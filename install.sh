@@ -329,12 +329,12 @@ initVar() {
     secretKeyWarpReg=
 
     socks5RoutingOutboundAuthType=
-    socks5RoutingOutboundAEADKey=
+    socks5RoutingOutboundUnifiedKey=
 
     socks5InboundAuthType=
     socks5InboundUserName=
     socks5InboundPassword=
-    socks5InboundAEADKey=
+    socks5InboundUnifiedKey=
 
     # 上次安装配置状态
     lastInstallationConfig=
@@ -3565,9 +3565,9 @@ EOF
         fi
         local socks5OutboundUserValue=${socks5RoutingOutboundUserName}
         local socks5OutboundPassValue=${socks5RoutingOutboundPassword}
-        if [[ "${socks5RoutingOutboundAuthType}" == "aead" ]]; then
-            socks5OutboundUserValue=${socks5RoutingOutboundAEADKey}
-            socks5OutboundPassValue=${socks5RoutingOutboundAEADKey}
+        if [[ "${socks5RoutingOutboundAuthType}" == "unified" ]]; then
+            socks5OutboundUserValue=${socks5RoutingOutboundUnifiedKey}
+            socks5OutboundPassValue=${socks5RoutingOutboundUnifiedKey}
         fi
         socks5OutboundUserValue=$(stripAnsi "${socks5OutboundUserValue}")
         socks5OutboundPassValue=$(stripAnsi "${socks5OutboundPassValue}")
@@ -8542,17 +8542,18 @@ setSocks5Inbound() {
     socks5InboundListen=$(stripAnsi "${socks5InboundListen}")
 
     # 认证方式选择
+    # 注意: sing-box SOCKS 仅支持用户名/密码认证，以下两种模式最终都使用用户名+密码
+    # - password: 用户可分别设置用户名和密码
+    # - unified: 用户名和密码使用相同的UUID，便于记忆和管理
     echoContent yellow "\n请选择认证方式（落地机与上游需保持一致）"
     echoContent yellow "1.用户名/密码[回车默认，可自定义]"
-    echoContent yellow "2.统一密钥[用户名和密码使用相同UUID，更安全]"
+    echoContent yellow "2.统一密钥[用户名和密码使用相同UUID，便于管理]"
     read -r -p "请选择:" socks5InboundAuthType
 
-    local socks5InboundEnableAEAD=false
     if [[ -z "${socks5InboundAuthType}" || "${socks5InboundAuthType}" == "1" ]]; then
         socks5InboundAuthType="password"
     elif [[ "${socks5InboundAuthType}" == "2" ]]; then
-        socks5InboundAuthType="aead"
-        socks5InboundEnableAEAD=true
+        socks5InboundAuthType="unified"
     else
         echoContent red " ---> 选择错误"
         exit 0
@@ -8572,12 +8573,12 @@ setSocks5Inbound() {
     socks5RoutingUUID=$(stripAnsi "${socks5RoutingUUID}")
     echo
 
-    if [[ "${socks5InboundAuthType}" == "aead" ]]; then
-        echoContent skyBlue "AEAD 预共享密钥需与上游一致，可直接回车沿用上方UUID或选择其他录入方式"
+    if [[ "${socks5InboundAuthType}" == "unified" ]]; then
+        echoContent skyBlue "统一密钥需与上游一致，可直接回车沿用上方UUID或选择其他录入方式"
         echoContent yellow "下方\"请选择\"对应：1 直接输入(回车默认UUID) / 2 读取文件 / 3 读取环境变量"
-        socks5InboundAEADKey=$(readCredentialBySource "预共享密钥" "${socks5RoutingUUID}" | stripAnsi | tail -n 1)
-        socks5InboundUserName="${socks5InboundAEADKey}"
-        socks5InboundPassword="${socks5InboundAEADKey}"
+        socks5InboundUnifiedKey=$(readCredentialBySource "统一密钥" "${socks5RoutingUUID}" | stripAnsi | tail -n 1)
+        socks5InboundUserName="${socks5InboundUnifiedKey}"
+        socks5InboundPassword="${socks5InboundUnifiedKey}"
     else
         socks5InboundUserName=$(readCredentialBySource "用户名称" "${socks5RoutingUUID}" | stripAnsi | tail -n 1)
         socks5InboundPassword=$(readCredentialBySource "用户密码" "${socks5RoutingUUID}" | stripAnsi | tail -n 1)
@@ -8604,11 +8605,12 @@ setSocks5Inbound() {
 
     local socks5InboundJsonFile
     socks5InboundJsonFile=$(mktemp)
+    # sing-box SOCKS 入站支持的字段: listen, listen_port, tag, users, domain_strategy
+    # 不支持: aead (sing-box SOCKS 仅支持用户名/密码认证)
     if ! jq -n \
         --arg listen "${socks5InboundListen}" \
         --argjson listenPort "${socks5InboundPort}" \
         --arg tag "socks5_inbound" \
-        --argjson enableAead "${socks5InboundEnableAEAD}" \
         --arg user "${socks5InboundUserName}" \
         --arg pass "${socks5InboundPassword}" \
         --arg domainStrategy "${domainStrategy}" '
@@ -8751,54 +8753,36 @@ setSocks5Outbound() {
         exit 0
     fi
     echo
+    # 注意: sing-box SOCKS 仅支持用户名/密码认证
+    # unified 模式是便捷功能，用户名和密码使用相同的UUID
     echoContent yellow "请选择上游认证方式（必须与落地机配置一致）"
     echoContent yellow "1.用户名/密码[回车默认，可自定义]"
-    echoContent yellow "2.统一密钥[用户名和密码使用相同UUID，更安全]"
+    echoContent yellow "2.统一密钥[用户名和密码使用相同UUID，便于管理]"
     read -r -p "请选择:" socks5RoutingOutboundAuthType
     if [[ -z "${socks5RoutingOutboundAuthType}" || "${socks5RoutingOutboundAuthType}" == "1" ]]; then
         socks5RoutingOutboundAuthType="password"
     elif [[ "${socks5RoutingOutboundAuthType}" == "2" ]]; then
-        socks5RoutingOutboundAuthType="aead"
+        socks5RoutingOutboundAuthType="unified"
     else
         echoContent red " ---> 选择错误"
         exit 0
     fi
     echo
-    if [[ "${socks5RoutingOutboundAuthType}" == "aead" ]]; then
+    if [[ "${socks5RoutingOutboundAuthType}" == "unified" ]]; then
         echoContent skyBlue "统一密钥模式：用户名和密码使用相同的UUID，需与落地机配置一致"
         echoContent yellow "下方\"请选择\"对应：1 直接输入(回车默认随机值) / 2 读取文件 / 3 读取环境变量"
-        local defaultSocks5OutboundAEADKey
-        defaultSocks5OutboundAEADKey=$(cat /proc/sys/kernel/random/uuid)
-        socks5RoutingOutboundAEADKey=$(readCredentialBySource "统一密钥" "${defaultSocks5OutboundAEADKey}" | stripAnsi | tail -n 1)
-        socks5RoutingOutboundUserName=${socks5RoutingOutboundAEADKey}
-        socks5RoutingOutboundPassword=${socks5RoutingOutboundAEADKey}
+        local defaultSocks5OutboundUnifiedKey
+        defaultSocks5OutboundUnifiedKey=$(cat /proc/sys/kernel/random/uuid)
+        socks5RoutingOutboundUnifiedKey=$(readCredentialBySource "统一密钥" "${defaultSocks5OutboundUnifiedKey}" | stripAnsi | tail -n 1)
+        socks5RoutingOutboundUserName=${socks5RoutingOutboundUnifiedKey}
+        socks5RoutingOutboundPassword=${socks5RoutingOutboundUnifiedKey}
     else
         socks5RoutingOutboundUserName=$(readCredentialBySource "请输入用户名" "" | stripAnsi | tail -n 1)
         socks5RoutingOutboundPassword=$(readCredentialBySource "请输入用户密码" "" | stripAnsi | tail -n 1)
     fi
     echo
-    echoContent skyBlue "TLS 仅作用于本机 -> 落地机链路，需落地机已部署 TLS 终端（脚本不负责生成证书）"
-    echoContent yellow "是否为上游开启TLS并校验证书？[回车默认开启，推荐确保链路加密；如落地机不支持TLS请选择n]\n" \
-        "关闭或跳过校验会存在中间人攻击风险，可用 openssl s_client 等方式确认对端端口是否支持TLS"
-    read -r -p "TLS+证书校验[y/n]:" socks5OutboundTLSStatus
-    local socks5OutboundTLSEnabled=true
-    local socks5OutboundTLSInsecure=false
-    if [[ "${socks5OutboundTLSStatus}" == "n" ]]; then
-        socks5OutboundTLSEnabled=false
-    fi
-    local socks5OutboundTLSServerName=${socks5RoutingOutboundIP}
-    if [[ "${socks5OutboundTLSEnabled}" == "true" ]]; then
-        read -r -p "证书SNI[回车默认 ${socks5OutboundTLSServerName}]:" socks5OutboundTLSReadServerName
-        if [[ -n "${socks5OutboundTLSReadServerName}" ]]; then
-            socks5OutboundTLSServerName=$(stripAnsi "${socks5OutboundTLSReadServerName}")
-        fi
-        echoContent yellow "是否跳过证书校验？[y/N 默认N，跳过存在被劫持风险]"
-        read -r -p "跳过证书校验:" socks5OutboundSkipVerify
-        if [[ "${socks5OutboundSkipVerify}" == "y" ]]; then
-            socks5OutboundTLSInsecure=true
-        fi
-    fi
 
+    # 注意: sing-box SOCKS 出站不支持 TLS，如需加密链路请使用链式代理功能
     echoContent yellow "可选：通过已有出站进行链式拨号（如先走WARP/直连/其他出站标签），留空则直接连上游。"
     read -r -p "链式出站标签(多个英文逗号分隔，按顺序生效):" socks5RoutingProxyTag
     socks5RoutingProxyTag=$(stripAnsi "${socks5RoutingProxyTag}")
@@ -8817,61 +8801,9 @@ setSocks5Outbound() {
         socks5RoutingFallbackDefault=01_direct_outbound
     fi
     echo
-    # 传输层交互：按上游 Socks5 服务实际支持选择，选错会导致连接失败
-    echoContent skyBlue "传输层用于匹配落地机的入口形态，落地机未做反代时通常选择1直连"
-    echoContent skyBlue "若落地机前有 CDN/反代，按实际部署选择 WS/H2，并保持 path/Host/SNI 一致"
-    echoContent yellow "可选：传输层 [1]直连(默认) [2]TLS [3]WS [4]H2"
-    read -r -p "传输层:" socks5TransportType
-    if [[ -z "${socks5TransportType}" || ! "${socks5TransportType}" =~ ^[1-4]$ ]]; then
-        socks5TransportType=1
-    fi
 
-    socks5TransportAlpnJson="[]"
-    socks5TransportInsecure=false
-    socks5TransportServerName=
-    socks5TransportPath=
-    socks5TransportHost=
-    socks5TransportHostList="[]"
-
-    if [[ "${socks5TransportType}" != "1" ]]; then
-        echoContent skyBlue "下方 SNI/ALPN 需与落地机 TLS/反代配置一致，否则握手会失败"
-        read -r -p "请输入 serverName(SNI，可为空):" socks5TransportServerName
-        read -r -p "请输入 alpn，多个用英文逗号分隔(留空则不设置):" socks5TransportAlpn
-        socks5TransportServerName=$(stripAnsi "${socks5TransportServerName}")
-        socks5TransportAlpn=$(stripAnsi "${socks5TransportAlpn}")
-        if [[ -n "${socks5TransportAlpn}" ]]; then
-            socks5TransportAlpnJson=$(echo "\"${socks5TransportAlpn}\"" | jq -c 'split(",")')
-        fi
-        echoContent yellow "若使用自签/内网证书可选择跳过校验；公网强烈建议保持校验"
-        read -r -p "是否跳过TLS证书验证？[y/n]:" socks5TransportAllowInsecure
-        if [[ "${socks5TransportAllowInsecure}" == "y" ]]; then
-            socks5TransportInsecure=true
-        fi
-
-        if [[ "${socks5TransportType}" == "3" || "${socks5TransportType}" == "4" ]]; then
-            read -r -p "请输入 path:" socks5TransportPath
-            if [[ -z "${socks5TransportPath}" ]]; then
-                echoContent red " ---> path不可为空"
-                exit 0
-            elif ! echo "${socks5TransportPath}" | grep -qE '^/'; then
-                socks5TransportPath="/${socks5TransportPath}"
-            fi
-            socks5TransportPath=$(stripAnsi "${socks5TransportPath}")
-
-            read -r -p "请输入 host:" socks5TransportHost
-            if [[ -z "${socks5TransportHost}" ]]; then
-                echoContent red " ---> host不可为空"
-                exit 0
-            fi
-            socks5TransportHost=$(stripAnsi "${socks5TransportHost}")
-            if [[ "${socks5TransportType}" == "4" ]]; then
-                socks5TransportHostList=$(echo "\"${socks5TransportHost}\"" | jq -c 'split(",")')
-            fi
-        fi
-    fi
-
-    # healthcheck 交互（来自 add-healthcheck-input-for-socks-outbound）
-    echoContent yellow "可选：配置探测URL/端口/间隔，为分流健康检查提供探测（留空跳过）"
+    # healthcheck 配置（仅用于 Xray 定时检测脚本，sing-box SOCKS 出站不支持 healthcheck）
+    echoContent yellow "可选：配置探测URL/端口/间隔，用于 Xray 定时检测脚本（留空跳过）"
     read -r -p "探测URL(默认https://www.gstatic.com/generate_204):" socks5HealthCheckURL
     read -r -p "探测端口(默认使用落地机端口):" socks5HealthCheckPort
     read -r -p "探测间隔(默认30s):" socks5HealthCheckInterval
@@ -8903,35 +8835,26 @@ setSocks5Outbound() {
             if [[ -z "${socks5RoutingOutboundPassword}" ]]; then
                 socks5RoutingOutboundPassword="${uuidNew}"
             fi
-        elif [[ "${socks5RoutingOutboundAuthType}" == "aead" ]]; then
-            if [[ -z "${socks5RoutingOutboundAEADKey}" ]]; then
-                echoContent red " ---> 预共享密钥不可为空"
+        elif [[ "${socks5RoutingOutboundAuthType}" == "unified" ]]; then
+            if [[ -z "${socks5RoutingOutboundUnifiedKey}" ]]; then
+                echoContent red " ---> 统一密钥不可为空"
                 exit 0
             fi
-            socks5RoutingOutboundUserName="${socks5RoutingOutboundAEADKey}"
-            socks5RoutingOutboundPassword="${socks5RoutingOutboundAEADKey}"
+            socks5RoutingOutboundUserName="${socks5RoutingOutboundUnifiedKey}"
+            socks5RoutingOutboundPassword="${socks5RoutingOutboundUnifiedKey}"
         fi
 
         local socks5ConfigTemp
         socks5ConfigTemp=$(mktemp)
 
+        # sing-box SOCKS 出站支持的字段: server, server_port, version, username, password, detour
+        # 不支持: tls, transport, healthcheck
         if ! jq -n \
             --arg server "${socks5RoutingOutboundIP}" \
             --argjson port "${socks5RoutingOutboundPort}" \
-            --arg auth "${socks5RoutingOutboundAuthType}" \
             --arg user "${socks5RoutingOutboundUserName}" \
             --arg pass "${socks5RoutingOutboundPassword}" \
-            --argjson alpn "${socks5TransportAlpnJson:-[]}" \
-            --arg path "${socks5TransportPath}" \
-            --arg host "${socks5TransportHost}" \
-            --argjson hostList "${socks5TransportHostList:-[]}" \
-            --argjson insecure "${socks5TransportInsecure:-false}" \
-            --arg detour "${socks5RoutingProxyTagList[0]}" \
-            --arg healthUrl "${socks5HealthCheckURL}" \
-            --arg healthInterval "${socks5HealthCheckInterval}" \
-            --arg healthPort "${socks5HealthCheckPort}" \
-            --arg transportType "${socks5TransportType}" \
-            --arg serverName "${socks5TransportServerName}" ' {
+            --arg detour "${socks5RoutingProxyTagList[0]}" ' {
   outbounds: [
     {
       type: "socks",
@@ -8944,20 +8867,7 @@ setSocks5Outbound() {
 }
             | .outbounds[0].username = $user
             | .outbounds[0].password = $pass
-            | (if $auth == "aead" then .outbounds[0].aead = true else . end)
             | (if ($detour|length)>0 then (.outbounds[0].detour=$detour) else . end)
-            | (if ($healthUrl|length)>0 or ($healthInterval|length)>0 or ($healthPort|length)>0 then
-                .outbounds[0].healthcheck = ({enable:true,url:$healthUrl,interval:$healthInterval}
-                    | if ($healthPort|length)>0 then .destination = ($server+":"+$healthPort) else . end)
-              else . end)
-            | (if $transportType != "1" then
-                .outbounds[0].tls = {enabled:true,server_name:$serverName,alpn:$alpn,insecure:$insecure}
-              else . end)
-            | (if $transportType == "3" then
-                .outbounds[0].transport = {type:"ws",path:$path,headers:{Host:$host}}
-              elif $transportType == "4" then
-                .outbounds[0].transport = {type:"http",path:$path,host:$hostList}
-              else . end)
 ' >"${socks5ConfigTemp}"; then
             rm -f "${socks5ConfigTemp}"
             echoContent red " ---> 生成 Socks5 出站配置失败，请检查输入"
