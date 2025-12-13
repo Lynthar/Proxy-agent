@@ -36,8 +36,7 @@ echoContent() {
 checkCentosSELinux() {
     if [[ -f "/etc/selinux/config" ]] && ! grep -q "SELINUX=disabled" <"/etc/selinux/config"; then
         echoContent yellow "# 注意事项"
-        echoContent yellow "检测到SELinux已开启，请手动关闭，教程如下"
-        echoContent yellow "https://www.v2ray-agent.com/archives/1684115970026#centos7-%E5%85%B3%E9%97%ADselinux"
+        echoContent yellow "检测到SELinux已开启，请手动关闭（例如在 /etc/selinux/config 设置 SELINUX=disabled 并重启）。"
         exit 0
     fi
 }
@@ -1478,14 +1477,14 @@ initTLSNginxConfig() {
             echoContent yellow "\n ---> 域名: ${domain}"
         else
             echo
-            echoContent yellow "请输入要配置的域名 例: www.v2ray-agent.com --->"
+            echoContent yellow "请输入要配置的域名 例: example.com --->"
             read -r -p "域名:" domain
         fi
     elif [[ -n "${currentHost}" && -n "${lastInstallationConfig}" ]]; then
         domain=${currentHost}
     else
         echo
-        echoContent yellow "请输入要配置的域名 例: www.v2ray-agent.com --->"
+        echoContent yellow "请输入要配置的域名 例: example.com --->"
         read -r -p "域名:" domain
     fi
 
@@ -1789,7 +1788,7 @@ switchDNSAPI() {
 # 初始化dns配置
 initDNSAPIConfig() {
     if [[ "$1" == "cloudflare" ]]; then
-        echoContent yellow "\n CF_Token参考配置教程：https://www.v2ray-agent.com/archives/1701160377972\n"
+        echoContent yellow "\n 请在 Cloudflare 控制台为 DNS 编辑权限创建 API Token 并填入 CF_Token/CF_Account_ID。\n"
         read -r -p "请输入API Token:" cfAPIToken
         if [[ -z "${cfAPIToken}" ]]; then
             echoContent red " ---> 输入为空，请重新输入"
@@ -3474,6 +3473,16 @@ EOF
     fi
     # socks5 outbound
     if echo "${tag}" | grep -q "socks5"; then
+        local socks5ProxySettings=
+        if [[ -n "${socks5RoutingProxyTag}" ]]; then
+            read -r -d '' socks5ProxySettings <<EOF || true
+,
+      "proxySettings": {
+        "tag": "${socks5RoutingProxyTag}",
+        "transportLayer": true
+      }
+EOF
+        fi
         cat <<EOF >"/etc/v2ray-agent/xray/conf/${tag}.json"
 {
   "outbounds": [
@@ -3493,7 +3502,7 @@ EOF
             ]
           }
         ]
-      }
+      }${socks5ProxySettings}
     }
   ]
 }
@@ -5817,7 +5826,7 @@ manageCDN() {
         echoContent red "=============================================================="
         echoContent yellow "# 注意事项"
         echoContent yellow "\n教程地址:"
-        echoContent skyBlue "https://www.v2ray-agent.com/archives/cloudflarezi-xuan-ip"
+        echoContent skyBlue "如需优化 Cloudflare 回源 IP，可根据本地网络状况选择可用的 IP 段。"
         echoContent red "\n如对Cloudflare优化不了解，请不要使用"
 
         echoContent yellow "1.CNAME www.digitalocean.com"
@@ -5862,7 +5871,7 @@ manageCDN() {
         fi
     else
         echoContent yellow "\n教程地址:"
-        echoContent skyBlue "https://www.v2ray-agent.com/archives/cloudflarezi-xuan-ip\n"
+        echoContent skyBlue "请根据网络状况选择合适的 Cloudflare 回源 IP。\n"
         echoContent red " ---> 未检测到可以使用的协议，仅支持ws、grpc、HTTPUpgrade相关的协议"
     fi
 }
@@ -6218,9 +6227,9 @@ updateV2RayAgent() {
     echoContent skyBlue "\n进度  $1/${totalProgress} : 更新v2ray-agent脚本"
     rm -rf /etc/v2ray-agent/install.sh
     if [[ "${release}" == "alpine" ]]; then
-        wget -c -q -P /etc/v2ray-agent/ -N --no-check-certificate "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/install.sh"
+        wget -c -q -P /etc/v2ray-agent/ -N "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/install.sh"
     else
-        wget -c -q "${wgetShowProgressStatus}" -P /etc/v2ray-agent/ -N --no-check-certificate "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/install.sh"
+        wget -c -q "${wgetShowProgressStatus}" -P /etc/v2ray-agent/ -N "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/install.sh"
     fi
 
     sudo chmod 700 /etc/v2ray-agent/install.sh
@@ -6231,7 +6240,7 @@ updateV2RayAgent() {
     echoContent yellow " ---> 请手动执行[vasma]打开脚本"
     echoContent green " ---> 当前版本：${version}\n"
     echoContent yellow "如更新不成功，请手动执行下面命令\n"
-    echoContent skyBlue "wget -P /root -N --no-check-certificate https://raw.githubusercontent.com/mack-a/v2ray-agent/master/install.sh && chmod 700 /root/install.sh && /root/install.sh"
+    echoContent skyBlue "wget -P /root -N https://raw.githubusercontent.com/mack-a/v2ray-agent/master/install.sh && chmod 700 /root/install.sh && /root/install.sh"
     echo
     exit 0
 }
@@ -6361,7 +6370,7 @@ EOF
 # 脚本快捷方式
 aliasInstall() {
 
-    if [[ -f "$HOME/install.sh" ]] && [[ -d "/etc/v2ray-agent" ]] && grep <"$HOME/install.sh" -q "作者:mack-a"; then
+    if [[ -f "$HOME/install.sh" ]] && [[ -d "/etc/v2ray-agent" ]] && grep <"$HOME/install.sh" -q "作者:Lynthar"; then
         mv "$HOME/install.sh" /etc/v2ray-agent/install.sh
         local vasmaType=
         if [[ -d "/usr/bin/" ]]; then
@@ -6420,7 +6429,7 @@ ipv6Routing() {
         echoContent red "=============================================================="
         echoContent yellow "# 注意事项\n"
         echoContent yellow "# 注意事项"
-        echoContent yellow "# 使用教程：https://www.v2ray-agent.com/archives/1683226921000 \n"
+        echoContent yellow "# 使用提示：请参考 documents 目录中的分流与策略说明 \n"
 
         read -r -p "请按照上面示例录入域名:" domainList
         if [[ "${coreInstallType}" == "1" ]]; then
@@ -6960,7 +6969,7 @@ warpRoutingReg() {
     elif [[ "${warpStatus}" == "2" ]]; then
         echoContent yellow "# 注意事项"
         echoContent yellow "# 支持sing-box、Xray-core"
-        echoContent yellow "# 使用教程：https://www.v2ray-agent.com/archives/1683226921000 \n"
+        echoContent yellow "# 使用提示：请参考 documents 目录中的分流与策略说明 \n"
 
         read -r -p "请按照上面示例录入域名:" domainList
         addWireGuardRoute "${type}" outboundTag "${domainList}"
@@ -7103,7 +7112,7 @@ vmessWSRouting() {
     echoContent skyBlue "\n功能 1/${totalProgress} : VMess+WS+TLS 分流"
     echoContent red "\n=============================================================="
     echoContent yellow "# 注意事项"
-    echoContent yellow "# 使用教程：https://www.v2ray-agent.com/archives/1683226921000 \n"
+    echoContent yellow "# 使用提示：详见 documents 目录中的分流与策略说明 \n"
 
     echoContent yellow "1.添加出站"
     echoContent yellow "2.卸载"
@@ -7130,7 +7139,7 @@ socks5Routing() {
     echoContent yellow "# 流量明文访问"
 
     echoContent yellow "# 仅限正常网络环境下设备间流量转发，禁止用于代理访问。"
-    echoContent yellow "# 使用教程：https://www.v2ray-agent.com/archives/1683226921000#heading-5 \n"
+    echoContent yellow "# 使用提示：更多示例见 documents 目录\n"
 
     echoContent yellow "1.Socks5出站"
     echoContent yellow "2.Socks5入站"
@@ -7474,7 +7483,7 @@ setSocks5InboundRouting() {
         addSingBoxOutbound block
         addSingBoxOutbound "01_direct_outbound"
     else
-        echoContent yellow "录入示例:netflix,openai,v2ray-agent.com\n"
+        echoContent yellow "录入示例:netflix,openai,example.com\n"
         read -r -p "域名:" socks5InboundRoutingDomain
         if [[ -z "${socks5InboundRoutingDomain}" ]]; then
             echoContent red " ---> 域名不可为空"
@@ -7521,7 +7530,20 @@ setSocks5Outbound() {
         exit 0
     fi
     echo
+    echoContent yellow "可选：通过已有出站进行链式拨号（例如先走WARP或本机的其他出站），回车则直连"
+    read -r -p "链式出站标签:" socks5RoutingProxyTag
+    if [[ -n "${socks5RoutingProxyTag}" ]]; then
+        echoContent green " ---> 当前Socks5出站将通过 ${socks5RoutingProxyTag} 链式转发"
+    fi
+    echo
     if [[ -n "${singBoxConfigPath}" ]]; then
+        local socks5DetourConfig=
+        if [[ -n "${socks5RoutingProxyTag}" ]]; then
+            read -r -d '' socks5DetourConfig <<EOF || true
+,
+          "detour":"${socks5RoutingProxyTag}"
+EOF
+        fi
         cat <<EOF >"${singBoxConfigPath}socks5_outbound.json"
 {
     "outbounds":[
@@ -7532,7 +7554,7 @@ setSocks5Outbound() {
           "server_port": ${socks5RoutingOutboundPort},
           "version": "5",
           "username":"${socks5RoutingOutboundUserName}",
-          "password":"${socks5RoutingOutboundPassword}"
+          "password":"${socks5RoutingOutboundPassword}"${socks5DetourConfig}
         }
     ]
 }
@@ -7557,7 +7579,7 @@ setSocks5OutboundRouting() {
     echoContent yellow "非增量添加，会替换原有规则\n"
     echoContent yellow "当输入的规则匹配到geosite或者rule_set后会使用相应的规则\n"
     echoContent yellow "如无法匹配则，则使用domain精确匹配\n"
-    echoContent yellow "录入示例:netflix,openai,v2ray-agent.com\n"
+    echoContent yellow "录入示例:netflix,openai,example.com\n"
     read -r -p "域名:" socks5RoutingOutboundDomain
     if [[ -z "${socks5RoutingOutboundDomain}" ]]; then
         echoContent red " ---> IP不可为空"
@@ -7678,7 +7700,7 @@ dnsRouting() {
     echoContent skyBlue "\n功能 1/${totalProgress} : DNS分流"
     echoContent red "\n=============================================================="
     echoContent yellow "# 注意事项"
-    echoContent yellow "# 使用教程：https://www.v2ray-agent.com/archives/1683226921000 \n"
+    echoContent yellow "# 使用提示：请参考 documents 目录中的分流与策略说明 \n"
 
     echoContent yellow "1.添加"
     echoContent yellow "2.卸载"
@@ -7705,7 +7727,7 @@ sniRouting() {
     echoContent skyBlue "\n功能 1/${totalProgress} : SNI反向代理分流"
     echoContent red "\n=============================================================="
     echoContent yellow "# 注意事项"
-    echoContent yellow "# 使用教程：https://www.v2ray-agent.com/archives/1683226921000 \n"
+    echoContent yellow "# 使用提示：请参考 documents 目录中的分流与策略说明 \n"
     echoContent yellow "# sing-box不支持规则集，仅支持指定域名。\n"
 
     echoContent yellow "1.添加"
@@ -8439,8 +8461,8 @@ addSubscribeMenu() {
 # 添加其他机器clashMeta订阅
 addOtherSubscribe() {
     echoContent yellow "#注意事项:"
-    echoContent yellow "请仔细阅读以下文章： https://www.v2ray-agent.com/archives/1681804748677"
-    echoContent skyBlue "录入示例：www.v2ray-agent.com:443:vps1\n"
+    echoContent yellow "请输入目标站点信息，确保与 Reality 配置相匹配。"
+    echoContent skyBlue "录入示例：www.example.com:443:vps1\n"
     read -r -p "请输入域名 端口 机器别名:" remoteSubscribeUrl
     if [[ -z "${remoteSubscribeUrl}" ]]; then
         echoContent red " ---> 不可为空"
@@ -9245,7 +9267,7 @@ initRealityClientServersName() {
             realityDomainPort=443
             echoContent skyBlue "\n================ 配置客户端可用的serverNames ===============\n"
             echoContent yellow "#注意事项"
-            echoContent green "Reality目标可用域名列表：https://www.v2ray-agent.com/archives/1689439383686#heading-3\n"
+            echoContent green "请确保所选 Reality 目标域名支持 TLS，且为可直连的常见站点。\n"
             echoContent yellow "录入示例:addons.mozilla.org:443\n"
             read -r -p "请输入目标域名，[回车]随机域名，默认端口443:" realityServerName
             if [[ -z "${realityServerName}" ]]; then
@@ -9342,7 +9364,7 @@ manageReality() {
     readSingBoxConfig
 
     if ! echo "${currentInstallProtocolType}" | grep -q -E "7,|8," || [[ -z "${coreInstallType}" ]]; then
-        echoContent red "\n ---> 请先安装Reality协议，参考教程 https://www.v2ray-agent.com/archives/1680104902581#heading-11"
+        echoContent red "\n ---> 请先安装Reality协议，并确认已配置可用的 serverName/公钥。"
         exit 0
     fi
 
@@ -9535,23 +9557,12 @@ singBoxVersionManageMenu() {
 menu() {
     cd "$HOME" || exit
     echoContent red "\n=============================================================="
-    echoContent green "作者：mack-a"
+    echoContent green "作者：Lynthar"
     echoContent green "当前版本：v3.5.1"
-    echoContent green "Github：https://github.com/mack-a/v2ray-agent"
-    echoContent green "描述：八合一共存脚本\c"
+    echoContent green "Github：https://github.com/Lynthar/Proxy-agent"
+    echoContent green "描述：八合一共存脚本"
     showInstallStatus
     checkWgetShowProgress
-    echoContent red "\n=========================== 推广区============================"
-    echoContent red "                                              "
-    echoContent yellow "VPS选购攻略"
-    echoContent green "https://www.v2ray-agent.com/archives/1679975663984"
-    echoContent yellow "年付10美金低价VPS AS4837"
-    echoContent green "https://www.v2ray-agent.com/archives/racknerdtao-can-zheng-li-nian-fu-10mei-yuan"
-    echoContent yellow "优质常驻套餐DMIT CN2-GIA"
-    echoContent green "https://www.v2ray-agent.com/archives/186cee7b-9459-4e57-b9b2-b07a4f36931c"
-    echoContent yellow "VPS探针：https://ping.v2ray-agent.com/"
-    echoContent red "                                              "
-    echoContent red "=============================================================="
     if [[ -n "${coreInstallType}" ]]; then
         echoContent yellow "1.重新安装"
     else
