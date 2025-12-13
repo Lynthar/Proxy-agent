@@ -8030,17 +8030,15 @@ setSocks5Outbound() {
         # detour + healthcheck 配置变量初始化
         local socks5DetourConfig=
         local socks5HealthcheckConfig=
-        # 这里继续保留 master 分支中基于 socks5RoutingProxyTagList[*] 的 detour 构造逻辑
-        if [[ -n "${socks5RoutingProxyTagList[*]}" ]]; then
-            # ... 原来 master 里的 detour 构造代码 ...
-        fi
-    fi
 
+        # 基于 socks5RoutingProxyTagList[*] 的 detour 构造逻辑
+        if [[ -n "${socks5RoutingProxyTagList[*]}" ]]; then
             read -r -d '' socks5DetourConfig <<EOF || true
 ,
           "detour":"${socks5RoutingProxyTagList[0]}"
 EOF
         fi
+
         # TLS / transport 相关配置（来自 codex/add-transport-options-to-socks-wizard 分支）
         local socks5SingBoxTLSConfig=
         local socks5SingBoxTransportConfig=
@@ -8118,8 +8116,6 @@ EOF
           "server_port": ${socks5RoutingOutboundPort},
           "version": "5",
         ${socks5OutboundUsers}${socks5DetourConfig}${socks5HealthcheckConfig}${socks5SingBoxTLSConfig}${socks5SingBoxTransportConfig}
-        }
-
         }
     ]
 }
