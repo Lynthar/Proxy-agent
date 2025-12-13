@@ -742,9 +742,16 @@ allowPort() {
             local nftComment="allow $1/${type}(mack-a)"
             local nftSourceRange="${sourceRange:-0.0.0.0/0}"
             local nftRules
+            local updateNftablesStatus=
             nftRules=$(nft list chain inet filter input)
             if ! echo "${nftRules}" | grep -q "${nftComment}" || ! echo "${nftRules}" | grep -q "${nftSourceRange}"; then
+                updateNftablesStatus=true
                 nft add rule inet filter input ip saddr "${nftSourceRange}" ${type} dport "$1" counter accept comment "${nftComment}"
+            fi
+
+            if echo "${updateNftablesStatus}" | grep -q "true"; then
+                nft list ruleset >/etc/nftables.conf
+                systemctl reload nftables >/dev/null 2>&1 || nft -f /etc/nftables.conf
             fi
         fi
     elif dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+netfilter-persistent" && systemctl status netfilter-persistent 2>/dev/null | grep -q "active (exited)"; then
