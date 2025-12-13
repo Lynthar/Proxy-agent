@@ -7483,6 +7483,7 @@ socks5Routing() {
 
     echoContent yellow "# 仅限正常网络环境下设备间流量转发，禁止用于代理访问。"
     echoContent yellow "# 推荐仅监听本机、开启上游证书校验并保持最小日志，降低暴露与劫持风险。"
+    echoContent yellow "# 出站=将本机流量交给上游/落地机；入站=让本机提供Socks供其他节点拨号。"
     echoContent yellow "# 使用提示：更多示例见 documents 目录\n"
 
     echoContent yellow "1.Socks5出站"
@@ -7715,6 +7716,7 @@ removeSocks5Routing() {
 setSocks5Inbound() {
 
     echoContent yellow "\n==================== 配置 Socks5 入站(解锁机、落地机) =====================\n"
+    echoContent yellow "用于让本机提供 Socks5 服务，通常给另一台机器或内网设备作为出站上游。"
     echoContent skyBlue "\n开始配置Socks5协议入站端口"
     echoContent skyBlue "该入站提供给其他VPS或本机作为上游，请根据连通性选择监听范围"
     echoContent yellow "若仅监听内网或127.0.0.1，只能同机或同内网机器访问，跨VPS互联需选择可被对端访问的地址"
@@ -7804,6 +7806,7 @@ setSocks5Inbound() {
           "listen":"${socks5InboundListen}",
           "listen_port":${result[-1]},
           "tag":"socks5_inbound",
+          "auth":"${socks5InboundAuthType}",
           "users":[
             {
                   "username": "${socks5InboundUserName}",
@@ -7855,6 +7858,7 @@ setSocks5InboundRouting() {
     else
         echoContent red "=============================================================="
         echoContent skyBlue "请输入允许访问的IP地址，多个IP英文逗号隔开。例如:1.1.1.1,2.2.2.2\n"
+        echoContent yellow "仅允许这些来源访问本机 Socks5 入站，未列出来源将被拒绝。"
         read -r -p "IP:" socks5InboundRoutingIPs
 
         if [[ -z "${socks5InboundRoutingIPs}" ]]; then
@@ -7906,12 +7910,14 @@ setSocks5Outbound() {
     echoContent yellow "\n==================== 配置 Socks5 出站（转发机、代理机） =====================\n"
     echoContent skyBlue "本步骤配置本机连接落地机的上游 SOCKS 服务，参数需与落地机一致"
     echo
+    echoContent yellow "上游地址：填Socks上游/落地机IP或域名，留空无法继续。"
     read -r -p "请输入落地机IP地址:" socks5RoutingOutboundIP
     if [[ -z "${socks5RoutingOutboundIP}" ]]; then
         echoContent red " ---> IP不可为空"
         exit 0
     fi
     echo
+    echoContent yellow "上游端口：填Socks监听端口(示例:1080/443)，与上游实际端口一致。"
     read -r -p "请输入落地机端口:" socks5RoutingOutboundPort
     if [[ -z "${socks5RoutingOutboundPort}" ]]; then
         echoContent red " ---> 端口不可为空"
@@ -7964,7 +7970,7 @@ setSocks5Outbound() {
         fi
     fi
 
-    echoContent yellow "可选：通过已有出站进行链式拨号（例如先走WARP或本机的其他出站），回车则直连"
+    echoContent yellow "可选：通过已有出站进行链式拨号（如先走WARP/直连/其他出站标签），留空则直接连上游。"
     read -r -p "链式出站标签(多个英文逗号分隔，按顺序生效):" socks5RoutingProxyTag
     socks5RoutingProxyTagList=()
     if [[ -n "${socks5RoutingProxyTag}" ]]; then
@@ -8135,6 +8141,7 @@ EOF
           "server": "${socks5RoutingOutboundIP}",
           "server_port": ${socks5RoutingOutboundPort},
           "version": "5",
+          "auth": "${socks5RoutingOutboundAuthType}",
         ${socks5OutboundUsers}${socks5DetourConfig}${socks5HealthcheckConfig}${socks5SingBoxTLSConfig}${socks5SingBoxTransportConfig}
         }
     ]
