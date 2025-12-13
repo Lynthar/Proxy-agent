@@ -5339,7 +5339,7 @@ EOF
 # Script shortcut
 aliasInstall() {
 
-    if [[ -f "$HOME/install.sh" ]] && [[ -d "/etc/v2ray-agent" ]] && grep <"$HOME/install.sh" -q "作者:mack-a"; then
+    if [[ -f "$HOME/install.sh" ]] && [[ -d "/etc/v2ray-agent" ]] && grep -Eq "Proxy-agent|作者[:：]Lynthar|作者:mack-a" "$HOME/install.sh"; then
         mv "$HOME/install.sh" /etc/v2ray-agent/install.sh
         local paslyType=
         if [[ -d "/usr/bin/" ]]; then
