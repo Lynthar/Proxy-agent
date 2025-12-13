@@ -328,9 +328,56 @@ initVar() {
     addressWarpReg=
     secretKeyWarpReg=
 
+    socks5RoutingOutboundAuthType=
+    socks5RoutingOutboundAEADKey=
+
+    socks5InboundAuthType=
+    socks5InboundUserName=
+    socks5InboundPassword=
+    socks5InboundAEADKey=
+
     # 上次安装配置状态
     lastInstallationConfig=
 
+}
+
+readCredentialBySource() {
+
+    local tips=$1
+    local defaultValue=$2
+    echoContent yellow "请选择${tips}录入方式"
+    echoContent yellow "1.直接输入${defaultValue:+[回车默认] }"
+    echoContent yellow "2.从文件读取"
+    echoContent yellow "3.从环境变量读取"
+    read -r -p "请选择:" credentialSource
+    local credentialValue=
+    case ${credentialSource} in
+    2)
+        read -r -p "请输入文件路径:" credentialPath
+        if [[ -z "${credentialPath}" || ! -f "${credentialPath}" ]]; then
+            echoContent red " ---> 文件路径无效"
+            exit 0
+        fi
+        credentialValue=$(tr -d '\n' <"${credentialPath}")
+        ;;
+    3)
+        read -r -p "请输入环境变量名称:" credentialEnv
+        credentialValue=${!credentialEnv}
+        ;;
+    *)
+        read -r -p "${tips}:" credentialValue
+        if [[ -z "${credentialValue}" && -n "${defaultValue}" ]]; then
+            credentialValue=${defaultValue}
+        fi
+        ;;
+    esac
+
+    if [[ -z "${credentialValue}" ]]; then
+        echoContent red " ---> ${tips}不可为空"
+        exit 0
+    fi
+
+    echo "${credentialValue}"
 }
 
 # 读取tls证书详情
@@ -3474,6 +3521,15 @@ EOF
     # socks5 outbound
     if echo "${tag}" | grep -q "socks5"; then
         local socks5ProxySettings=
+        if [[ -z "${socks5RoutingOutboundAuthType}" ]]; then
+            socks5RoutingOutboundAuthType="password"
+        fi
+        local socks5OutboundUserValue=${socks5RoutingOutboundUserName}
+        local socks5OutboundPassValue=${socks5RoutingOutboundPassword}
+        if [[ "${socks5RoutingOutboundAuthType}" == "aead" ]]; then
+            socks5OutboundUserValue=${socks5RoutingOutboundAEADKey}
+            socks5OutboundPassValue=${socks5RoutingOutboundAEADKey}
+        fi
         if [[ -n "${socks5RoutingProxyTag}" ]]; then
             read -r -d '' socks5ProxySettings <<EOF || true
 ,
@@ -3490,14 +3546,15 @@ EOF
       "protocol": "socks",
       "tag": "${tag}",
       "settings": {
+        "auth": "${socks5RoutingOutboundAuthType}",
         "servers": [
           {
             "address": "${socks5RoutingOutboundIP}",
             "port": ${socks5RoutingOutboundPort},
             "users": [
               {
-                "user": "${socks5RoutingOutboundUserName}",
-                "pass": "${socks5RoutingOutboundPassword}"
+                "user": "${socks5OutboundUserValue}",
+                "pass": "${socks5OutboundPassValue}"
               }
             ]
           }
@@ -7373,6 +7430,21 @@ setSocks5Inbound() {
     echoContent green "\n ---> 入站Socks5端口：${result[-1]}"
     echoContent green "\n ---> 此端口需要配置到其他机器出站，请不要进行代理行为"
 
+    echoContent yellow "\n请选择认证方式"
+    echoContent yellow "1.用户名/密码[回车默认]"
+    echoContent yellow "2.预共享密钥(AEAD)"
+    read -r -p "请选择:" socks5InboundAuthType
+
+    if [[ -z "${socks5InboundAuthType}" || "${socks5InboundAuthType}" == "1" ]]; then
+        socks5InboundAuthType="password"
+    elif [[ "${socks5InboundAuthType}" == "2" ]]; then
+        socks5InboundAuthType="aead"
+    else
+        echoContent red " ---> 选择错误"
+        exit 0
+    fi
+
+    echo
     echoContent yellow "\n请输入自定义UUID[需合法]，[回车]随机UUID"
     read -r -p 'UUID:' socks5RoutingUUID
     if [[ -z "${socks5RoutingUUID}" ]]; then
@@ -7383,8 +7455,15 @@ setSocks5Inbound() {
         fi
     fi
     echo
-    echoContent green "用户名称：${socks5RoutingUUID}"
-    echoContent green "用户密码：${socks5RoutingUUID}"
+
+    if [[ "${socks5InboundAuthType}" == "aead" ]]; then
+        socks5InboundAEADKey=$(readCredentialBySource "预共享密钥" "${socks5RoutingUUID}")
+        socks5InboundUserName="${socks5InboundAEADKey}"
+        socks5InboundPassword="${socks5InboundAEADKey}"
+    else
+        socks5InboundUserName=$(readCredentialBySource "用户名称" "${socks5RoutingUUID}")
+        socks5InboundPassword=$(readCredentialBySource "用户密码" "${socks5RoutingUUID}")
+    fi
 
     echoContent yellow "\n请选择分流域名DNS解析类型"
     echoContent yellow "# 注意事项：需要保证vps支持相应的DNS解析"
@@ -7411,8 +7490,8 @@ setSocks5Inbound() {
           "tag":"socks5_inbound",
           "users":[
             {
-                  "username": "${socks5RoutingUUID}",
-                  "password": "${socks5RoutingUUID}"
+                  "username": "${socks5InboundUserName}",
+                  "password": "${socks5InboundPassword}"
             }
           ],
           "domain_strategy":"${domainStrategy}"
@@ -7518,16 +7597,26 @@ setSocks5Outbound() {
         exit 0
     fi
     echo
-    read -r -p "请输入用户名:" socks5RoutingOutboundUserName
-    if [[ -z "${socks5RoutingOutboundUserName}" ]]; then
-        echoContent red " ---> 用户名不可为空"
+    echoContent yellow "请选择上游认证方式"
+    echoContent yellow "1.用户名/密码[回车默认]"
+    echoContent yellow "2.预共享密钥(AEAD)"
+    read -r -p "请选择:" socks5RoutingOutboundAuthType
+    if [[ -z "${socks5RoutingOutboundAuthType}" || "${socks5RoutingOutboundAuthType}" == "1" ]]; then
+        socks5RoutingOutboundAuthType="password"
+    elif [[ "${socks5RoutingOutboundAuthType}" == "2" ]]; then
+        socks5RoutingOutboundAuthType="aead"
+    else
+        echoContent red " ---> 选择错误"
         exit 0
     fi
     echo
-    read -r -p "请输入用户密码:" socks5RoutingOutboundPassword
-    if [[ -z "${socks5RoutingOutboundPassword}" ]]; then
-        echoContent red " ---> 用户密码不可为空"
-        exit 0
+    if [[ "${socks5RoutingOutboundAuthType}" == "aead" ]]; then
+        socks5RoutingOutboundAEADKey=$(readCredentialBySource "预共享密钥" "")
+        socks5RoutingOutboundUserName=${socks5RoutingOutboundAEADKey}
+        socks5RoutingOutboundPassword=${socks5RoutingOutboundAEADKey}
+    else
+        socks5RoutingOutboundUserName=$(readCredentialBySource "请输入用户名" "")
+        socks5RoutingOutboundPassword=$(readCredentialBySource "请输入用户密码" "")
     fi
     echo
     echoContent yellow "可选：通过已有出站进行链式拨号（例如先走WARP或本机的其他出站），回车则直连"
@@ -7544,6 +7633,15 @@ setSocks5Outbound() {
           "detour":"${socks5RoutingProxyTag}"
 EOF
         fi
+        local socks5OutboundUsers
+        read -r -d '' socks5OutboundUsers <<EOF || true
+          "users": [
+            {
+              "username": "${socks5RoutingOutboundUserName}",
+              "password": "${socks5RoutingOutboundPassword}"
+            }
+          ]
+EOF
         cat <<EOF >"${singBoxConfigPath}socks5_outbound.json"
 {
     "outbounds":[
@@ -7553,8 +7651,7 @@ EOF
           "server": "${socks5RoutingOutboundIP}",
           "server_port": ${socks5RoutingOutboundPort},
           "version": "5",
-          "username":"${socks5RoutingOutboundUserName}",
-          "password":"${socks5RoutingOutboundPassword}"${socks5DetourConfig}
+${socks5OutboundUsers}${socks5DetourConfig}
         }
     ]
 }
