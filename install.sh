@@ -7746,7 +7746,13 @@ setSocks5Inbound() {
     echoContent yellow "若仅监听内网或127.0.0.1，只能同机或同内网机器访问，跨VPS互联需选择可被对端访问的地址"
     echo
     mapfile -t result < <(initSingBoxPort "${singBoxSocks5Port}")
-    echoContent green "\n ---> 入站Socks5端口：${result[-1]}"
+    local socks5InboundPort=${result[-1]}
+    socks5InboundPort=$(stripAnsi "${socks5InboundPort}")
+    if [[ -z "${socks5InboundPort}" || ! "${socks5InboundPort}" =~ ^[0-9]+$ ]]; then
+        echoContent red " ---> 端口读取异常，请重新输入"
+        exit 0
+    fi
+    echoContent green "\n ---> 入站Socks5端口：${socks5InboundPort}"
     echoContent green "\n ---> 此端口需要配置到其他机器出站，请不要进行代理行为"
 
     # 监听范围选择（合并了安全提示）
@@ -7770,6 +7776,8 @@ setSocks5Inbound() {
         socks5InboundListen="0.0.0.0"
         socks5InboundAllowRange="0.0.0.0/0"
     fi
+
+    socks5InboundListen=$(stripAnsi "${socks5InboundListen}")
 
     # 认证方式选择
     echoContent yellow "\n请选择认证方式（落地机与上游需保持一致，AEAD更安全）"
@@ -7832,7 +7840,7 @@ setSocks5Inbound() {
         {
           "type": "socks",
           "listen":"${socks5InboundListen}",
-          "listen_port":${result[-1]},
+          "listen_port":${socks5InboundPort},
           "tag":"socks5_inbound",
           "auth":"${socks5InboundAuthType}",
           "users":[
@@ -7847,8 +7855,10 @@ setSocks5Inbound() {
 }
 EOF
 
+    validateJsonFile "/etc/v2ray-agent/sing-box/conf/config/20_socks5_inbounds.json"
+
     if [[ "${socks5InboundListen}" != "127.0.0.1" ]]; then
-        allowPort "${result[-1]}" tcp "${socks5InboundAllowRange}"
+        allowPort "${socks5InboundPort}" tcp "${socks5InboundAllowRange}"
     fi
 
 }
