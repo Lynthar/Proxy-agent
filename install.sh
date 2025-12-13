@@ -8140,7 +8140,7 @@ EOF
         # users 数组配置（来自 master 分支）
         local socks5OutboundUsers
         read -r -d '' socks5OutboundUsers <<EOF || true
-          "users": [
+,          "users": [
             {
               "username": "${socks5RoutingOutboundUserName}",
               "password": "${socks5RoutingOutboundPassword}"
