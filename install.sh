@@ -7201,6 +7201,842 @@ warpRoutingReg() {
     reloadCore
 }
 
+# ======================= 链式代理功能 =======================
+
+# 链式代理主菜单
+chainProxyMenu() {
+    echoContent skyBlue "\n功能: 链式代理管理"
+    echoContent red "\n=============================================================="
+    echoContent yellow "# 链式代理说明"
+    echoContent yellow "# 用于在两台境外VPS之间建立加密转发通道"
+    echoContent yellow "# 入口节点(线路优化) → 出口节点(IP优化) → 互联网"
+    echoContent yellow "# 使用 Shadowsocks 2022 协议，加密安全、性能优秀\n"
+
+    echoContent yellow "1.快速配置向导 [推荐]"
+    echoContent yellow "2.查看链路状态"
+    echoContent yellow "3.测试链路连通性"
+    echoContent yellow "4.高级设置"
+    echoContent yellow "5.卸载链式代理"
+
+    read -r -p "请选择:" selectType
+
+    case ${selectType} in
+    1)
+        chainProxyWizard
+        ;;
+    2)
+        showChainStatus
+        ;;
+    3)
+        testChainConnection
+        ;;
+    4)
+        chainProxyAdvanced
+        ;;
+    5)
+        removeChainProxy
+        ;;
+    esac
+}
+
+# 链式代理配置向导
+chainProxyWizard() {
+    echoContent skyBlue "\n链式代理配置向导"
+    echoContent red "\n=============================================================="
+    echoContent yellow "请选择本机角色:\n"
+    echoContent yellow "1.出口节点 (Exit) - 落地机，直接访问互联网"
+    echoContent yellow "  └─ 生成配置码，供入口节点导入"
+    echoContent yellow ""
+    echoContent yellow "2.入口节点 (Entry) - 转发机，接收客户端连接"
+    echoContent yellow "  └─ 导入出口节点的配置码"
+    echoContent yellow ""
+    echoContent yellow "3.手动配置入口节点"
+    echoContent yellow "  └─ 手动输入出口节点信息"
+
+    read -r -p "请选择:" selectType
+
+    case ${selectType} in
+    1)
+        setupChainExit
+        ;;
+    2)
+        setupChainEntryByCode
+        ;;
+    3)
+        setupChainEntryManual
+        ;;
+    esac
+}
+
+# 确保 sing-box 已安装
+ensureSingBoxInstalled() {
+    if [[ ! -f "/etc/v2ray-agent/sing-box/sing-box" ]]; then
+        echoContent yellow "\n检测到 sing-box 未安装，正在安装..."
+        installSingBox
+        if [[ ! -f "/etc/v2ray-agent/sing-box/sing-box" ]]; then
+            echoContent red " ---> sing-box 安装失败"
+            return 1
+        fi
+    fi
+
+    # 确保配置目录存在
+    mkdir -p /etc/v2ray-agent/sing-box/conf/config/
+
+    # 确保基础配置存在
+    if [[ ! -f "/etc/v2ray-agent/sing-box/conf/config/00_log.json" ]]; then
+        cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/00_log.json
+{
+    "log": {
+        "disabled": false,
+        "level": "info",
+        "timestamp": true
+    }
+}
+EOF
+    fi
+
+    # 确保 DNS 配置存在
+    if [[ ! -f "/etc/v2ray-agent/sing-box/conf/config/01_dns.json" ]]; then
+        cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/01_dns.json
+{
+    "dns": {
+        "servers": [
+            {
+                "tag": "google",
+                "address": "8.8.8.8"
+            }
+        ]
+    }
+}
+EOF
+    fi
+
+    # 确保直连出站存在
+    if [[ ! -f "/etc/v2ray-agent/sing-box/conf/config/01_direct_outbound.json" ]]; then
+        cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/01_direct_outbound.json
+{
+    "outbounds": [
+        {
+            "type": "direct",
+            "tag": "direct"
+        }
+    ]
+}
+EOF
+    fi
+
+    return 0
+}
+
+# 生成链式代理密钥 (Shadowsocks 2022 需要 Base64 编码)
+generateChainKey() {
+    # AES-128-GCM 需要 16 字节密钥
+    openssl rand -base64 16
+}
+
+# 获取本机公网 IP
+getChainPublicIP() {
+    local ip=""
+    # 尝试多个服务获取公网IP
+    ip=$(curl -s4 --connect-timeout 5 https://api.ipify.org 2>/dev/null)
+    if [[ -z "${ip}" ]]; then
+        ip=$(curl -s4 --connect-timeout 5 https://ifconfig.me 2>/dev/null)
+    fi
+    if [[ -z "${ip}" ]]; then
+        ip=$(curl -s4 --connect-timeout 5 https://ip.sb 2>/dev/null)
+    fi
+    echo "${ip}"
+}
+
+# 配置出口节点 (Exit)
+setupChainExit() {
+    echoContent skyBlue "\n配置出口节点 (Exit)"
+    echoContent red "\n=============================================================="
+
+    # 确保 sing-box 已安装
+    if ! ensureSingBoxInstalled; then
+        return 1
+    fi
+
+    # 检查是否已存在链式代理入站
+    if [[ -f "/etc/v2ray-agent/sing-box/conf/config/chain_inbound.json" ]]; then
+        echoContent yellow "\n检测到已存在链式代理配置"
+        read -r -p "是否覆盖现有配置？[y/n]:" confirmOverwrite
+        if [[ "${confirmOverwrite}" != "y" ]]; then
+            # 显示现有配置码
+            showExistingChainCode
+            return 0
+        fi
+    fi
+
+    # 生成随机端口 (10000-60000)
+    local chainPort
+    chainPort=$((RANDOM % 50000 + 10000))
+    echoContent yellow "\n请输入链式代理端口 [回车使用随机端口: ${chainPort}]"
+    read -r -p "端口:" inputPort
+    if [[ -n "${inputPort}" ]]; then
+        if [[ ! "${inputPort}" =~ ^[0-9]+$ ]] || [[ "${inputPort}" -lt 1 ]] || [[ "${inputPort}" -gt 65535 ]]; then
+            echoContent red " ---> 端口格式错误"
+            return 1
+        fi
+        chainPort=${inputPort}
+    fi
+
+    # 生成密钥
+    local chainKey
+    chainKey=$(generateChainKey)
+    echoContent green "\n ---> 已生成随机密钥"
+
+    # 加密方法
+    local chainMethod="2022-blake3-aes-128-gcm"
+
+    # 获取公网IP
+    local publicIP
+    publicIP=$(getChainPublicIP)
+    if [[ -z "${publicIP}" ]]; then
+        echoContent yellow "\n无法自动获取公网IP，请手动输入"
+        read -r -p "公网IP:" publicIP
+        if [[ -z "${publicIP}" ]]; then
+            echoContent red " ---> IP不能为空"
+            return 1
+        fi
+    fi
+    echoContent green " ---> 本机公网IP: ${publicIP}"
+
+    # 询问是否限制入口IP
+    echoContent yellow "\n是否限制只允许特定IP连接？(提高安全性)"
+    echoContent yellow "1.不限制 [回车默认]"
+    echoContent yellow "2.限制特定IP"
+    read -r -p "请选择:" limitIPChoice
+
+    local allowedIP=""
+    if [[ "${limitIPChoice}" == "2" ]]; then
+        read -r -p "请输入允许连接的入口节点IP:" allowedIP
+        if [[ -z "${allowedIP}" ]]; then
+            echoContent red " ---> IP不能为空"
+            return 1
+        fi
+    fi
+
+    # 创建入站配置
+    cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/chain_inbound.json
+{
+    "inbounds": [
+        {
+            "type": "shadowsocks",
+            "tag": "chain_inbound",
+            "listen": "::",
+            "listen_port": ${chainPort},
+            "method": "${chainMethod}",
+            "password": "${chainKey}",
+            "multiplex": {
+                "enabled": true
+            }
+        }
+    ]
+}
+EOF
+
+    # 创建路由配置 (让链式入站流量走直连)
+    cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/chain_route.json
+{
+    "route": {
+        "rules": [
+            {
+                "inbound": ["chain_inbound"],
+                "outbound": "direct"
+            }
+        ],
+        "final": "direct"
+    }
+}
+EOF
+
+    # 保存配置信息用于生成配置码
+    cat <<EOF >/etc/v2ray-agent/sing-box/conf/chain_exit_info.json
+{
+    "role": "exit",
+    "ip": "${publicIP}",
+    "port": ${chainPort},
+    "method": "${chainMethod}",
+    "password": "${chainKey}",
+    "allowed_ip": "${allowedIP}"
+}
+EOF
+
+    # 开放防火墙端口
+    if [[ -n "${allowedIP}" ]]; then
+        allowPort "${chainPort}" "tcp" "${allowedIP}/32"
+        echoContent green " ---> 已开放端口 ${chainPort} (仅允许 ${allowedIP})"
+    else
+        allowPort "${chainPort}" "tcp"
+        echoContent green " ---> 已开放端口 ${chainPort}"
+    fi
+
+    # 合并配置并重启
+    mergeSingBoxConfig
+    reloadCore
+
+    # 生成并显示配置码
+    echoContent green "\n=============================================================="
+    echoContent green "出口节点配置完成！"
+    echoContent green "=============================================================="
+    echoContent yellow "\n链式代理配置码 (请复制到入口节点):\n"
+
+    local chainCode
+    chainCode="chain://ss2022@${publicIP}:${chainPort}?key=$(echo -n "${chainKey}" | base64 | tr -d '\n')&method=${chainMethod}"
+    echoContent skyBlue "${chainCode}"
+
+    echoContent yellow "\n或手动配置:"
+    echoContent green "  IP地址: ${publicIP}"
+    echoContent green "  端口: ${chainPort}"
+    echoContent green "  密钥: ${chainKey}"
+    echoContent green "  加密方式: ${chainMethod}"
+
+    echoContent red "\n请妥善保管配置码，切勿泄露！"
+}
+
+# 显示现有配置码
+showExistingChainCode() {
+    if [[ ! -f "/etc/v2ray-agent/sing-box/conf/chain_exit_info.json" ]]; then
+        echoContent red " ---> 未找到出口节点配置信息"
+        return 1
+    fi
+
+    local publicIP port method password
+    publicIP=$(jq -r '.ip' /etc/v2ray-agent/sing-box/conf/chain_exit_info.json)
+    port=$(jq -r '.port' /etc/v2ray-agent/sing-box/conf/chain_exit_info.json)
+    method=$(jq -r '.method' /etc/v2ray-agent/sing-box/conf/chain_exit_info.json)
+    password=$(jq -r '.password' /etc/v2ray-agent/sing-box/conf/chain_exit_info.json)
+
+    echoContent green "\n=============================================================="
+    echoContent green "现有出口节点配置"
+    echoContent green "=============================================================="
+
+    local chainCode
+    chainCode="chain://ss2022@${publicIP}:${port}?key=$(echo -n "${password}" | base64 | tr -d '\n')&method=${method}"
+    echoContent yellow "\n配置码:\n"
+    echoContent skyBlue "${chainCode}"
+
+    echoContent yellow "\n手动配置信息:"
+    echoContent green "  IP地址: ${publicIP}"
+    echoContent green "  端口: ${port}"
+    echoContent green "  密钥: ${password}"
+    echoContent green "  加密方式: ${method}"
+}
+
+# 解析配置码
+parseChainCode() {
+    local code=$1
+
+    # 验证格式 chain://ss2022@IP:PORT?key=xxx&method=xxx
+    if [[ ! "${code}" =~ ^chain://ss2022@ ]]; then
+        echoContent red " ---> 配置码格式错误"
+        return 1
+    fi
+
+    # 提取 IP:PORT
+    local ipPort
+    ipPort=$(echo "${code}" | sed 's/chain:\/\/ss2022@//' | cut -d'?' -f1)
+    chainExitIP=$(echo "${ipPort}" | cut -d':' -f1)
+    chainExitPort=$(echo "${ipPort}" | cut -d':' -f2)
+
+    # 提取参数
+    local params
+    params=$(echo "${code}" | cut -d'?' -f2)
+
+    # 提取 key (Base64 编码的密钥需要解码)
+    local keyBase64
+    keyBase64=$(echo "${params}" | grep -oP 'key=\K[^&]+')
+    chainExitKey=$(echo "${keyBase64}" | base64 -d 2>/dev/null)
+    if [[ -z "${chainExitKey}" ]]; then
+        # 如果解码失败，可能密钥本身就是原始格式
+        chainExitKey="${keyBase64}"
+    fi
+
+    # 提取 method
+    chainExitMethod=$(echo "${params}" | grep -oP 'method=\K[^&]+')
+    if [[ -z "${chainExitMethod}" ]]; then
+        chainExitMethod="2022-blake3-aes-128-gcm"
+    fi
+
+    # 验证提取结果
+    if [[ -z "${chainExitIP}" ]] || [[ -z "${chainExitPort}" ]] || [[ -z "${chainExitKey}" ]]; then
+        echoContent red " ---> 配置码解析失败"
+        return 1
+    fi
+
+    echoContent green " ---> 配置码解析成功"
+    echoContent green "  出口IP: ${chainExitIP}"
+    echoContent green "  出口端口: ${chainExitPort}"
+    echoContent green "  加密方式: ${chainExitMethod}"
+
+    return 0
+}
+
+# 通过配置码配置入口节点
+setupChainEntryByCode() {
+    echoContent skyBlue "\n配置入口节点 (Entry) - 配置码模式"
+    echoContent red "\n=============================================================="
+
+    echoContent yellow "请粘贴出口节点生成的配置码:"
+    read -r -p "配置码:" chainCode
+
+    if [[ -z "${chainCode}" ]]; then
+        echoContent red " ---> 配置码不能为空"
+        return 1
+    fi
+
+    # 解析配置码
+    if ! parseChainCode "${chainCode}"; then
+        return 1
+    fi
+
+    # 调用通用配置函数
+    setupChainEntry "${chainExitIP}" "${chainExitPort}" "${chainExitKey}" "${chainExitMethod}"
+}
+
+# 手动配置入口节点
+setupChainEntryManual() {
+    echoContent skyBlue "\n配置入口节点 (Entry) - 手动模式"
+    echoContent red "\n=============================================================="
+
+    read -r -p "出口节点IP:" chainExitIP
+    if [[ -z "${chainExitIP}" ]]; then
+        echoContent red " ---> IP不能为空"
+        return 1
+    fi
+
+    read -r -p "出口节点端口:" chainExitPort
+    if [[ -z "${chainExitPort}" ]]; then
+        echoContent red " ---> 端口不能为空"
+        return 1
+    fi
+
+    read -r -p "密钥:" chainExitKey
+    if [[ -z "${chainExitKey}" ]]; then
+        echoContent red " ---> 密钥不能为空"
+        return 1
+    fi
+
+    echoContent yellow "\n加密方式 [回车默认: 2022-blake3-aes-128-gcm]"
+    read -r -p "加密方式:" chainExitMethod
+    if [[ -z "${chainExitMethod}" ]]; then
+        chainExitMethod="2022-blake3-aes-128-gcm"
+    fi
+
+    setupChainEntry "${chainExitIP}" "${chainExitPort}" "${chainExitKey}" "${chainExitMethod}"
+}
+
+# 配置入口节点 (通用函数)
+setupChainEntry() {
+    local exitIP=$1
+    local exitPort=$2
+    local exitKey=$3
+    local exitMethod=$4
+
+    # 确保 sing-box 已安装
+    if ! ensureSingBoxInstalled; then
+        return 1
+    fi
+
+    # 检查是否已存在链式代理出站
+    if [[ -f "/etc/v2ray-agent/sing-box/conf/config/chain_outbound.json" ]]; then
+        echoContent yellow "\n检测到已存在链式代理配置"
+        read -r -p "是否覆盖现有配置？[y/n]:" confirmOverwrite
+        if [[ "${confirmOverwrite}" != "y" ]]; then
+            return 0
+        fi
+    fi
+
+    echoContent yellow "\n正在配置入口节点..."
+
+    # 创建出站配置
+    cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/chain_outbound.json
+{
+    "outbounds": [
+        {
+            "type": "shadowsocks",
+            "tag": "chain_outbound",
+            "server": "${exitIP}",
+            "server_port": ${exitPort},
+            "method": "${exitMethod}",
+            "password": "${exitKey}",
+            "multiplex": {
+                "enabled": true,
+                "protocol": "h2mux",
+                "max_connections": 4,
+                "min_streams": 4
+            }
+        }
+    ]
+}
+EOF
+
+    # 创建路由配置 (所有流量走链式出站)
+    cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/chain_route.json
+{
+    "route": {
+        "final": "chain_outbound"
+    }
+}
+EOF
+
+    # 保存配置信息
+    cat <<EOF >/etc/v2ray-agent/sing-box/conf/chain_entry_info.json
+{
+    "role": "entry",
+    "exit_ip": "${exitIP}",
+    "exit_port": ${exitPort},
+    "method": "${exitMethod}",
+    "password": "${exitKey}"
+}
+EOF
+
+    # 合并配置并重启
+    mergeSingBoxConfig
+    reloadCore
+
+    echoContent green "\n=============================================================="
+    echoContent green "入口节点配置完成！"
+    echoContent green "=============================================================="
+
+    # 自动测试连通性
+    echoContent yellow "\n正在测试链路连通性..."
+    sleep 2
+    testChainConnection
+}
+
+# 查看链路状态
+showChainStatus() {
+    echoContent skyBlue "\n链式代理状态"
+    echoContent red "\n=============================================================="
+
+    local role="未配置"
+    local exitIP=""
+    local exitPort=""
+    local status="❌ 未配置"
+
+    # 检查是否为出口节点
+    if [[ -f "/etc/v2ray-agent/sing-box/conf/chain_exit_info.json" ]]; then
+        role="出口节点 (Exit)"
+        local ip port
+        ip=$(jq -r '.ip' /etc/v2ray-agent/sing-box/conf/chain_exit_info.json)
+        port=$(jq -r '.port' /etc/v2ray-agent/sing-box/conf/chain_exit_info.json)
+        local allowedIP
+        allowedIP=$(jq -r '.allowed_ip' /etc/v2ray-agent/sing-box/conf/chain_exit_info.json)
+
+        # 检查 sing-box 是否运行
+        if pgrep -x "sing-box" >/dev/null 2>&1; then
+            status="✅ 运行中"
+        else
+            status="❌ 未运行"
+        fi
+
+        echoContent green "╔══════════════════════════════════════════════════════════════╗"
+        echoContent green "║                      链式代理状态                              ║"
+        echoContent green "╠══════════════════════════════════════════════════════════════╣"
+        echoContent yellow "  当前角色: ${role}"
+        echoContent yellow "  监听端口: ${port}"
+        echoContent yellow "  本机IP: ${ip}"
+        echoContent yellow "  允许连接: ${allowedIP:-所有IP}"
+        echoContent yellow "  运行状态: ${status}"
+        echoContent green "╚══════════════════════════════════════════════════════════════╝"
+
+        # 显示配置码
+        showExistingChainCode
+
+    # 检查是否为入口节点
+    elif [[ -f "/etc/v2ray-agent/sing-box/conf/chain_entry_info.json" ]]; then
+        role="入口节点 (Entry)"
+        exitIP=$(jq -r '.exit_ip' /etc/v2ray-agent/sing-box/conf/chain_entry_info.json)
+        exitPort=$(jq -r '.exit_port' /etc/v2ray-agent/sing-box/conf/chain_entry_info.json)
+
+        # 检查 sing-box 是否运行
+        if pgrep -x "sing-box" >/dev/null 2>&1; then
+            status="✅ 运行中"
+        else
+            status="❌ 未运行"
+        fi
+
+        echoContent green "╔══════════════════════════════════════════════════════════════╗"
+        echoContent green "║                      链式代理状态                              ║"
+        echoContent green "╠══════════════════════════════════════════════════════════════╣"
+        echoContent yellow "  当前角色: ${role}"
+        echoContent yellow "  出口地址: ${exitIP}:${exitPort}"
+        echoContent yellow "  运行状态: ${status}"
+        echoContent green "╚══════════════════════════════════════════════════════════════╝"
+
+    else
+        echoContent yellow "未配置链式代理"
+        echoContent yellow "请使用 '快速配置向导' 进行配置"
+    fi
+}
+
+# 测试链路连通性
+testChainConnection() {
+    echoContent skyBlue "\n测试链路连通性"
+    echoContent red "\n=============================================================="
+
+    # 检查是否为入口节点
+    if [[ ! -f "/etc/v2ray-agent/sing-box/conf/chain_entry_info.json" ]]; then
+        # 检查是否为出口节点
+        if [[ -f "/etc/v2ray-agent/sing-box/conf/chain_exit_info.json" ]]; then
+            echoContent yellow "当前为出口节点，无需测试链路"
+            echoContent yellow "请在入口节点测试连通性"
+
+            # 测试出口节点自身网络
+            echoContent yellow "\n测试出口节点网络..."
+            local testIP
+            testIP=$(curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null)
+            if [[ -n "${testIP}" ]]; then
+                echoContent green "✅ 出口节点网络正常"
+                echoContent green "   出口IP: ${testIP}"
+            else
+                echoContent red "❌ 出口节点网络异常"
+            fi
+            return 0
+        else
+            echoContent red " ---> 未配置链式代理"
+            return 1
+        fi
+    fi
+
+    local exitIP exitPort
+    exitIP=$(jq -r '.exit_ip' /etc/v2ray-agent/sing-box/conf/chain_entry_info.json)
+    exitPort=$(jq -r '.exit_port' /etc/v2ray-agent/sing-box/conf/chain_entry_info.json)
+
+    echoContent yellow "出口节点: ${exitIP}:${exitPort}\n"
+
+    # 测试1: TCP端口连通性
+    echoContent yellow "测试1: TCP端口连通性..."
+    if nc -zv -w 5 "${exitIP}" "${exitPort}" >/dev/null 2>&1; then
+        echoContent green "  ✅ TCP端口连通"
+    else
+        echoContent red "  ❌ TCP端口不通"
+        echoContent red "  请检查:"
+        echoContent red "  1. 出口节点防火墙是否开放端口 ${exitPort}"
+        echoContent red "  2. 出口节点 sing-box 是否运行"
+        echoContent red "  3. IP地址是否正确"
+        return 1
+    fi
+
+    # 测试2: 通过链路访问外网
+    echoContent yellow "测试2: 链路转发测试..."
+
+    # 检查 sing-box 是否运行
+    if ! pgrep -x "sing-box" >/dev/null 2>&1; then
+        echoContent red "  ❌ sing-box 未运行"
+        return 1
+    fi
+
+    # 通过链路获取出口IP (需要等待 sing-box 完全启动)
+    sleep 1
+    local outIP
+    outIP=$(curl -s --connect-timeout 10 https://api.ipify.org 2>/dev/null)
+
+    if [[ -n "${outIP}" ]]; then
+        echoContent green "  ✅ 链路转发正常"
+        echoContent green "  出口IP: ${outIP}"
+
+        # 测试延迟
+        local startTime endTime latency
+        startTime=$(date +%s%N)
+        curl -s --connect-timeout 5 https://www.google.com >/dev/null 2>&1
+        endTime=$(date +%s%N)
+        latency=$(( (endTime - startTime) / 1000000 ))
+        echoContent green "  延迟: ${latency}ms"
+    else
+        echoContent red "  ❌ 链路转发失败"
+        echoContent red "  请检查出口节点配置和网络"
+        return 1
+    fi
+
+    echoContent green "\n=============================================================="
+    echoContent green "链路测试通过！"
+    echoContent green "=============================================================="
+}
+
+# 高级设置
+chainProxyAdvanced() {
+    echoContent skyBlue "\n链式代理高级设置"
+    echoContent red "\n=============================================================="
+
+    echoContent yellow "1.重新生成配置码 (出口节点)"
+    echoContent yellow "2.更新密钥"
+    echoContent yellow "3.修改端口"
+    echoContent yellow "4.查看详细配置"
+
+    read -r -p "请选择:" selectType
+
+    case ${selectType} in
+    1)
+        if [[ -f "/etc/v2ray-agent/sing-box/conf/chain_exit_info.json" ]]; then
+            showExistingChainCode
+        else
+            echoContent red " ---> 当前不是出口节点"
+        fi
+        ;;
+    2)
+        updateChainKey
+        ;;
+    3)
+        updateChainPort
+        ;;
+    4)
+        showChainDetailConfig
+        ;;
+    esac
+}
+
+# 更新密钥
+updateChainKey() {
+    echoContent yellow "\n更新链式代理密钥"
+
+    if [[ -f "/etc/v2ray-agent/sing-box/conf/chain_exit_info.json" ]]; then
+        # 出口节点
+        local port method
+        port=$(jq -r '.port' /etc/v2ray-agent/sing-box/conf/chain_exit_info.json)
+        method=$(jq -r '.method' /etc/v2ray-agent/sing-box/conf/chain_exit_info.json)
+        local publicIP
+        publicIP=$(jq -r '.ip' /etc/v2ray-agent/sing-box/conf/chain_exit_info.json)
+
+        # 生成新密钥
+        local newKey
+        newKey=$(generateChainKey)
+
+        # 更新入站配置
+        jq --arg key "${newKey}" '.inbounds[0].password = $key' \
+            /etc/v2ray-agent/sing-box/conf/config/chain_inbound.json > /tmp/chain_inbound.json
+        mv /tmp/chain_inbound.json /etc/v2ray-agent/sing-box/conf/config/chain_inbound.json
+
+        # 更新信息文件
+        jq --arg key "${newKey}" '.password = $key' \
+            /etc/v2ray-agent/sing-box/conf/chain_exit_info.json > /tmp/chain_exit_info.json
+        mv /tmp/chain_exit_info.json /etc/v2ray-agent/sing-box/conf/chain_exit_info.json
+
+        mergeSingBoxConfig
+        reloadCore
+
+        echoContent green " ---> 密钥已更新"
+        echoContent yellow "\n新配置码:\n"
+        local chainCode
+        chainCode="chain://ss2022@${publicIP}:${port}?key=$(echo -n "${newKey}" | base64 | tr -d '\n')&method=${method}"
+        echoContent skyBlue "${chainCode}"
+        echoContent red "\n请更新入口节点配置！"
+
+    elif [[ -f "/etc/v2ray-agent/sing-box/conf/chain_entry_info.json" ]]; then
+        echoContent red " ---> 入口节点请从出口节点获取新配置码后重新配置"
+    else
+        echoContent red " ---> 未配置链式代理"
+    fi
+}
+
+# 更新端口
+updateChainPort() {
+    echoContent yellow "\n更新链式代理端口"
+
+    if [[ ! -f "/etc/v2ray-agent/sing-box/conf/chain_exit_info.json" ]]; then
+        echoContent red " ---> 仅出口节点可修改端口"
+        return 1
+    fi
+
+    local oldPort
+    oldPort=$(jq -r '.port' /etc/v2ray-agent/sing-box/conf/chain_exit_info.json)
+
+    read -r -p "新端口 [当前: ${oldPort}]:" newPort
+    if [[ -z "${newPort}" ]]; then
+        return 0
+    fi
+
+    if [[ ! "${newPort}" =~ ^[0-9]+$ ]] || [[ "${newPort}" -lt 1 ]] || [[ "${newPort}" -gt 65535 ]]; then
+        echoContent red " ---> 端口格式错误"
+        return 1
+    fi
+
+    # 更新入站配置
+    jq --argjson port "${newPort}" '.inbounds[0].listen_port = $port' \
+        /etc/v2ray-agent/sing-box/conf/config/chain_inbound.json > /tmp/chain_inbound.json
+    mv /tmp/chain_inbound.json /etc/v2ray-agent/sing-box/conf/config/chain_inbound.json
+
+    # 更新信息文件
+    jq --argjson port "${newPort}" '.port = $port' \
+        /etc/v2ray-agent/sing-box/conf/chain_exit_info.json > /tmp/chain_exit_info.json
+    mv /tmp/chain_exit_info.json /etc/v2ray-agent/sing-box/conf/chain_exit_info.json
+
+    # 更新防火墙
+    allowPort "${newPort}" "tcp"
+
+    mergeSingBoxConfig
+    reloadCore
+
+    echoContent green " ---> 端口已更新为 ${newPort}"
+    showExistingChainCode
+    echoContent red "\n请更新入口节点配置！"
+}
+
+# 显示详细配置
+showChainDetailConfig() {
+    echoContent skyBlue "\n链式代理详细配置"
+    echoContent red "\n=============================================================="
+
+    if [[ -f "/etc/v2ray-agent/sing-box/conf/config/chain_inbound.json" ]]; then
+        echoContent yellow "\n入站配置 (chain_inbound.json):"
+        jq . /etc/v2ray-agent/sing-box/conf/config/chain_inbound.json
+    fi
+
+    if [[ -f "/etc/v2ray-agent/sing-box/conf/config/chain_outbound.json" ]]; then
+        echoContent yellow "\n出站配置 (chain_outbound.json):"
+        jq . /etc/v2ray-agent/sing-box/conf/config/chain_outbound.json
+    fi
+
+    if [[ -f "/etc/v2ray-agent/sing-box/conf/config/chain_route.json" ]]; then
+        echoContent yellow "\n路由配置 (chain_route.json):"
+        jq . /etc/v2ray-agent/sing-box/conf/config/chain_route.json
+    fi
+}
+
+# 卸载链式代理
+removeChainProxy() {
+    echoContent skyBlue "\n卸载链式代理"
+    echoContent red "\n=============================================================="
+
+    read -r -p "确认卸载链式代理？[y/n]:" confirmRemove
+    if [[ "${confirmRemove}" != "y" ]]; then
+        return 0
+    fi
+
+    # 删除配置文件
+    rm -f /etc/v2ray-agent/sing-box/conf/config/chain_inbound.json
+    rm -f /etc/v2ray-agent/sing-box/conf/config/chain_outbound.json
+    rm -f /etc/v2ray-agent/sing-box/conf/config/chain_route.json
+    rm -f /etc/v2ray-agent/sing-box/conf/chain_exit_info.json
+    rm -f /etc/v2ray-agent/sing-box/conf/chain_entry_info.json
+
+    # 重新合并配置
+    mergeSingBoxConfig
+    reloadCore
+
+    echoContent green " ---> 链式代理已卸载"
+}
+
+# 合并 sing-box 配置 (如果函数不存在则定义)
+if ! type mergeSingBoxConfig >/dev/null 2>&1; then
+    mergeSingBoxConfig() {
+        if [[ -d "/etc/v2ray-agent/sing-box/conf/config/" ]]; then
+            local configDir="/etc/v2ray-agent/sing-box/conf/config/"
+            local outputFile="/etc/v2ray-agent/sing-box/conf/config.json"
+
+            # 使用 sing-box 合并配置
+            if [[ -f "/etc/v2ray-agent/sing-box/sing-box" ]]; then
+                /etc/v2ray-agent/sing-box/sing-box merge "${outputFile}" -C "${configDir}" >/dev/null 2>&1
+            fi
+        fi
+    }
+fi
+
+# ======================= 链式代理功能结束 =======================
+
 # 分流工具
 routingToolsMenu() {
     echoContent skyBlue "\n功能 1/${totalProgress} : 分流工具"
@@ -10250,6 +11086,7 @@ menu() {
     fi
 
     echoContent yellow "2.任意组合安装"
+    echoContent yellow "3.链式代理管理"
     echoContent yellow "4.Hysteria2管理"
     echoContent yellow "5.REALITY管理"
     echoContent yellow "6.Tuic管理"
@@ -10280,9 +11117,9 @@ menu() {
     2)
         selectCoreInstall
         ;;
-        #    3)
-        #        initXrayFrontingConfig 1
-        #        ;;
+    3)
+        chainProxyMenu
+        ;;
     4)
         manageHysteria
         ;;
