@@ -7127,6 +7127,157 @@ vmessWSRouting() {
         ;;
     esac
 }
+# Socks5配置检查
+checkSocksConfig() {
+    readInstallType
+
+    if [[ -z "${singBoxConfigPath}" && -d "/etc/v2ray-agent/sing-box/conf/config/" ]]; then
+        singBoxConfigPath="/etc/v2ray-agent/sing-box/conf/config/"
+    fi
+
+    echoContent skyBlue "\n功能 1/1 : Socks5配置检查"
+
+    if [[ -z "${singBoxConfigPath}" && "${coreInstallType}" != "1" ]]; then
+        echoContent red " ---> 未检测到Socks5配置，请先安装对应功能"
+        exit 0
+    fi
+
+    local socksInboundFile="${singBoxConfigPath}20_socks5_inbounds.json"
+    local socksOutboundFile="${singBoxConfigPath}socks5_outbound.json"
+    local socksOutboundRouteFile="${singBoxConfigPath}socks5_01_outbound_route.json"
+    local socksInboundRouteFile="${singBoxConfigPath}socks5_02_inbound_route.json"
+    local singBoxSocksStatus=false
+    local xraySocksStatus=false
+
+    if [[ -f "${socksInboundFile}" || -f "${socksOutboundFile}" ]]; then
+        singBoxSocksStatus=true
+    fi
+
+    if [[ -n "${configPath}" && -f "${configPath}socks5_outbound.json" ]]; then
+        xraySocksStatus=true
+    fi
+
+    if [[ "${singBoxSocksStatus}" != "true" && "${xraySocksStatus}" != "true" ]]; then
+        echoContent red " ---> 未找到Socks5入站或出站配置文件"
+        exit 0
+    fi
+
+    # 端口占用检查
+    if [[ -f "${socksInboundFile}" ]]; then
+        local socksListenPort
+        socksListenPort=$(jq -r '.inbounds[0].listen_port // empty' "${socksInboundFile}")
+        if [[ -n "${socksListenPort}" ]]; then
+            local portConflicts
+            portConflicts=$(lsof -i "tcp:${socksListenPort}" | awk 'NR>1 && $1!="sing-box" {print}')
+            if [[ -n "${portConflicts}" ]]; then
+                echoContent red " ---> Socks5入站端口 ${socksListenPort} 已被其他进程占用"
+                echoContent yellow " ---> 修复指引：停止占用该端口的进程或修改 ${socksInboundFile} 中的 listen_port 后重启"
+            else
+                echoContent green " ---> Socks5入站端口 ${socksListenPort} 正常"
+            fi
+        fi
+    fi
+
+    # 凭据及证书路径检查
+    if [[ -f "${socksInboundFile}" ]]; then
+        local socksInboundUser
+        local socksInboundPassword
+        socksInboundUser=$(jq -r '.inbounds[0].users[0].username // empty' "${socksInboundFile}")
+        socksInboundPassword=$(jq -r '.inbounds[0].users[0].password // empty' "${socksInboundFile}")
+
+        if [[ -z "${socksInboundUser}" || -z "${socksInboundPassword}" ]]; then
+            echoContent red " ---> Socks5入站凭据缺失"
+            echoContent yellow " ---> 修复指引：在 ${socksInboundFile} 填写 username/password，或重新执行 Socks5 入站安装"
+        else
+            echoContent green " ---> Socks5入站凭据正常"
+        fi
+    fi
+
+    if [[ -f "${socksOutboundFile}" ]]; then
+        local socksOutboundUser
+        local socksOutboundPassword
+        socksOutboundUser=$(jq -r '.outbounds[0].username // empty' "${socksOutboundFile}")
+        socksOutboundPassword=$(jq -r '.outbounds[0].password // empty' "${socksOutboundFile}")
+        local socksOutboundCertPath
+        local socksOutboundKeyPath
+        socksOutboundCertPath=$(jq -r '.outbounds[0].tls.certificate_path // empty' "${socksOutboundFile}")
+        socksOutboundKeyPath=$(jq -r '.outbounds[0].tls.key_path // empty' "${socksOutboundFile}")
+
+        if [[ -z "${socksOutboundUser}" || -z "${socksOutboundPassword}" ]]; then
+            echoContent red " ---> Socks5出站凭据缺失"
+            echoContent yellow " ---> 修复指引：在 ${socksOutboundFile} 填写 username/password，或重新执行 Socks5 出站安装"
+        else
+            echoContent green " ---> Socks5出站凭据正常"
+        fi
+
+        if [[ -n "${socksOutboundCertPath}" && ! -f "${socksOutboundCertPath}" ]]; then
+            echoContent red " ---> Socks5出站证书路径无效: ${socksOutboundCertPath}"
+            echoContent yellow " ---> 修复指引：更新证书路径或上传证书文件后重启服务"
+        fi
+
+        if [[ -n "${socksOutboundKeyPath}" && ! -f "${socksOutboundKeyPath}" ]]; then
+            echoContent red " ---> Socks5出站私钥路径无效: ${socksOutboundKeyPath}"
+            echoContent yellow " ---> 修复指引：更新私钥路径或上传私钥文件后重启服务"
+        fi
+    fi
+
+    local outboundTags=()
+    if [[ -n "${singBoxConfigPath}" ]]; then
+        while read -r outboundFile; do
+            while read -r outboundTag; do
+                if [[ -n "${outboundTag}" && "${outboundTag}" != "null" ]]; then
+                    outboundTags+=("${outboundTag}")
+                fi
+            done < <(jq -r '.outbounds[]?.tag // empty' "${outboundFile}" 2>/dev/null)
+        done < <(find "${singBoxConfigPath}" -maxdepth 1 -type f -name "*.json")
+    fi
+
+    checkRouteTarget() {
+        local routeFile=$1
+        local routeName=$2
+        if [[ -f "${routeFile}" ]]; then
+            while read -r targetTag; do
+                if [[ -z "${targetTag}" ]]; then
+                    continue
+                fi
+
+                if [[ ! " ${outboundTags[*]} " =~ " ${targetTag} " ]]; then
+                    echoContent red " ---> 路由 ${routeName} 中的目标标签 ${targetTag} 不存在"
+                    echoContent yellow " ---> 修复指引：重新安装 Socks5 分流或在 ${singBoxConfigPath} 内补充该出站配置"
+                fi
+            done < <(jq -r '.route.rules[]?.outbound // empty' "${routeFile}" 2>/dev/null)
+        fi
+    }
+
+    checkRouteTarget "${socksOutboundRouteFile}" "socks5_01_outbound_route"
+    checkRouteTarget "${socksInboundRouteFile}" "socks5_02_inbound_route"
+
+    if [[ "${coreInstallType}" == "1" ]]; then
+        local xrayOutbounds=()
+        if [[ -n "${configPath}" ]]; then
+            while read -r outboundFile; do
+                while read -r outboundTag; do
+                    if [[ -n "${outboundTag}" && "${outboundTag}" != "null" ]]; then
+                        xrayOutbounds+=("${outboundTag}")
+                    fi
+                done < <(jq -r '.outbounds[]?.tag // empty' "${outboundFile}" 2>/dev/null)
+            done < <(find "${configPath}" -maxdepth 1 -type f -name "*.json")
+        fi
+
+        if [[ -f "${configPath}09_routing.json" ]]; then
+            while read -r xrayTarget; do
+                if [[ -z "${xrayTarget}" ]]; then
+                    continue
+                fi
+
+                if [[ ! " ${xrayOutbounds[*]} " =~ " ${xrayTarget} " ]]; then
+                    echoContent red " ---> Xray 分流规则中的出站标签 ${xrayTarget} 不存在"
+                    echoContent yellow " ---> 修复指引：检查 ${configPath}${xrayTarget}.json 是否缺失，或重新执行 Socks5 出站配置"
+                fi
+            done < <(jq -r '.routing.rules[]?.outboundTag // empty' "${configPath}09_routing.json" 2>/dev/null)
+        fi
+    fi
+}
 # Socks5分流
 socks5Routing() {
     if [[ -z "${coreInstallType}" ]]; then
@@ -7144,6 +7295,7 @@ socks5Routing() {
     echoContent yellow "1.Socks5出站"
     echoContent yellow "2.Socks5入站"
     echoContent yellow "3.卸载"
+    echoContent yellow "4.检查配置"
     read -r -p "请选择:" selectType
 
     case ${selectType} in
@@ -7155,6 +7307,9 @@ socks5Routing() {
         ;;
     3)
         removeSocks5Routing
+        ;;
+    4)
+        checkSocksConfig
         ;;
     esac
 }
