@@ -328,9 +328,56 @@ initVar() {
     addressWarpReg=
     secretKeyWarpReg=
 
+    socks5RoutingOutboundAuthType=
+    socks5RoutingOutboundAEADKey=
+
+    socks5InboundAuthType=
+    socks5InboundUserName=
+    socks5InboundPassword=
+    socks5InboundAEADKey=
+
     # 上次安装配置状态
     lastInstallationConfig=
 
+}
+
+readCredentialBySource() {
+
+    local tips=$1
+    local defaultValue=$2
+    echoContent yellow "请选择${tips}录入方式"
+    echoContent yellow "1.直接输入${defaultValue:+[回车默认] }"
+    echoContent yellow "2.从文件读取"
+    echoContent yellow "3.从环境变量读取"
+    read -r -p "请选择:" credentialSource
+    local credentialValue=
+    case ${credentialSource} in
+    2)
+        read -r -p "请输入文件路径:" credentialPath
+        if [[ -z "${credentialPath}" || ! -f "${credentialPath}" ]]; then
+            echoContent red " ---> 文件路径无效"
+            exit 0
+        fi
+        credentialValue=$(tr -d '\n' <"${credentialPath}")
+        ;;
+    3)
+        read -r -p "请输入环境变量名称:" credentialEnv
+        credentialValue=${!credentialEnv}
+        ;;
+    *)
+        read -r -p "${tips}:" credentialValue
+        if [[ -z "${credentialValue}" && -n "${defaultValue}" ]]; then
+            credentialValue=${defaultValue}
+        fi
+        ;;
+    esac
+
+    if [[ -z "${credentialValue}" ]]; then
+        echoContent red " ---> ${tips}不可为空"
+        exit 0
+    fi
+
+    echo "${credentialValue}"
 }
 
 # 读取tls证书详情
@@ -3474,6 +3521,15 @@ EOF
     # socks5 outbound
     if echo "${tag}" | grep -q "socks5"; then
         local socks5ProxySettings=
+        if [[ -z "${socks5RoutingOutboundAuthType}" ]]; then
+            socks5RoutingOutboundAuthType="password"
+        fi
+        local socks5OutboundUserValue=${socks5RoutingOutboundUserName}
+        local socks5OutboundPassValue=${socks5RoutingOutboundPassword}
+        if [[ "${socks5RoutingOutboundAuthType}" == "aead" ]]; then
+            socks5OutboundUserValue=${socks5RoutingOutboundAEADKey}
+            socks5OutboundPassValue=${socks5RoutingOutboundAEADKey}
+        fi
         if [[ -n "${socks5RoutingProxyTag}" ]]; then
             read -r -d '' socks5ProxySettings <<EOF || true
 ,
@@ -3530,14 +3586,15 @@ EOF
       "protocol": "socks",
       "tag": "${tag}",
       "settings": {
+        "auth": "${socks5RoutingOutboundAuthType}",
         "servers": [
           {
             "address": "${socks5RoutingOutboundIP}",
             "port": ${socks5RoutingOutboundPort},
             "users": [
               {
-                "user": "${socks5RoutingOutboundUserName}",
-                "pass": "${socks5RoutingOutboundPassword}"
+                "user": "${socks5OutboundUserValue}",
+                "pass": "${socks5OutboundPassValue}"
               }
             ]
           }
@@ -6328,9 +6385,43 @@ checkLog() {
     fi
     local realityLogShow=
     local logStatus=false
-    if grep -q "access" ${configPath}00_log.json; then
-        logStatus=true
+    local currentLogLevel="warning"
+    local accessLogPath=
+    local errorLogPath=
+    if [[ -f "${configPath}00_log.json" ]]; then
+        if grep -q "access" ${configPath}00_log.json; then
+            logStatus=true
+        fi
+        currentLogLevel=$(jq -r '.log.loglevel // "warning"' ${configPath}00_log.json)
+        accessLogPath=$(jq -r '.log.access // empty' ${configPath}00_log.json)
+        errorLogPath=$(jq -r '.log.error // empty' ${configPath}00_log.json)
     fi
+
+    writeLogConfig() {
+        local accessPath=$1
+        local errorPath=$2
+        local level=$3
+        {
+            echo "{"
+            echo "  \"log\": {"
+            if [[ -n "${accessPath}" ]]; then
+                echo "    \"access\": \"${accessPath}\"," 
+            fi
+            echo "    \"error\": \"${errorPath}\"," 
+            echo "    \"loglevel\": \"${level}\"," 
+            echo "    \"dnsLog\": false"
+            echo "  }"
+            echo "}"
+        } >${configPath}00_log.json
+    }
+
+    updateRealityLogShow() {
+        if [[ -n ${realityStatus} ]]; then
+            local vlessVisionRealityInbounds
+            vlessVisionRealityInbounds=$(jq -r ".inbounds[0].streamSettings.realitySettings.show=${1}" ${configPath}07_VLESS_vision_reality_inbounds.json)
+            echo "${vlessVisionRealityInbounds}" | jq . >${configPath}07_VLESS_vision_reality_inbounds.json
+        fi
+    }
 
     echoContent skyBlue "\n功能 $1/${totalProgress} : 查看日志"
     echoContent red "\n=============================================================="
@@ -6347,49 +6438,33 @@ checkLog() {
     echoContent yellow "4.查看证书定时任务日志"
     echoContent yellow "5.查看证书安装日志"
     echoContent yellow "6.清空日志"
+    echoContent yellow "7.日志级别(当前:${currentLogLevel})"
     echoContent red "=============================================================="
 
     read -r -p "请选择:" selectAccessLogType
     local configPathLog=${configPath//conf\//}
+    local defaultAccessPath=${accessLogPath:-${configPathLog}access.log}
+    local defaultErrorPath=${errorLogPath:-${configPathLog}error.log}
 
     case ${selectAccessLogType} in
     1)
         if [[ "${logStatus}" == "false" ]]; then
             realityLogShow=true
-            cat <<EOF >${configPath}00_log.json
-{
-  "log": {
-  	"access":"${configPathLog}access.log",
-    "error": "${configPathLog}error.log",
-    "loglevel": "debug"
-  }
-}
-EOF
+            writeLogConfig "${defaultAccessPath}" "${defaultErrorPath}" "${currentLogLevel}"
         elif [[ "${logStatus}" == "true" ]]; then
             realityLogShow=false
-            cat <<EOF >${configPath}00_log.json
-{
-  "log": {
-    "error": "${configPathLog}error.log",
-    "loglevel": "warning"
-  }
-}
-EOF
+            writeLogConfig "" "${defaultErrorPath}" "${currentLogLevel}"
         fi
 
-        if [[ -n ${realityStatus} ]]; then
-            local vlessVisionRealityInbounds
-            vlessVisionRealityInbounds=$(jq -r ".inbounds[0].streamSettings.realitySettings.show=${realityLogShow}" ${configPath}07_VLESS_vision_reality_inbounds.json)
-            echo "${vlessVisionRealityInbounds}" | jq . >${configPath}07_VLESS_vision_reality_inbounds.json
-        fi
+        updateRealityLogShow "${realityLogShow}"
         reloadCore
         checkLog 1
         ;;
     2)
-        tail -f ${configPathLog}access.log
+        tail -f ${defaultAccessPath}
         ;;
     3)
-        tail -f ${configPathLog}error.log
+        tail -f ${defaultErrorPath}
         ;;
     4)
         if [[ ! -f "/etc/v2ray-agent/crontab_tls.log" ]]; then
@@ -6401,8 +6476,51 @@ EOF
         tail -n 100 /etc/v2ray-agent/tls/acme.log
         ;;
     6)
-        echo >${configPathLog}access.log
-        echo >${configPathLog}error.log
+        echo >${defaultAccessPath}
+        echo >${defaultErrorPath}
+        ;;
+    7)
+        echoContent yellow "\n日志级别切换(当前:${currentLogLevel})"
+        echoContent yellow "1.warning(默认)"
+        echoContent yellow "2.info"
+        echoContent yellow "3.debug"
+        echoContent yellow "4.最小日志(写入/tmp，适合无盘/调试完毕后使用)"
+        read -r -p "请选择:" selectLogLevel
+        local targetAccessPath=""
+        case ${selectLogLevel} in
+        1)
+            currentLogLevel="warning"
+            ;;
+        2)
+            currentLogLevel="info"
+            ;;
+        3)
+            currentLogLevel="debug"
+            ;;
+        4)
+            local tmpLogDir="/tmp/v2ray-agent"
+            mkdir -p "${tmpLogDir}"
+            currentLogLevel="warning"
+            writeLogConfig "${tmpLogDir}/access.log" "${tmpLogDir}/error.log" "${currentLogLevel}"
+            updateRealityLogShow "false"
+            reloadCore
+            echoContent green "\n ---> 已切换为最小日志模式"
+            echoContent yellow " ---> access/error 将写入 ${tmpLogDir}/，系统临时目录会在重启或周期清理时自动清空，如需立即清理可执行 [rm -f ${tmpLogDir}/*.log]"
+            checkLog 1
+            ;;
+        esac
+        if [[ "${selectLogLevel}" != "4" ]]; then
+            if [[ "${logStatus}" == "true" ]]; then
+                targetAccessPath=${defaultAccessPath}
+                realityLogShow=true
+            else
+                realityLogShow=false
+            fi
+            writeLogConfig "${targetAccessPath}" "${defaultErrorPath}" "${currentLogLevel}"
+            updateRealityLogShow "${realityLogShow}"
+            reloadCore
+            checkLog 1
+        fi
         ;;
     esac
 }
@@ -7167,6 +7285,157 @@ vmessWSRouting() {
         ;;
     esac
 }
+# Socks5配置检查
+checkSocksConfig() {
+    readInstallType
+
+    if [[ -z "${singBoxConfigPath}" && -d "/etc/v2ray-agent/sing-box/conf/config/" ]]; then
+        singBoxConfigPath="/etc/v2ray-agent/sing-box/conf/config/"
+    fi
+
+    echoContent skyBlue "\n功能 1/1 : Socks5配置检查"
+
+    if [[ -z "${singBoxConfigPath}" && "${coreInstallType}" != "1" ]]; then
+        echoContent red " ---> 未检测到Socks5配置，请先安装对应功能"
+        exit 0
+    fi
+
+    local socksInboundFile="${singBoxConfigPath}20_socks5_inbounds.json"
+    local socksOutboundFile="${singBoxConfigPath}socks5_outbound.json"
+    local socksOutboundRouteFile="${singBoxConfigPath}socks5_01_outbound_route.json"
+    local socksInboundRouteFile="${singBoxConfigPath}socks5_02_inbound_route.json"
+    local singBoxSocksStatus=false
+    local xraySocksStatus=false
+
+    if [[ -f "${socksInboundFile}" || -f "${socksOutboundFile}" ]]; then
+        singBoxSocksStatus=true
+    fi
+
+    if [[ -n "${configPath}" && -f "${configPath}socks5_outbound.json" ]]; then
+        xraySocksStatus=true
+    fi
+
+    if [[ "${singBoxSocksStatus}" != "true" && "${xraySocksStatus}" != "true" ]]; then
+        echoContent red " ---> 未找到Socks5入站或出站配置文件"
+        exit 0
+    fi
+
+    # 端口占用检查
+    if [[ -f "${socksInboundFile}" ]]; then
+        local socksListenPort
+        socksListenPort=$(jq -r '.inbounds[0].listen_port // empty' "${socksInboundFile}")
+        if [[ -n "${socksListenPort}" ]]; then
+            local portConflicts
+            portConflicts=$(lsof -i "tcp:${socksListenPort}" | awk 'NR>1 && $1!="sing-box" {print}')
+            if [[ -n "${portConflicts}" ]]; then
+                echoContent red " ---> Socks5入站端口 ${socksListenPort} 已被其他进程占用"
+                echoContent yellow " ---> 修复指引：停止占用该端口的进程或修改 ${socksInboundFile} 中的 listen_port 后重启"
+            else
+                echoContent green " ---> Socks5入站端口 ${socksListenPort} 正常"
+            fi
+        fi
+    fi
+
+    # 凭据及证书路径检查
+    if [[ -f "${socksInboundFile}" ]]; then
+        local socksInboundUser
+        local socksInboundPassword
+        socksInboundUser=$(jq -r '.inbounds[0].users[0].username // empty' "${socksInboundFile}")
+        socksInboundPassword=$(jq -r '.inbounds[0].users[0].password // empty' "${socksInboundFile}")
+
+        if [[ -z "${socksInboundUser}" || -z "${socksInboundPassword}" ]]; then
+            echoContent red " ---> Socks5入站凭据缺失"
+            echoContent yellow " ---> 修复指引：在 ${socksInboundFile} 填写 username/password，或重新执行 Socks5 入站安装"
+        else
+            echoContent green " ---> Socks5入站凭据正常"
+        fi
+    fi
+
+    if [[ -f "${socksOutboundFile}" ]]; then
+        local socksOutboundUser
+        local socksOutboundPassword
+        socksOutboundUser=$(jq -r '.outbounds[0].username // empty' "${socksOutboundFile}")
+        socksOutboundPassword=$(jq -r '.outbounds[0].password // empty' "${socksOutboundFile}")
+        local socksOutboundCertPath
+        local socksOutboundKeyPath
+        socksOutboundCertPath=$(jq -r '.outbounds[0].tls.certificate_path // empty' "${socksOutboundFile}")
+        socksOutboundKeyPath=$(jq -r '.outbounds[0].tls.key_path // empty' "${socksOutboundFile}")
+
+        if [[ -z "${socksOutboundUser}" || -z "${socksOutboundPassword}" ]]; then
+            echoContent red " ---> Socks5出站凭据缺失"
+            echoContent yellow " ---> 修复指引：在 ${socksOutboundFile} 填写 username/password，或重新执行 Socks5 出站安装"
+        else
+            echoContent green " ---> Socks5出站凭据正常"
+        fi
+
+        if [[ -n "${socksOutboundCertPath}" && ! -f "${socksOutboundCertPath}" ]]; then
+            echoContent red " ---> Socks5出站证书路径无效: ${socksOutboundCertPath}"
+            echoContent yellow " ---> 修复指引：更新证书路径或上传证书文件后重启服务"
+        fi
+
+        if [[ -n "${socksOutboundKeyPath}" && ! -f "${socksOutboundKeyPath}" ]]; then
+            echoContent red " ---> Socks5出站私钥路径无效: ${socksOutboundKeyPath}"
+            echoContent yellow " ---> 修复指引：更新私钥路径或上传私钥文件后重启服务"
+        fi
+    fi
+
+    local outboundTags=()
+    if [[ -n "${singBoxConfigPath}" ]]; then
+        while read -r outboundFile; do
+            while read -r outboundTag; do
+                if [[ -n "${outboundTag}" && "${outboundTag}" != "null" ]]; then
+                    outboundTags+=("${outboundTag}")
+                fi
+            done < <(jq -r '.outbounds[]?.tag // empty' "${outboundFile}" 2>/dev/null)
+        done < <(find "${singBoxConfigPath}" -maxdepth 1 -type f -name "*.json")
+    fi
+
+    checkRouteTarget() {
+        local routeFile=$1
+        local routeName=$2
+        if [[ -f "${routeFile}" ]]; then
+            while read -r targetTag; do
+                if [[ -z "${targetTag}" ]]; then
+                    continue
+                fi
+
+                if [[ ! " ${outboundTags[*]} " =~ " ${targetTag} " ]]; then
+                    echoContent red " ---> 路由 ${routeName} 中的目标标签 ${targetTag} 不存在"
+                    echoContent yellow " ---> 修复指引：重新安装 Socks5 分流或在 ${singBoxConfigPath} 内补充该出站配置"
+                fi
+            done < <(jq -r '.route.rules[]?.outbound // empty' "${routeFile}" 2>/dev/null)
+        fi
+    }
+
+    checkRouteTarget "${socksOutboundRouteFile}" "socks5_01_outbound_route"
+    checkRouteTarget "${socksInboundRouteFile}" "socks5_02_inbound_route"
+
+    if [[ "${coreInstallType}" == "1" ]]; then
+        local xrayOutbounds=()
+        if [[ -n "${configPath}" ]]; then
+            while read -r outboundFile; do
+                while read -r outboundTag; do
+                    if [[ -n "${outboundTag}" && "${outboundTag}" != "null" ]]; then
+                        xrayOutbounds+=("${outboundTag}")
+                    fi
+                done < <(jq -r '.outbounds[]?.tag // empty' "${outboundFile}" 2>/dev/null)
+            done < <(find "${configPath}" -maxdepth 1 -type f -name "*.json")
+        fi
+
+        if [[ -f "${configPath}09_routing.json" ]]; then
+            while read -r xrayTarget; do
+                if [[ -z "${xrayTarget}" ]]; then
+                    continue
+                fi
+
+                if [[ ! " ${xrayOutbounds[*]} " =~ " ${xrayTarget} " ]]; then
+                    echoContent red " ---> Xray 分流规则中的出站标签 ${xrayTarget} 不存在"
+                    echoContent yellow " ---> 修复指引：检查 ${configPath}${xrayTarget}.json 是否缺失，或重新执行 Socks5 出站配置"
+                fi
+            done < <(jq -r '.routing.rules[]?.outboundTag // empty' "${configPath}09_routing.json" 2>/dev/null)
+        fi
+    fi
+}
 # Socks5分流
 socks5Routing() {
     if [[ -z "${coreInstallType}" ]]; then
@@ -7184,6 +7453,7 @@ socks5Routing() {
     echoContent yellow "1.Socks5出站"
     echoContent yellow "2.Socks5入站"
     echoContent yellow "3.卸载"
+    echoContent yellow "4.检查配置"
     read -r -p "请选择:" selectType
 
     case ${selectType} in
@@ -7195,6 +7465,9 @@ socks5Routing() {
         ;;
     3)
         removeSocks5Routing
+        ;;
+    4)
+        checkSocksConfig
         ;;
     esac
 }
@@ -7413,6 +7686,21 @@ setSocks5Inbound() {
     echoContent green "\n ---> 入站Socks5端口：${result[-1]}"
     echoContent green "\n ---> 此端口需要配置到其他机器出站，请不要进行代理行为"
 
+    echoContent yellow "\n请选择认证方式"
+    echoContent yellow "1.用户名/密码[回车默认]"
+    echoContent yellow "2.预共享密钥(AEAD)"
+    read -r -p "请选择:" socks5InboundAuthType
+
+    if [[ -z "${socks5InboundAuthType}" || "${socks5InboundAuthType}" == "1" ]]; then
+        socks5InboundAuthType="password"
+    elif [[ "${socks5InboundAuthType}" == "2" ]]; then
+        socks5InboundAuthType="aead"
+    else
+        echoContent red " ---> 选择错误"
+        exit 0
+    fi
+
+    echo
     echoContent yellow "\n请输入自定义UUID[需合法]，[回车]随机UUID"
     read -r -p 'UUID:' socks5RoutingUUID
     if [[ -z "${socks5RoutingUUID}" ]]; then
@@ -7423,8 +7711,15 @@ setSocks5Inbound() {
         fi
     fi
     echo
-    echoContent green "用户名称：${socks5RoutingUUID}"
-    echoContent green "用户密码：${socks5RoutingUUID}"
+
+    if [[ "${socks5InboundAuthType}" == "aead" ]]; then
+        socks5InboundAEADKey=$(readCredentialBySource "预共享密钥" "${socks5RoutingUUID}")
+        socks5InboundUserName="${socks5InboundAEADKey}"
+        socks5InboundPassword="${socks5InboundAEADKey}"
+    else
+        socks5InboundUserName=$(readCredentialBySource "用户名称" "${socks5RoutingUUID}")
+        socks5InboundPassword=$(readCredentialBySource "用户密码" "${socks5RoutingUUID}")
+    fi
 
     echoContent yellow "\n请选择分流域名DNS解析类型"
     echoContent yellow "# 注意事项：需要保证vps支持相应的DNS解析"
@@ -7451,8 +7746,8 @@ setSocks5Inbound() {
           "tag":"socks5_inbound",
           "users":[
             {
-                  "username": "${socks5RoutingUUID}",
-                  "password": "${socks5RoutingUUID}"
+                  "username": "${socks5InboundUserName}",
+                  "password": "${socks5InboundPassword}"
             }
           ],
           "domain_strategy":"${domainStrategy}"
@@ -7558,22 +7853,43 @@ setSocks5Outbound() {
         exit 0
     fi
     echo
-    read -r -p "请输入用户名:" socks5RoutingOutboundUserName
-    if [[ -z "${socks5RoutingOutboundUserName}" ]]; then
-        echoContent red " ---> 用户名不可为空"
+    echoContent yellow "请选择上游认证方式"
+    echoContent yellow "1.用户名/密码[回车默认]"
+    echoContent yellow "2.预共享密钥(AEAD)"
+    read -r -p "请选择:" socks5RoutingOutboundAuthType
+    if [[ -z "${socks5RoutingOutboundAuthType}" || "${socks5RoutingOutboundAuthType}" == "1" ]]; then
+        socks5RoutingOutboundAuthType="password"
+    elif [[ "${socks5RoutingOutboundAuthType}" == "2" ]]; then
+        socks5RoutingOutboundAuthType="aead"
+    else
+        echoContent red " ---> 选择错误"
         exit 0
     fi
     echo
-    read -r -p "请输入用户密码:" socks5RoutingOutboundPassword
-    if [[ -z "${socks5RoutingOutboundPassword}" ]]; then
-        echoContent red " ---> 用户密码不可为空"
-        exit 0
+    if [[ "${socks5RoutingOutboundAuthType}" == "aead" ]]; then
+        socks5RoutingOutboundAEADKey=$(readCredentialBySource "预共享密钥" "")
+        socks5RoutingOutboundUserName=${socks5RoutingOutboundAEADKey}
+        socks5RoutingOutboundPassword=${socks5RoutingOutboundAEADKey}
+    else
+        socks5RoutingOutboundUserName=$(readCredentialBySource "请输入用户名" "")
+        socks5RoutingOutboundPassword=$(readCredentialBySource "请输入用户密码" "")
     fi
     echo
     echoContent yellow "可选：通过已有出站进行链式拨号（例如先走WARP或本机的其他出站），回车则直连"
-    read -r -p "链式出站标签:" socks5RoutingProxyTag
+    read -r -p "链式出站标签(多个英文逗号分隔，按顺序生效):" socks5RoutingProxyTag
+    socks5RoutingProxyTagList=()
     if [[ -n "${socks5RoutingProxyTag}" ]]; then
-        echoContent green " ---> 当前Socks5出站将通过 ${socks5RoutingProxyTag} 链式转发"
+        while IFS=',' read -r tag; do
+            if [[ -n "${tag}" ]]; then
+                socks5RoutingProxyTagList+=("${tag}")
+            fi
+        done < <(echo "${socks5RoutingProxyTag}" | tr -s ',' '\n')
+    fi
+    if [[ ${#socks5RoutingProxyTagList[@]} -gt 0 ]]; then
+        echoContent green " ---> 当前Socks5出站将按顺序通过：${socks5RoutingProxyTagList[*]}"
+        socks5RoutingFallbackDefault=${socks5RoutingProxyTagList[1]:-01_direct_outbound}
+    else
+        socks5RoutingFallbackDefault=01_direct_outbound
     fi
     echo
     echoContent yellow "可选：传输层 [1]直连(默认) [2]TLS [3]WS [4]H2"
@@ -7622,12 +7938,13 @@ setSocks5Outbound() {
     
     if [[ -n "${singBoxConfigPath}" ]]; then
         local socks5DetourConfig=
-        if [[ -n "${socks5RoutingProxyTag}" ]]; then
+        if [[ -n "${socks5RoutingProxyTagList[*]}" ]]; then
             read -r -d '' socks5DetourConfig <<EOF || true
 ,
-          "detour":"${socks5RoutingProxyTag}"
+          "detour":"${socks5RoutingProxyTagList[0]}"
 EOF
         fi
+        # TLS / transport 相关配置（来自 codex/add-transport-options-to-socks-wizard 分支）
         local socks5SingBoxTLSConfig=
         local socks5SingBoxTransportConfig=
         if [[ "${socks5TransportType}" != "1" ]]; then
@@ -7663,6 +7980,18 @@ EOF
 EOF
             fi
         fi
+
+        # users 数组配置（来自 master 分支）
+        local socks5OutboundUsers
+        read -r -d '' socks5OutboundUsers <<EOF || true
+          "users": [
+            {
+              "username": "${socks5RoutingOutboundUserName}",
+              "password": "${socks5RoutingOutboundPassword}"
+            }
+          ]
+EOF
+
         cat <<EOF >"${singBoxConfigPath}socks5_outbound.json"
 {
     "outbounds":[
@@ -7672,8 +8001,9 @@ EOF
           "server": "${socks5RoutingOutboundIP}",
           "server_port": ${socks5RoutingOutboundPort},
           "version": "5",
-          "username":"${socks5RoutingOutboundUserName}",
-          "password":"${socks5RoutingOutboundPassword}"${socks5DetourConfig}${socks5SingBoxTLSConfig}${socks5SingBoxTransportConfig}
+        ${socks5OutboundUsers}${socks5DetourConfig}${socks5SingBoxTLSConfig}${socks5SingBoxTransportConfig}
+        }
+
         }
     ]
 }
@@ -7693,50 +8023,112 @@ setSocks5OutboundRouting() {
     fi
 
     echoContent red "=============================================================="
-    echoContent skyBlue "请输入要分流的域名\n"
+    echoContent skyBlue "请输入要绑定到 socks 标签的域名/IP/端口\n"
     echoContent yellow "支持Xray-core geosite匹配，支持sing-box1.8+ rule_set匹配\n"
     echoContent yellow "非增量添加，会替换原有规则\n"
     echoContent yellow "当输入的规则匹配到geosite或者rule_set后会使用相应的规则\n"
     echoContent yellow "如无法匹配则，则使用domain精确匹配\n"
     echoContent yellow "录入示例:netflix,openai,example.com\n"
-    read -r -p "域名:" socks5RoutingOutboundDomain
-    if [[ -z "${socks5RoutingOutboundDomain}" ]]; then
-        echoContent red " ---> IP不可为空"
+    read -r -p "域名(可留空):" socks5RoutingOutboundDomain
+    read -r -p "IP(可留空，多条用英文逗号分隔):" socks5RoutingOutboundIP
+    read -r -p "端口(可留空，示例:80,443):" socks5RoutingOutboundPort
+
+    if [[ -z "${socks5RoutingOutboundDomain}" && -z "${socks5RoutingOutboundIP}" && -z "${socks5RoutingOutboundPort}" ]]; then
+        echoContent red " ---> 至少需要填写域名、IP 或端口中的一项"
         exit 0
     fi
-    addSingBoxRouteRule "socks5_outbound" "${socks5RoutingOutboundDomain}" "socks5_01_outbound_route"
+
+    local rules=
+    rules=$(initSingBoxRules "${socks5RoutingOutboundDomain}" "socks5_01_outbound_route")
+    local domainRules=
+    domainRules=$(echo "${rules}" | jq .domainRules)
+
+    local ruleSet=
+    ruleSet=$(echo "${rules}" | jq .ruleSet)
+    local ruleSetTag=[]
+    if [[ "$(echo "${ruleSet}" | jq '.|length')" != "0" ]]; then
+        ruleSetTag=$(echo "${ruleSet}" | jq '.|map(.tag)')
+    fi
+
+    local ipRules="[]"
+    if [[ -n "${socks5RoutingOutboundIP}" ]]; then
+        ipRules=$(echo "\"${socks5RoutingOutboundIP}\"" | jq -c '[split(",")[]|select(length>0)]')
+    fi
+
+    local portRules="[]"
+    if [[ -n "${socks5RoutingOutboundPort}" ]]; then
+        portRules=$(echo "\"${socks5RoutingOutboundPort}\"" | jq -c '[split(",")[]|select(length>0)|(tonumber? // .)]')
+    fi
+
+    local socks5RoutingFallbackOutbound=${socks5RoutingFallbackDefault:-01_direct_outbound}
+    read -r -p "未命中规则的fallback出站标签[默认${socks5RoutingFallbackOutbound}]:" socks5RoutingFallbackOutboundInput
+    if [[ -n "${socks5RoutingFallbackOutboundInput}" ]]; then
+        socks5RoutingFallbackOutbound=${socks5RoutingFallbackOutboundInput}
+    fi
+
+    if [[ -n "${singBoxConfigPath}" ]]; then
+        cat <<EOF >"${singBoxConfigPath}socks5_01_outbound_route.json"
+{
+  "route": {
+    "rules": [
+      {
+        "rule_set":${ruleSetTag},
+        "domain_regex":${domainRules},
+        "ip_cidr":${ipRules},
+        "port":${portRules},
+        "outbound": "socks5_outbound"
+      },
+      {
+        "outbound": "${socks5RoutingFallbackOutbound}"
+      }
+    ],
+    "rule_set":${ruleSet}
+  }
+}
+EOF
+
+        jq '(.route.rules[]|select(.rule_set==[])|del(.rule_set))|(.route.rules[]|select(.domain_regex==[])|del(.domain_regex))|(.route.rules[]|select(.ip_cidr==[])|del(.ip_cidr))|(.route.rules[]|select(.port==[])|del(.port))|if .route.rule_set == [] then del(.route.rule_set) else . end' "${singBoxConfigPath}socks5_01_outbound_route.json" >"${singBoxConfigPath}socks5_01_outbound_route_tmp.json" && mv "${singBoxConfigPath}socks5_01_outbound_route_tmp.json" "${singBoxConfigPath}socks5_01_outbound_route.json"
+    fi
+
     addSingBoxOutbound "01_direct_outbound"
 
     if [[ "${coreInstallType}" == "1" ]]; then
-
-        unInstallRouting "socks5_outbound" "outboundTag"
-        local domainRules=[]
-        while read -r line; do
-            if echo "${routingRule}" | grep -q "${line}"; then
-                echoContent yellow " ---> ${line}已存在，跳过"
-            else
-                local geositeStatus
-                geositeStatus=$(curl -s "https://api.github.com/repos/v2fly/domain-list-community/contents/data/${line}" | jq .message)
-
-                if [[ "${geositeStatus}" == "null" ]]; then
-                    domainRules=$(echo "${domainRules}" | jq -r ". += [\"geosite:${line}\"]")
+        if [[ -z "${socks5RoutingOutboundDomain}" ]]; then
+            echoContent yellow " ---> 检测到未录入域名，Xray-core 分流规则跳过生成"
+        else
+            unInstallRouting "socks5_outbound" "outboundTag"
+            local domainRules=[]
+            while read -r line; do
+                if echo "${routingRule}" | grep -q "${line}"; then
+                    echoContent yellow " ---> ${line}已存在，跳过"
                 else
-                    domainRules=$(echo "${domainRules}" | jq -r ". += [\"domain:${line}\"]")
+                    local geositeStatus
+                    geositeStatus=$(curl -s "https://api.github.com/repos/v2fly/domain-list-community/contents/data/${line}" | jq .message)
+
+                    if [[ "${geositeStatus}" == "null" ]]; then
+                        domainRules=$(echo "${domainRules}" | jq -r ". += [\"geosite:${line}\"]")
+                    else
+                        domainRules=$(echo "${domainRules}" | jq -r ". += [\"domain:${line}\"]")
+                    fi
                 fi
-            fi
-        done < <(echo "${socks5RoutingOutboundDomain}" | tr ',' '\n')
-        if [[ ! -f "${configPath}09_routing.json" ]]; then
-            cat <<EOF >${configPath}09_routing.json
+            done < <(echo "${socks5RoutingOutboundDomain}" | tr ',' '\n')
+            if [[ ! -f "${configPath}09_routing.json" ]]; then
+                cat <<EOF >${configPath}09_routing.json
 {
     "routing":{
         "rules": []
   }
 }
 EOF
+            fi
+            routing=$(jq -r ".routing.rules += [{\"type\": \"field\",\"domain\": ${domainRules},\"outboundTag\": \"socks5_outbound\"}]" ${configPath}09_routing.json)
+            echo "${routing}" | jq . >${configPath}09_routing.json
         fi
-        routing=$(jq -r ".routing.rules += [{\"type\": \"field\",\"domain\": ${domainRules},\"outboundTag\": \"socks5_outbound\"}]" ${configPath}09_routing.json)
-        echo "${routing}" | jq . >${configPath}09_routing.json
     fi
+
+    echoContent green "\n=============================================================="
+    echoContent green " ---> socks5分流规则添加完毕"
+    echoContent green "==============================================================\n"
 }
 
 # 设置VMess+WS+TLS【仅出站】
