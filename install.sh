@@ -3562,6 +3562,10 @@ EOF
     # socks5 outbound（Xray 用，提供给分流规则统一指向的上游 SOCKS 出站）
     if echo "${tag}" | grep -q "socks5"; then
         local socks5ProxySettings=
+        socks5RoutingOutboundIP=$(stripAnsi "${socks5RoutingOutboundIP}")
+        socks5RoutingOutboundPort=$(stripAnsi "${socks5RoutingOutboundPort}")
+        socks5RoutingOutboundUserName=$(stripAnsi "${socks5RoutingOutboundUserName}")
+        socks5RoutingOutboundPassword=$(stripAnsi "${socks5RoutingOutboundPassword}")
         if [[ -z "${socks5RoutingOutboundAuthType}" ]]; then
             socks5RoutingOutboundAuthType="password"
         fi
@@ -3571,6 +3575,9 @@ EOF
             socks5OutboundUserValue=${socks5RoutingOutboundAEADKey}
             socks5OutboundPassValue=${socks5RoutingOutboundAEADKey}
         fi
+        socks5OutboundUserValue=$(stripAnsi "${socks5OutboundUserValue}")
+        socks5OutboundPassValue=$(stripAnsi "${socks5OutboundPassValue}")
+        socks5RoutingProxyTag=$(stripAnsi "${socks5RoutingProxyTag}")
         if [[ -n "${socks5RoutingProxyTag}" ]]; then
             read -r -d '' socks5ProxySettings <<EOF || true
 ,
@@ -7785,6 +7792,7 @@ setSocks5Inbound() {
 
     if [[ "${socks5InboundAuthType}" == "aead" ]]; then
         echoContent skyBlue "AEAD 预共享密钥需与上游一致，可直接回车沿用上方UUID或选择其他录入方式"
+        echoContent yellow "下方\"请选择\"对应：1 直接输入(回车默认UUID) / 2 读取文件 / 3 读取环境变量"
         socks5InboundAEADKey=$(readCredentialBySource "预共享密钥" "${socks5RoutingUUID}")
         socks5InboundUserName="${socks5InboundAEADKey}"
         socks5InboundPassword="${socks5InboundAEADKey}"
@@ -7952,9 +7960,11 @@ setSocks5Outbound() {
     echo
     if [[ "${socks5RoutingOutboundAuthType}" == "aead" ]]; then
         echoContent skyBlue "使用 AEAD 模式时，预共享密钥需与落地机相同，可直接回车使用自动生成的随机值"
+        echoContent yellow "下方\"请选择\"对应：1 直接输入(回车默认随机值) / 2 读取文件 / 3 读取环境变量"
         local defaultSocks5OutboundAEADKey
         defaultSocks5OutboundAEADKey=$(cat /proc/sys/kernel/random/uuid)
         socks5RoutingOutboundAEADKey=$(readCredentialBySource "预共享密钥" "${defaultSocks5OutboundAEADKey}")
+        socks5RoutingOutboundAEADKey=$(stripAnsi "${socks5RoutingOutboundAEADKey}")
         socks5RoutingOutboundUserName=${socks5RoutingOutboundAEADKey}
         socks5RoutingOutboundPassword=${socks5RoutingOutboundAEADKey}
     else
@@ -7986,11 +7996,12 @@ setSocks5Outbound() {
 
     echoContent yellow "可选：通过已有出站进行链式拨号（如先走WARP/直连/其他出站标签），留空则直接连上游。"
     read -r -p "链式出站标签(多个英文逗号分隔，按顺序生效):" socks5RoutingProxyTag
+    socks5RoutingProxyTag=$(stripAnsi "${socks5RoutingProxyTag}")
     socks5RoutingProxyTagList=()
     if [[ -n "${socks5RoutingProxyTag}" ]]; then
         while IFS=',' read -r tag; do
             if [[ -n "${tag}" ]]; then
-                socks5RoutingProxyTagList+=("${tag}")
+                socks5RoutingProxyTagList+=("$(stripAnsi "${tag}")")
             fi
         done < <(echo "${socks5RoutingProxyTag}" | tr -s ',' '\n')
     fi
