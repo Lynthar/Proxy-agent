@@ -30,7 +30,7 @@ wget -P /root -N "https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/i
 安装后，运行以下命令可再次打开管理菜单:
 
 ```
-vasma
+pasly
 ```
 
 ## 文档和指南
