@@ -6288,9 +6288,43 @@ checkLog() {
     fi
     local realityLogShow=
     local logStatus=false
-    if grep -q "access" ${configPath}00_log.json; then
-        logStatus=true
+    local currentLogLevel="warning"
+    local accessLogPath=
+    local errorLogPath=
+    if [[ -f "${configPath}00_log.json" ]]; then
+        if grep -q "access" ${configPath}00_log.json; then
+            logStatus=true
+        fi
+        currentLogLevel=$(jq -r '.log.loglevel // "warning"' ${configPath}00_log.json)
+        accessLogPath=$(jq -r '.log.access // empty' ${configPath}00_log.json)
+        errorLogPath=$(jq -r '.log.error // empty' ${configPath}00_log.json)
     fi
+
+    writeLogConfig() {
+        local accessPath=$1
+        local errorPath=$2
+        local level=$3
+        {
+            echo "{"
+            echo "  \"log\": {"
+            if [[ -n "${accessPath}" ]]; then
+                echo "    \"access\": \"${accessPath}\"," 
+            fi
+            echo "    \"error\": \"${errorPath}\"," 
+            echo "    \"loglevel\": \"${level}\"," 
+            echo "    \"dnsLog\": false"
+            echo "  }"
+            echo "}"
+        } >${configPath}00_log.json
+    }
+
+    updateRealityLogShow() {
+        if [[ -n ${realityStatus} ]]; then
+            local vlessVisionRealityInbounds
+            vlessVisionRealityInbounds=$(jq -r ".inbounds[0].streamSettings.realitySettings.show=${1}" ${configPath}07_VLESS_vision_reality_inbounds.json)
+            echo "${vlessVisionRealityInbounds}" | jq . >${configPath}07_VLESS_vision_reality_inbounds.json
+        fi
+    }
 
     echoContent skyBlue "\n功能 $1/${totalProgress} : 查看日志"
     echoContent red "\n=============================================================="
@@ -6307,49 +6341,33 @@ checkLog() {
     echoContent yellow "4.查看证书定时任务日志"
     echoContent yellow "5.查看证书安装日志"
     echoContent yellow "6.清空日志"
+    echoContent yellow "7.日志级别(当前:${currentLogLevel})"
     echoContent red "=============================================================="
 
     read -r -p "请选择:" selectAccessLogType
     local configPathLog=${configPath//conf\//}
+    local defaultAccessPath=${accessLogPath:-${configPathLog}access.log}
+    local defaultErrorPath=${errorLogPath:-${configPathLog}error.log}
 
     case ${selectAccessLogType} in
     1)
         if [[ "${logStatus}" == "false" ]]; then
             realityLogShow=true
-            cat <<EOF >${configPath}00_log.json
-{
-  "log": {
-  	"access":"${configPathLog}access.log",
-    "error": "${configPathLog}error.log",
-    "loglevel": "debug"
-  }
-}
-EOF
+            writeLogConfig "${defaultAccessPath}" "${defaultErrorPath}" "${currentLogLevel}"
         elif [[ "${logStatus}" == "true" ]]; then
             realityLogShow=false
-            cat <<EOF >${configPath}00_log.json
-{
-  "log": {
-    "error": "${configPathLog}error.log",
-    "loglevel": "warning"
-  }
-}
-EOF
+            writeLogConfig "" "${defaultErrorPath}" "${currentLogLevel}"
         fi
 
-        if [[ -n ${realityStatus} ]]; then
-            local vlessVisionRealityInbounds
-            vlessVisionRealityInbounds=$(jq -r ".inbounds[0].streamSettings.realitySettings.show=${realityLogShow}" ${configPath}07_VLESS_vision_reality_inbounds.json)
-            echo "${vlessVisionRealityInbounds}" | jq . >${configPath}07_VLESS_vision_reality_inbounds.json
-        fi
+        updateRealityLogShow "${realityLogShow}"
         reloadCore
         checkLog 1
         ;;
     2)
-        tail -f ${configPathLog}access.log
+        tail -f ${defaultAccessPath}
         ;;
     3)
-        tail -f ${configPathLog}error.log
+        tail -f ${defaultErrorPath}
         ;;
     4)
         if [[ ! -f "/etc/v2ray-agent/crontab_tls.log" ]]; then
@@ -6361,8 +6379,51 @@ EOF
         tail -n 100 /etc/v2ray-agent/tls/acme.log
         ;;
     6)
-        echo >${configPathLog}access.log
-        echo >${configPathLog}error.log
+        echo >${defaultAccessPath}
+        echo >${defaultErrorPath}
+        ;;
+    7)
+        echoContent yellow "\n日志级别切换(当前:${currentLogLevel})"
+        echoContent yellow "1.warning(默认)"
+        echoContent yellow "2.info"
+        echoContent yellow "3.debug"
+        echoContent yellow "4.最小日志(写入/tmp，适合无盘/调试完毕后使用)"
+        read -r -p "请选择:" selectLogLevel
+        local targetAccessPath=""
+        case ${selectLogLevel} in
+        1)
+            currentLogLevel="warning"
+            ;;
+        2)
+            currentLogLevel="info"
+            ;;
+        3)
+            currentLogLevel="debug"
+            ;;
+        4)
+            local tmpLogDir="/tmp/v2ray-agent"
+            mkdir -p "${tmpLogDir}"
+            currentLogLevel="warning"
+            writeLogConfig "${tmpLogDir}/access.log" "${tmpLogDir}/error.log" "${currentLogLevel}"
+            updateRealityLogShow "false"
+            reloadCore
+            echoContent green "\n ---> 已切换为最小日志模式"
+            echoContent yellow " ---> access/error 将写入 ${tmpLogDir}/，系统临时目录会在重启或周期清理时自动清空，如需立即清理可执行 [rm -f ${tmpLogDir}/*.log]"
+            checkLog 1
+            ;;
+        esac
+        if [[ "${selectLogLevel}" != "4" ]]; then
+            if [[ "${logStatus}" == "true" ]]; then
+                targetAccessPath=${defaultAccessPath}
+                realityLogShow=true
+            else
+                realityLogShow=false
+            fi
+            writeLogConfig "${targetAccessPath}" "${defaultErrorPath}" "${currentLogLevel}"
+            updateRealityLogShow "${realityLogShow}"
+            reloadCore
+            checkLog 1
+        fi
         ;;
     esac
 }
