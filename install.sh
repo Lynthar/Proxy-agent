@@ -8026,7 +8026,14 @@ setSocks5Outbound() {
     read -r -p "探测间隔(默认30s):" socks5HealthCheckInterval
     echo
 
+    # 仅当指定配置文件目录时才生成 sing-box 出站 JSON
     if [[ -n "${singBoxConfigPath}" ]]; then
+        local socks5ConfigFile="${singBoxConfigPath}socks5_outbound.json"
+
+        # 提前设置 healthcheck 默认值，保证后续使用一致
+        socks5HealthCheckURL=${socks5HealthCheckURL:-https://www.gstatic.com/generate_204}
+        socks5HealthCheckInterval=${socks5HealthCheckInterval:-30s}
+
         # detour + healthcheck 配置变量初始化
         local socks5DetourConfig=
         local socks5HealthcheckConfig=
@@ -8040,6 +8047,7 @@ EOF
         fi
 
         # TLS / transport 相关配置（来自 codex/add-transport-options-to-socks-wizard 分支）
+        # 使用显式的 TLS/transport 片段，避免 JSON 拼接时遗漏逗号或缩进
         local socks5SingBoxTLSConfig=
         local socks5SingBoxTransportConfig=
         if [[ "${socks5TransportType}" != "1" ]]; then
@@ -8100,18 +8108,19 @@ EOF
 ,
           "healthcheck": {
               "enable": true,
-              "url": "${socks5HealthCheckURL:-https://www.gstatic.com/generate_204}",
-              "interval": "${socks5HealthCheckInterval:-30s}"${socks5HealthCheckDestinationConfig}
+              "url": "${socks5HealthCheckURL}",
+              "interval": "${socks5HealthCheckInterval}"${socks5HealthCheckDestinationConfig}
           }
 EOF
         fi
 
-        cat <<EOF >"${singBoxConfigPath}socks5_outbound.json"
+        # 按国际通用风格输出 JSON，便于读写和后续审计
+        cat <<EOF >"${socks5ConfigFile}"
 {
-    "outbounds":[
+    "outbounds": [
         {
           "type": "socks",
-          "tag":"socks5_outbound",
+          "tag": "socks5_outbound",
           "server": "${socks5RoutingOutboundIP}",
           "server_port": ${socks5RoutingOutboundPort},
           "version": "5",
