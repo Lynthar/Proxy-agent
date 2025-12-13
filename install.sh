@@ -345,6 +345,16 @@ stripAnsi() {
     echo -e "$1" | sed $'s/\x1b\[[0-9;]*[a-zA-Z]//g'
 }
 
+validateJsonFile() {
+
+    local jsonPath=$1
+    if ! jq -e . "${jsonPath}" >/dev/null 2>&1; then
+        echoContent red " ---> ${jsonPath} 解析失败，已移除，请检查上方录入并重试"
+        rm -f "${jsonPath}"
+        exit 0
+    fi
+}
+
 readCredentialBySource() {
 
     local tips=$1
@@ -3561,7 +3571,6 @@ EOF
     fi
     # socks5 outbound（Xray 用，提供给分流规则统一指向的上游 SOCKS 出站）
     if echo "${tag}" | grep -q "socks5"; then
-        local socks5ProxySettings=
         socks5RoutingOutboundIP=$(stripAnsi "${socks5RoutingOutboundIP}")
         socks5RoutingOutboundPort=$(stripAnsi "${socks5RoutingOutboundPort}")
         socks5RoutingOutboundUserName=$(stripAnsi "${socks5RoutingOutboundUserName}")
@@ -3578,80 +3587,77 @@ EOF
         socks5OutboundUserValue=$(stripAnsi "${socks5OutboundUserValue}")
         socks5OutboundPassValue=$(stripAnsi "${socks5OutboundPassValue}")
         socks5RoutingProxyTag=$(stripAnsi "${socks5RoutingProxyTag}")
+
+        local socks5OutboundJson
+        socks5OutboundJson=$(jq -n \
+            --arg tag "${tag}" \
+            --arg auth "${socks5RoutingOutboundAuthType}" \
+            --arg address "${socks5RoutingOutboundIP}" \
+            --arg port "${socks5RoutingOutboundPort}" \
+            --arg user "${socks5OutboundUserValue}" \
+            --arg pass "${socks5OutboundPassValue}" '
+            {
+              outbounds: [
+                {
+                  protocol: "socks",
+                  tag: $tag,
+                  settings: {
+                    auth: $auth,
+                    servers: [
+                      {
+                        address: $address,
+                        port: ($port|tonumber),
+                        users: [ {user: $user, pass: $pass} ]
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+        ')
+
         if [[ -n "${socks5RoutingProxyTag}" ]]; then
-            read -r -d '' socks5ProxySettings <<EOF || true
-,
-      "proxySettings": {
-        "tag": "${socks5RoutingProxyTag}",
-        "transportLayer": true
-      }
-EOF
+            socks5OutboundJson=$(echo "${socks5OutboundJson}" | jq --arg proxyTag "${socks5RoutingProxyTag}" '.outbounds[0].proxySettings = {tag:$proxyTag,transportLayer:true}')
         fi
-        local socks5XrayStreamSettingsConfig=
+
         if [[ -n "${socks5TransportType}" && "${socks5TransportType}" != "1" ]]; then
             local socks5XrayNetwork="tcp"
-            local socks5XrayTransportConfig=
-
             if [[ "${socks5TransportType}" == "3" ]]; then
                 socks5XrayNetwork="ws"
-                read -r -d '' socks5XrayTransportConfig <<EOF || true
-,
-        "wsSettings": {
-          "path": "${socks5TransportPath}",
-          "headers": {
-            "Host": "${socks5TransportHost}"
-          }
-        }
-EOF
             elif [[ "${socks5TransportType}" == "4" ]]; then
                 socks5XrayNetwork="http"
-                read -r -d '' socks5XrayTransportConfig <<EOF || true
-,
-        "httpSettings": {
-          "path": "${socks5TransportPath}",
-          "host": ${socks5TransportHostList}
-        }
-EOF
             fi
 
-            read -r -d '' socks5XrayStreamSettingsConfig <<EOF || true
-,
-      "streamSettings": {
-        "network": "${socks5XrayNetwork}",
-        "security": "tls",
-        "tlsSettings": {
-          "serverName": "${socks5TransportServerName}",
-          "alpn": ${socks5TransportAlpnJson},
-          "allowInsecure": ${socks5TransportInsecure}
-        }${socks5XrayTransportConfig}
-      }
-EOF
+            socks5OutboundJson=$(echo "${socks5OutboundJson}" | jq \
+                --arg network "${socks5XrayNetwork}" \
+                --arg serverName "${socks5TransportServerName}" \
+                --argjson alpn "${socks5TransportAlpnJson:-[]}" \
+                --argjson insecure "${socks5TransportInsecure:-false}" '
+                .outbounds[0].streamSettings = {
+                  network: $network,
+                  security: "tls",
+                  tlsSettings: {
+                    serverName: $serverName,
+                    alpn: $alpn,
+                    allowInsecure: $insecure
+                  }
+                }
+            ')
+
+            if [[ "${socks5TransportType}" == "3" ]]; then
+                socks5OutboundJson=$(echo "${socks5OutboundJson}" | jq \
+                    --arg path "${socks5TransportPath}" \
+                    --arg host "${socks5TransportHost}" '.outbounds[0].streamSettings.wsSettings = {path:$path,headers:{Host:$host}}')
+            elif [[ "${socks5TransportType}" == "4" ]]; then
+                socks5OutboundJson=$(echo "${socks5OutboundJson}" | jq \
+                    --arg path "${socks5TransportPath}" \
+                    --argjson hostList "${socks5TransportHostList:-[]}" '.outbounds[0].streamSettings.httpSettings = {path:$path,host:$hostList}')
+            fi
         fi
-        cat <<EOF >"/etc/v2ray-agent/xray/conf/${tag}.json"
-{
-  "outbounds": [
-    {
-      "protocol": "socks",
-      "tag": "${tag}",
-      "settings": {
-        "auth": "${socks5RoutingOutboundAuthType}",
-        "servers": [
-          {
-            "address": "${socks5RoutingOutboundIP}",
-            "port": ${socks5RoutingOutboundPort},
-            "users": [
-              {
-                "user": "${socks5OutboundUserValue}",
-                "pass": "${socks5OutboundPassValue}"
-              }
-            ]
-          }
-        ]
-      }${socks5ProxySettings}${socks5XrayStreamSettingsConfig}
-    }
-  ]
-}
-EOF
+
+        local socks5XrayOutboundPath="/etc/v2ray-agent/xray/conf/${tag}.json"
+        echo "${socks5OutboundJson}" | jq . >"${socks5XrayOutboundPath}"
+        validateJsonFile "${socks5XrayOutboundPath}"
     fi
     if echo "${tag}" | grep -q "wireguard_out_IPv4"; then
         cat <<EOF >"/etc/v2ray-agent/xray/conf/${tag}.json"
@@ -6578,7 +6584,7 @@ checkLog() {
 # 脚本快捷方式
 aliasInstall() {
 
-    if [[ -f "$HOME/install.sh" ]] && [[ -d "/etc/v2ray-agent" ]] && grep <"$HOME/install.sh" -q "作者:Lynthar"; then
+    if [[ -f "$HOME/install.sh" ]] && [[ -d "/etc/v2ray-agent" ]] && grep -Eq "作者[:：]Lynthar|Proxy-agent" "$HOME/install.sh"; then
         mv "$HOME/install.sh" /etc/v2ray-agent/install.sh
         local paslyType=
         if [[ -d "/usr/bin/" ]]; then
@@ -7948,6 +7954,10 @@ setSocks5Outbound() {
         exit 0
     fi
     socks5RoutingOutboundPort=$(stripAnsi "${socks5RoutingOutboundPort}")
+    if [[ ! "${socks5RoutingOutboundPort}" =~ ^[0-9]+$ ]]; then
+        echoContent red " ---> 端口格式错误，仅支持数字"
+        exit 0
+    fi
     echo
     echoContent yellow "请选择上游认证方式（必须与落地机配置一致）"
     echoContent yellow "1.用户名/密码[回车默认，通用]"
@@ -8183,6 +8193,7 @@ EOF
     ]
 }
 EOF
+        validateJsonFile "${socks5ConfigFile}"
     fi
     if [[ "${coreInstallType}" == "1" ]]; then
         addXrayOutbound socks5_outbound
