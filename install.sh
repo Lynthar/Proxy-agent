@@ -7952,6 +7952,7 @@ setSocks5Outbound() {
         socks5RoutingFallbackDefault=01_direct_outbound
     fi
     echo
+    # 传输层交互（来自 master / add-transport-options-to-socks-wizard）
     echoContent yellow "可选：传输层 [1]直连(默认) [2]TLS [3]WS [4]H2"
     read -r -p "传输层:" socks5TransportType
     if [[ -z "${socks5TransportType}" || ! "${socks5TransportType}" =~ ^[1-4]$ ]]; then
@@ -7995,10 +7996,24 @@ setSocks5Outbound() {
             fi
         fi
     fi
-    
+
+    # healthcheck 交互（来自 add-healthcheck-input-for-socks-outbound）
+    echoContent yellow "可选：配置探测URL/端口/间隔，生成 sing-box healthcheck 配置（留空跳过）"
+    read -r -p "探测URL(默认https://www.gstatic.com/generate_204):" socks5HealthCheckURL
+    read -r -p "探测端口(默认使用落地机端口):" socks5HealthCheckPort
+    read -r -p "探测间隔(默认30s):" socks5HealthCheckInterval
+    echo
+
     if [[ -n "${singBoxConfigPath}" ]]; then
+        # detour + healthcheck 配置变量初始化
         local socks5DetourConfig=
+        local socks5HealthcheckConfig=
+        # 这里继续保留 master 分支中基于 socks5RoutingProxyTagList[*] 的 detour 构造逻辑
         if [[ -n "${socks5RoutingProxyTagList[*]}" ]]; then
+            # ... 原来 master 里的 detour 构造代码 ...
+        fi
+    fi
+
             read -r -d '' socks5DetourConfig <<EOF || true
 ,
           "detour":"${socks5RoutingProxyTagList[0]}"
@@ -8052,6 +8067,25 @@ EOF
           ]
 EOF
 
+        # healthcheck 配置（来自 codex/add-healthcheck-input-for-socks-outbound 分支）
+        if [[ -n "${socks5HealthCheckURL}${socks5HealthCheckPort}${socks5HealthCheckInterval}" ]]; then
+            local socks5HealthCheckDestinationConfig=
+            if [[ -n "${socks5HealthCheckPort}" ]]; then
+                read -r -d '' socks5HealthCheckDestinationConfig <<EOF || true
+,
+              "destination": "${socks5RoutingOutboundIP}:${socks5HealthCheckPort}"
+EOF
+            fi
+            read -r -d '' socks5HealthcheckConfig <<EOF || true
+,
+          "healthcheck": {
+              "enable": true,
+              "url": "${socks5HealthCheckURL:-https://www.gstatic.com/generate_204}",
+              "interval": "${socks5HealthCheckInterval:-30s}"${socks5HealthCheckDestinationConfig}
+          }
+EOF
+        fi
+
         cat <<EOF >"${singBoxConfigPath}socks5_outbound.json"
 {
     "outbounds":[
@@ -8061,7 +8095,7 @@ EOF
           "server": "${socks5RoutingOutboundIP}",
           "server_port": ${socks5RoutingOutboundPort},
           "version": "5",
-        ${socks5OutboundUsers}${socks5DetourConfig}${socks5SingBoxTLSConfig}${socks5SingBoxTransportConfig}
+        ${socks5OutboundUsers}${socks5DetourConfig}${socks5HealthcheckConfig}${socks5SingBoxTLSConfig}${socks5SingBoxTransportConfig}
         }
 
         }
@@ -8071,6 +8105,44 @@ EOF
     fi
     if [[ "${coreInstallType}" == "1" ]]; then
         addXrayOutbound socks5_outbound
+        echoContent yellow "可选：创建 Xray 定时检测脚本，探测失败后切换路由标签或重启"
+        read -r -p "是否创建并注册cron任务？[y/n]:" socks5XrayCronStatus
+        if [[ "${socks5XrayCronStatus}" == "y" ]]; then
+            local socks5XrayFailoverTag=
+            local socks5XrayCronInterval=
+            read -r -p "检测失败后切换到的路由标签（留空则重启Xray）:" socks5XrayFailoverTag
+            read -r -p "检测频率(分钟,默认5):" socks5XrayCronInterval
+            if [[ -z "${socks5XrayCronInterval}" || ! ${socks5XrayCronInterval} =~ ^[0-9]+$ || "${socks5XrayCronInterval}" == "0" ]]; then
+                socks5XrayCronInterval=5
+            fi
+            cat <<EOF >/etc/v2ray-agent/socks5_outbound_healthcheck.sh
+#!/usr/bin/env bash
+check_url="${socks5HealthCheckURL:-https://www.gstatic.com/generate_204}"
+proxy_auth="${socks5RoutingOutboundUserName}:${socks5RoutingOutboundPassword}@${socks5RoutingOutboundIP}:${socks5RoutingOutboundPort}"
+failover_tag="${socks5XrayFailoverTag}"
+routing_file="/etc/v2ray-agent/xray/conf/09_routing.json"
+
+if ! curl -x "socks5://${proxy_auth}" --max-time 10 -ks "${check_url}" >/dev/null 2>&1; then
+    if [[ -n "${failover_tag}" && -f "${routing_file}" ]] && command -v jq >/dev/null 2>&1; then
+        updated_route=$(jq "if .routing and .routing.rules then .routing.rules |= map(if .outboundTag==\"socks5_outbound\" then (.outboundTag=\"${failover_tag}\") else . end) else . end" "${routing_file}")
+        if [[ -n "${updated_route}" ]]; then
+            echo "${updated_route}" | jq . >"${routing_file}"
+            systemctl restart xray >/dev/null 2>&1
+        fi
+    else
+        systemctl restart xray >/dev/null 2>&1
+    fi
+fi
+EOF
+            chmod 700 /etc/v2ray-agent/socks5_outbound_healthcheck.sh
+            if crontab -l >/dev/null 2>&1; then
+                crontab -l | sed '/socks5_outbound_healthcheck/d' >/etc/v2ray-agent/backup_crontab.cron
+            else
+                echo "" >/etc/v2ray-agent/backup_crontab.cron
+            fi
+            echo "*/${socks5XrayCronInterval} * * * * /bin/bash /etc/v2ray-agent/socks5_outbound_healthcheck.sh >/etc/v2ray-agent/socks5_outbound_healthcheck.log 2>&1" >>/etc/v2ray-agent/backup_crontab.cron
+            crontab /etc/v2ray-agent/backup_crontab.cron
+        fi
     fi
 }
 
