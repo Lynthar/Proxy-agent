@@ -37,7 +37,7 @@ checkCentosSELinux() {
     if [[ -f "/etc/selinux/config" ]] && ! grep -q "SELINUX=disabled" <"/etc/selinux/config"; then
         echoContent yellow "# Notes"
         echoContent yellow "It is detected that SELinux is turned on. Please turn it off manually. The tutorial is as follows"
-        echoContent yellow "https://www.v2ray-agent.com/archives/1679931532764#heading-8 "
+        echoContent yellow "Please disable SELinux manually (set SELINUX=disabled in /etc/selinux/config and reboot)."
         exit 0
     fi
 }
@@ -1127,12 +1127,12 @@ initTLSNginxConfig() {
             echoContent yellow "\n ---> Domain name: ${domain}"
         else
             echo
-            echoContent yellow "Please enter the domain name to be configured: www.v2ray-agent.com --->"
+            echoContent yellow "Please enter the domain name to be configured: example.com --->"
             read -r -p "domain name:" domain
         fi
     else
         echo
-        echoContent yellow "Please enter the domain name to be configured: www.v2ray-agent.com --->"
+        echoContent yellow "Please enter the domain name to be configured: example.com --->"
         read -r -p "domain name:" domain
     fi
 
@@ -3833,7 +3833,7 @@ customCDNIP() {
     echoContent red "\n================================================ ================="
     echoContent yellow "# Notes"
     echoContent yellow "\nTutorial address:"
-    echoContent skyBlue "https://www.v2ray-agent.com/archives/cloudflarezi-xuan-ip"
+    echoContent skyBlue "If needed, choose Cloudflare IP ranges that work best for your network."
     echoContent red "\nIf you don't understand Cloudflare optimization, please do not use it"
     echoContent yellow "\n1.CNAME www.digitalocean.com"
     echoContent yellow "2.CNAME who.int"
@@ -5198,9 +5198,9 @@ updateV2RayAgent() {
     echoContent skyBlue "\nProgress$1/${totalProgress}: Update v2ray-agent script"
     rm -rf /etc/v2ray-agent/install.sh
     # if wget --help | grep -q show-progress; then
-    wget -c -q "${wgetShowProgressStatus}" -P /etc/v2ray-agent/ -N --no-check-certificate "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/install.sh"
+    wget -c -q "${wgetShowProgressStatus}" -P /etc/v2ray-agent/ -N "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/install.sh"
     #else
-    # wget -c -q -P /etc/v2ray-agent/ -N --no-check-certificate "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/install.sh"
+    # wget -c -q -P /etc/v2ray-agent/ -N "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/install.sh"
     #fi
 
     sudo chmod 700 /etc/v2ray-agent/install.sh
@@ -5211,7 +5211,7 @@ updateV2RayAgent() {
     echoContent yellow " ---> Please manually execute [vasma] to open the script"
     echoContent green " ---> Current version: ${version}\n"
     echoContent yellow "If the update fails, please manually execute the following command\n"
-    echoContent skyBlue "wget -P /root -N --no-check-certificate https://raw.githubusercontent.com/mack-a/v2ray-agent/master/install.sh && chmod 700 /root/install.sh && /root/install.sh"
+    echoContent skyBlue "wget -P /root -N https://raw.githubusercontent.com/mack-a/v2ray-agent/master/install.sh && chmod 700 /root/install.sh && /root/install.sh"
     echo
     exit 0
 }
@@ -5241,7 +5241,7 @@ bbrInstall() {
     echoContent red "================================================== ==============="
     read -r -p "Please select:" installBBRStatus
     if [[ "${installBBRStatus}" == "1" ]]; then
-        wget -N --no-check-certificate "https://raw.githubusercontent.com/ylx2016/Linux-NetSpeed/master/tcp.sh" && chmod +x tcp.sh && ./tcp.sh
+        wget -N "https://raw.githubusercontent.com/ylx2016/Linux-NetSpeed/master/tcp.sh" && chmod +x tcp.sh && ./tcp.sh
     else
         menu
     fi
@@ -5397,7 +5397,7 @@ ipv6Routing() {
         echoContent red "================================================== ==============="
         echoContent yellow "# Notes\n"
         echoContent yellow "# Notes"
-        echoContent yellow "# Tutorial: https://www.v2ray-agent.com/archives/ba-he-yi-jiao-ben-yu-ming-fen-liu-jiao-cheng \n"
+        echoContent yellow "# Tip: see documents directory for domain split and routing examples.\n"
 
         read -r -p "Please enter the domain name according to the above example:" domainList
         addInstallRouting IPv6-out outboundTag "${domainList}"
@@ -5762,7 +5762,7 @@ warpRouting() {
         exit 0
     elif [[ "${warpStatus}" == "2" ]]; then
         echoContent yellow "# Notes"
-        echoContent yellow "# Tutorial: https://www.v2ray-agent.com/archives/ba-he-yi-jiao-ben-yu-ming-fen-liu-jiao-cheng \n"
+        echoContent yellow "# Tip: see documents directory for domain split and routing examples.\n"
 
         read -r -p "Please enter the domain name according to the above example:" domainList
 
@@ -5894,7 +5894,7 @@ warpRoutingReg() {
         exit 0
     elif [[ "${warpStatus}" == "2" ]]; then
         echoContent yellow "# Notes"
-        echoContent yellow "# Tutorial: https://www.v2ray-agent.com/archives/ba-he-yi-jiao-ben-yu-ming-fen-liu-jiao-cheng \n"
+        echoContent yellow "# Tip: see documents directory for domain split and routing examples.\n"
 
         read -r -p "Please enter the domain name according to the above example:" domainList
 
@@ -6073,7 +6073,7 @@ dokodemoDoorRouting() {
     echoContent skyBlue "\nFunction 1/${totalProgress}: any door diversion"
     echoContent red "\n================================================ ================="
     echoContent yellow "# Notes"
-    echoContent yellow "# Tutorial: https://www.v2ray-agent.com/archives/ba-he-yi-jiao-ben-yu-ming-fen-liu-jiao-cheng \n"
+    echoContent yellow "# Tip: see documents directory for domain split and routing examples.\n"
 
     echoContent yellow "1.Add outbound"
     echoContent yellow "2.Add inbound"
@@ -6098,7 +6098,7 @@ vmessWSRouting() {
     echoContent skyBlue "\nFunction 1/${totalProgress}: VMess+WS+TLS offload"
     echoContent red "\n================================================ ================="
     echoContent yellow "# Notes"
-    echoContent yellow "# Tutorial: https://www.v2ray-agent.com/archives/ba-he-yi-jiao-ben-yu-ming-fen-liu-jiao-cheng \n"
+    echoContent yellow "# Tip: see documents directory for domain split and routing examples.\n"
 
     echoContent yellow "1.Add outbound"
     echoContent yellow "2.Uninstall"
@@ -6374,7 +6374,7 @@ dnsRouting() {
     echoContent skyBlue "\nFunction 1/${totalProgress}: DNS offloading"
     echoContent red "\n================================================ ================="
     echoContent yellow "# Notes"
-    echoContent yellow "# Tutorial: https://www.v2ray-agent.com/archives/ba-he-yi-jiao-ben-yu-ming-fen-liu-jiao-cheng \n"
+    echoContent yellow "# Tip: see documents directory for domain split and routing examples.\n"
 
     echoContent yellow "1.Add"
     echoContent yellow "2.Uninstall"
@@ -6401,7 +6401,7 @@ sniRouting() {
     echoContent skyBlue "\nFunction 1/${totalProgress}: SNI reverse proxy offload"
     echoContent red "\n================================================ ================="
     echoContent yellow "# Notes"
-    echoContent yellow "# Tutorial: https://www.v2ray-agent.com/archives/ba-he-yi-jiao-ben-yu-ming-fen-liu-jiao-cheng \n"
+    echoContent yellow "# Tip: see documents directory for domain split and routing examples.\n"
 
     echoContent yellow "1.Add"
     echoContent yellow "2.Uninstall"
@@ -6945,8 +6945,8 @@ addSubscribeMenu() {
 # Add other machines to clashMeta subscription
 addOtherSubscribe() {
     echoContent yellow "#Notes:"
-    echoContent yellow "Please read the following article carefully: https://www.v2ray-agent.com/archives/1681804748677"
-    echoContent skyBlue "Input example: www.v2ray-agent.com:443:vps1\n"
+    echoContent yellow "Please provide the target site information that matches your Reality configuration."
+    echoContent skyBlue "Input example: www.example.com:443:vps1\n"
     read -r -p "Please enter the domain name, port and machine alias:" remoteSubscribeUrl
     if [[ -z "${remoteSubscribeUrl}" ]]; then
         echoContent red " ---> cannot be empty"
@@ -7625,7 +7625,7 @@ initRealityDest() {
         realityDestDomainList="gateway.icloud.com,itunes.apple.com,swdist.apple.com,swcdn.apple.com,updates.cdn-apple.com,mensura.cdn-apple.com,osxapps.itunes.apple.com,aod.itunes.apple.com,download-installer.cdn.mozilla.net,addons.mozilla.org,s0.awsstatic.com,d1.awsstatic.com,images-na.ssl-images-amazon.com,m.media-amazon.com,player.live-video.net,one-piece.com,lol.secure.dyn.riotcdn.net,www.lovelive-anime.jp,www.nokia.com,auth.riotgames.com,xsso.riotgames.com,csgo.com"
 
         echoContent skyBlue "\n====== Generate a domain name with fallback configuration , for example : [addons.mozilla.org:443] ======\n"
-        echoContent green "Fallback domain name list: https://www.v2ray-agent.com/archives/1680104902581#heading-8\n"
+        echoContent green "Use a TLS-enabled, reachable fallback domain for Reality.\n"
         read -r -p "Please enter [Enter] to use random:" realityDestDomain
         if [[ -z "${realityDestDomain}" ]]; then
             local randomNum=
@@ -7653,7 +7653,7 @@ initRealityClientServersName() {
     else
         echoContent skyBlue "\n================ Configure serverNames available to the client ================\n"
         echoContent yellow "#Notes"
-        echoContent green "List of serverNames available to the client: https://www.v2ray-agent.com/archives/1680104902581#heading-8\n"
+        echoContent green "Client serverName should match a real, reachable domain with TLS support.\n"
         echoContent yellow "Input example: addons.mozilla.org\n"
         read -r -p "Please enter [Enter] to use random:" realityServerNames
         if [[ -z "${realityServerNames}" ]]; then
@@ -7901,12 +7901,6 @@ menu() {
     echoContent green "Description: 8-in-1 coexistence script\c"
     showInstallStatus
     checkWgetShowProgress
-    echoContent red "\n============================ Promotion area================ ============"
-    echoContent red " "
-    echoContent green "For promotion, please contact TG: @mackaff\n"
-    echoContent green "VPS purchasing guide: https://www.v2ray-agent.com/archives/1679975663984"
-    echoContent green "Low-price VPS AS4837 with an annual payment of 10 US dollars: https://www.v2ray-agent.com/archives/racknerdtao-can-zheng-li-nian-fu-10mei-yuan"
-    echoContent red "================================================== ==============="
     if [[ -n "${coreInstallType}" ]]; then
         echoContent yellow "1.Reinstall"
     else
