@@ -359,11 +359,11 @@ readCredentialBySource() {
 
     local tips=$1
     local defaultValue=$2
-    echoContent skyBlue "\n${tips}用于配置双方握手的凭据，可手动/文件/环境变量方式录入"
-    echoContent yellow "请选择${tips}录入方式（自动化部署可用文件或环境变量）"
-    echoContent yellow "1.直接输入${defaultValue:+[回车默认] }"
-    echoContent yellow "2.从文件读取"
-    echoContent yellow "3.从环境变量读取"
+    echoContent skyBlue "\n${tips}用于配置双方握手的凭据，可手动/文件/环境变量方式录入" >&2
+    echoContent yellow "请选择${tips}录入方式（自动化部署可用文件或环境变量）" >&2
+    echoContent yellow "1.直接输入${defaultValue:+[回车默认] }" >&2
+    echoContent yellow "2.从文件读取" >&2
+    echoContent yellow "3.从环境变量读取" >&2
     read -r -p "请选择:" credentialSource
     local credentialValue=
     case ${credentialSource} in
@@ -887,8 +887,8 @@ readSingBoxConfig() {
         fi
         if [[ -f "${singBoxConfigPath}06_hysteria2_inbounds.json" ]]; then
             hysteriaPort=$(jq -r '.inbounds[0].listen_port' "${singBoxConfigPath}06_hysteria2_inbounds.json")
-            hysteria2ClientUploadSpeed=$(jq -r '.inbounds[0].down_mbps' "${singBoxConfigPath}06_hysteria2_inbounds.json")
-            hysteria2ClientDownloadSpeed=$(jq -r '.inbounds[0].up_mbps' "${singBoxConfigPath}06_hysteria2_inbounds.json")
+            hysteria2ClientUploadSpeed=$(jq -r '.inbounds[0].up_mbps' "${singBoxConfigPath}06_hysteria2_inbounds.json")
+            hysteria2ClientDownloadSpeed=$(jq -r '.inbounds[0].down_mbps' "${singBoxConfigPath}06_hysteria2_inbounds.json")
         fi
     fi
 }
@@ -3824,8 +3824,8 @@ initSingBoxHysteria2Config() {
             "listen": "::",
             "listen_port": ${hysteriaPort},
             "users": $(initXrayClients 6),
-            "up_mbps":${hysteria2ClientDownloadSpeed},
-            "down_mbps":${hysteria2ClientUploadSpeed},
+            "up_mbps":${hysteria2ClientUploadSpeed},
+            "down_mbps":${hysteria2ClientDownloadSpeed},
             "tls": {
                 "enabled": true,
                 "server_name":"${currentHost}",
@@ -4719,8 +4719,8 @@ EOF
             "listen": "::",
             "listen_port": ${result[-1]},
             "users": $(initSingBoxClients 6),
-            "up_mbps":${hysteria2ClientDownloadSpeed},
-            "down_mbps":${hysteria2ClientUploadSpeed},
+            "up_mbps":${hysteria2ClientUploadSpeed},
+            "down_mbps":${hysteria2ClientDownloadSpeed},
             "tls": {
                 "enabled": true,
                 "server_name":"${sslDomain}",
@@ -7844,7 +7844,6 @@ setSocks5Inbound() {
               listen: $listen,
               listen_port: $listenPort,
               tag: $tag,
-              auth: $auth,
               users: [
                 {
                   username: $user,
@@ -7855,6 +7854,7 @@ setSocks5Inbound() {
             }
           ]
         }
+        | (if $auth == "aead" then .inbounds[0].users[0].aead = true else . end)
     ' >"${socks5InboundJsonFile}"; then
         rm -f "${socks5InboundJsonFile}"
         echoContent red " ---> 生成 Socks5 入站配置失败，请检查输入"
@@ -8165,12 +8165,13 @@ setSocks5Outbound() {
       tag: "socks5_outbound",
       server: $server,
       server_port: $port,
-      version: "5",
-      auth: $auth
+      version: "5"
     }
   ]
 }
-            | (.outbounds[0].users = [{username:$user,password:$pass}])
+            | .outbounds[0].username = $user
+            | .outbounds[0].password = $pass
+            | (if $auth == "aead" then .outbounds[0].aead = true else . end)
             | (if ($detour|length)>0 then (.outbounds[0].detour=$detour) else . end)
             | (if ($healthUrl|length)>0 or ($healthInterval|length)>0 or ($healthPort|length)>0 then
                 .outbounds[0].healthcheck = ({enable:true,url:$healthUrl,interval:$healthInterval}
