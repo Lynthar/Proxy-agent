@@ -8269,7 +8269,6 @@ socks5Routing() {
     echoContent yellow "# 流量明文访问"
 
     echoContent yellow "# 仅限正常网络环境下设备间流量转发，禁止用于代理访问。"
-    echoContent yellow "# 推荐仅监听本机、开启上游证书校验并保持最小日志，降低暴露与劫持风险。"
     echoContent yellow "# 出站=将本机流量交给上游/落地机；入站=让本机提供Socks供其他节点拨号。"
     echoContent yellow "# 使用提示：更多示例见 documents 目录\n"
 
