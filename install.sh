@@ -7837,7 +7837,14 @@ setSocks5Inbound() {
         --arg pass "${socks5InboundPassword}" \
         --arg domainStrategy "${domainStrategy}" '
         {
-          inbounds: [
+          "inbounds": [
+            {
+              "type": "socks",
+              "listen":"${socks5InboundListen}",
+              "listen_port":${socks5InboundPort},
+              "tag":"socks5_inbound",
+              "auth":"${socks5InboundAuthType}",
+              "users":[
             {
               type: "socks",
               listen: $listen,
@@ -7857,6 +7864,8 @@ setSocks5Inbound() {
     ')
 
     echo "${socks5InboundJson}" | jq . >/etc/v2ray-agent/sing-box/conf/config/20_socks5_inbounds.json
+
+    validateJsonFile "/etc/v2ray-agent/sing-box/conf/config/20_socks5_inbounds.json"
 
     validateJsonFile "/etc/v2ray-agent/sing-box/conf/config/20_socks5_inbounds.json"
 
