@@ -341,6 +341,10 @@ initVar() {
 
 }
 
+stripAnsi() {
+    echo -e "$1" | sed $'s/\x1b\[[0-9;]*[a-zA-Z]//g'
+}
+
 readCredentialBySource() {
 
     local tips=$1
@@ -372,6 +376,9 @@ readCredentialBySource() {
         fi
         ;;
     esac
+
+    # 去除可能的ANSI控制符，防止写入配置文件后产生\x1b错误
+    credentialValue=$(stripAnsi "${credentialValue}")
 
     if [[ -z "${credentialValue}" ]]; then
         echoContent red " ---> ${tips}不可为空"
@@ -7740,6 +7747,7 @@ setSocks5Inbound() {
             echoContent red " ---> 网段不可为空"
             exit 0
         fi
+        socks5InboundAllowRange=$(stripAnsi "${socks5InboundAllowRange}")
         socks5InboundListen="0.0.0.0"
     elif [[ "${socks5InboundListenStatus}" == "3" ]]; then
         socks5InboundListen="0.0.0.0"
@@ -7772,9 +7780,11 @@ setSocks5Inbound() {
             socks5RoutingUUID=$(/etc/v2ray-agent/sing-box/sing-box generate uuid)
         fi
     fi
+    socks5RoutingUUID=$(stripAnsi "${socks5RoutingUUID}")
     echo
 
     if [[ "${socks5InboundAuthType}" == "aead" ]]; then
+        echoContent skyBlue "AEAD 预共享密钥需与上游一致，可直接回车沿用上方UUID或选择其他录入方式"
         socks5InboundAEADKey=$(readCredentialBySource "预共享密钥" "${socks5RoutingUUID}")
         socks5InboundUserName="${socks5InboundAEADKey}"
         socks5InboundPassword="${socks5InboundAEADKey}"
@@ -7892,6 +7902,7 @@ setSocks5InboundRouting() {
             echoContent red " ---> 域名不可为空"
             exit 0
         fi
+        socks5InboundRoutingDomain=$(stripAnsi "${socks5InboundRoutingDomain}")
         addSingBoxRouteRule "01_direct_outbound" "${socks5InboundRoutingDomain}" "socks5_02_inbound_route"
         local route=
         route=$(jq ".route.rules[0].inbound = [\"socks5_inbound\"]" "${singBoxConfigPath}socks5_02_inbound_route.json")
@@ -7916,6 +7927,7 @@ setSocks5Outbound() {
         echoContent red " ---> IP不可为空"
         exit 0
     fi
+    socks5RoutingOutboundIP=$(stripAnsi "${socks5RoutingOutboundIP}")
     echo
     echoContent yellow "上游端口：填Socks监听端口(示例:1080/443)，与上游实际端口一致。"
     read -r -p "请输入落地机端口:" socks5RoutingOutboundPort
@@ -7923,6 +7935,7 @@ setSocks5Outbound() {
         echoContent red " ---> 端口不可为空"
         exit 0
     fi
+    socks5RoutingOutboundPort=$(stripAnsi "${socks5RoutingOutboundPort}")
     echo
     echoContent yellow "请选择上游认证方式（必须与落地机配置一致）"
     echoContent yellow "1.用户名/密码[回车默认，通用]"
@@ -7938,6 +7951,7 @@ setSocks5Outbound() {
     fi
     echo
     if [[ "${socks5RoutingOutboundAuthType}" == "aead" ]]; then
+        echoContent skyBlue "使用 AEAD 模式时，预共享密钥需与落地机相同，可直接回车使用自动生成的随机值"
         local defaultSocks5OutboundAEADKey
         defaultSocks5OutboundAEADKey=$(cat /proc/sys/kernel/random/uuid)
         socks5RoutingOutboundAEADKey=$(readCredentialBySource "预共享密钥" "${defaultSocks5OutboundAEADKey}")
@@ -8007,6 +8021,8 @@ setSocks5Outbound() {
         echoContent skyBlue "下方 SNI/ALPN 需与落地机 TLS/反代配置一致，否则握手会失败"
         read -r -p "请输入 serverName(SNI，可为空):" socks5TransportServerName
         read -r -p "请输入 alpn，多个用英文逗号分隔(留空则不设置):" socks5TransportAlpn
+        socks5TransportServerName=$(stripAnsi "${socks5TransportServerName}")
+        socks5TransportAlpn=$(stripAnsi "${socks5TransportAlpn}")
         if [[ -n "${socks5TransportAlpn}" ]]; then
             socks5TransportAlpnJson=$(echo "\"${socks5TransportAlpn}\"" | jq -c 'split(",")')
         fi
@@ -8024,12 +8040,14 @@ setSocks5Outbound() {
             elif ! echo "${socks5TransportPath}" | grep -qE '^/'; then
                 socks5TransportPath="/${socks5TransportPath}"
             fi
+            socks5TransportPath=$(stripAnsi "${socks5TransportPath}")
 
             read -r -p "请输入 host:" socks5TransportHost
             if [[ -z "${socks5TransportHost}" ]]; then
                 echoContent red " ---> host不可为空"
                 exit 0
             fi
+            socks5TransportHost=$(stripAnsi "${socks5TransportHost}")
             if [[ "${socks5TransportType}" == "4" ]]; then
                 socks5TransportHostList=$(echo "\"${socks5TransportHost}\"" | jq -c 'split(",")')
             fi
@@ -8206,6 +8224,9 @@ setSocks5OutboundRouting() {
     read -r -p "域名(可留空，用逗号分隔):" socks5RoutingOutboundDomain
     read -r -p "IP(可留空，用逗号分隔):" socks5RoutingOutboundIP
     read -r -p "端口(可留空，用逗号分隔):" socks5RoutingOutboundPort
+    socks5RoutingOutboundDomain=$(stripAnsi "${socks5RoutingOutboundDomain}")
+    socks5RoutingOutboundIP=$(stripAnsi "${socks5RoutingOutboundIP}")
+    socks5RoutingOutboundPort=$(stripAnsi "${socks5RoutingOutboundPort}")
 
     if [[ -z "${socks5RoutingOutboundDomain}" && -z "${socks5RoutingOutboundIP}" && -z "${socks5RoutingOutboundPort}" ]]; then
         echoContent red " ---> 至少需要填写域名、IP 或端口中的一项"
@@ -8237,7 +8258,7 @@ setSocks5OutboundRouting() {
     local socks5RoutingFallbackOutbound=${socks5RoutingFallbackDefault:-01_direct_outbound}
     read -r -p "未命中规则的fallback出站标签[默认${socks5RoutingFallbackOutbound}]:" socks5RoutingFallbackOutboundInput
     if [[ -n "${socks5RoutingFallbackOutboundInput}" ]]; then
-        socks5RoutingFallbackOutbound=${socks5RoutingFallbackOutboundInput}
+        socks5RoutingFallbackOutbound=$(stripAnsi "${socks5RoutingFallbackOutboundInput}")
     fi
 
     if [[ -n "${singBoxConfigPath}" ]]; then
