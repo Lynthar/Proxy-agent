@@ -7681,17 +7681,28 @@ setSocks5Outbound() {
     fi
     echo
     echoContent yellow "可选：通过已有出站进行链式拨号（例如先走WARP或本机的其他出站），回车则直连"
-    read -r -p "链式出站标签:" socks5RoutingProxyTag
+    read -r -p "链式出站标签(多个英文逗号分隔，按顺序生效):" socks5RoutingProxyTag
+    socks5RoutingProxyTagList=()
     if [[ -n "${socks5RoutingProxyTag}" ]]; then
-        echoContent green " ---> 当前Socks5出站将通过 ${socks5RoutingProxyTag} 链式转发"
+        while IFS=',' read -r tag; do
+            if [[ -n "${tag}" ]]; then
+                socks5RoutingProxyTagList+=("${tag}")
+            fi
+        done < <(echo "${socks5RoutingProxyTag}" | tr -s ',' '\n')
+    fi
+    if [[ ${#socks5RoutingProxyTagList[@]} -gt 0 ]]; then
+        echoContent green " ---> 当前Socks5出站将按顺序通过：${socks5RoutingProxyTagList[*]}"
+        socks5RoutingFallbackDefault=${socks5RoutingProxyTagList[1]:-01_direct_outbound}
+    else
+        socks5RoutingFallbackDefault=01_direct_outbound
     fi
     echo
     if [[ -n "${singBoxConfigPath}" ]]; then
         local socks5DetourConfig=
-        if [[ -n "${socks5RoutingProxyTag}" ]]; then
+        if [[ -n "${socks5RoutingProxyTagList[*]}" ]]; then
             read -r -d '' socks5DetourConfig <<EOF || true
 ,
-          "detour":"${socks5RoutingProxyTag}"
+          "detour":"${socks5RoutingProxyTagList[0]}"
 EOF
         fi
         local socks5OutboundUsers
@@ -7732,50 +7743,112 @@ setSocks5OutboundRouting() {
     fi
 
     echoContent red "=============================================================="
-    echoContent skyBlue "请输入要分流的域名\n"
+    echoContent skyBlue "请输入要绑定到 socks 标签的域名/IP/端口\n"
     echoContent yellow "支持Xray-core geosite匹配，支持sing-box1.8+ rule_set匹配\n"
     echoContent yellow "非增量添加，会替换原有规则\n"
     echoContent yellow "当输入的规则匹配到geosite或者rule_set后会使用相应的规则\n"
     echoContent yellow "如无法匹配则，则使用domain精确匹配\n"
     echoContent yellow "录入示例:netflix,openai,example.com\n"
-    read -r -p "域名:" socks5RoutingOutboundDomain
-    if [[ -z "${socks5RoutingOutboundDomain}" ]]; then
-        echoContent red " ---> IP不可为空"
+    read -r -p "域名(可留空):" socks5RoutingOutboundDomain
+    read -r -p "IP(可留空，多条用英文逗号分隔):" socks5RoutingOutboundIP
+    read -r -p "端口(可留空，示例:80,443):" socks5RoutingOutboundPort
+
+    if [[ -z "${socks5RoutingOutboundDomain}" && -z "${socks5RoutingOutboundIP}" && -z "${socks5RoutingOutboundPort}" ]]; then
+        echoContent red " ---> 至少需要填写域名、IP 或端口中的一项"
         exit 0
     fi
-    addSingBoxRouteRule "socks5_outbound" "${socks5RoutingOutboundDomain}" "socks5_01_outbound_route"
+
+    local rules=
+    rules=$(initSingBoxRules "${socks5RoutingOutboundDomain}" "socks5_01_outbound_route")
+    local domainRules=
+    domainRules=$(echo "${rules}" | jq .domainRules)
+
+    local ruleSet=
+    ruleSet=$(echo "${rules}" | jq .ruleSet)
+    local ruleSetTag=[]
+    if [[ "$(echo "${ruleSet}" | jq '.|length')" != "0" ]]; then
+        ruleSetTag=$(echo "${ruleSet}" | jq '.|map(.tag)')
+    fi
+
+    local ipRules="[]"
+    if [[ -n "${socks5RoutingOutboundIP}" ]]; then
+        ipRules=$(echo "\"${socks5RoutingOutboundIP}\"" | jq -c '[split(",")[]|select(length>0)]')
+    fi
+
+    local portRules="[]"
+    if [[ -n "${socks5RoutingOutboundPort}" ]]; then
+        portRules=$(echo "\"${socks5RoutingOutboundPort}\"" | jq -c '[split(",")[]|select(length>0)|(tonumber? // .)]')
+    fi
+
+    local socks5RoutingFallbackOutbound=${socks5RoutingFallbackDefault:-01_direct_outbound}
+    read -r -p "未命中规则的fallback出站标签[默认${socks5RoutingFallbackOutbound}]:" socks5RoutingFallbackOutboundInput
+    if [[ -n "${socks5RoutingFallbackOutboundInput}" ]]; then
+        socks5RoutingFallbackOutbound=${socks5RoutingFallbackOutboundInput}
+    fi
+
+    if [[ -n "${singBoxConfigPath}" ]]; then
+        cat <<EOF >"${singBoxConfigPath}socks5_01_outbound_route.json"
+{
+  "route": {
+    "rules": [
+      {
+        "rule_set":${ruleSetTag},
+        "domain_regex":${domainRules},
+        "ip_cidr":${ipRules},
+        "port":${portRules},
+        "outbound": "socks5_outbound"
+      },
+      {
+        "outbound": "${socks5RoutingFallbackOutbound}"
+      }
+    ],
+    "rule_set":${ruleSet}
+  }
+}
+EOF
+
+        jq '(.route.rules[]|select(.rule_set==[])|del(.rule_set))|(.route.rules[]|select(.domain_regex==[])|del(.domain_regex))|(.route.rules[]|select(.ip_cidr==[])|del(.ip_cidr))|(.route.rules[]|select(.port==[])|del(.port))|if .route.rule_set == [] then del(.route.rule_set) else . end' "${singBoxConfigPath}socks5_01_outbound_route.json" >"${singBoxConfigPath}socks5_01_outbound_route_tmp.json" && mv "${singBoxConfigPath}socks5_01_outbound_route_tmp.json" "${singBoxConfigPath}socks5_01_outbound_route.json"
+    fi
+
     addSingBoxOutbound "01_direct_outbound"
 
     if [[ "${coreInstallType}" == "1" ]]; then
-
-        unInstallRouting "socks5_outbound" "outboundTag"
-        local domainRules=[]
-        while read -r line; do
-            if echo "${routingRule}" | grep -q "${line}"; then
-                echoContent yellow " ---> ${line}已存在，跳过"
-            else
-                local geositeStatus
-                geositeStatus=$(curl -s "https://api.github.com/repos/v2fly/domain-list-community/contents/data/${line}" | jq .message)
-
-                if [[ "${geositeStatus}" == "null" ]]; then
-                    domainRules=$(echo "${domainRules}" | jq -r ". += [\"geosite:${line}\"]")
+        if [[ -z "${socks5RoutingOutboundDomain}" ]]; then
+            echoContent yellow " ---> 检测到未录入域名，Xray-core 分流规则跳过生成"
+        else
+            unInstallRouting "socks5_outbound" "outboundTag"
+            local domainRules=[]
+            while read -r line; do
+                if echo "${routingRule}" | grep -q "${line}"; then
+                    echoContent yellow " ---> ${line}已存在，跳过"
                 else
-                    domainRules=$(echo "${domainRules}" | jq -r ". += [\"domain:${line}\"]")
+                    local geositeStatus
+                    geositeStatus=$(curl -s "https://api.github.com/repos/v2fly/domain-list-community/contents/data/${line}" | jq .message)
+
+                    if [[ "${geositeStatus}" == "null" ]]; then
+                        domainRules=$(echo "${domainRules}" | jq -r ". += [\"geosite:${line}\"]")
+                    else
+                        domainRules=$(echo "${domainRules}" | jq -r ". += [\"domain:${line}\"]")
+                    fi
                 fi
-            fi
-        done < <(echo "${socks5RoutingOutboundDomain}" | tr ',' '\n')
-        if [[ ! -f "${configPath}09_routing.json" ]]; then
-            cat <<EOF >${configPath}09_routing.json
+            done < <(echo "${socks5RoutingOutboundDomain}" | tr ',' '\n')
+            if [[ ! -f "${configPath}09_routing.json" ]]; then
+                cat <<EOF >${configPath}09_routing.json
 {
     "routing":{
         "rules": []
   }
 }
 EOF
+            fi
+            routing=$(jq -r ".routing.rules += [{\"type\": \"field\",\"domain\": ${domainRules},\"outboundTag\": \"socks5_outbound\"}]" ${configPath}09_routing.json)
+            echo "${routing}" | jq . >${configPath}09_routing.json
         fi
-        routing=$(jq -r ".routing.rules += [{\"type\": \"field\",\"domain\": ${domainRules},\"outboundTag\": \"socks5_outbound\"}]" ${configPath}09_routing.json)
-        echo "${routing}" | jq . >${configPath}09_routing.json
     fi
+
+    echoContent green "\n=============================================================="
+    echoContent green " ---> socks5分流规则添加完毕"
+    echoContent green "==============================================================\n"
 }
 
 # 设置VMess+WS+TLS【仅出站】
