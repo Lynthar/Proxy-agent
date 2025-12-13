@@ -4760,6 +4760,8 @@ unInstall() {
 
     rm -rf /usr/bin/vasma
     rm -rf /usr/sbin/vasma
+    rm -rf /usr/bin/pasly
+    rm -rf /usr/sbin/pasly
     echoContent green " ---> Uninstallation of shortcut completed"
     echoContent green " ---> Uninstall v2ray-agent script completed"
 }
@@ -5208,7 +5210,7 @@ updateV2RayAgent() {
     version=$(grep 'Current version: v' "/etc/v2ray-agent/install.sh" | awk -F "[v]" '{print $2}' | tail -n +2 | head -n 1 | awk -F "[\"]" '{print $1}')
 
     echoContent green "\n ---> Update completed"
-    echoContent yellow " ---> Please manually execute [vasma] to open the script"
+    echoContent yellow " ---> Please manually execute [pasly] to open the script"
     echoContent green " ---> Current version: ${version}\n"
     echoContent yellow "If the update fails, please manually execute the following command\n"
     echoContent skyBlue "wget -P /root -N https://raw.githubusercontent.com/mack-a/v2ray-agent/master/install.sh && chmod 700 /root/install.sh && /root/install.sh"
@@ -5339,25 +5341,27 @@ aliasInstall() {
 
     if [[ -f "$HOME/install.sh" ]] && [[ -d "/etc/v2ray-agent" ]] && grep <"$HOME/install.sh" -q "作者:mack-a"; then
         mv "$HOME/install.sh" /etc/v2ray-agent/install.sh
-        local vasmaType=
+        local paslyType=
         if [[ -d "/usr/bin/" ]]; then
-            if [[ ! -f "/usr/bin/vasma" ]]; then
-                ln -s /etc/v2ray-agent/install.sh /usr/bin/vasma
-                chmod 700 /usr/bin/vasma
-                vasmaType=true
+            rm -f "/usr/bin/vasma"
+            if [[ ! -f "/usr/bin/pasly" ]]; then
+                ln -s /etc/v2ray-agent/install.sh /usr/bin/pasly
+                chmod 700 /usr/bin/pasly
+                paslyType=true
             fi
 
             rm -rf "$HOME/install.sh"
         elif [[ -d "/usr/sbin" ]]; then
-            if [[ ! -f "/usr/sbin/vasma" ]]; then
-                ln -s /etc/v2ray-agent/install.sh /usr/sbin/vasma
-                chmod 700 /usr/sbin/vasma
-                vasmaType=true
+            rm -f "/usr/sbin/vasma"
+            if [[ ! -f "/usr/sbin/pasly" ]]; then
+                ln -s /etc/v2ray-agent/install.sh /usr/sbin/pasly
+                chmod 700 /usr/sbin/pasly
+                paslyType=true
             fi
             rm -rf "$HOME/install.sh"
         fi
-        if [[ "${vasmaType}" == "true" ]]; then
-            echoContent green "The shortcut is created successfully, you can execute [vasma] to reopen the script"
+        if [[ "${paslyType}" == "true" ]]; then
+            echoContent green "The shortcut is created successfully, you can execute [pasly] to reopen the script"
         fi
     fi
 }
