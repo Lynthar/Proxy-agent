@@ -345,7 +345,8 @@ readCredentialBySource() {
 
     local tips=$1
     local defaultValue=$2
-    echoContent yellow "请选择${tips}录入方式"
+    echoContent skyBlue "\n${tips}用于配置双方握手的凭据，可手动/文件/环境变量方式录入"
+    echoContent yellow "请选择${tips}录入方式（自动化部署可用文件或环境变量）"
     echoContent yellow "1.直接输入${defaultValue:+[回车默认] }"
     echoContent yellow "2.从文件读取"
     echoContent yellow "3.从环境变量读取"
@@ -3551,7 +3552,7 @@ EOF
 }
 EOF
     fi
-    # socks5 outbound
+    # socks5 outbound（Xray 用，提供给分流规则统一指向的上游 SOCKS 出站）
     if echo "${tag}" | grep -q "socks5"; then
         local socks5ProxySettings=
         if [[ -z "${socks5RoutingOutboundAuthType}" ]]; then
@@ -7717,6 +7718,8 @@ setSocks5Inbound() {
     echoContent yellow "\n==================== 配置 Socks5 入站(解锁机、落地机) =====================\n"
     echoContent yellow "用于让本机提供 Socks5 服务，通常给另一台机器或内网设备作为出站上游。"
     echoContent skyBlue "\n开始配置Socks5协议入站端口"
+    echoContent skyBlue "该入站提供给其他VPS或本机作为上游，请根据连通性选择监听范围"
+    echoContent yellow "若仅监听内网或127.0.0.1，只能同机或同内网机器访问，跨VPS互联需选择可被对端访问的地址"
     echo
     mapfile -t result < <(initSingBoxPort "${singBoxSocks5Port}")
     echoContent green "\n ---> 入站Socks5端口：${result[-1]}"
@@ -7744,9 +7747,9 @@ setSocks5Inbound() {
     fi
 
     # 认证方式选择
-    echoContent yellow "\n请选择认证方式"
-    echoContent yellow "1.用户名/密码[回车默认]"
-    echoContent yellow "2.预共享密钥(AEAD)"
+    echoContent yellow "\n请选择认证方式（落地机与上游需保持一致，AEAD更安全）"
+    echoContent yellow "1.用户名/密码[回车默认，兼容性高]"
+    echoContent yellow "2.预共享密钥(AEAD)[安全性更高，默认使用下方UUID生成]"
     read -r -p "请选择:" socks5InboundAuthType
 
     if [[ -z "${socks5InboundAuthType}" || "${socks5InboundAuthType}" == "1" ]]; then
@@ -7905,7 +7908,7 @@ setSocks5InboundRouting() {
 setSocks5Outbound() {
 
     echoContent yellow "\n==================== 配置 Socks5 出站（转发机、代理机） =====================\n"
-    echoContent yellow "用于将本机流量转交给上游/落地机Socks服务，请填对端信息而非本机。"
+    echoContent skyBlue "本步骤配置本机连接落地机的上游 SOCKS 服务，参数需与落地机一致"
     echo
     echoContent yellow "上游地址：填Socks上游/落地机IP或域名，留空无法继续。"
     read -r -p "请输入落地机IP地址:" socks5RoutingOutboundIP
@@ -7921,10 +7924,9 @@ setSocks5Outbound() {
         exit 0
     fi
     echo
-    echoContent yellow "请选择上游认证方式"
-    echoContent yellow "# 常规账号密码选1；上游要求 AEAD/预共享密钥选2。"
-    echoContent yellow "1.用户名/密码[回车默认]"
-    echoContent yellow "2.预共享密钥(AEAD)"
+    echoContent yellow "请选择上游认证方式（必须与落地机配置一致）"
+    echoContent yellow "1.用户名/密码[回车默认，通用]"
+    echoContent yellow "2.预共享密钥(AEAD)[更安全，默认自动生成随机值]"
     read -r -p "请选择:" socks5RoutingOutboundAuthType
     if [[ -z "${socks5RoutingOutboundAuthType}" || "${socks5RoutingOutboundAuthType}" == "1" ]]; then
         socks5RoutingOutboundAuthType="password"
@@ -7936,7 +7938,9 @@ setSocks5Outbound() {
     fi
     echo
     if [[ "${socks5RoutingOutboundAuthType}" == "aead" ]]; then
-        socks5RoutingOutboundAEADKey=$(readCredentialBySource "预共享密钥" "")
+        local defaultSocks5OutboundAEADKey
+        defaultSocks5OutboundAEADKey=$(cat /proc/sys/kernel/random/uuid)
+        socks5RoutingOutboundAEADKey=$(readCredentialBySource "预共享密钥" "${defaultSocks5OutboundAEADKey}")
         socks5RoutingOutboundUserName=${socks5RoutingOutboundAEADKey}
         socks5RoutingOutboundPassword=${socks5RoutingOutboundAEADKey}
     else
@@ -7944,8 +7948,9 @@ setSocks5Outbound() {
         socks5RoutingOutboundPassword=$(readCredentialBySource "请输入用户密码" "")
     fi
     echo
-    echoContent yellow "是否为上游开启TLS并校验证书？[回车默认开启，推荐确保链路加密；如上游不支持TLS请选择n]\n" \
-        "关闭或跳过校验会存在中间人攻击风险"
+    echoContent skyBlue "TLS 仅作用于本机 -> 落地机链路，需落地机已部署 TLS 终端（脚本不负责生成证书）"
+    echoContent yellow "是否为上游开启TLS并校验证书？[回车默认开启，推荐确保链路加密；如落地机不支持TLS请选择n]\n" \
+        "关闭或跳过校验会存在中间人攻击风险，可用 openssl s_client 等方式确认对端端口是否支持TLS"
     read -r -p "TLS+证书校验[y/n]:" socks5OutboundTLSStatus
     local socks5OutboundTLSEnabled=true
     local socks5OutboundTLSInsecure=false
@@ -7982,8 +7987,10 @@ setSocks5Outbound() {
         socks5RoutingFallbackDefault=01_direct_outbound
     fi
     echo
-    # 传输层交互（来自 master / add-transport-options-to-socks-wizard）
-    echoContent yellow "可选：传输层 [1]直连(默认) [2]TLS [3]WS [4]H2（需与上游监听方式一致）"
+    # 传输层交互：按上游 Socks5 服务实际支持选择，选错会导致连接失败
+    echoContent skyBlue "传输层用于匹配落地机的入口形态，落地机未做反代时通常选择1直连"
+    echoContent skyBlue "若落地机前有 CDN/反代，按实际部署选择 WS/H2，并保持 path/Host/SNI 一致"
+    echoContent yellow "可选：传输层 [1]直连(默认) [2]TLS [3]WS [4]H2"
     read -r -p "传输层:" socks5TransportType
     if [[ -z "${socks5TransportType}" || ! "${socks5TransportType}" =~ ^[1-4]$ ]]; then
         socks5TransportType=1
@@ -7997,11 +8004,13 @@ setSocks5Outbound() {
     socks5TransportHostList="[]"
 
     if [[ "${socks5TransportType}" != "1" ]]; then
+        echoContent skyBlue "下方 SNI/ALPN 需与落地机 TLS/反代配置一致，否则握手会失败"
         read -r -p "请输入 serverName(SNI，可为空):" socks5TransportServerName
         read -r -p "请输入 alpn，多个用英文逗号分隔(留空则不设置):" socks5TransportAlpn
         if [[ -n "${socks5TransportAlpn}" ]]; then
             socks5TransportAlpnJson=$(echo "\"${socks5TransportAlpn}\"" | jq -c 'split(",")')
         fi
+        echoContent yellow "若使用自签/内网证书可选择跳过校验；公网强烈建议保持校验"
         read -r -p "是否跳过TLS证书验证？[y/n]:" socks5TransportAllowInsecure
         if [[ "${socks5TransportAllowInsecure}" == "y" ]]; then
             socks5TransportInsecure=true
@@ -8028,7 +8037,7 @@ setSocks5Outbound() {
     fi
 
     # healthcheck 交互（来自 add-healthcheck-input-for-socks-outbound）
-    echoContent yellow "可选：配置探测URL/端口/间隔，生成 sing-box healthcheck 配置（留空跳过）"
+    echoContent yellow "可选：配置探测URL/端口/间隔，为分流健康检查提供探测（留空跳过）"
     read -r -p "探测URL(默认https://www.gstatic.com/generate_204):" socks5HealthCheckURL
     read -r -p "探测端口(默认使用落地机端口):" socks5HealthCheckPort
     read -r -p "探测间隔(默认30s):" socks5HealthCheckInterval
@@ -8182,7 +8191,7 @@ EOF
     fi
 }
 
-# socks5 outbound routing规则
+# socks5 outbound routing规则：匹配域名/IP/端口后转发到 socks5 出站
 setSocks5OutboundRouting() {
 
     if [[ "$1" == "addRules" && ! -f "${singBoxConfigPath}socks5_01_outbound_route.json" && ! -f "${configPath}09_routing.json" ]]; then
@@ -8191,16 +8200,12 @@ setSocks5OutboundRouting() {
     fi
 
     echoContent red "=============================================================="
-    echoContent skyBlue "请输入要绑定到 socks 标签的域名/IP/端口\n"
-    echoContent yellow "规则命中后会走 socks5_outbound，留空则不会写入规则。"
-    echoContent yellow "支持Xray-core geosite匹配，支持sing-box1.8+ rule_set匹配\n"
-    echoContent yellow "非增量添加，会替换原有规则\n"
-    echoContent yellow "当输入的规则匹配到geosite或者rule_set后会使用相应的规则\n"
-    echoContent yellow "如无法匹配则，则使用domain精确匹配\n"
-    echoContent yellow "录入示例:netflix,openai,example.com\n"
-    read -r -p "域名(可留空):" socks5RoutingOutboundDomain
-    read -r -p "IP(可留空，多条用英文逗号分隔):" socks5RoutingOutboundIP
-    read -r -p "端口(可留空，示例:80,443):" socks5RoutingOutboundPort
+    echoContent skyBlue "请输入要绑定到 socks 标签的域名/IP/端口（至少填写一项）\n"
+    echoContent yellow "域名支持 geosite/rule_set，示例: netflix,openai,example.com\n"
+    echoContent yellow "IP 示例: 1.1.1.1,8.8.8.8  |  端口示例: 80,443\n"
+    read -r -p "域名(可留空，用逗号分隔):" socks5RoutingOutboundDomain
+    read -r -p "IP(可留空，用逗号分隔):" socks5RoutingOutboundIP
+    read -r -p "端口(可留空，用逗号分隔):" socks5RoutingOutboundPort
 
     if [[ -z "${socks5RoutingOutboundDomain}" && -z "${socks5RoutingOutboundIP}" && -z "${socks5RoutingOutboundPort}" ]]; then
         echoContent red " ---> 至少需要填写域名、IP 或端口中的一项"
