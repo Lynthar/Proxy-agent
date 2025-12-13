@@ -5958,6 +5958,8 @@ unInstall() {
 
     rm -rf /usr/bin/vasma
     rm -rf /usr/sbin/vasma
+    rm -rf /usr/bin/pasly
+    rm -rf /usr/sbin/pasly
     echoContent green " ---> 卸载快捷方式完成"
     echoContent green " ---> 卸载v2ray-agent脚本完成"
 }
@@ -6382,7 +6384,7 @@ updateV2RayAgent() {
     version=$(grep '当前版本：v' "/etc/v2ray-agent/install.sh" | awk -F "[v]" '{print $2}' | tail -n +2 | head -n 1 | awk -F "[\"]" '{print $1}')
 
     echoContent green "\n ---> 更新完毕"
-    echoContent yellow " ---> 请手动执行[vasma]打开脚本"
+    echoContent yellow " ---> 请手动执行[pasly]打开脚本"
     echoContent green " ---> 当前版本：${version}\n"
     echoContent yellow "如更新不成功，请手动执行下面命令\n"
     echoContent skyBlue "wget -P /root -N https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/install.sh && chmod 700 /root/install.sh && /root/install.sh"
@@ -6578,25 +6580,27 @@ aliasInstall() {
 
     if [[ -f "$HOME/install.sh" ]] && [[ -d "/etc/v2ray-agent" ]] && grep <"$HOME/install.sh" -q "作者:Lynthar"; then
         mv "$HOME/install.sh" /etc/v2ray-agent/install.sh
-        local vasmaType=
+        local paslyType=
         if [[ -d "/usr/bin/" ]]; then
-            if [[ ! -f "/usr/bin/vasma" ]]; then
-                ln -s /etc/v2ray-agent/install.sh /usr/bin/vasma
-                chmod 700 /usr/bin/vasma
-                vasmaType=true
+            rm -f "/usr/bin/vasma"
+            if [[ ! -f "/usr/bin/pasly" ]]; then
+                ln -s /etc/v2ray-agent/install.sh /usr/bin/pasly
+                chmod 700 /usr/bin/pasly
+                paslyType=true
             fi
 
             rm -rf "$HOME/install.sh"
         elif [[ -d "/usr/sbin" ]]; then
-            if [[ ! -f "/usr/sbin/vasma" ]]; then
-                ln -s /etc/v2ray-agent/install.sh /usr/sbin/vasma
-                chmod 700 /usr/sbin/vasma
-                vasmaType=true
+            rm -f "/usr/sbin/vasma"
+            if [[ ! -f "/usr/sbin/pasly" ]]; then
+                ln -s /etc/v2ray-agent/install.sh /usr/sbin/pasly
+                chmod 700 /usr/sbin/pasly
+                paslyType=true
             fi
             rm -rf "$HOME/install.sh"
         fi
-        if [[ "${vasmaType}" == "true" ]]; then
-            echoContent green "快捷方式创建成功，可执行[vasma]重新打开脚本"
+        if [[ "${paslyType}" == "true" ]]; then
+            echoContent green "快捷方式创建成功，可执行[pasly]重新打开脚本"
         fi
     fi
 }
@@ -7985,7 +7989,7 @@ setSocks5Outbound() {
     if [[ "${socks5OutboundTLSEnabled}" == "true" ]]; then
         read -r -p "证书SNI[回车默认 ${socks5OutboundTLSServerName}]:" socks5OutboundTLSReadServerName
         if [[ -n "${socks5OutboundTLSReadServerName}" ]]; then
-            socks5OutboundTLSServerName=${socks5OutboundTLSReadServerName}
+            socks5OutboundTLSServerName=$(stripAnsi "${socks5OutboundTLSReadServerName}")
         fi
         echoContent yellow "是否跳过证书校验？[y/N 默认N，跳过存在被劫持风险]"
         read -r -p "跳过证书校验:" socks5OutboundSkipVerify
@@ -8070,6 +8074,9 @@ setSocks5Outbound() {
     read -r -p "探测URL(默认https://www.gstatic.com/generate_204):" socks5HealthCheckURL
     read -r -p "探测端口(默认使用落地机端口):" socks5HealthCheckPort
     read -r -p "探测间隔(默认30s):" socks5HealthCheckInterval
+    socks5HealthCheckURL=$(stripAnsi "${socks5HealthCheckURL}")
+    socks5HealthCheckPort=$(stripAnsi "${socks5HealthCheckPort}")
+    socks5HealthCheckInterval=$(stripAnsi "${socks5HealthCheckInterval}")
     echo
 
     # 仅当指定配置文件目录时才生成 sing-box 出站 JSON
