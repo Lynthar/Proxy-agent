@@ -3473,6 +3473,16 @@ EOF
     fi
     # socks5 outbound
     if echo "${tag}" | grep -q "socks5"; then
+        local socks5ProxySettings=
+        if [[ -n "${socks5RoutingProxyTag}" ]]; then
+            read -r -d '' socks5ProxySettings <<EOF || true
+,
+      "proxySettings": {
+        "tag": "${socks5RoutingProxyTag}",
+        "transportLayer": true
+      }
+EOF
+        fi
         cat <<EOF >"/etc/v2ray-agent/xray/conf/${tag}.json"
 {
   "outbounds": [
@@ -3492,7 +3502,7 @@ EOF
             ]
           }
         ]
-      }
+      }${socks5ProxySettings}
     }
   ]
 }
@@ -7520,7 +7530,20 @@ setSocks5Outbound() {
         exit 0
     fi
     echo
+    echoContent yellow "可选：通过已有出站进行链式拨号（例如先走WARP或本机的其他出站），回车则直连"
+    read -r -p "链式出站标签:" socks5RoutingProxyTag
+    if [[ -n "${socks5RoutingProxyTag}" ]]; then
+        echoContent green " ---> 当前Socks5出站将通过 ${socks5RoutingProxyTag} 链式转发"
+    fi
+    echo
     if [[ -n "${singBoxConfigPath}" ]]; then
+        local socks5DetourConfig=
+        if [[ -n "${socks5RoutingProxyTag}" ]]; then
+            read -r -d '' socks5DetourConfig <<EOF || true
+,
+          "detour":"${socks5RoutingProxyTag}"
+EOF
+        fi
         cat <<EOF >"${singBoxConfigPath}socks5_outbound.json"
 {
     "outbounds":[
@@ -7531,7 +7554,7 @@ setSocks5Outbound() {
           "server_port": ${socks5RoutingOutboundPort},
           "version": "5",
           "username":"${socks5RoutingOutboundUserName}",
-          "password":"${socks5RoutingOutboundPassword}"
+          "password":"${socks5RoutingOutboundPassword}"${socks5DetourConfig}
         }
     ]
 }
