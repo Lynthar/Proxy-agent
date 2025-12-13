@@ -7325,6 +7325,58 @@ EOF
 EOF
     fi
 
+    # 确保 systemd 服务已安装（修复：链式代理需要服务才能启动）
+    if [[ ! -f "/etc/systemd/system/sing-box.service" ]] && [[ ! -f "/etc/init.d/sing-box" ]]; then
+        echoContent yellow "\n检测到 sing-box 服务未配置，正在配置..."
+        local execStart='/etc/v2ray-agent/sing-box/sing-box run -c /etc/v2ray-agent/sing-box/conf/config.json'
+
+        if [[ -n $(find /bin /usr/bin -name "systemctl") ]] && [[ "${release}" != "alpine" ]]; then
+            cat <<EOF >/etc/systemd/system/sing-box.service
+[Unit]
+Description=Sing-Box Service
+Documentation=https://sing-box.sagernet.org
+After=network.target nss-lookup.target
+
+[Service]
+User=root
+WorkingDirectory=/root
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+ExecStart=${execStart}
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=10
+LimitNPROC=infinity
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+            systemctl daemon-reload
+            systemctl enable sing-box.service >/dev/null 2>&1
+            echoContent green " ---> sing-box 服务配置完成"
+        elif [[ "${release}" == "alpine" ]]; then
+            cat <<EOF >/etc/init.d/sing-box
+#!/sbin/openrc-run
+
+name="sing-box"
+description="Sing-Box Service"
+command="/etc/v2ray-agent/sing-box/sing-box"
+command_args="run -c /etc/v2ray-agent/sing-box/conf/config.json"
+command_background=true
+pidfile="/run/\${RC_SVCNAME}.pid"
+
+depend() {
+    need net
+    after firewall
+}
+EOF
+            chmod +x /etc/init.d/sing-box
+            rc-update add sing-box default >/dev/null 2>&1
+            echoContent green " ---> sing-box 服务配置完成 (Alpine)"
+        fi
+    fi
+
     return 0
 }
 
@@ -7693,9 +7745,33 @@ EOF
 }
 EOF
 
-    # 合并配置并重启
-    mergeSingBoxConfig
-    reloadCore
+    # 合并配置
+    echoContent yellow "正在合并配置..."
+    if ! /etc/v2ray-agent/sing-box/sing-box merge config.json -C /etc/v2ray-agent/sing-box/conf/config/ -D /etc/v2ray-agent/sing-box/conf/ 2>/dev/null; then
+        echoContent red " ---> 配置合并失败，请检查配置文件格式"
+        echoContent yellow "调试命令: /etc/v2ray-agent/sing-box/sing-box merge config.json -C /etc/v2ray-agent/sing-box/conf/config/ -D /etc/v2ray-agent/sing-box/conf/"
+        return 1
+    fi
+
+    # 验证配置文件已生成
+    if [[ ! -f "/etc/v2ray-agent/sing-box/conf/config.json" ]]; then
+        echoContent red " ---> 配置文件生成失败"
+        return 1
+    fi
+
+    # 启动 sing-box
+    echoContent yellow "正在启动 sing-box..."
+    handleSingBox stop >/dev/null 2>&1
+    handleSingBox start
+
+    # 验证启动成功
+    sleep 1
+    if ! pgrep -x "sing-box" >/dev/null 2>&1; then
+        echoContent red " ---> sing-box 启动失败"
+        echoContent yellow "请手动执行以下命令查看错误:"
+        echoContent yellow "/etc/v2ray-agent/sing-box/sing-box run -c /etc/v2ray-agent/sing-box/conf/config.json"
+        return 1
+    fi
 
     echoContent green "\n=============================================================="
     echoContent green "入口节点配置完成！"
@@ -8021,15 +8097,15 @@ removeChainProxy() {
 }
 
 # 合并 sing-box 配置 (如果函数不存在则定义)
+# 注意：此函数与 singBoxMergeConfig 保持一致，用于链式代理独立运行场景
 if ! type mergeSingBoxConfig >/dev/null 2>&1; then
     mergeSingBoxConfig() {
         if [[ -d "/etc/v2ray-agent/sing-box/conf/config/" ]]; then
-            local configDir="/etc/v2ray-agent/sing-box/conf/config/"
-            local outputFile="/etc/v2ray-agent/sing-box/conf/config.json"
-
-            # 使用 sing-box 合并配置
+            # 先删除旧配置，再合并生成新配置
+            rm -f /etc/v2ray-agent/sing-box/conf/config.json >/dev/null 2>&1
+            # 使用 sing-box 合并配置（与 singBoxMergeConfig 保持一致）
             if [[ -f "/etc/v2ray-agent/sing-box/sing-box" ]]; then
-                /etc/v2ray-agent/sing-box/sing-box merge "${outputFile}" -C "${configDir}" >/dev/null 2>&1
+                /etc/v2ray-agent/sing-box/sing-box merge config.json -C /etc/v2ray-agent/sing-box/conf/config/ -D /etc/v2ray-agent/sing-box/conf/ >/dev/null 2>&1
             fi
         fi
     }
