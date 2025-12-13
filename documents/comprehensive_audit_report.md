@@ -8,20 +8,20 @@
 
 ## 问题汇总表
 
-| 编号 | 严重性 | 类别 | 问题描述 | 行号 |
+| 编号 | 严重性 | 类别 | 问题描述 | 状态 |
 |------|--------|------|----------|------|
-| 1 | 🔴 高 | 配置错误 | sing-box SOCKS5 入站添加了不存在的 `aead` 字段 | 7863 (已修复) |
-| 2 | 🔴 高 | 路由缺失 | 全局 SOCKS5 出站转发缺少 `route.final` 配置 | 7620-7666 (已修复) |
-| 3 | 🟠 中 | 逻辑错误 | Hysteria2 带宽配置 `up_mbps`/`down_mbps` 反向 | 4726-4727 |
-| 4 | 🟠 中 | 配置错误 | Xray 入站配置包含无效的 `add` 字段 | 4273 |
-| 5 | 🟠 中 | 死代码 | `initRealityClientServersName` 中 elif 条件永不执行 | 9981-9984 |
-| 6 | 🟡 低 | 死代码 | 被注释的 `initTuicConfig` 函数 | 3345-3361 |
-| 7 | 🟡 低 | 死代码 | 被注释的 `initXrayFrontingConfig` 函数 | 3887-3984 |
-| 8 | 🟡 低 | 安全建议 | Reality shortIds 使用空字符串 `""` | 4182-4185 等 |
-| 9 | 🟡 低 | 安全建议 | Reality shortIds 硬编码固定值 | 4184, 4356 等 |
-| 10 | 🟡 低 | 配置建议 | Reality maxTimeDiff 设置过大 (70000ms) | 4181, 4353 |
-| 11 | 🟡 低 | 代码冗余 | SOCKS5 入站的 AEAD 选项无实际作用 | 7786-7800 |
-| 12 | ⚪ 信息 | 版本兼容 | Xray x25519 输出格式变化需注意 | 9903-9904 |
+| 1 | 🔴 高 | 配置错误 | sing-box SOCKS5 入站添加了不存在的 `aead` 字段 | ✅ 已修复 |
+| 2 | 🔴 高 | 路由缺失 | 全局 SOCKS5 出站转发缺少 `route.final` 配置 | ✅ 已修复 |
+| 3 | 🟠 中 | 逻辑错误 | Hysteria2 带宽配置 `up_mbps`/`down_mbps` 反向 | ✅ 已修复 |
+| 4 | 🟠 中 | 配置错误 | Xray 入站配置包含无效的 `add` 字段 | ✅ 已修复 |
+| 5 | 🟠 中 | 死代码 | `initRealityClientServersName` 中 elif 条件永不执行 | ✅ 已修复 |
+| 6 | 🟡 低 | 死代码 | 被注释的 `initTuicConfig` 函数 | ✅ 已修复 |
+| 7 | 🟡 低 | 死代码 | 被注释的 `initXrayFrontingConfig` 函数 | ✅ 已修复 |
+| 8 | 🟡 低 | 安全建议 | Reality shortIds 使用空字符串 `""` | ✅ 已修复 |
+| 9 | 🟡 低 | 安全建议 | Reality shortIds 硬编码固定值 | ✅ 已修复 |
+| 10 | 🟡 低 | 配置建议 | Reality maxTimeDiff 设置过大 (70000ms) | ✅ 已修复 |
+| 11 | 🟡 低 | 代码冗余 | SOCKS5 入站的 AEAD 选项误导性菜单文本 | ✅ 已修复 |
+| 12 | ⚪ 信息 | 版本兼容 | Xray x25519 输出格式变化需注意 | ✅ 已修复 |
 
 ---
 
@@ -296,24 +296,22 @@ realityPublicKey=$(echo "${realityX25519Key}" | grep -E "Public|Password" | awk 
 
 ---
 
-## 修复优先级建议
+## 修复状态汇总
 
-1. **立即修复** (已完成):
-   - ✅ sing-box SOCKS5 aead 字段
-   - ✅ 全局 SOCKS5 路由配置
+**所有问题均已修复** (2025-12-13):
 
-2. **高优先级**:
-   - 🔴 Hysteria2 up_mbps/down_mbps 交换 (#3)
-   - 🔴 Xray 入站 add 字段移除 (#4)
-
-3. **中优先级**:
-   - 🟠 elif 条件逻辑修复 (#5)
-   - 🟠 SOCKS5 AEAD 菜单清理 (#11)
-
-4. **低优先级 (代码清理)**:
-   - 🟡 删除死代码 (#6, #7)
-   - 🟡 Reality shortIds 优化 (#8, #9)
-   - 🟡 maxTimeDiff 调整 (#10)
+1. ✅ sing-box SOCKS5 aead 字段 - 已移除
+2. ✅ 全局 SOCKS5 路由配置 - 已添加 route.final
+3. ✅ Hysteria2 up_mbps/down_mbps - 已交换
+4. ✅ Xray 入站 add 字段 - 已移除
+5. ✅ elif 条件逻辑 - 已移除死代码
+6. ✅ initTuicConfig 死代码 - 已删除
+7. ✅ initXrayFrontingConfig 死代码 - 已删除
+8. ✅ Reality shortIds 空字符串 - 已改为随机生成
+9. ✅ Reality shortIds 硬编码 - 已改为动态生成
+10. ✅ maxTimeDiff - 已从 70000 调整为 60000
+11. ✅ SOCKS5 AEAD 菜单 - 已更新为准确描述
+12. ✅ x25519 版本兼容 - 已添加新旧版本支持
 
 ---
 
