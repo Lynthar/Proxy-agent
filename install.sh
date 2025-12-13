@@ -7656,13 +7656,9 @@ showSingBoxRoutingRules() {
         if [[ -f "${singBoxConfigPath}$1.json" ]]; then
             jq .route.rules "${singBoxConfigPath}$1.json"
         elif [[ "$1" == "socks5_01_outbound_route" && -f "${singBoxConfigPath}socks5_outbound.json" ]]; then
-            echoContent yellow "已安装 sing-box socks5全局出站分流"
-            echoContent yellow "\n出站分流配置："
-            echoContent skyBlue "$(jq .outbounds[0] ${singBoxConfigPath}socks5_outbound.json)"
+            jq .outbounds[0] "${singBoxConfigPath}socks5_outbound.json"
         elif [[ "$1" == "socks5_02_inbound_route" && -f "${singBoxConfigPath}20_socks5_inbounds.json" ]]; then
-            echoContent yellow "已安装 sing-box socks5全局入站分流"
-            echoContent yellow "\n出站分流配置："
-            echoContent skyBlue "$(jq .outbounds[0] ${singBoxConfigPath}socks5_outbound.json)"
+            jq .inbounds[0] "${singBoxConfigPath}20_socks5_inbounds.json"
         fi
     fi
 }
@@ -7672,15 +7668,8 @@ showXrayRoutingRules() {
     if [[ "${coreInstallType}" == "1" ]]; then
         if [[ -f "${configPath}09_routing.json" ]]; then
             jq ".routing.rules[]|select(.outboundTag==\"$1\")" "${configPath}09_routing.json"
-
-            echoContent yellow "\n已安装 xray-core socks5全局出站分流"
-            echoContent yellow "\n出站分流配置："
-            echoContent skyBlue "$(jq .outbounds[0].settings.servers[0] ${configPath}socks5_outbound.json)"
-
         elif [[ "$1" == "socks5_outbound" && -f "${configPath}socks5_outbound.json" ]]; then
-            echoContent yellow "\n已安装 xray-core socks5全局出站分流"
-            echoContent yellow "\n出站分流配置："
-            echoContent skyBlue "$(jq .outbounds[0].settings.servers[0] ${configPath}socks5_outbound.json)"
+            jq .outbounds[0].settings.servers[0] "${configPath}socks5_outbound.json"
         fi
     fi
 }
@@ -7834,26 +7823,49 @@ setSocks5Inbound() {
         echoContent red " ---> 选择类型错误"
         exit 0
     fi
-    cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/20_socks5_inbounds.json
-{
-    "inbounds":[
+    socks5InboundAllowRange=$(stripAnsi "${socks5InboundAllowRange}")
+    socks5InboundUserName=$(stripAnsi "${socks5InboundUserName}")
+    socks5InboundPassword=$(stripAnsi "${socks5InboundPassword}")
+
+    local socks5InboundJson
+    socks5InboundJson=$(jq -n \
+        --arg listen "${socks5InboundListen}" \
+        --argjson listenPort "${socks5InboundPort}" \
+        --arg tag "socks5_inbound" \
+        --arg auth "${socks5InboundAuthType}" \
+        --arg user "${socks5InboundUserName}" \
+        --arg pass "${socks5InboundPassword}" \
+        --arg domainStrategy "${domainStrategy}" '
         {
-          "type": "socks",
-          "listen":"${socks5InboundListen}",
-          "listen_port":${socks5InboundPort},
-          "tag":"socks5_inbound",
-          "auth":"${socks5InboundAuthType}",
-          "users":[
+          "inbounds": [
             {
-                  "username": "${socks5InboundUserName}",
-                  "password": "${socks5InboundPassword}"
+              "type": "socks",
+              "listen":"${socks5InboundListen}",
+              "listen_port":${socks5InboundPort},
+              "tag":"socks5_inbound",
+              "auth":"${socks5InboundAuthType}",
+              "users":[
+            {
+              type: "socks",
+              listen: $listen,
+              listen_port: $listenPort,
+              tag: $tag,
+              auth: $auth,
+              users: [
+                {
+                  username: $user,
+                  password: $pass
+                }
+              ],
+              domain_strategy: $domainStrategy
             }
-          ],
-          "domain_strategy":"${domainStrategy}"
+          ]
         }
-    ]
-}
-EOF
+    ')
+
+    echo "${socks5InboundJson}" | jq . >/etc/v2ray-agent/sing-box/conf/config/20_socks5_inbounds.json
+
+    validateJsonFile "/etc/v2ray-agent/sing-box/conf/config/20_socks5_inbounds.json"
 
     validateJsonFile "/etc/v2ray-agent/sing-box/conf/config/20_socks5_inbounds.json"
 
