@@ -740,20 +740,31 @@ readInstallAlpn() {
 # 检查防火墙
 allowPort() {
     local type=$2
+    local sourceRange=$3
     if [[ -z "${type}" ]]; then
         type=tcp
     fi
     # 如果防火墙启动状态则添加相应的开放端口
     if dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+ufw"; then
         if ufw status | grep -q "Status: active"; then
-            if ! ufw status | grep -q "$1/${type}"; then
+            if [[ -n "${sourceRange}" && "${sourceRange}" != "0.0.0.0/0" ]]; then
+                sudo ufw allow from "${sourceRange}" to any port "$1" proto "${type}"
+                checkUFWAllowPort "$1"
+            elif ! ufw status | grep -q "$1/${type}"; then
                 sudo ufw allow "$1/${type}"
                 checkUFWAllowPort "$1"
             fi
         fi
     elif systemctl status firewalld 2>/dev/null | grep -q "active (running)"; then
         local updateFirewalldStatus=
-        if ! firewall-cmd --list-ports --permanent | grep -qw "$1/${type}"; then
+        if [[ -n "${sourceRange}" && "${sourceRange}" != "0.0.0.0/0" ]]; then
+            local richRule="rule family=\"ipv4\" source address=\"${sourceRange}\" port protocol=\"${type}\" port=\"$1\" accept"
+            if ! firewall-cmd --permanent --query-rich-rule="${richRule}" >/dev/null 2>&1; then
+                updateFirewalldStatus=true
+                firewall-cmd --permanent --zone=public --add-rich-rule="${richRule}"
+                checkFirewalldAllowPort "$1"
+            fi
+        elif ! firewall-cmd --list-ports --permanent | grep -qw "$1/${type}"; then
             updateFirewalldStatus=true
             local firewallPort=$1
             if echo "${firewallPort}" | grep -q ":"; then
@@ -773,9 +784,31 @@ allowPort() {
                 checkUFWAllowPort "$1"
             fi
         fi
+    elif command -v nft >/dev/null 2>&1 && systemctl status nftables 2>/dev/null | grep -q "active"; then
+        if nft list chain inet filter input >/dev/null 2>&1; then
+            local nftComment="allow $1/${type}(mack-a)"
+            local nftSourceRange="${sourceRange:-0.0.0.0/0}"
+            local nftRules
+            local updateNftablesStatus=
+            nftRules=$(nft list chain inet filter input)
+            if ! echo "${nftRules}" | grep -q "${nftComment}" || ! echo "${nftRules}" | grep -q "${nftSourceRange}"; then
+                updateNftablesStatus=true
+                nft add rule inet filter input ip saddr "${nftSourceRange}" ${type} dport "$1" counter accept comment "${nftComment}"
+            fi
+
+            if echo "${updateNftablesStatus}" | grep -q "true"; then
+                nft list ruleset >/etc/nftables.conf
+                systemctl reload nftables >/dev/null 2>&1 || nft -f /etc/nftables.conf
+            fi
+        fi
     elif dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+netfilter-persistent" && systemctl status netfilter-persistent 2>/dev/null | grep -q "active (exited)"; then
         local updateFirewalldStatus=
-        if ! iptables -L | grep -q "$1/${type}(mack-a)"; then
+        if [[ -n "${sourceRange}" && "${sourceRange}" != "0.0.0.0/0" ]]; then
+            if ! iptables -C INPUT -p ${type} -s "${sourceRange}" --dport "$1" -m comment --comment "allow $1/${type}(mack-a)" -j ACCEPT 2>/dev/null; then
+                updateFirewalldStatus=true
+                iptables -I INPUT -p ${type} -s "${sourceRange}" --dport "$1" -m comment --comment "allow $1/${type}(mack-a)" -j ACCEPT
+            fi
+        elif ! iptables -L | grep -q "$1/${type}(mack-a)"; then
             updateFirewalldStatus=true
             iptables -I INPUT -p ${type} --dport "$1" -m comment --comment "allow $1/${type}(mack-a)" -j ACCEPT
         fi
@@ -816,7 +849,7 @@ checkUFWAllowPort() {
 
 # 输出firewall-cmd端口开放状态
 checkFirewalldAllowPort() {
-    if firewall-cmd --list-ports --permanent | grep -q "$1"; then
+    if firewall-cmd --list-ports --permanent | grep -q "$1" || firewall-cmd --list-rich-rules --permanent | grep -q "$1"; then
         echoContent green " ---> $1端口开放成功"
     else
         echoContent red " ---> $1端口开放失败"
@@ -7686,6 +7719,28 @@ setSocks5Inbound() {
     echoContent green "\n ---> 入站Socks5端口：${result[-1]}"
     echoContent green "\n ---> 此端口需要配置到其他机器出站，请不要进行代理行为"
 
+    # 监听范围选择（来自 codex/add-listener-range-selection-for-inbound-wizard 分支）
+    echoContent yellow "\n请选择监听范围"
+    echoContent yellow "1.仅本机 127.0.0.1[回车默认]"
+    echoContent yellow "2.自定义内网网段"
+    echoContent yellow "3.全部IPv4 0.0.0.0/0"
+    read -r -p "监听范围:" socks5InboundListenStatus
+    local socks5InboundListen="127.0.0.1"
+    local socks5InboundAllowRange="127.0.0.0/8"
+
+    if [[ "${socks5InboundListenStatus}" == "2" ]]; then
+        read -r -p "请输入允许访问的内网网段(示例:192.168.0.0/16):" socks5InboundAllowRange
+        if [[ -z "${socks5InboundAllowRange}" ]]; then
+            echoContent red " ---> 网段不可为空"
+            exit 0
+        fi
+        socks5InboundListen="0.0.0.0"
+    elif [[ "${socks5InboundListenStatus}" == "3" ]]; then
+        socks5InboundListen="0.0.0.0"
+        socks5InboundAllowRange="0.0.0.0/0"
+    fi
+
+    # 认证方式选择（来自 master 分支）
     echoContent yellow "\n请选择认证方式"
     echoContent yellow "1.用户名/密码[回车默认]"
     echoContent yellow "2.预共享密钥(AEAD)"
@@ -7701,6 +7756,7 @@ setSocks5Inbound() {
     fi
 
     echo
+
     echoContent yellow "\n请输入自定义UUID[需合法]，[回车]随机UUID"
     read -r -p 'UUID:' socks5RoutingUUID
     if [[ -z "${socks5RoutingUUID}" ]]; then
@@ -7741,7 +7797,7 @@ setSocks5Inbound() {
     "inbounds":[
         {
           "type": "socks",
-          "listen":"::",
+          "listen":"${socks5InboundListen}",
           "listen_port":${result[-1]},
           "tag":"socks5_inbound",
           "users":[
@@ -7755,6 +7811,10 @@ setSocks5Inbound() {
     ]
 }
 EOF
+
+    if [[ "${socks5InboundListen}" != "127.0.0.1" ]]; then
+        allowPort "${result[-1]}" tcp "${socks5InboundAllowRange}"
+    fi
 
 }
 
