@@ -7482,6 +7482,7 @@ socks5Routing() {
 
     echoContent yellow "# 仅限正常网络环境下设备间流量转发，禁止用于代理访问。"
     echoContent yellow "# 推荐仅监听本机、开启上游证书校验并保持最小日志，降低暴露与劫持风险。"
+    echoContent yellow "# 出站=将本机流量交给上游/落地机；入站=让本机提供Socks供其他节点拨号。"
     echoContent yellow "# 使用提示：更多示例见 documents 目录\n"
 
     echoContent yellow "1.Socks5出站"
@@ -7714,6 +7715,7 @@ removeSocks5Routing() {
 setSocks5Inbound() {
 
     echoContent yellow "\n==================== 配置 Socks5 入站(解锁机、落地机) =====================\n"
+    echoContent yellow "用于让本机提供 Socks5 服务，通常给另一台机器或内网设备作为出站上游。"
     echoContent skyBlue "\n开始配置Socks5协议入站端口"
     echo
     mapfile -t result < <(initSingBoxPort "${singBoxSocks5Port}")
@@ -7853,6 +7855,7 @@ setSocks5InboundRouting() {
     else
         echoContent red "=============================================================="
         echoContent skyBlue "请输入允许访问的IP地址，多个IP英文逗号隔开。例如:1.1.1.1,2.2.2.2\n"
+        echoContent yellow "仅允许这些来源访问本机 Socks5 入站，未列出来源将被拒绝。"
         read -r -p "IP:" socks5InboundRoutingIPs
 
         if [[ -z "${socks5InboundRoutingIPs}" ]]; then
@@ -7902,13 +7905,16 @@ setSocks5InboundRouting() {
 setSocks5Outbound() {
 
     echoContent yellow "\n==================== 配置 Socks5 出站（转发机、代理机） =====================\n"
+    echoContent yellow "用于将本机流量转交给上游/落地机Socks服务，请填对端信息而非本机。"
     echo
+    echoContent yellow "上游地址：填Socks上游/落地机IP或域名，留空无法继续。"
     read -r -p "请输入落地机IP地址:" socks5RoutingOutboundIP
     if [[ -z "${socks5RoutingOutboundIP}" ]]; then
         echoContent red " ---> IP不可为空"
         exit 0
     fi
     echo
+    echoContent yellow "上游端口：填Socks监听端口(示例:1080/443)，与上游实际端口一致。"
     read -r -p "请输入落地机端口:" socks5RoutingOutboundPort
     if [[ -z "${socks5RoutingOutboundPort}" ]]; then
         echoContent red " ---> 端口不可为空"
@@ -7916,6 +7922,7 @@ setSocks5Outbound() {
     fi
     echo
     echoContent yellow "请选择上游认证方式"
+    echoContent yellow "# 常规账号密码选1；上游要求 AEAD/预共享密钥选2。"
     echoContent yellow "1.用户名/密码[回车默认]"
     echoContent yellow "2.预共享密钥(AEAD)"
     read -r -p "请选择:" socks5RoutingOutboundAuthType
@@ -7958,7 +7965,7 @@ setSocks5Outbound() {
         fi
     fi
 
-    echoContent yellow "可选：通过已有出站进行链式拨号（例如先走WARP或本机的其他出站），回车则直连"
+    echoContent yellow "可选：通过已有出站进行链式拨号（如先走WARP/直连/其他出站标签），留空则直接连上游。"
     read -r -p "链式出站标签(多个英文逗号分隔，按顺序生效):" socks5RoutingProxyTag
     socks5RoutingProxyTagList=()
     if [[ -n "${socks5RoutingProxyTag}" ]]; then
@@ -7976,7 +7983,7 @@ setSocks5Outbound() {
     fi
     echo
     # 传输层交互（来自 master / add-transport-options-to-socks-wizard）
-    echoContent yellow "可选：传输层 [1]直连(默认) [2]TLS [3]WS [4]H2"
+    echoContent yellow "可选：传输层 [1]直连(默认) [2]TLS [3]WS [4]H2（需与上游监听方式一致）"
     read -r -p "传输层:" socks5TransportType
     if [[ -z "${socks5TransportType}" || ! "${socks5TransportType}" =~ ^[1-4]$ ]]; then
         socks5TransportType=1
@@ -8185,6 +8192,7 @@ setSocks5OutboundRouting() {
 
     echoContent red "=============================================================="
     echoContent skyBlue "请输入要绑定到 socks 标签的域名/IP/端口\n"
+    echoContent yellow "规则命中后会走 socks5_outbound，留空则不会写入规则。"
     echoContent yellow "支持Xray-core geosite匹配，支持sing-box1.8+ rule_set匹配\n"
     echoContent yellow "非增量添加，会替换原有规则\n"
     echoContent yellow "当输入的规则匹配到geosite或者rule_set后会使用相应的规则\n"
