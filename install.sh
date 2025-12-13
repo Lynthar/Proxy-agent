@@ -7623,7 +7623,8 @@ setSocks5OutboundRoutingAll() {
     echoContent red "=============================================================="
     echoContent yellow "# 注意事项\n"
     echoContent yellow "1.会删除所有已经设置的分流规则，包括其他分流（warp、IPv6等）"
-    echoContent yellow "2.会删除Socks5之外的所有出站规则\n"
+    echoContent yellow "2.会删除Socks5之外的所有出站规则"
+    echoContent yellow "3.所有入站流量将通过Socks5出站转发\n"
     read -r -p "是否确认设置？[y/n]:" socksOutStatus
 
     if [[ "${socksOutStatus}" == "y" ]]; then
@@ -7649,6 +7650,15 @@ setSocks5OutboundRoutingAll() {
 
             removeSingBoxConfig socks5_01_outbound_route
             removeSingBoxConfig 01_direct_outbound
+
+            # 创建全局路由配置，让所有流量走 socks5_outbound
+            cat <<EOF >"${singBoxConfigPath}socks5_01_outbound_route.json"
+{
+  "route": {
+    "final": "socks5_outbound"
+  }
+}
+EOF
         fi
 
         echoContent green " ---> Socks5全局出站设置完毕"
@@ -7860,7 +7870,6 @@ setSocks5Inbound() {
             }
           ]
         }
-        | (if $enableAead then .inbounds[0].users[0].aead = true else . end)
     ' >"${socks5InboundJsonFile}"; then
         rm -f "${socks5InboundJsonFile}"
         echoContent red " ---> 生成 Socks5 入站配置失败，请检查输入"
