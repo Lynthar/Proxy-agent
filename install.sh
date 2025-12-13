@@ -3483,6 +3483,46 @@ EOF
       }
 EOF
         fi
+        local socks5XrayStreamSettingsConfig=
+        if [[ -n "${socks5TransportType}" && "${socks5TransportType}" != "1" ]]; then
+            local socks5XrayNetwork="tcp"
+            local socks5XrayTransportConfig=
+
+            if [[ "${socks5TransportType}" == "3" ]]; then
+                socks5XrayNetwork="ws"
+                read -r -d '' socks5XrayTransportConfig <<EOF || true
+,
+        "wsSettings": {
+          "path": "${socks5TransportPath}",
+          "headers": {
+            "Host": "${socks5TransportHost}"
+          }
+        }
+EOF
+            elif [[ "${socks5TransportType}" == "4" ]]; then
+                socks5XrayNetwork="http"
+                read -r -d '' socks5XrayTransportConfig <<EOF || true
+,
+        "httpSettings": {
+          "path": "${socks5TransportPath}",
+          "host": ${socks5TransportHostList}
+        }
+EOF
+            fi
+
+            read -r -d '' socks5XrayStreamSettingsConfig <<EOF || true
+,
+      "streamSettings": {
+        "network": "${socks5XrayNetwork}",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "${socks5TransportServerName}",
+          "alpn": ${socks5TransportAlpnJson},
+          "allowInsecure": ${socks5TransportInsecure}
+        }${socks5XrayTransportConfig}
+      }
+EOF
+        fi
         cat <<EOF >"/etc/v2ray-agent/xray/conf/${tag}.json"
 {
   "outbounds": [
@@ -3502,7 +3542,7 @@ EOF
             ]
           }
         ]
-      }${socks5ProxySettings}
+      }${socks5ProxySettings}${socks5XrayStreamSettingsConfig}
     }
   ]
 }
@@ -7536,6 +7576,50 @@ setSocks5Outbound() {
         echoContent green " ---> 当前Socks5出站将通过 ${socks5RoutingProxyTag} 链式转发"
     fi
     echo
+    echoContent yellow "可选：传输层 [1]直连(默认) [2]TLS [3]WS [4]H2"
+    read -r -p "传输层:" socks5TransportType
+    if [[ -z "${socks5TransportType}" || ! "${socks5TransportType}" =~ ^[1-4]$ ]]; then
+        socks5TransportType=1
+    fi
+
+    socks5TransportAlpnJson="[]"
+    socks5TransportInsecure=false
+    socks5TransportServerName=
+    socks5TransportPath=
+    socks5TransportHost=
+    socks5TransportHostList="[]"
+
+    if [[ "${socks5TransportType}" != "1" ]]; then
+        read -r -p "请输入 serverName(SNI，可为空):" socks5TransportServerName
+        read -r -p "请输入 alpn，多个用英文逗号分隔(留空则不设置):" socks5TransportAlpn
+        if [[ -n "${socks5TransportAlpn}" ]]; then
+            socks5TransportAlpnJson=$(echo "\"${socks5TransportAlpn}\"" | jq -c 'split(",")')
+        fi
+        read -r -p "是否跳过TLS证书验证？[y/n]:" socks5TransportAllowInsecure
+        if [[ "${socks5TransportAllowInsecure}" == "y" ]]; then
+            socks5TransportInsecure=true
+        fi
+
+        if [[ "${socks5TransportType}" == "3" || "${socks5TransportType}" == "4" ]]; then
+            read -r -p "请输入 path:" socks5TransportPath
+            if [[ -z "${socks5TransportPath}" ]]; then
+                echoContent red " ---> path不可为空"
+                exit 0
+            elif ! echo "${socks5TransportPath}" | grep -qE '^/'; then
+                socks5TransportPath="/${socks5TransportPath}"
+            fi
+
+            read -r -p "请输入 host:" socks5TransportHost
+            if [[ -z "${socks5TransportHost}" ]]; then
+                echoContent red " ---> host不可为空"
+                exit 0
+            fi
+            if [[ "${socks5TransportType}" == "4" ]]; then
+                socks5TransportHostList=$(echo "\"${socks5TransportHost}\"" | jq -c 'split(",")')
+            fi
+        fi
+    fi
+    
     if [[ -n "${singBoxConfigPath}" ]]; then
         local socks5DetourConfig=
         if [[ -n "${socks5RoutingProxyTag}" ]]; then
@@ -7543,6 +7627,41 @@ setSocks5Outbound() {
 ,
           "detour":"${socks5RoutingProxyTag}"
 EOF
+        fi
+        local socks5SingBoxTLSConfig=
+        local socks5SingBoxTransportConfig=
+        if [[ "${socks5TransportType}" != "1" ]]; then
+            read -r -d '' socks5SingBoxTLSConfig <<EOF || true
+,
+          "tls": {
+            "enabled": true,
+            "server_name": "${socks5TransportServerName}",
+            "alpn": ${socks5TransportAlpnJson},
+            "insecure": ${socks5TransportInsecure}
+          }
+EOF
+
+            if [[ "${socks5TransportType}" == "3" ]]; then
+                read -r -d '' socks5SingBoxTransportConfig <<EOF || true
+,
+          "transport": {
+            "type": "ws",
+            "path": "${socks5TransportPath}",
+            "headers": {
+              "Host": "${socks5TransportHost}"
+            }
+          }
+EOF
+            elif [[ "${socks5TransportType}" == "4" ]]; then
+                read -r -d '' socks5SingBoxTransportConfig <<EOF || true
+,
+          "transport": {
+            "type": "http",
+            "path": "${socks5TransportPath}",
+            "host": ${socks5TransportHostList}
+          }
+EOF
+            fi
         fi
         cat <<EOF >"${singBoxConfigPath}socks5_outbound.json"
 {
@@ -7554,7 +7673,7 @@ EOF
           "server_port": ${socks5RoutingOutboundPort},
           "version": "5",
           "username":"${socks5RoutingOutboundUserName}",
-          "password":"${socks5RoutingOutboundPassword}"${socks5DetourConfig}
+          "password":"${socks5RoutingOutboundPassword}"${socks5DetourConfig}${socks5SingBoxTLSConfig}${socks5SingBoxTransportConfig}
         }
     ]
 }
