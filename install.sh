@@ -3341,25 +3341,6 @@ initTuicProtocol() {
     fi
 }
 
-# 初始化tuic配置
-#initTuicConfig() {
-#    echoContent skyBlue "\n进度 $1/${totalProgress} : 初始化Tuic配置"
-#
-#    initTuicPort
-#    initTuicProtocol
-#    cat <<EOF >/etc/v2ray-agent/tuic/conf/config.json
-#{
-#    "server": "[::]:${tuicPort}",
-#    "users": $(initXrayClients 9),
-#    "certificate": "/etc/v2ray-agent/tls/${currentHost}.crt",
-#    "private_key": "/etc/v2ray-agent/tls/${currentHost}.key",
-#    "congestion_control":"${tuicAlgorithm}",
-#    "alpn": ["h3"],
-#    "log_level": "warn"
-#}
-#EOF
-#}
-
 # 初始化singbox route配置
 initSingBoxRouteConfig() {
     downloadSingBoxGeositeDB
@@ -3828,8 +3809,8 @@ initSingBoxHysteria2Config() {
             "listen": "::",
             "listen_port": ${hysteriaPort},
             "users": $(initXrayClients 6),
-            "up_mbps":${hysteria2ClientUploadSpeed},
-            "down_mbps":${hysteria2ClientDownloadSpeed},
+            "up_mbps":${hysteria2ClientDownloadSpeed},
+            "down_mbps":${hysteria2ClientUploadSpeed},
             "tls": {
                 "enabled": true,
                 "server_name":"${currentHost}",
@@ -3882,67 +3863,6 @@ singBoxMergeConfig() {
     rm /etc/v2ray-agent/sing-box/conf/config.json >/dev/null 2>&1
     /etc/v2ray-agent/sing-box/sing-box merge config.json -C /etc/v2ray-agent/sing-box/conf/config/ -D /etc/v2ray-agent/sing-box/conf/ >/dev/null 2>&1
 }
-
-# 初始化Xray Trojan XTLS 配置文件
-#initXrayFrontingConfig() {
-#    echoContent red " ---> Trojan暂不支持 xtls-rprx-vision"
-#    if [[ -z "${configPath}" ]]; then
-#        echoContent red " ---> 未安装，请使用脚本安装"
-#        menu
-#        exit 0
-#    fi
-#    if [[ "${coreInstallType}" != "1" ]]; then
-#        echoContent red " ---> 未安装可用类型"
-#    fi
-#    local xtlsType=
-#    if echo ${currentInstallProtocolType} | grep -q trojan; then
-#        xtlsType=VLESS
-#    else
-#        xtlsType=Trojan
-#    fi
-#
-#    echoContent skyBlue "\n功能 1/${totalProgress} : 前置切换为${xtlsType}"
-#    echoContent red "\n=============================================================="
-#    echoContent yellow "# 注意事项\n"
-#    echoContent yellow "会将前置替换为${xtlsType}"
-#    echoContent yellow "如果前置是Trojan，查看账号时则会出现两个Trojan协议的节点，有一个不可用xtls"
-#    echoContent yellow "再次执行可切换至上一次的前置\n"
-#
-#    echoContent yellow "1.切换至${xtlsType}"
-#    echoContent red "=============================================================="
-#    read -r -p "请选择:" selectType
-#    if [[ "${selectType}" == "1" ]]; then
-#
-#        if [[ "${xtlsType}" == "Trojan" ]]; then
-#
-#            local VLESSConfig
-#            VLESSConfig=$(cat ${configPath}${frontingType}.json)
-#            VLESSConfig=${VLESSConfig//"id"/"password"}
-#            VLESSConfig=${VLESSConfig//VLESSTCP/TrojanTCPXTLS}
-#            VLESSConfig=${VLESSConfig//VLESS/Trojan}
-#            VLESSConfig=${VLESSConfig//"vless"/"trojan"}
-#            VLESSConfig=${VLESSConfig//"id"/"password"}
-#
-#            echo "${VLESSConfig}" | jq . >${configPath}02_trojan_TCP_inbounds.json
-#            rm ${configPath}${frontingType}.json
-#        elif [[ "${xtlsType}" == "VLESS" ]]; then
-#
-#            local VLESSConfig
-#            VLESSConfig=$(cat ${configPath}02_trojan_TCP_inbounds.json)
-#            VLESSConfig=${VLESSConfig//"password"/"id"}
-#            VLESSConfig=${VLESSConfig//TrojanTCPXTLS/VLESSTCP}
-#            VLESSConfig=${VLESSConfig//Trojan/VLESS}
-#            VLESSConfig=${VLESSConfig//"trojan"/"vless"}
-#            VLESSConfig=${VLESSConfig//"password"/"id"}
-#
-#            echo "${VLESSConfig}" | jq . >${configPath}02_VLESS_TCP_inbounds.json
-#            rm ${configPath}02_trojan_TCP_inbounds.json
-#        fi
-#        reloadCore
-#    fi
-#
-#    exit 0
-#}
 
 # 初始化sing-box端口
 initSingBoxPort() {
@@ -4153,6 +4073,7 @@ EOF
         initXrayXHTTPort
         initRealityClientServersName
         initRealityKey
+        initRealityShortIds
         initRealityMldsa65
         cat <<EOF >/etc/v2ray-agent/xray/conf/12_VLESS_XHTTP_inbounds.json
 {
@@ -4178,10 +4099,10 @@ EOF
             ],
             "privateKey": "${realityPrivateKey}",
             "publicKey": "${realityPublicKey}",
-            "maxTimeDiff": 70000,
+            "maxTimeDiff": 60000,
             "shortIds": [
-                "",
-                "6ba85179e30d4fc2"
+                "${realityShortId1}",
+                "${realityShortId2}"
             ]
         },
         "xhttpSettings": {
@@ -4270,7 +4191,6 @@ EOF
                 ${fallbacksList}
             ]
           },
-          "add": "${add}",
           "streamSettings": {
             "network": "tcp",
             "security": "tls",
@@ -4301,6 +4221,7 @@ EOF
         initXrayRealityPort
         initRealityClientServersName
         initRealityKey
+        initRealityShortIds
         initRealityMldsa65
         cat <<EOF >/etc/v2ray-agent/xray/conf/07_VLESS_vision_reality_inbounds.json
 {
@@ -4350,10 +4271,10 @@ EOF
           "publicKey": "${realityPublicKey}",
           "mldsa65Seed": "${realityMldsa65Seed}",
           "mldsa65Verify": "${realityMldsa65Verify}",
-          "maxTimeDiff": 70000,
+          "maxTimeDiff": 60000,
           "shortIds": [
-            "",
-            "6ba85179e30d4fc2"
+            "${realityShortId1}",
+            "${realityShortId2}"
           ]
         }
       },
@@ -4626,6 +4547,7 @@ EOF
         echoContent yellow "\n================= 配置VLESS+Reality+Vision =================\n"
         initRealityClientServersName
         initRealityKey
+        initRealityShortIds
         echoContent skyBlue "\n开始配置VLESS+Reality+Vision协议端口"
         echo
         mapfile -t result < <(initSingBoxPort "${singBoxVLESSRealityVisionPort}")
@@ -4650,8 +4572,8 @@ EOF
             },
             "private_key": "${realityPrivateKey}",
             "short_id": [
-                "",
-                "6ba85179e30d4fc2"
+                "${realityShortId1}",
+                "${realityShortId2}"
             ]
         }
       }
@@ -4667,6 +4589,7 @@ EOF
         echoContent yellow "\n================== 配置VLESS+Reality+gRPC ==================\n"
         initRealityClientServersName
         initRealityKey
+        initRealityShortIds
         echoContent skyBlue "\n开始配置VLESS+Reality+gRPC协议端口"
         echo
         mapfile -t result < <(initSingBoxPort "${singBoxVLESSRealityGRPCPort}")
@@ -4691,8 +4614,8 @@ EOF
             },
             "private_key": "${realityPrivateKey}",
             "short_id": [
-                "",
-                "6ba85179e30d4fc2"
+                "${realityShortId1}",
+                "${realityShortId2}"
             ]
         }
       },
@@ -4723,8 +4646,8 @@ EOF
             "listen": "::",
             "listen_port": ${result[-1]},
             "users": $(initSingBoxClients 6),
-            "up_mbps":${hysteria2ClientUploadSpeed},
-            "down_mbps":${hysteria2ClientDownloadSpeed},
+            "up_mbps":${hysteria2ClientDownloadSpeed},
+            "down_mbps":${hysteria2ClientUploadSpeed},
             "tls": {
                 "enabled": true,
                 "server_name":"${sslDomain}",
@@ -7783,9 +7706,9 @@ setSocks5Inbound() {
     socks5InboundListen=$(stripAnsi "${socks5InboundListen}")
 
     # 认证方式选择
-    echoContent yellow "\n请选择认证方式（落地机与上游需保持一致，AEAD更安全）"
-    echoContent yellow "1.用户名/密码[回车默认，兼容性高]"
-    echoContent yellow "2.预共享密钥(AEAD)[安全性更高，默认使用下方UUID生成]"
+    echoContent yellow "\n请选择认证方式（落地机与上游需保持一致）"
+    echoContent yellow "1.用户名/密码[回车默认，可自定义]"
+    echoContent yellow "2.统一密钥[用户名和密码使用相同UUID，更安全]"
     read -r -p "请选择:" socks5InboundAuthType
 
     local socks5InboundEnableAEAD=false
@@ -7993,8 +7916,8 @@ setSocks5Outbound() {
     fi
     echo
     echoContent yellow "请选择上游认证方式（必须与落地机配置一致）"
-    echoContent yellow "1.用户名/密码[回车默认，通用]"
-    echoContent yellow "2.预共享密钥(AEAD)[更安全，默认自动生成随机值]"
+    echoContent yellow "1.用户名/密码[回车默认，可自定义]"
+    echoContent yellow "2.统一密钥[用户名和密码使用相同UUID，更安全]"
     read -r -p "请选择:" socks5RoutingOutboundAuthType
     if [[ -z "${socks5RoutingOutboundAuthType}" || "${socks5RoutingOutboundAuthType}" == "1" ]]; then
         socks5RoutingOutboundAuthType="password"
@@ -8006,11 +7929,11 @@ setSocks5Outbound() {
     fi
     echo
     if [[ "${socks5RoutingOutboundAuthType}" == "aead" ]]; then
-        echoContent skyBlue "使用 AEAD 模式时，预共享密钥需与落地机相同，可直接回车使用自动生成的随机值"
+        echoContent skyBlue "统一密钥模式：用户名和密码使用相同的UUID，需与落地机配置一致"
         echoContent yellow "下方\"请选择\"对应：1 直接输入(回车默认随机值) / 2 读取文件 / 3 读取环境变量"
         local defaultSocks5OutboundAEADKey
         defaultSocks5OutboundAEADKey=$(cat /proc/sys/kernel/random/uuid)
-        socks5RoutingOutboundAEADKey=$(readCredentialBySource "预共享密钥" "${defaultSocks5OutboundAEADKey}" | stripAnsi | tail -n 1)
+        socks5RoutingOutboundAEADKey=$(readCredentialBySource "统一密钥" "${defaultSocks5OutboundAEADKey}" | stripAnsi | tail -n 1)
         socks5RoutingOutboundUserName=${socks5RoutingOutboundAEADKey}
         socks5RoutingOutboundPassword=${socks5RoutingOutboundAEADKey}
     else
@@ -9900,8 +9823,11 @@ initRealityKey() {
             else
                 realityX25519Key=$(/etc/v2ray-agent/xray/xray x25519)
             fi
-            realityPrivateKey=$(echo "${realityX25519Key}" | grep "PrivateKey" | awk '{print $2}')
-            realityPublicKey=$(echo "${realityX25519Key}" | grep "Password" | awk '{print $2}')
+            # 兼容新旧版本 Xray x25519 输出格式
+            # 旧版: "Private key: xxx" / "Public key: xxx"
+            # 新版: "PrivateKey: xxx" / "Password: xxx"
+            realityPrivateKey=$(echo "${realityX25519Key}" | grep -E "Private|PrivateKey" | awk '{print $NF}')
+            realityPublicKey=$(echo "${realityX25519Key}" | grep -E "Public|Password" | awk '{print $NF}')
             if [[ -z "${realityPrivateKey}" ]]; then
                 echoContent red "输入的Private Key不合法"
                 initRealityKey
@@ -9912,6 +9838,15 @@ initRealityKey() {
         fi
     fi
 }
+
+# 生成随机 Reality shortIds
+initRealityShortIds() {
+    if [[ -z "${realityShortId1}" ]]; then
+        realityShortId1=$(openssl rand -hex 8)
+        realityShortId2=$(openssl rand -hex 8)
+    fi
+}
+
 # 初始化 mldsa65Seed
 initRealityMldsa65() {
     echoContent skyBlue "\n生成Reality mldsa65\n"
@@ -9978,9 +9913,6 @@ initRealityClientServersName() {
             realityServerName=
             realityDomainPort=
         fi
-    elif [[ -n "${realityServerName}" && -z "${lastInstallationConfig}" ]]; then
-        realityServerName=
-        realityDomainPort=
     fi
 
     if [[ -z "${realityServerName}" ]]; then
