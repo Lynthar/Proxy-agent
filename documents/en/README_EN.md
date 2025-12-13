@@ -30,7 +30,7 @@ bash wget -P /root -N "https://raw.githubusercontent.com/mack-a/v2ray-agent/mast
 After installation, run the following command to open the management menu again:
 
 ```
-vasma
+pasly
 ```
 
 ## Documentation and Guides
