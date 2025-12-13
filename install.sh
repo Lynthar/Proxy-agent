@@ -7801,6 +7801,7 @@ setSocks5Inbound() {
           "listen":"${socks5InboundListen}",
           "listen_port":${result[-1]},
           "tag":"socks5_inbound",
+          "auth":"${socks5InboundAuthType}",
           "users":[
             {
                   "username": "${socks5InboundUserName}",
@@ -8124,6 +8125,7 @@ EOF
           "server": "${socks5RoutingOutboundIP}",
           "server_port": ${socks5RoutingOutboundPort},
           "version": "5",
+          "auth": "${socks5RoutingOutboundAuthType}",
         ${socks5OutboundUsers}${socks5DetourConfig}${socks5HealthcheckConfig}${socks5SingBoxTLSConfig}${socks5SingBoxTransportConfig}
         }
     ]
