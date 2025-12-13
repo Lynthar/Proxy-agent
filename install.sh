@@ -7139,6 +7139,7 @@ socks5Routing() {
     echoContent yellow "# 流量明文访问"
 
     echoContent yellow "# 仅限正常网络环境下设备间流量转发，禁止用于代理访问。"
+    echoContent yellow "# 推荐仅监听本机、开启上游证书校验并保持最小日志，降低暴露与劫持风险。"
     echoContent yellow "# 使用提示：更多示例见 documents 目录\n"
 
     echoContent yellow "1.Socks5出站"
@@ -7373,6 +7374,12 @@ setSocks5Inbound() {
     echoContent green "\n ---> 入站Socks5端口：${result[-1]}"
     echoContent green "\n ---> 此端口需要配置到其他机器出站，请不要进行代理行为"
 
+    echoContent yellow "\n监听地址[回车默认 127.0.0.1，仅本机访问，推荐；改为0.0.0.0/:: 将暴露到公网，存在被扫描和滥用风险]"
+    read -r -p '监听地址:' socks5InboundListen
+    if [[ -z "${socks5InboundListen}" ]]; then
+        socks5InboundListen="127.0.0.1"
+    fi
+
     echoContent yellow "\n请输入自定义UUID[需合法]，[回车]随机UUID"
     read -r -p 'UUID:' socks5RoutingUUID
     if [[ -z "${socks5RoutingUUID}" ]]; then
@@ -7406,7 +7413,7 @@ setSocks5Inbound() {
     "inbounds":[
         {
           "type": "socks",
-          "listen":"::",
+          "listen":"${socks5InboundListen}",
           "listen_port":${result[-1]},
           "tag":"socks5_inbound",
           "users":[
@@ -7530,6 +7537,27 @@ setSocks5Outbound() {
         exit 0
     fi
     echo
+    echoContent yellow "是否为上游开启TLS并校验证书？[回车默认开启，推荐确保链路加密；如上游不支持TLS请选择n]\n" \
+        "关闭或跳过校验会存在中间人攻击风险"
+    read -r -p "TLS+证书校验[y/n]:" socks5OutboundTLSStatus
+    local socks5OutboundTLSEnabled=true
+    local socks5OutboundTLSInsecure=false
+    if [[ "${socks5OutboundTLSStatus}" == "n" ]]; then
+        socks5OutboundTLSEnabled=false
+    fi
+    local socks5OutboundTLSServerName=${socks5RoutingOutboundIP}
+    if [[ "${socks5OutboundTLSEnabled}" == "true" ]]; then
+        read -r -p "证书SNI[回车默认 ${socks5OutboundTLSServerName}]:" socks5OutboundTLSReadServerName
+        if [[ -n "${socks5OutboundTLSReadServerName}" ]]; then
+            socks5OutboundTLSServerName=${socks5OutboundTLSReadServerName}
+        fi
+        echoContent yellow "是否跳过证书校验？[y/N 默认N，跳过存在被劫持风险]"
+        read -r -p "跳过证书校验:" socks5OutboundSkipVerify
+        if [[ "${socks5OutboundSkipVerify}" == "y" ]]; then
+            socks5OutboundTLSInsecure=true
+        fi
+    fi
+
     echoContent yellow "可选：通过已有出站进行链式拨号（例如先走WARP或本机的其他出站），回车则直连"
     read -r -p "链式出站标签:" socks5RoutingProxyTag
     if [[ -n "${socks5RoutingProxyTag}" ]]; then
@@ -7544,6 +7572,17 @@ setSocks5Outbound() {
           "detour":"${socks5RoutingProxyTag}"
 EOF
         fi
+        local socks5TLSConfig=
+        if [[ "${socks5OutboundTLSEnabled}" == "true" ]]; then
+            read -r -d '' socks5TLSConfig <<EOF || true
+,
+          "tls":{
+              "enabled": true,
+              "server_name":"${socks5OutboundTLSServerName}",
+              "insecure": ${socks5OutboundTLSInsecure}
+          }
+EOF
+        fi
         cat <<EOF >"${singBoxConfigPath}socks5_outbound.json"
 {
     "outbounds":[
@@ -7554,7 +7593,7 @@ EOF
           "server_port": ${socks5RoutingOutboundPort},
           "version": "5",
           "username":"${socks5RoutingOutboundUserName}",
-          "password":"${socks5RoutingOutboundPassword}"${socks5DetourConfig}
+          "password":"${socks5RoutingOutboundPassword}"${socks5DetourConfig}${socks5TLSConfig}
         }
     ]
 }
@@ -9491,7 +9530,7 @@ singBoxLog() {
 {
   "log": {
     "disabled": $1,
-    "level": "debug",
+    "level": "warn",
     "output": "/etc/v2ray-agent/sing-box/conf/box.log",
     "timestamp": true
   }
