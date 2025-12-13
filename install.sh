@@ -364,11 +364,13 @@ readCredentialBySource() {
     echoContent yellow "1.直接输入${defaultValue:+[回车默认] }" >&2
     echoContent yellow "2.从文件读取" >&2
     echoContent yellow "3.从环境变量读取" >&2
-    read -r -p "请选择:" credentialSource
+    echo -n "请选择:" >&2
+    read -r credentialSource
     local credentialValue=
     case ${credentialSource} in
     2)
-        read -r -p "请输入文件路径:" credentialPath
+        echo -n "请输入文件路径:" >&2
+        read -r credentialPath
         if [[ -z "${credentialPath}" || ! -f "${credentialPath}" ]]; then
             echoContent red " ---> 文件路径无效"
             exit 0
@@ -376,11 +378,13 @@ readCredentialBySource() {
         credentialValue=$(tr -d '\n' <"${credentialPath}")
         ;;
     3)
-        read -r -p "请输入环境变量名称:" credentialEnv
+        echo -n "请输入环境变量名称:" >&2
+        read -r credentialEnv
         credentialValue=${!credentialEnv}
         ;;
     *)
-        read -r -p "${tips}:" credentialValue
+        echo -n "${tips}:" >&2
+        read -r credentialValue
         if [[ -z "${credentialValue}" && -n "${defaultValue}" ]]; then
             credentialValue=${defaultValue}
         fi
@@ -7774,10 +7778,12 @@ setSocks5Inbound() {
     echoContent yellow "2.预共享密钥(AEAD)[安全性更高，默认使用下方UUID生成]"
     read -r -p "请选择:" socks5InboundAuthType
 
+    local socks5InboundEnableAEAD=false
     if [[ -z "${socks5InboundAuthType}" || "${socks5InboundAuthType}" == "1" ]]; then
         socks5InboundAuthType="password"
     elif [[ "${socks5InboundAuthType}" == "2" ]]; then
         socks5InboundAuthType="aead"
+        socks5InboundEnableAEAD=true
     else
         echoContent red " ---> 选择错误"
         exit 0
@@ -7800,12 +7806,12 @@ setSocks5Inbound() {
     if [[ "${socks5InboundAuthType}" == "aead" ]]; then
         echoContent skyBlue "AEAD 预共享密钥需与上游一致，可直接回车沿用上方UUID或选择其他录入方式"
         echoContent yellow "下方\"请选择\"对应：1 直接输入(回车默认UUID) / 2 读取文件 / 3 读取环境变量"
-        socks5InboundAEADKey=$(readCredentialBySource "预共享密钥" "${socks5RoutingUUID}")
+        socks5InboundAEADKey=$(readCredentialBySource "预共享密钥" "${socks5RoutingUUID}" | stripAnsi | tail -n 1)
         socks5InboundUserName="${socks5InboundAEADKey}"
         socks5InboundPassword="${socks5InboundAEADKey}"
     else
-        socks5InboundUserName=$(readCredentialBySource "用户名称" "${socks5RoutingUUID}")
-        socks5InboundPassword=$(readCredentialBySource "用户密码" "${socks5RoutingUUID}")
+        socks5InboundUserName=$(readCredentialBySource "用户名称" "${socks5RoutingUUID}" | stripAnsi | tail -n 1)
+        socks5InboundPassword=$(readCredentialBySource "用户密码" "${socks5RoutingUUID}" | stripAnsi | tail -n 1)
     fi
 
     echoContent yellow "\n请选择分流域名DNS解析类型"
@@ -7833,7 +7839,7 @@ setSocks5Inbound() {
         --arg listen "${socks5InboundListen}" \
         --argjson listenPort "${socks5InboundPort}" \
         --arg tag "socks5_inbound" \
-        --arg auth "${socks5InboundAuthType}" \
+        --argjson enableAead "${socks5InboundEnableAEAD}" \
         --arg user "${socks5InboundUserName}" \
         --arg pass "${socks5InboundPassword}" \
         --arg domainStrategy "${domainStrategy}" '
@@ -7854,7 +7860,7 @@ setSocks5Inbound() {
             }
           ]
         }
-        | (if $auth == "aead" then .inbounds[0].users[0].aead = true else . end)
+        | (if $enableAead then .inbounds[0].users[0].aead = true else . end)
     ' >"${socks5InboundJsonFile}"; then
         rm -f "${socks5InboundJsonFile}"
         echoContent red " ---> 生成 Socks5 入站配置失败，请检查输入"
@@ -7995,13 +8001,12 @@ setSocks5Outbound() {
         echoContent yellow "下方\"请选择\"对应：1 直接输入(回车默认随机值) / 2 读取文件 / 3 读取环境变量"
         local defaultSocks5OutboundAEADKey
         defaultSocks5OutboundAEADKey=$(cat /proc/sys/kernel/random/uuid)
-        socks5RoutingOutboundAEADKey=$(readCredentialBySource "预共享密钥" "${defaultSocks5OutboundAEADKey}")
-        socks5RoutingOutboundAEADKey=$(stripAnsi "${socks5RoutingOutboundAEADKey}")
+        socks5RoutingOutboundAEADKey=$(readCredentialBySource "预共享密钥" "${defaultSocks5OutboundAEADKey}" | stripAnsi | tail -n 1)
         socks5RoutingOutboundUserName=${socks5RoutingOutboundAEADKey}
         socks5RoutingOutboundPassword=${socks5RoutingOutboundAEADKey}
     else
-        socks5RoutingOutboundUserName=$(readCredentialBySource "请输入用户名" "")
-        socks5RoutingOutboundPassword=$(readCredentialBySource "请输入用户密码" "")
+        socks5RoutingOutboundUserName=$(readCredentialBySource "请输入用户名" "" | stripAnsi | tail -n 1)
+        socks5RoutingOutboundPassword=$(readCredentialBySource "请输入用户密码" "" | stripAnsi | tail -n 1)
     fi
     echo
     echoContent skyBlue "TLS 仅作用于本机 -> 落地机链路，需落地机已部署 TLS 终端（脚本不负责生成证书）"
