@@ -7827,8 +7827,9 @@ setSocks5Inbound() {
     socks5InboundUserName=$(stripAnsi "${socks5InboundUserName}")
     socks5InboundPassword=$(stripAnsi "${socks5InboundPassword}")
 
-    local socks5InboundJson
-    socks5InboundJson=$(jq -n \
+    local socks5InboundJsonFile
+    socks5InboundJsonFile=$(mktemp)
+    if ! jq -n \
         --arg listen "${socks5InboundListen}" \
         --argjson listenPort "${socks5InboundPort}" \
         --arg tag "socks5_inbound" \
@@ -7837,14 +7838,7 @@ setSocks5Inbound() {
         --arg pass "${socks5InboundPassword}" \
         --arg domainStrategy "${domainStrategy}" '
         {
-          "inbounds": [
-            {
-              "type": "socks",
-              "listen":"${socks5InboundListen}",
-              "listen_port":${socks5InboundPort},
-              "tag":"socks5_inbound",
-              "auth":"${socks5InboundAuthType}",
-              "users":[
+          inbounds: [
             {
               type: "socks",
               listen: $listen,
@@ -7861,11 +7855,13 @@ setSocks5Inbound() {
             }
           ]
         }
-    ')
+    ' >"${socks5InboundJsonFile}"; then
+        rm -f "${socks5InboundJsonFile}"
+        echoContent red " ---> 生成 Socks5 入站配置失败，请检查输入"
+        exit 0
+    fi
 
-    echo "${socks5InboundJson}" | jq . >/etc/v2ray-agent/sing-box/conf/config/20_socks5_inbounds.json
-
-    validateJsonFile "/etc/v2ray-agent/sing-box/conf/config/20_socks5_inbounds.json"
+    mv "${socks5InboundJsonFile}" /etc/v2ray-agent/sing-box/conf/config/20_socks5_inbounds.json
 
     validateJsonFile "/etc/v2ray-agent/sing-box/conf/config/20_socks5_inbounds.json"
 
@@ -8114,107 +8110,87 @@ setSocks5Outbound() {
     # 仅当指定配置文件目录时才生成 sing-box 出站 JSON
     if [[ -n "${singBoxConfigPath}" ]]; then
         local socks5ConfigFile="${singBoxConfigPath}socks5_outbound.json"
-
-        # 提前设置 healthcheck 默认值，保证后续使用一致
         socks5HealthCheckURL=${socks5HealthCheckURL:-https://www.gstatic.com/generate_204}
         socks5HealthCheckInterval=${socks5HealthCheckInterval:-30s}
 
-        # detour + healthcheck 配置变量初始化
-        local socks5DetourConfig=
-        local socks5HealthcheckConfig=
-
-        # 基于 socks5RoutingProxyTagList[*] 的 detour 构造逻辑
-        if [[ -n "${socks5RoutingProxyTagList[*]}" ]]; then
-            read -r -d '' socks5DetourConfig <<EOF || true
-,
-          "detour":"${socks5RoutingProxyTagList[0]}"
-EOF
+        if [[ -z "${socks5RoutingOutboundIP}" ]]; then
+            echoContent red " ---> 上游地址不可为空"
+            exit 0
         fi
 
-        # TLS / transport 相关配置（来自 codex/add-transport-options-to-socks-wizard 分支）
-        # 使用显式的 TLS/transport 片段，避免 JSON 拼接时遗漏逗号或缩进
-        local socks5SingBoxTLSConfig=
-        local socks5SingBoxTransportConfig=
-        if [[ "${socks5TransportType}" != "1" ]]; then
-            read -r -d '' socks5SingBoxTLSConfig <<EOF || true
-,
-          "tls": {
-            "enabled": true,
-            "server_name": "${socks5TransportServerName}",
-            "alpn": ${socks5TransportAlpnJson},
-            "insecure": ${socks5TransportInsecure}
-          }
-EOF
+        if [[ -z "${socks5RoutingOutboundPort}" || ! "${socks5RoutingOutboundPort}" =~ ^[0-9]+$ ]]; then
+            echoContent red " ---> 上游端口格式错误"
+            exit 0
+        fi
 
-            if [[ "${socks5TransportType}" == "3" ]]; then
-                read -r -d '' socks5SingBoxTransportConfig <<EOF || true
-,
-          "transport": {
-            "type": "ws",
-            "path": "${socks5TransportPath}",
-            "headers": {
-              "Host": "${socks5TransportHost}"
-            }
-          }
-EOF
-            elif [[ "${socks5TransportType}" == "4" ]]; then
-                read -r -d '' socks5SingBoxTransportConfig <<EOF || true
-,
-          "transport": {
-            "type": "http",
-            "path": "${socks5TransportPath}",
-            "host": ${socks5TransportHostList}
-          }
-EOF
+        if [[ "${socks5RoutingOutboundAuthType}" == "password" ]]; then
+            if [[ -z "${socks5RoutingOutboundUserName}" ]]; then
+                socks5RoutingOutboundUserName="admin"
             fi
-        fi
-
-        # users 数组配置（来自 master 分支）
-        local socks5OutboundUsers
-        read -r -d '' socks5OutboundUsers <<EOF || true
-,          "users": [
-            {
-              "username": "${socks5RoutingOutboundUserName}",
-              "password": "${socks5RoutingOutboundPassword}"
-            }
-          ]
-EOF
-
-        # healthcheck 配置（来自 codex/add-healthcheck-input-for-socks-outbound 分支）
-        if [[ -n "${socks5HealthCheckURL}${socks5HealthCheckPort}${socks5HealthCheckInterval}" ]]; then
-            local socks5HealthCheckDestinationConfig=
-            if [[ -n "${socks5HealthCheckPort}" ]]; then
-                read -r -d '' socks5HealthCheckDestinationConfig <<EOF || true
-,
-              "destination": "${socks5RoutingOutboundIP}:${socks5HealthCheckPort}"
-EOF
+            if [[ -z "${socks5RoutingOutboundPassword}" ]]; then
+                socks5RoutingOutboundPassword="${uuidNew}"
             fi
-            read -r -d '' socks5HealthcheckConfig <<EOF || true
-,
-          "healthcheck": {
-              "enable": true,
-              "url": "${socks5HealthCheckURL}",
-              "interval": "${socks5HealthCheckInterval}"${socks5HealthCheckDestinationConfig}
-          }
-EOF
+        elif [[ "${socks5RoutingOutboundAuthType}" == "aead" ]]; then
+            if [[ -z "${socks5RoutingOutboundAEADKey}" ]]; then
+                echoContent red " ---> 预共享密钥不可为空"
+                exit 0
+            fi
+            socks5RoutingOutboundUserName="${socks5RoutingOutboundAEADKey}"
+            socks5RoutingOutboundPassword="${socks5RoutingOutboundAEADKey}"
         fi
 
-        # 按国际通用风格输出 JSON，便于读写和后续审计
-        cat <<EOF >"${socks5ConfigFile}"
-{
-    "outbounds": [
-        {
-          "type": "socks",
-          "tag": "socks5_outbound",
-          "server": "${socks5RoutingOutboundIP}",
-          "server_port": ${socks5RoutingOutboundPort},
-          "version": "5",
-          "auth": "${socks5RoutingOutboundAuthType}",
-        ${socks5OutboundUsers}${socks5DetourConfig}${socks5HealthcheckConfig}${socks5SingBoxTLSConfig}${socks5SingBoxTransportConfig}
-        }
-    ]
+        local socks5ConfigTemp
+        socks5ConfigTemp=$(mktemp)
+
+        if ! jq -n \
+            --arg server "${socks5RoutingOutboundIP}" \
+            --argjson port "${socks5RoutingOutboundPort}" \
+            --arg auth "${socks5RoutingOutboundAuthType}" \
+            --arg user "${socks5RoutingOutboundUserName}" \
+            --arg pass "${socks5RoutingOutboundPassword}" \
+            --argjson alpn "${socks5TransportAlpnJson:-[]}" \
+            --arg path "${socks5TransportPath}" \
+            --arg host "${socks5TransportHost}" \
+            --argjson hostList "${socks5TransportHostList:-[]}" \
+            --argjson insecure "${socks5TransportInsecure:-false}" \
+            --arg detour "${socks5RoutingProxyTagList[0]}" \
+            --arg healthUrl "${socks5HealthCheckURL}" \
+            --arg healthInterval "${socks5HealthCheckInterval}" \
+            --arg healthPort "${socks5HealthCheckPort}" \
+            --arg transportType "${socks5TransportType}" \
+            --arg serverName "${socks5TransportServerName}" ' {
+  outbounds: [
+    {
+      type: "socks",
+      tag: "socks5_outbound",
+      server: $server,
+      server_port: $port,
+      version: "5",
+      auth: $auth
+    }
+  ]
 }
-EOF
+            | (.outbounds[0].users = [{username:$user,password:$pass}])
+            | (if ($detour|length)>0 then (.outbounds[0].detour=$detour) else . end)
+            | (if ($healthUrl|length)>0 or ($healthInterval|length)>0 or ($healthPort|length)>0 then
+                .outbounds[0].healthcheck = ({enable:true,url:$healthUrl,interval:$healthInterval}
+                    | if ($healthPort|length)>0 then .destination = ($server+":"+$healthPort) else . end)
+              else . end)
+            | (if $transportType != "1" then
+                .outbounds[0].tls = {enabled:true,server_name:$serverName,alpn:$alpn,insecure:$insecure}
+              else . end)
+            | (if $transportType == "3" then
+                .outbounds[0].transport = {type:"ws",path:$path,headers:{Host:$host}}
+              elif $transportType == "4" then
+                .outbounds[0].transport = {type:"http",path:$path,host:$hostList}
+              else . end)
+' >"${socks5ConfigTemp}"; then
+            rm -f "${socks5ConfigTemp}"
+            echoContent red " ---> 生成 Socks5 出站配置失败，请检查输入"
+            exit 0
+        fi
+
+        mv "${socks5ConfigTemp}" "${socks5ConfigFile}"
         validateJsonFile "${socks5ConfigFile}"
     fi
     if [[ "${coreInstallType}" == "1" ]]; then
