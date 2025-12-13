@@ -377,4 +377,41 @@ elif [[ "${socks5InboundDomainStrategyStatus}" == "2" ]]; then
 
 ---
 
-*报告生成日期: 2025-12-13*
+---
+
+## 7. 已修复的问题 (2025-12-13)
+
+### 7.1 sing-box SOCKS5 入站 aead 字段错误 (已修复)
+
+**原问题**: `install.sh:7863` 中为 SOCKS 入站添加了不存在的 `aead` 字段
+
+```bash
+| (if $enableAead then .inbounds[0].users[0].aead = true else . end)
+```
+
+**错误信息**:
+```
+FATAL[0000] decode config at /etc/v2ray-agent/sing-box/conf/config/20_socks5_inbounds.json: inbounds[0].users[0].aead: json: unknown field "aead"
+```
+
+**修复**: 移除了该行代码。sing-box SOCKS 入站只支持 `username` 和 `password` 字段。
+
+---
+
+### 7.2 全局 SOCKS 出站转发缺少路由配置 (已修复)
+
+**原问题**: `setSocks5OutboundRoutingAll` 函数只删除了其他路由规则，但没有创建让所有流量走 `socks5_outbound` 的路由配置。这导致使用 Reality 协议时流量无法正确转发。
+
+**修复**: 在函数中添加了创建全局路由配置的代码：
+
+```json
+{
+  "route": {
+    "final": "socks5_outbound"
+  }
+}
+```
+
+---
+
+*报告更新日期: 2025-12-13*
