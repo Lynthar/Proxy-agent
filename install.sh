@@ -345,6 +345,16 @@ stripAnsi() {
     echo -e "$1" | sed $'s/\x1b\[[0-9;]*[a-zA-Z]//g'
 }
 
+validateJsonFile() {
+
+    local jsonPath=$1
+    if ! jq -e . "${jsonPath}" >/dev/null 2>&1; then
+        echoContent red " ---> ${jsonPath} 解析失败，已移除，请检查上方录入并重试"
+        rm -f "${jsonPath}"
+        exit 0
+    fi
+}
+
 readCredentialBySource() {
 
     local tips=$1
@@ -3645,7 +3655,9 @@ EOF
             fi
         fi
 
-        echo "${socks5OutboundJson}" | jq . >"/etc/v2ray-agent/xray/conf/${tag}.json"
+        local socks5XrayOutboundPath="/etc/v2ray-agent/xray/conf/${tag}.json"
+        echo "${socks5OutboundJson}" | jq . >"${socks5XrayOutboundPath}"
+        validateJsonFile "${socks5XrayOutboundPath}"
     fi
     if echo "${tag}" | grep -q "wireguard_out_IPv4"; then
         cat <<EOF >"/etc/v2ray-agent/xray/conf/${tag}.json"
@@ -7942,6 +7954,10 @@ setSocks5Outbound() {
         exit 0
     fi
     socks5RoutingOutboundPort=$(stripAnsi "${socks5RoutingOutboundPort}")
+    if [[ ! "${socks5RoutingOutboundPort}" =~ ^[0-9]+$ ]]; then
+        echoContent red " ---> 端口格式错误，仅支持数字"
+        exit 0
+    fi
     echo
     echoContent yellow "请选择上游认证方式（必须与落地机配置一致）"
     echoContent yellow "1.用户名/密码[回车默认，通用]"
@@ -8177,6 +8193,7 @@ EOF
     ]
 }
 EOF
+        validateJsonFile "${socks5ConfigFile}"
     fi
     if [[ "${coreInstallType}" == "1" ]]; then
         addXrayOutbound socks5_outbound
