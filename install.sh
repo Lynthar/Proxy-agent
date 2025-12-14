@@ -639,6 +639,13 @@ readInstallProtocolType() {
                 singBoxAnyTLSPort=$(jq .inbounds[0].listen_port "${row}.json")
             fi
         fi
+        if echo "${row}" | grep -q ss2022_inbounds; then
+            currentInstallProtocolType="${currentInstallProtocolType}14,"
+            if [[ "${coreInstallType}" == "2" ]]; then
+                frontingType=14_ss2022_inbounds
+                ss2022Port=$(jq .inbounds[0].listen_port "${row}.json")
+            fi
+        fi
         if echo "${row}" | grep -q VMess_HTTPUpgrade_inbounds; then
             currentInstallProtocolType="${currentInstallProtocolType}11,"
             if [[ "${coreInstallType}" == "2" ]]; then
@@ -1117,6 +1124,9 @@ showInstallStatus() {
         fi
         if echo ${currentInstallProtocolType} | grep -q ",13,"; then
             echoContent yellow "AnyTLS \c"
+        fi
+        if echo ${currentInstallProtocolType} | grep -q ",14,"; then
+            echoContent yellow "SS2022 \c"
         fi
     fi
 }
@@ -3037,6 +3047,15 @@ initSingBoxClients() {
             users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
         fi
 
+        # Shadowsocks 2022
+        if echo "${type}" | grep -q ",14,"; then
+            # 使用UUID的前16字节进行base64编码作为用户密钥
+            local ss2022UserKey
+            ss2022UserKey=$(echo -n "${uuid}" | head -c 16 | base64)
+            currentUser="{\"password\":\"${ss2022UserKey}\",\"name\":\"${name}-SS2022\"}"
+            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
+        fi
+
         if echo "${type}" | grep -q ",20,"; then
             currentUser="{\"username\":\"${uuid}\",\"password\":\"${uuid}\"}"
 
@@ -3100,6 +3119,69 @@ initHysteria2Network() {
         echoContent green "\n ---> 混淆已启用\n"
     else
         echoContent green "\n ---> 混淆未启用\n"
+    fi
+}
+
+# 初始化 Shadowsocks 2022 配置
+initSS2022Config() {
+    # 读取现有配置
+    if [[ -f "${singBoxConfigPath}14_ss2022_inbounds.json" ]]; then
+        ss2022Port=$(jq -r '.inbounds[0].listen_port' "${singBoxConfigPath}14_ss2022_inbounds.json")
+        ss2022ServerKey=$(jq -r '.inbounds[0].password' "${singBoxConfigPath}14_ss2022_inbounds.json")
+        ss2022Method=$(jq -r '.inbounds[0].method' "${singBoxConfigPath}14_ss2022_inbounds.json")
+    fi
+
+    if [[ -n "${ss2022Port}" ]]; then
+        read -r -p "读取到上次安装时的端口 ${ss2022Port}，是否使用？[y/n]:" historySS2022PortStatus
+        if [[ "${historySS2022PortStatus}" != "y" ]]; then
+            ss2022Port=
+            ss2022ServerKey=
+        fi
+    fi
+
+    if [[ -z "${ss2022Port}" ]]; then
+        echoContent yellow "请输入Shadowsocks 2022端口[回车随机10000-30000]"
+        read -r -p "端口:" ss2022Port
+        if [[ -z "${ss2022Port}" ]]; then
+            ss2022Port=$((RANDOM % 20001 + 10000))
+        fi
+        echoContent green "\n ---> 端口: ${ss2022Port}"
+    fi
+
+    # 选择加密方式
+    if [[ -z "${ss2022Method}" ]]; then
+        echoContent yellow "\n请选择加密方式:"
+        echoContent yellow "1.2022-blake3-aes-128-gcm [推荐，密钥较短]"
+        echoContent yellow "2.2022-blake3-aes-256-gcm"
+        echoContent yellow "3.2022-blake3-chacha20-poly1305"
+        read -r -p "请选择[默认1]:" ss2022MethodChoice
+        case ${ss2022MethodChoice} in
+        2)
+            ss2022Method="2022-blake3-aes-256-gcm"
+            ss2022KeyLen=32
+            ;;
+        3)
+            ss2022Method="2022-blake3-chacha20-poly1305"
+            ss2022KeyLen=32
+            ;;
+        *)
+            ss2022Method="2022-blake3-aes-128-gcm"
+            ss2022KeyLen=16
+            ;;
+        esac
+        echoContent green "\n ---> 加密方式: ${ss2022Method}"
+    else
+        if [[ "${ss2022Method}" == "2022-blake3-aes-128-gcm" ]]; then
+            ss2022KeyLen=16
+        else
+            ss2022KeyLen=32
+        fi
+    fi
+
+    # 生成服务器密钥
+    if [[ -z "${ss2022ServerKey}" ]]; then
+        ss2022ServerKey=$(openssl rand -base64 ${ss2022KeyLen})
+        echoContent green " ---> 服务器密钥已自动生成"
     fi
 }
 
@@ -3868,6 +3950,17 @@ singBoxHysteria2Install() {
     totalProgress=5
     installSingBox 1
     selectCustomInstallType=",6,"
+    initSingBoxConfig custom 2 true
+    installSingBoxService 3
+    reloadCore
+    showAccounts 4
+}
+
+# sing-box Shadowsocks 2022 安装
+singBoxSS2022Install() {
+    totalProgress=5
+    installSingBox 1
+    selectCustomInstallType=",14,"
     initSingBoxConfig custom 2 true
     installSingBoxService 3
     reloadCore
@@ -4847,6 +4940,35 @@ EOF
         rm /etc/v2ray-agent/sing-box/conf/config/13_anytls_inbounds.json >/dev/null 2>&1
     fi
 
+    # Shadowsocks 2022
+    if echo "${selectCustomInstallType}" | grep -q ",14," || [[ "$1" == "all" ]]; then
+        echoContent yellow "\n================== 配置 Shadowsocks 2022 ==================\n"
+        echoContent skyBlue "\n开始配置Shadowsocks 2022协议"
+        echo
+        initSS2022Config
+        cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/14_ss2022_inbounds.json
+{
+    "inbounds": [
+        {
+            "type": "shadowsocks",
+            "listen": "::",
+            "tag": "ss2022-in",
+            "listen_port": ${ss2022Port},
+            "method": "${ss2022Method}",
+            "password": "${ss2022ServerKey}",
+            "users": $(initSingBoxClients 14),
+            "multiplex": {
+                "enabled": true
+            }
+        }
+    ]
+}
+EOF
+        echoContent green " ---> Shadowsocks 2022配置完成"
+    elif [[ -z "$3" ]]; then
+        rm /etc/v2ray-agent/sing-box/conf/config/14_ss2022_inbounds.json >/dev/null 2>&1
+    fi
+
     if [[ -z "$3" ]]; then
         removeSingBoxConfig wireguard_endpoints_IPv4_route
         removeSingBoxConfig wireguard_endpoints_IPv6_route
@@ -5332,6 +5454,44 @@ EOF
 
         echoContent yellow " ---> 二维码 AnyTLS"
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=anytls%3A%2F%2F${id}%40${currentHost}%3A${singBoxAnyTLSPort}%3Fpeer%3D${currentHost}%26insecure%3D0%26sni%3D${currentHost}%23${email}\n"
+
+    elif [[ "${type}" == "ss2022" ]]; then
+        local ss2022ServerKey=$5
+        local ss2022Method=$6
+        # SS2022 密码格式: serverKey:userKey
+        local ss2022Password="${ss2022ServerKey}:${id}"
+        local ss2022PasswordBase64
+        ss2022PasswordBase64=$(echo -n "${ss2022Password}" | base64 | tr -d '\n')
+
+        echoContent yellow " ---> Shadowsocks 2022"
+
+        echoContent yellow " ---> 格式化明文(SS2022)"
+        echoContent green "协议类型:ss2022，地址:${publicIP}，端口:${port}，加密方式:${ss2022Method}，密码:${ss2022Password}，账户名:${email}\n"
+
+        # SIP002 URL格式: ss://BASE64(method:password)@host:port#name
+        local ss2022UrlPassword
+        ss2022UrlPassword=$(echo -n "${ss2022Method}:${ss2022Password}" | base64 | tr -d '\n')
+        echoContent green "    ss://${ss2022UrlPassword}@${publicIP}:${port}#${email}\n"
+        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/default/${user}"
+ss://${ss2022UrlPassword}@${publicIP}:${port}#${email}
+EOF
+        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/clashMeta/${user}"
+  - name: "${email}"
+    type: ss
+    server: ${publicIP}
+    port: ${port}
+    cipher: ${ss2022Method}
+    password: "${ss2022Password}"
+    udp: true
+EOF
+
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"shadowsocks\",\"server\":\"${publicIP}\",\"server_port\":${port},\"method\":\"${ss2022Method}\",\"password\":\"${ss2022Password}\",\"multiplex\":{\"enabled\":true}}]" "/etc/v2ray-agent/subscribe_local/sing-box/${user}")
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/v2ray-agent/subscribe_local/sing-box/${user}"
+
+        echoContent yellow " ---> 二维码 SS2022"
+        local ss2022QRCode
+        ss2022QRCode=$(echo -n "ss://${ss2022UrlPassword}@${publicIP}:${port}#${email}" | sed 's/:/%3A/g; s/\//%2F/g; s/@/%40/g; s/#/%23/g')
+        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${ss2022QRCode}\n"
     fi
 
 }
@@ -5604,6 +5764,26 @@ showAccounts() {
             defaultBase64Code anytls "${singBoxAnyTLSPort}" "$(echo "${user}" | jq -r .name)" "$(echo "${user}" | jq -r .password)"
         done
 
+    fi
+
+    # Shadowsocks 2022
+    if echo ${currentInstallProtocolType} | grep -q ",14," || [[ -n "${ss2022Port}" ]]; then
+        echoContent skyBlue "\n================================  Shadowsocks 2022 ================================\n"
+        local path="${singBoxConfigPath}"
+        if [[ -f "${path}14_ss2022_inbounds.json" ]]; then
+            local serverKey
+            local method
+            serverKey=$(jq -r '.inbounds[0].password' "${path}14_ss2022_inbounds.json")
+            method=$(jq -r '.inbounds[0].method' "${path}14_ss2022_inbounds.json")
+            local port
+            port=$(jq -r '.inbounds[0].listen_port' "${path}14_ss2022_inbounds.json")
+
+            jq -r -c '.inbounds[]|.users[]' "${path}14_ss2022_inbounds.json" | while read -r user; do
+                echoContent skyBlue "\n ---> 账号:$(echo "${user}" | jq -r .name)"
+                echo
+                defaultBase64Code ss2022 "${port}" "$(echo "${user}" | jq -r .name)" "$(echo "${user}" | jq -r .password)" "${serverKey}" "${method}"
+            done
+        fi
     fi
 }
 # 移除nginx302配置
@@ -6231,6 +6411,14 @@ addUser() {
             clients=$(jq -r "${userConfig} = ${clients}" ${configPath}13_anytls_inbounds.json)
             echo "${clients}" | jq . >${configPath}13_anytls_inbounds.json
         fi
+        # Shadowsocks 2022
+        if echo "${currentInstallProtocolType}" | grep -q ",14,"; then
+            local clients=
+            clients=$(initSingBoxClients 14 "${uuid}" "${email}")
+
+            clients=$(jq -r "${userConfig} = ${clients}" ${configPath}14_ss2022_inbounds.json)
+            echo "${clients}" | jq . >${configPath}14_ss2022_inbounds.json
+        fi
     done
     reloadCore
     echoContent green " ---> 添加完成"
@@ -6334,6 +6522,12 @@ removeUser() {
             vmessHTTPUpgradeResult=$(jq -r 'del(.inbounds[0].users['${delUserIndex}']//.inbounds[0].users['${delUserIndex}'])' "${singBoxConfigPath}11_VMess_HTTPUpgrade_inbounds.json")
             echo "${vmessHTTPUpgradeResult}" | jq . >"${singBoxConfigPath}11_VMess_HTTPUpgrade_inbounds.json"
             echo "${vmessHTTPUpgradeResult}" | jq . >${configPath}11_VMess_HTTPUpgrade_inbounds.json
+        fi
+        # Shadowsocks 2022
+        if echo ${currentInstallProtocolType} | grep -q ",14,"; then
+            local ss2022Result
+            ss2022Result=$(jq -r 'del(.inbounds[0].users['${delUserIndex}'])' "${singBoxConfigPath}14_ss2022_inbounds.json")
+            echo "${ss2022Result}" | jq . >"${singBoxConfigPath}14_ss2022_inbounds.json"
         fi
         reloadCore
         readNginxSubscribe
@@ -10440,6 +10634,7 @@ customSingBoxInstall() {
     echoContent yellow "10.Naive"
     echoContent yellow "11.VMess+TLS+HTTPUpgrade"
     echoContent yellow "13.anytls"
+    echoContent yellow "14.Shadowsocks 2022[无需TLS证书]"
 
     read -r -p "请选择[多选]，[例如:1,2,3]:" selectCustomInstallType
     echoContent skyBlue "--------------------------------------------------------------"
@@ -10447,7 +10642,7 @@ customSingBoxInstall() {
         echoContent red " ---> 请使用英文逗号分隔"
         exit 0
     fi
-    if [[ "${selectCustomInstallType}" != "10" ]] && [[ "${selectCustomInstallType}" != "11" ]] && [[ "${selectCustomInstallType}" != "13" ]] && ((${#selectCustomInstallType} >= 2)) && ! echo "${selectCustomInstallType}" | grep -q ","; then
+    if [[ "${selectCustomInstallType}" != "10" ]] && [[ "${selectCustomInstallType}" != "11" ]] && [[ "${selectCustomInstallType}" != "13" ]] && [[ "${selectCustomInstallType}" != "14" ]] && ((${#selectCustomInstallType} >= 2)) && ! echo "${selectCustomInstallType}" | grep -q ","; then
         echoContent red " ---> 多选请使用英文逗号分隔"
         exit 0
     fi
@@ -10459,6 +10654,13 @@ customSingBoxInstall() {
     fi
 
     if [[ "${selectCustomInstallType//,/}" =~ ^[0-9]+$ ]]; then
+        # WebSocket 协议迁移提示
+        if echo "${selectCustomInstallType}" | grep -q -E ",1,|,3,"; then
+            echoContent yellow "\n ---> 提示: WebSocket传输已逐渐被XHTTP(SplitHTTP)取代"
+            echoContent yellow " ---> XHTTP具有更好的抗检测能力和CDN兼容性，建议在Xray中使用VLESS+Reality+XHTTP"
+            echoContent yellow " ---> 参考: https://xtls.github.io/en/config/transports/splithttp.html\n"
+        fi
+
         readLastInstallationConfig
         unInstallSubscribe
         totalProgress=9
@@ -10526,6 +10728,13 @@ customXrayInstall() {
         selectCustomInstallType=",${selectCustomInstallType},"
     fi
     if [[ "${selectCustomInstallType//,/}" =~ ^[0-7]+$ ]]; then
+        # WebSocket 协议迁移提示
+        if echo "${selectCustomInstallType}" | grep -q -E ",1,|,3,"; then
+            echoContent yellow "\n ---> 提示: WebSocket传输已逐渐被XHTTP(SplitHTTP)取代"
+            echoContent yellow " ---> XHTTP具有更好的抗检测能力和CDN兼容性，建议选择12.VLESS+Reality+XHTTP+TLS"
+            echoContent yellow " ---> 参考: https://xtls.github.io/en/config/transports/splithttp.html\n"
+        fi
+
         readLastInstallationConfig
         unInstallSubscribe
         checkBTPanel
