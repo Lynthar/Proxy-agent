@@ -11535,8 +11535,25 @@ installSubscribe() {
         nginxBlog
         echo
         local httpSubscribeStatus=
+        local subscribeServerName=
 
-        if ! echo "${selectCustomInstallType}" | grep -qE ",0,|,1,|,2,|,3,|,4,|,5,|,6,|,9,|,10,|,11,|,13," && ! echo "${currentInstallProtocolType}" | grep -qE ",0,|,1,|,2,|,3,|,4,|,5,|,6,|,9,|,10,|,11,|,13," && [[ -z "${domain}" ]]; then
+        # 确定订阅使用的域名
+        if [[ -n "${currentHost}" ]]; then
+            subscribeServerName="${currentHost}"
+        elif [[ -n "${domain}" ]]; then
+            subscribeServerName="${domain}"
+        fi
+
+        # 检查是否有可用的TLS证书（实际检查文件是否存在）
+        local tlsCertExists=false
+        if [[ -n "${subscribeServerName}" ]] && \
+           [[ -f "/etc/Proxy-agent/tls/${subscribeServerName}.crt" ]] && \
+           [[ -f "/etc/Proxy-agent/tls/${subscribeServerName}.key" ]]; then
+            tlsCertExists=true
+        fi
+
+        # 如果没有TLS证书，使用HTTP订阅
+        if [[ "${tlsCertExists}" != "true" ]]; then
             httpSubscribeStatus=true
         fi
 
@@ -11551,13 +11568,6 @@ installSubscribe() {
                 exit
             fi
         else
-            local subscribeServerName=
-            if [[ -n "${currentHost}" ]]; then
-                subscribeServerName="${currentHost}"
-            else
-                subscribeServerName="${domain}"
-            fi
-
             SSLType="ssl"
             serverName="server_name ${subscribeServerName};"
             nginxSubscribeSSL="ssl_certificate /etc/Proxy-agent/tls/${subscribeServerName}.crt;ssl_certificate_key /etc/Proxy-agent/tls/${subscribeServerName}.key;"
