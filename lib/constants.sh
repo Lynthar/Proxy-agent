@@ -180,9 +180,11 @@ readonly XRAY_ERROR_LOG="${V2RAY_AGENT_DIR}/xray/error.log"
 
 # ============================================================================
 # 脚本版本
+# SCRIPT_VERSION 由 install.sh 从 VERSION 文件动态加载
+# 这里只提供默认值和其他常量
 # ============================================================================
 
-readonly SCRIPT_VERSION="v3.2.0"
+: "${SCRIPT_VERSION:=v3.6.0}"  # 默认版本，如果未从VERSION文件加载
 readonly SCRIPT_AUTHOR="Lynthar"
 readonly SCRIPT_REPO="https://github.com/Lynthar/Proxy-agent"
 
