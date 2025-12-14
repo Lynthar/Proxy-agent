@@ -193,6 +193,47 @@ fi
 
 # ============================================================================
 
+# 域名验证函数 - 防止命令注入
+# 返回 0 表示有效，返回 1 表示无效
+isValidDomain() {
+    local domain="$1"
+    # 空值无效
+    [[ -z "${domain}" ]] && return 1
+    # 检查是否包含危险字符（命令注入防护）
+    if [[ "${domain}" =~ [\;\|\&\$\`\(\)\{\}\[\]\<\>\!\#\*\?\~\'\"] ]]; then
+        return 1
+    fi
+    # 检查是否包含空格或换行
+    if [[ "${domain}" =~ [[:space:]] ]]; then
+        return 1
+    fi
+    # 基本域名格式验证（允许子域名、顶级域名等）
+    # 格式: 允许字母、数字、连字符和点，但不能以点或连字符开头/结尾
+    if [[ ! "${domain}" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]]; then
+        return 1
+    fi
+    # 不允许连续的点
+    if [[ "${domain}" =~ \.\. ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# URL/重定向地址验证函数 - 防止命令注入
+isValidRedirectUrl() {
+    local url="$1"
+    [[ -z "${url}" ]] && return 1
+    # 检查是否包含危险字符
+    if [[ "${url}" =~ [\;\|\&\$\`\(\)\{\}\[\]\<\>\!\#\*\~\'] ]]; then
+        return 1
+    fi
+    # 必须以 http:// 或 https:// 开头
+    if [[ ! "${url}" =~ ^https?:// ]]; then
+        return 1
+    fi
+    return 0
+}
+
 echoContent() {
     case $1 in
     # 红色
@@ -1046,9 +1087,9 @@ getPublicIP() {
         echo "${currentHost}"
     else
         local currentIP=
-        currentIP=$(curl -s "-${type}" http://www.cloudflare.com/cdn-cgi/trace | grep "ip" | awk -F "[=]" '{print $2}')
+        currentIP=$(curl -s "-${type}" https://www.cloudflare.com/cdn-cgi/trace | grep "ip" | awk -F "[=]" '{print $2}')
         if [[ -z "${currentIP}" && -z "$1" ]]; then
-            currentIP=$(curl -s "-6" http://www.cloudflare.com/cdn-cgi/trace | grep "ip" | awk -F "[=]" '{print $2}')
+            currentIP=$(curl -s "-6" https://www.cloudflare.com/cdn-cgi/trace | grep "ip" | awk -F "[=]" '{print $2}')
         fi
         echo "${currentIP}"
     fi
@@ -1720,7 +1761,7 @@ checkPortOpen() {
         touch ${nginxConfigPath}checkPortOpen.conf
         local listenIPv6PortConfig=
 
-        if [[ -n $(curl -s -6 -m 4 http://www.cloudflare.com/cdn-cgi/trace | grep "ip" | cut -d "=" -f 2) ]]; then
+        if [[ -n $(curl -s -6 -m 4 https://www.cloudflare.com/cdn-cgi/trace | grep "ip" | cut -d "=" -f 2) ]]; then
             listenIPv6PortConfig="listen [::]:${port};"
         fi
         cat <<EOF >${nginxConfigPath}checkPortOpen.conf
@@ -1792,6 +1833,10 @@ initTLSNginxConfig() {
 
     if [[ -z ${domain} ]]; then
         echoContent red "  域名不可为空--->"
+        initTLSNginxConfig 3
+    elif ! isValidDomain "${domain}"; then
+        echoContent red "  域名格式无效或包含不安全字符--->"
+        echoContent yellow "  域名只能包含字母、数字、连字符和点"
         initTLSNginxConfig 3
     else
         dnsTLSDomain=$(echo "${domain}" | awk -F "." '{$1="";print $0}' | sed 's/^[[:space:]]*//' | sed 's/ /./g')
@@ -2180,10 +2225,29 @@ acmeInstallSSL() {
 
     if [[ "${dnsAPIType}" == "cloudflare" ]]; then
         echoContent green " ---> DNS API 生成证书中"
-        sudo CF_Token="${cfAPIToken}" "$HOME/.acme.sh/acme.sh" --issue -d "${dnsAPIDomain}" -d "${dnsTLSDomain}" --dns dns_cf -k ec-256 --server "${sslType}" ${sslIPv6} 2>&1 | tee -a /etc/Proxy-agent/tls/acme.log >/dev/null
+        # 使用临时环境文件避免在进程列表中暴露API Token
+        local acmeEnvFile
+        acmeEnvFile=$(mktemp)
+        chmod 600 "${acmeEnvFile}"
+        cat > "${acmeEnvFile}" << ACME_ENV_EOF
+export CF_Token="${cfAPIToken}"
+ACME_ENV_EOF
+        # shellcheck source=/dev/null
+        sudo bash -c "source '${acmeEnvFile}' && '$HOME/.acme.sh/acme.sh' --issue -d '${dnsAPIDomain}' -d '${dnsTLSDomain}' --dns dns_cf -k ec-256 --server '${sslType}' ${sslIPv6}" 2>&1 | tee -a /etc/Proxy-agent/tls/acme.log >/dev/null
+        rm -f "${acmeEnvFile}"
     elif [[ "${dnsAPIType}" == "aliyun" ]]; then
         echoContent green " --->  DNS API 生成证书中"
-        sudo Ali_Key="${aliKey}" Ali_Secret="${aliSecret}" "$HOME/.acme.sh/acme.sh" --issue -d "${dnsAPIDomain}" -d "${dnsTLSDomain}" --dns dns_ali -k ec-256 --server "${sslType}" ${sslIPv6} 2>&1 | tee -a /etc/Proxy-agent/tls/acme.log >/dev/null
+        # 使用临时环境文件避免在进程列表中暴露API Key/Secret
+        local acmeEnvFile
+        acmeEnvFile=$(mktemp)
+        chmod 600 "${acmeEnvFile}"
+        cat > "${acmeEnvFile}" << ACME_ENV_EOF
+export Ali_Key="${aliKey}"
+export Ali_Secret="${aliSecret}"
+ACME_ENV_EOF
+        # shellcheck source=/dev/null
+        sudo bash -c "source '${acmeEnvFile}' && '$HOME/.acme.sh/acme.sh' --issue -d '${dnsAPIDomain}' -d '${dnsTLSDomain}' --dns dns_ali -k ec-256 --server '${sslType}' ${sslIPv6}" 2>&1 | tee -a /etc/Proxy-agent/tls/acme.log >/dev/null
+        rm -f "${acmeEnvFile}"
     else
         echoContent green " ---> 生成证书中"
         sudo "$HOME/.acme.sh/acme.sh" --issue -d "${tlsDomain}" --standalone -k ec-256 --server "${sslType}" ${sslIPv6} 2>&1 | tee -a /etc/Proxy-agent/tls/acme.log >/dev/null
@@ -6083,6 +6147,10 @@ updateNginxBlog() {
         if [[ "${redirectStatus}" == "1" ]]; then
             backupNginxConfig backup
             read -r -p "请输入要重定向的域名,例如 https://www.baidu.com:" redirectDomain
+            if ! isValidRedirectUrl "${redirectDomain}"; then
+                echoContent red " ---> URL格式无效，必须以 http:// 或 https:// 开头且不含特殊字符"
+                exit 0
+            fi
             removeNginx302
             addNginx302 "${redirectDomain}"
             handleNginx stop
@@ -6342,6 +6410,11 @@ manageCDN() {
             ;;
         5)
             read -r -p "请输入想要自定义CDN IP或者域名:" setCDNDomain
+            # 验证输入不包含危险字符
+            if [[ "${setCDNDomain}" =~ [\;\|\&\$\`\(\)\{\}\[\]\<\>\!\#\*\?\~\'\"] ]] || [[ "${setCDNDomain}" =~ [[:space:]] ]]; then
+                echoContent red " ---> 输入包含不安全字符"
+                exit 0
+            fi
             ;;
         6)
             echo >/etc/Proxy-agent/cdn
@@ -7058,7 +7131,7 @@ aliasInstall() {
 
 # 检查ipv6、ipv4
 checkIPv6() {
-    currentIPv6IP=$(curl -s -6 -m 4 http://www.cloudflare.com/cdn-cgi/trace | grep "ip" | cut -d "=" -f 2)
+    currentIPv6IP=$(curl -s -6 -m 4 https://www.cloudflare.com/cdn-cgi/trace | grep "ip" | cut -d "=" -f 2)
 
     if [[ -z "${currentIPv6IP}" ]]; then
         echoContent red " ---> 不支持ipv6"
@@ -9348,15 +9421,21 @@ updateChainKey() {
         local newKey
         newKey=$(generateChainKey)
 
-        # 更新入站配置
+        # 更新入站配置 - 使用安全的临时文件
+        local tmpInboundFile
+        tmpInboundFile=$(mktemp)
+        chmod 600 "${tmpInboundFile}"
         jq --arg key "${newKey}" '.inbounds[0].password = $key' \
-            /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json > /tmp/chain_inbound.json
-        mv /tmp/chain_inbound.json /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
+            /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json > "${tmpInboundFile}"
+        mv "${tmpInboundFile}" /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
 
-        # 更新信息文件
+        # 更新信息文件 - 使用安全的临时文件
+        local tmpInfoFile
+        tmpInfoFile=$(mktemp)
+        chmod 600 "${tmpInfoFile}"
         jq --arg key "${newKey}" '.password = $key' \
-            /etc/Proxy-agent/sing-box/conf/chain_exit_info.json > /tmp/chain_exit_info.json
-        mv /tmp/chain_exit_info.json /etc/Proxy-agent/sing-box/conf/chain_exit_info.json
+            /etc/Proxy-agent/sing-box/conf/chain_exit_info.json > "${tmpInfoFile}"
+        mv "${tmpInfoFile}" /etc/Proxy-agent/sing-box/conf/chain_exit_info.json
 
         mergeSingBoxConfig
         reloadCore
@@ -9402,15 +9481,21 @@ updateChainPort() {
         return 1
     fi
 
-    # 更新入站配置
+    # 更新入站配置 - 使用安全的临时文件
+    local tmpInboundFile
+    tmpInboundFile=$(mktemp)
+    chmod 600 "${tmpInboundFile}"
     jq --argjson port "${newPort}" '.inbounds[0].listen_port = $port' \
-        /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json > /tmp/chain_inbound.json
-    mv /tmp/chain_inbound.json /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
+        /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json > "${tmpInboundFile}"
+    mv "${tmpInboundFile}" /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
 
-    # 更新信息文件
+    # 更新信息文件 - 使用安全的临时文件
+    local tmpInfoFile
+    tmpInfoFile=$(mktemp)
+    chmod 600 "${tmpInfoFile}"
     jq --argjson port "${newPort}" '.port = $port' \
-        "${infoFile}" > /tmp/chain_info_temp.json
-    mv /tmp/chain_info_temp.json "${infoFile}"
+        "${infoFile}" > "${tmpInfoFile}"
+    mv "${tmpInfoFile}" "${infoFile}"
 
     # 更新防火墙
     allowPort "${newPort}" "tcp"
@@ -10096,6 +10181,7 @@ setSocks5Inbound() {
 
     local socks5InboundJsonFile
     socks5InboundJsonFile=$(mktemp)
+    chmod 600 "${socks5InboundJsonFile}"
     # sing-box SOCKS 入站支持的字段: listen, listen_port, tag, users, domain_strategy
     # 不支持: aead (sing-box SOCKS 仅支持用户名/密码认证)
     if ! jq -n \
@@ -10337,6 +10423,7 @@ setSocks5Outbound() {
 
         local socks5ConfigTemp
         socks5ConfigTemp=$(mktemp)
+        chmod 600 "${socks5ConfigTemp}"
 
         # sing-box SOCKS 出站支持的字段: server, server_port, version, username, password, detour
         # 不支持: tls, transport, healthcheck
@@ -11311,7 +11398,7 @@ installSubscribe() {
             serverName="server_name ${subscribeServerName};"
             nginxSubscribeSSL="ssl_certificate /etc/Proxy-agent/tls/${subscribeServerName}.crt;ssl_certificate_key /etc/Proxy-agent/tls/${subscribeServerName}.key;"
         fi
-        if [[ -n "$(curl --connect-timeout 2 -s -6 http://www.cloudflare.com/cdn-cgi/trace | grep "ip" | cut -d "=" -f 2)" ]]; then
+        if [[ -n "$(curl --connect-timeout 2 -s -6 https://www.cloudflare.com/cdn-cgi/trace | grep "ip" | cut -d "=" -f 2)" ]]; then
             listenIPv6="listen [::]:${result[-1]} ${SSLType};"
         fi
         if echo "${nginxVersion}" | grep -q "1.25" && [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $3}') -gt 0 ]] || [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $2}') -gt 25 ]]; then
@@ -12205,6 +12292,13 @@ initRealityClientServersName() {
             if [[ -z "${realityServerName}" ]]; then
                 randomNum=$(randomNum 1 27)
                 realityServerName=$(echo "${realityDestDomainList}" | awk -F ',' -v randomNum="$randomNum" '{print $randomNum}')
+            else
+                # 验证用户输入的域名（可能包含端口，先提取域名部分验证）
+                local realityDomainCheck="${realityServerName%%:*}"
+                if ! isValidDomain "${realityDomainCheck}"; then
+                    echoContent red " ---> 域名格式无效或包含不安全字符"
+                    exit 0
+                fi
             fi
             if echo "${realityServerName}" | grep -q ":"; then
                 realityDomainPort=$(echo "${realityServerName}" | awk -F "[:]" '{print $2}')
