@@ -6806,31 +6806,70 @@ removeUser() {
 updateV2RayAgent() {
     echoContent skyBlue "\n进度  $1/${totalProgress} : 更新 Proxy-agent 脚本"
 
-    local repoBase="https://raw.githubusercontent.com/Lynthar/Proxy-agent/master"
     local installDir="/etc/Proxy-agent"
+    local latestVersion
+    local downloadBase
+
+    # 检查 GitHub Release 最新版本
+    echoContent yellow " ---> 检查最新版本..."
+    latestVersion=$(getLatestReleaseVersion)
+
+    if [[ -n "${latestVersion}" ]]; then
+        echoContent green " ---> 发现最新版本: ${latestVersion}"
+
+        # 比较版本
+        if ! compareVersions "${SCRIPT_VERSION}" "${latestVersion}"; then
+            echoContent green " ---> 当前已是最新版本 (${SCRIPT_VERSION})"
+            echoContent yellow " ---> 如需强制更新，请使用手动命令"
+            read -r -p "是否继续更新? [y/N]: " forceUpdate
+            if [[ "${forceUpdate}" != "y" && "${forceUpdate}" != "Y" ]]; then
+                menu
+                return
+            fi
+        fi
+
+        # 使用 GitHub Release 下载地址
+        # 格式: https://github.com/user/repo/releases/download/v1.0.0/file
+        downloadBase="https://github.com/${GITHUB_REPO}/releases/download/${latestVersion}"
+    else
+        echoContent yellow " ---> 无法获取 Release 版本，使用 master 分支"
+        latestVersion="master"
+        downloadBase="https://raw.githubusercontent.com/${GITHUB_REPO}/master"
+    fi
 
     # 下载新版本脚本
+    echoContent yellow " ---> 下载脚本文件..."
     rm -rf "${installDir}/install.sh"
+
+    # Release 模式下尝试从 release assets 下载，失败则从 raw 下载
+    local rawBase="https://raw.githubusercontent.com/${GITHUB_REPO}/master"
+
     if [[ "${release}" == "alpine" ]]; then
-        wget -c -q -P "${installDir}/" -N "${repoBase}/install.sh"
+        wget -c -q -P "${installDir}/" -N "${rawBase}/install.sh"
     else
-        wget -c -q "${wgetShowProgressStatus}" -P "${installDir}/" -N "${repoBase}/install.sh"
+        wget -c -q "${wgetShowProgressStatus}" -P "${installDir}/" -N "${rawBase}/install.sh"
     fi
     sudo chmod 700 "${installDir}/install.sh"
 
-    # 下载 VERSION 文件
-    wget -c -q -O "${installDir}/VERSION" "${repoBase}/VERSION" 2>/dev/null
+    # 保存版本号到 VERSION 文件
+    if [[ "${latestVersion}" != "master" ]]; then
+        echo "${latestVersion#v}" > "${installDir}/VERSION"
+    else
+        wget -c -q -O "${installDir}/VERSION" "${rawBase}/VERSION" 2>/dev/null
+    fi
 
     # 下载/更新 lib 目录模块
+    echoContent yellow " ---> 下载模块文件..."
     mkdir -p "${installDir}/lib"
     for module in i18n constants utils json-utils system-detect service-control protocol-registry config-reader; do
-        wget -c -q -O "${installDir}/lib/${module}.sh" "${repoBase}/lib/${module}.sh" 2>/dev/null
+        wget -c -q -O "${installDir}/lib/${module}.sh" "${rawBase}/lib/${module}.sh" 2>/dev/null
     done
 
     # 下载/更新语言文件
+    echoContent yellow " ---> 下载语言文件..."
     mkdir -p "${installDir}/shell/lang"
     for langFile in zh_CN en_US loader; do
-        wget -c -q -O "${installDir}/shell/lang/${langFile}.sh" "${repoBase}/shell/lang/${langFile}.sh" 2>/dev/null
+        wget -c -q -O "${installDir}/shell/lang/${langFile}.sh" "${rawBase}/shell/lang/${langFile}.sh" 2>/dev/null
     done
 
     # 读取新版本号
@@ -6838,14 +6877,17 @@ updateV2RayAgent() {
     if [[ -f "${installDir}/VERSION" ]]; then
         version="v$(cat "${installDir}/VERSION" 2>/dev/null | tr -d '[:space:]')"
     else
-        version="unknown"
+        version="${latestVersion}"
     fi
 
     echoContent green "\n ---> 更新完毕"
     echoContent yellow " ---> 请手动执行[pasly]打开脚本"
-    echoContent green " ---> 当前版本：${version}\n"
+    echoContent green " ---> 当前版本：${version}"
+    if [[ "${latestVersion}" != "master" ]]; then
+        echoContent green " ---> Release: ${latestVersion}\n"
+    fi
     echoContent yellow "如更新不成功，请手动执行下面命令\n"
-    echoContent skyBlue "wget -P /root -N ${repoBase}/install.sh && chmod 700 /root/install.sh && /root/install.sh"
+    echoContent skyBlue "wget -P /root -N ${rawBase}/install.sh && chmod 700 /root/install.sh && /root/install.sh"
     echo
     exit 0
 }
@@ -12553,7 +12595,16 @@ menu() {
     cd "$HOME" || exit
     echoContent red "\n=============================================================="
     echoContent green "$(t MENU_AUTHOR): Lynthar"
-    echoContent green "$(t MENU_VERSION): ${SCRIPT_VERSION}"
+
+    # 显示版本号，并在后台检查更新
+    local versionDisplay="${SCRIPT_VERSION}"
+    if [[ -n "${LATEST_VERSION}" ]] && compareVersions "${SCRIPT_VERSION}" "${LATEST_VERSION}"; then
+        versionDisplay="${SCRIPT_VERSION} -> ${LATEST_VERSION} [有更新/Update Available]"
+        echoContent yellow "$(t MENU_VERSION): ${versionDisplay}"
+    else
+        echoContent green "$(t MENU_VERSION): ${versionDisplay}"
+    fi
+
     echoContent green "$(t MENU_GITHUB): https://github.com/Lynthar/Proxy-agent"
     echoContent green "$(t MENU_DESC): $(t MENU_TITLE)"
     showInstallStatus
@@ -12653,5 +12704,9 @@ menu() {
         ;;
     esac
 }
+
+# 启动时检查更新（使用短超时，避免阻塞太久）
+checkForUpdates 2>/dev/null
+
 cronFunction
 menu
