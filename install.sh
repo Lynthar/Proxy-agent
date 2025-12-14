@@ -53,6 +53,84 @@ _load_version() {
 _load_version
 
 # ============================================================================
+# GitHub Release 版本检测
+# 从 GitHub API 获取最新 Release 版本号
+# ============================================================================
+GITHUB_REPO="Lynthar/Proxy-agent"
+GITHUB_API_URL="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+
+# 获取最新 Release 版本号
+# 返回: 版本号 (如 v3.6.0) 或空字符串
+getLatestReleaseVersion() {
+    local response
+    local version
+
+    # 使用 curl 获取 GitHub API 响应
+    response=$(curl -s --connect-timeout 5 -m 10 "${GITHUB_API_URL}" 2>/dev/null)
+
+    if [[ -n "${response}" ]]; then
+        # 提取 tag_name 字段
+        version=$(echo "${response}" | grep -oP '"tag_name"\s*:\s*"\K[^"]+' 2>/dev/null)
+
+        # 如果 grep -P 不可用，尝试其他方法
+        if [[ -z "${version}" ]]; then
+            version=$(echo "${response}" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+        fi
+
+        # 确保版本号以 v 开头
+        if [[ -n "${version}" && "${version}" != v* ]]; then
+            version="v${version}"
+        fi
+
+        echo "${version}"
+    fi
+}
+
+# 比较版本号
+# 参数: $1 = 当前版本, $2 = 远程版本
+# 返回: 0 = 需要更新, 1 = 已是最新, 2 = 无法比较
+compareVersions() {
+    local current="$1"
+    local remote="$2"
+
+    # 去除 v 前缀
+    current="${current#v}"
+    remote="${remote#v}"
+
+    if [[ -z "${current}" || -z "${remote}" ]]; then
+        return 2
+    fi
+
+    if [[ "${current}" == "${remote}" ]]; then
+        return 1
+    fi
+
+    # 使用 sort -V 比较版本号
+    local higher
+    higher=$(printf '%s\n%s' "${current}" "${remote}" | sort -V | tail -1)
+
+    if [[ "${higher}" == "${remote}" ]]; then
+        return 0  # 需要更新
+    else
+        return 1  # 已是最新
+    fi
+}
+
+# 检查更新并显示提示
+checkForUpdates() {
+    local latestVersion
+    latestVersion=$(getLatestReleaseVersion)
+
+    if [[ -n "${latestVersion}" ]]; then
+        if compareVersions "${SCRIPT_VERSION}" "${latestVersion}"; then
+            export LATEST_VERSION="${latestVersion}"
+            return 0  # 有新版本
+        fi
+    fi
+    return 1  # 无新版本或检查失败
+}
+
+# ============================================================================
 # 路径迁移 - 从 v2ray-agent 迁移到 Proxy-agent
 # 用于从旧版本平滑升级
 # ============================================================================
