@@ -135,7 +135,7 @@ checkForUpdates() {
 # 用于从旧版本平滑升级
 # ============================================================================
 _migrate_from_v2ray_agent() {
-    local oldDir="/etc/Proxy-agent"
+    local oldDir="/etc/v2ray-agent"
     local newDir="/etc/Proxy-agent"
 
     # 如果旧目录存在且新目录不存在，执行迁移
@@ -156,11 +156,11 @@ _migrate_from_v2ray_agent() {
 
         # 更新 systemd 服务文件中的路径
         if [[ -f "/etc/systemd/system/xray.service" ]]; then
-            sed -i 's|/etc/Proxy-agent/|/etc/Proxy-agent/|g' /etc/systemd/system/xray.service
+            sed -i 's|/etc/v2ray-agent/|/etc/Proxy-agent/|g' /etc/systemd/system/xray.service
             systemctl daemon-reload
         fi
         if [[ -f "/etc/systemd/system/sing-box.service" ]]; then
-            sed -i 's|/etc/Proxy-agent/|/etc/Proxy-agent/|g' /etc/systemd/system/sing-box.service
+            sed -i 's|/etc/v2ray-agent/|/etc/Proxy-agent/|g' /etc/systemd/system/sing-box.service
             systemctl daemon-reload
         fi
 
@@ -168,14 +168,14 @@ _migrate_from_v2ray_agent() {
         if [[ -d "/etc/nginx/conf.d" ]]; then
             for conf in /etc/nginx/conf.d/*.conf; do
                 if [[ -f "${conf}" ]]; then
-                    sed -i 's|/etc/Proxy-agent/|/etc/Proxy-agent/|g' "${conf}"
+                    sed -i 's|/etc/v2ray-agent/|/etc/Proxy-agent/|g' "${conf}"
                 fi
             done
         fi
 
         # 更新 crontab 中的路径
         if crontab -l 2>/dev/null | grep -q "v2ray-agent"; then
-            crontab -l 2>/dev/null | sed 's|/etc/Proxy-agent/|/etc/Proxy-agent/|g' | crontab -
+            crontab -l 2>/dev/null | sed 's|/etc/v2ray-agent/|/etc/Proxy-agent/|g' | crontab -
         fi
 
         # 更新 /usr/bin/pasly 符号链接
