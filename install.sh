@@ -31,6 +31,106 @@ fi
 unset _LIB_DIR _module
 
 # ============================================================================
+# 版本号管理
+# 版本号来源优先级: VERSION文件 > 硬编码默认值
+# ============================================================================
+_load_version() {
+    local versionFile="${_SCRIPT_DIR}/VERSION"
+    local installedVersionFile="/etc/Proxy-agent/VERSION"
+
+    # 优先从脚本目录读取
+    if [[ -f "${versionFile}" ]]; then
+        SCRIPT_VERSION="v$(cat "${versionFile}" 2>/dev/null | tr -d '[:space:]')"
+    # 其次从安装目录读取
+    elif [[ -f "${installedVersionFile}" ]]; then
+        SCRIPT_VERSION="v$(cat "${installedVersionFile}" 2>/dev/null | tr -d '[:space:]')"
+    else
+        # 默认版本
+        SCRIPT_VERSION="v3.6.0"
+    fi
+    export SCRIPT_VERSION
+}
+_load_version
+
+# ============================================================================
+# GitHub Release 版本检测
+# 从 GitHub API 获取最新 Release 版本号
+# ============================================================================
+GITHUB_REPO="Lynthar/Proxy-agent"
+GITHUB_API_URL="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+
+# 获取最新 Release 版本号
+# 返回: 版本号 (如 v3.6.0) 或空字符串
+getLatestReleaseVersion() {
+    local response
+    local version
+
+    # 使用 curl 获取 GitHub API 响应
+    response=$(curl -s --connect-timeout 5 -m 10 "${GITHUB_API_URL}" 2>/dev/null)
+
+    if [[ -n "${response}" ]]; then
+        # 提取 tag_name 字段
+        version=$(echo "${response}" | grep -oP '"tag_name"\s*:\s*"\K[^"]+' 2>/dev/null)
+
+        # 如果 grep -P 不可用，尝试其他方法
+        if [[ -z "${version}" ]]; then
+            version=$(echo "${response}" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+        fi
+
+        # 确保版本号以 v 开头
+        if [[ -n "${version}" && "${version}" != v* ]]; then
+            version="v${version}"
+        fi
+
+        echo "${version}"
+    fi
+}
+
+# 比较版本号
+# 参数: $1 = 当前版本, $2 = 远程版本
+# 返回: 0 = 需要更新, 1 = 已是最新, 2 = 无法比较
+compareVersions() {
+    local current="$1"
+    local remote="$2"
+
+    # 去除 v 前缀
+    current="${current#v}"
+    remote="${remote#v}"
+
+    if [[ -z "${current}" || -z "${remote}" ]]; then
+        return 2
+    fi
+
+    if [[ "${current}" == "${remote}" ]]; then
+        return 1
+    fi
+
+    # 使用 sort -V 比较版本号
+    local higher
+    higher=$(printf '%s\n%s' "${current}" "${remote}" | sort -V | tail -1)
+
+    if [[ "${higher}" == "${remote}" ]]; then
+        return 0  # 需要更新
+    else
+        return 1  # 已是最新
+    fi
+}
+
+# 检查更新并显示提示
+checkForUpdates() {
+    local latestVersion
+    latestVersion=$(getLatestReleaseVersion)
+
+    if [[ -n "${latestVersion}" ]]; then
+        if compareVersions "${SCRIPT_VERSION}" "${latestVersion}"; then
+            export LATEST_VERSION="${latestVersion}"
+            return 0  # 有新版本
+        fi
+    fi
+    return 1  # 无新版本或检查失败
+}
+
+# ============================================================================
 # 路径迁移 - 从 v2ray-agent 迁移到 Proxy-agent
 # 用于从旧版本平滑升级
 # ============================================================================
@@ -6705,22 +6805,89 @@ removeUser() {
 # 更新脚本
 updateV2RayAgent() {
     echoContent skyBlue "\n进度  $1/${totalProgress} : 更新 Proxy-agent 脚本"
-    rm -rf /etc/Proxy-agent/install.sh
-    if [[ "${release}" == "alpine" ]]; then
-        wget -c -q -P /etc/Proxy-agent/ -N "https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/install.sh"
+
+    local installDir="/etc/Proxy-agent"
+    local latestVersion
+    local downloadBase
+
+    # 检查 GitHub Release 最新版本
+    echoContent yellow " ---> 检查最新版本..."
+    latestVersion=$(getLatestReleaseVersion)
+
+    if [[ -n "${latestVersion}" ]]; then
+        echoContent green " ---> 发现最新版本: ${latestVersion}"
+
+        # 比较版本
+        if ! compareVersions "${SCRIPT_VERSION}" "${latestVersion}"; then
+            echoContent green " ---> 当前已是最新版本 (${SCRIPT_VERSION})"
+            echoContent yellow " ---> 如需强制更新，请使用手动命令"
+            read -r -p "是否继续更新? [y/N]: " forceUpdate
+            if [[ "${forceUpdate}" != "y" && "${forceUpdate}" != "Y" ]]; then
+                menu
+                return
+            fi
+        fi
+
+        # 使用 GitHub Release 下载地址
+        # 格式: https://github.com/user/repo/releases/download/v1.0.0/file
+        downloadBase="https://github.com/${GITHUB_REPO}/releases/download/${latestVersion}"
     else
-        wget -c -q "${wgetShowProgressStatus}" -P /etc/Proxy-agent/ -N "https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/install.sh"
+        echoContent yellow " ---> 无法获取 Release 版本，使用 master 分支"
+        latestVersion="master"
+        downloadBase="https://raw.githubusercontent.com/${GITHUB_REPO}/master"
     fi
 
-    sudo chmod 700 /etc/Proxy-agent/install.sh
+    # 下载新版本脚本
+    echoContent yellow " ---> 下载脚本文件..."
+    rm -rf "${installDir}/install.sh"
+
+    # Release 模式下尝试从 release assets 下载，失败则从 raw 下载
+    local rawBase="https://raw.githubusercontent.com/${GITHUB_REPO}/master"
+
+    if [[ "${release}" == "alpine" ]]; then
+        wget -c -q -P "${installDir}/" -N "${rawBase}/install.sh"
+    else
+        wget -c -q "${wgetShowProgressStatus}" -P "${installDir}/" -N "${rawBase}/install.sh"
+    fi
+    sudo chmod 700 "${installDir}/install.sh"
+
+    # 保存版本号到 VERSION 文件
+    if [[ "${latestVersion}" != "master" ]]; then
+        echo "${latestVersion#v}" > "${installDir}/VERSION"
+    else
+        wget -c -q -O "${installDir}/VERSION" "${rawBase}/VERSION" 2>/dev/null
+    fi
+
+    # 下载/更新 lib 目录模块
+    echoContent yellow " ---> 下载模块文件..."
+    mkdir -p "${installDir}/lib"
+    for module in i18n constants utils json-utils system-detect service-control protocol-registry config-reader; do
+        wget -c -q -O "${installDir}/lib/${module}.sh" "${rawBase}/lib/${module}.sh" 2>/dev/null
+    done
+
+    # 下载/更新语言文件
+    echoContent yellow " ---> 下载语言文件..."
+    mkdir -p "${installDir}/shell/lang"
+    for langFile in zh_CN en_US loader; do
+        wget -c -q -O "${installDir}/shell/lang/${langFile}.sh" "${rawBase}/shell/lang/${langFile}.sh" 2>/dev/null
+    done
+
+    # 读取新版本号
     local version
-    version=$(grep '当前版本：v' "/etc/Proxy-agent/install.sh" | awk -F "[v]" '{print $2}' | tail -n +2 | head -n 1 | awk -F "[\"]" '{print $1}')
+    if [[ -f "${installDir}/VERSION" ]]; then
+        version="v$(cat "${installDir}/VERSION" 2>/dev/null | tr -d '[:space:]')"
+    else
+        version="${latestVersion}"
+    fi
 
     echoContent green "\n ---> 更新完毕"
     echoContent yellow " ---> 请手动执行[pasly]打开脚本"
-    echoContent green " ---> 当前版本：${version}\n"
+    echoContent green " ---> 当前版本：${version}"
+    if [[ "${latestVersion}" != "master" ]]; then
+        echoContent green " ---> Release: ${latestVersion}\n"
+    fi
     echoContent yellow "如更新不成功，请手动执行下面命令\n"
-    echoContent skyBlue "wget -P /root -N https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/install.sh && chmod 700 /root/install.sh && /root/install.sh"
+    echoContent skyBlue "wget -P /root -N ${rawBase}/install.sh && chmod 700 /root/install.sh && /root/install.sh"
     echo
     exit 0
 }
@@ -6913,6 +7080,24 @@ aliasInstall() {
 
     if [[ -f "$HOME/install.sh" ]] && [[ -d "/etc/Proxy-agent" ]] && grep -Eq "作者[:：]Lynthar|Proxy-agent" "$HOME/install.sh"; then
         mv "$HOME/install.sh" /etc/Proxy-agent/install.sh
+
+        # 复制 VERSION 文件（如果存在于脚本目录）
+        if [[ -f "${_SCRIPT_DIR}/VERSION" ]]; then
+            cp -f "${_SCRIPT_DIR}/VERSION" /etc/Proxy-agent/VERSION 2>/dev/null
+        fi
+
+        # 复制 lib 目录（如果存在）
+        if [[ -d "${_SCRIPT_DIR}/lib" ]]; then
+            mkdir -p /etc/Proxy-agent/lib
+            cp -rf "${_SCRIPT_DIR}/lib/"*.sh /etc/Proxy-agent/lib/ 2>/dev/null
+        fi
+
+        # 复制 shell/lang 目录（如果存在）
+        if [[ -d "${_SCRIPT_DIR}/shell/lang" ]]; then
+            mkdir -p /etc/Proxy-agent/shell/lang
+            cp -rf "${_SCRIPT_DIR}/shell/lang/"*.sh /etc/Proxy-agent/shell/lang/ 2>/dev/null
+        fi
+
         local paslyType=
         if [[ -d "/usr/bin/" ]]; then
             rm -f "/usr/bin/vasma"
@@ -12410,7 +12595,16 @@ menu() {
     cd "$HOME" || exit
     echoContent red "\n=============================================================="
     echoContent green "$(t MENU_AUTHOR): Lynthar"
-    echoContent green "$(t MENU_VERSION): v3.5.1"
+
+    # 显示版本号，并在后台检查更新
+    local versionDisplay="${SCRIPT_VERSION}"
+    if [[ -n "${LATEST_VERSION}" ]] && compareVersions "${SCRIPT_VERSION}" "${LATEST_VERSION}"; then
+        versionDisplay="${SCRIPT_VERSION} -> ${LATEST_VERSION} [有更新/Update Available]"
+        echoContent yellow "$(t MENU_VERSION): ${versionDisplay}"
+    else
+        echoContent green "$(t MENU_VERSION): ${versionDisplay}"
+    fi
+
     echoContent green "$(t MENU_GITHUB): https://github.com/Lynthar/Proxy-agent"
     echoContent green "$(t MENU_DESC): $(t MENU_TITLE)"
     showInstallStatus
@@ -12510,5 +12704,9 @@ menu() {
         ;;
     esac
 }
+
+# 启动时检查更新（使用短超时，避免阻塞太久）
+checkForUpdates 2>/dev/null
+
 cronFunction
 menu
