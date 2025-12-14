@@ -15,7 +15,7 @@ readonly _JSON_UTILS_LOADED=1
 # ============================================================================
 
 # JSON临时文件前缀
-readonly JSON_TMP_PREFIX="/tmp/v2ray-agent-json"
+readonly JSON_TMP_PREFIX="/tmp/Proxy-agent-json"
 
 # ============================================================================
 # 验证函数
@@ -596,7 +596,7 @@ xrayGetTLSDomain() {
 
     certPath=$(jsonGetValue "${file}" ".inbounds[0].streamSettings.tlsSettings.certificates[0].certificateFile")
     if [[ -n "${certPath}" ]]; then
-        # 从路径 /etc/v2ray-agent/tls/domain.crt 提取域名
+        # 从路径 /etc/Proxy-agent/tls/domain.crt 提取域名
         echo "${certPath}" | awk -F '[/]' '{print $(NF)}' | sed 's/\.crt$//'
     fi
 }

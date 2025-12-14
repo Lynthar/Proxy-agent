@@ -126,7 +126,7 @@ handleXrayService() {
                     echoContent green " ---> Xray启动成功"
                 else
                     echoContent red "Xray启动失败"
-                    echoContent red "请手动执行: /etc/v2ray-agent/xray/xray -confdir /etc/v2ray-agent/xray/conf"
+                    echoContent red "请手动执行: /etc/Proxy-agent/xray/xray -confdir /etc/Proxy-agent/xray/conf"
                     return 1
                 fi
             fi
@@ -183,7 +183,7 @@ handleSingBoxService() {
                 else
                     echoContent red "sing-box启动失败"
                     echoContent yellow "请手动执行检查:"
-                    echoContent yellow "  /etc/v2ray-agent/sing-box/sing-box merge config.json -C /etc/v2ray-agent/sing-box/conf/config/ -D /etc/v2ray-agent/sing-box/conf/"
+                    echoContent yellow "  /etc/Proxy-agent/sing-box/sing-box merge config.json -C /etc/Proxy-agent/sing-box/conf/config/ -D /etc/Proxy-agent/sing-box/conf/"
                     return 1
                 fi
             fi

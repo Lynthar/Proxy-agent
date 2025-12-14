@@ -37,7 +37,8 @@ readonly PROTOCOL_SOCKS5=20               # SOCKS5 (内部使用)
 # 配置目录路径
 # ============================================================================
 
-readonly V2RAY_AGENT_DIR="/etc/v2ray-agent"
+readonly PROXY_AGENT_DIR="/etc/Proxy-agent"
+readonly V2RAY_AGENT_DIR="${PROXY_AGENT_DIR}"  # 向后兼容别名
 readonly XRAY_CONFIG_DIR="${V2RAY_AGENT_DIR}/xray/conf"
 readonly SINGBOX_CONFIG_DIR="${V2RAY_AGENT_DIR}/sing-box/conf/config"
 readonly TLS_CERT_DIR="${V2RAY_AGENT_DIR}/tls"
