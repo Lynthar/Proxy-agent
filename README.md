@@ -16,26 +16,44 @@ Xray-core/sing-box 一键脚本快速安装
 *   **分流管理:** 提供wireguard、IPv6、Socks5、DNS、VMess(ws)、SNI反向代理，可用于解锁流媒体、规避IP验证等作用.
 *   **目标域名管理:** 提供域名黑名单管理，可用于禁止访问指定网站.
 *   **BT下载管理:** 可用于禁止下载P2P相关内容.
+*   **双语支持:** 提供中文和英文两个版本.
 *   **可在本仓库文档中查看使用说明**
+
 ## 快速开始
 
-### 安装
+### 中文版安装
 
-```
+```bash
 wget -P /root -N "https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/install.sh" && chmod 700 /root/install.sh && /root/install.sh
+```
+
+### English Version Installation
+
+```bash
+wget -P /root -N "https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/shell/install_en.sh" && chmod 700 /root/install_en.sh && /root/install_en.sh
 ```
 
 ### 使用
 
 安装后，运行以下命令可再次打开管理菜单:
 
-```
+```bash
 pasly
 ```
+
+## 语言选择 / Language Selection
+
+| 语言 / Language | 安装脚本 / Script |
+|----------------|------------------|
+| 中文           | `install.sh`     |
+| English        | `install_en.sh`  |
+
+两个版本功能完全相同，仅界面语言不同。
 
 ## 文档和指南
 
 *   请参考本仓库的 documents 目录，了解脚本功能、风险提示与使用示例。
+*   For English documentation, see [English README](documents/en/README_EN.md)
 
 ## 支持
 
