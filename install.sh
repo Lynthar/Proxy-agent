@@ -7208,8 +7208,8 @@ chainProxyMenu() {
     echoContent skyBlue "\n功能: 链式代理管理"
     echoContent red "\n=============================================================="
     echoContent yellow "# 链式代理说明"
-    echoContent yellow "# 用于在两台境外VPS之间建立加密转发通道"
-    echoContent yellow "# 入口节点(线路优化) → 出口节点(IP优化) → 互联网"
+    echoContent yellow "# 用于在多台境外VPS之间建立加密转发链路"
+    echoContent yellow "# 支持多层中继: 入口 → 中继1 → 中继2 → ... → 出口 → 互联网"
     echoContent yellow "# 使用 Shadowsocks 2022 协议，加密安全、性能优秀\n"
 
     echoContent yellow "1.快速配置向导 [推荐]"
@@ -7244,14 +7244,18 @@ chainProxyWizard() {
     echoContent skyBlue "\n链式代理配置向导"
     echoContent red "\n=============================================================="
     echoContent yellow "请选择本机角色:\n"
-    echoContent yellow "1.出口节点 (Exit) - 落地机，直接访问互联网"
-    echoContent yellow "  └─ 生成配置码，供入口节点导入"
+    echoContent yellow "1.出口节点 (Exit) - 链路终点，直接访问互联网"
+    echoContent yellow "  └─ 生成配置码，供中继或入口节点导入"
     echoContent yellow ""
-    echoContent yellow "2.入口节点 (Entry) - 转发机，接收客户端连接"
-    echoContent yellow "  └─ 导入出口节点的配置码"
+    echoContent yellow "2.中继节点 (Relay) - 链路中间节点，转发流量"
+    echoContent yellow "  └─ 导入下游配置码，生成新配置码供上游使用"
+    echoContent yellow "  └─ 支持多层中继: 入口→中继1→中继2→...→出口"
     echoContent yellow ""
-    echoContent yellow "3.手动配置入口节点"
-    echoContent yellow "  └─ 手动输入出口节点信息"
+    echoContent yellow "3.入口节点 (Entry) - 链路起点，接收客户端连接"
+    echoContent yellow "  └─ 导入出口或中继节点的配置码"
+    echoContent yellow ""
+    echoContent yellow "4.手动配置入口节点"
+    echoContent yellow "  └─ 手动输入出口节点信息 (仅支持单跳)"
 
     read -r -p "请选择:" selectType
 
@@ -7260,9 +7264,12 @@ chainProxyWizard() {
         setupChainExit
         ;;
     2)
-        setupChainEntryByCode
+        setupChainRelay
         ;;
     3)
+        setupChainEntryByCode
+        ;;
+    4)
         setupChainEntryManual
         ;;
     esac
@@ -7577,53 +7584,113 @@ showExistingChainCode() {
     echoContent green "  加密方式: ${method}"
 }
 
-# 解析配置码
+# 解析配置码 (支持 V1 单跳和 V2 多跳格式)
+# V1 格式: chain://ss2022@IP:PORT?key=xxx&method=xxx
+# V2 格式: chain://v2@BASE64_JSON_ARRAY
+# 输出: chainHops 数组 (JSON), chainHopCount 跳数
 parseChainCode() {
     local code=$1
 
-    # 验证格式 chain://ss2022@IP:PORT?key=xxx&method=xxx
-    if [[ ! "${code}" =~ ^chain://ss2022@ ]]; then
-        echoContent red " ---> 配置码格式错误"
-        return 1
+    # 初始化全局变量
+    chainHops=""
+    chainHopCount=0
+    chainExitIP=""
+    chainExitPort=""
+    chainExitKey=""
+    chainExitMethod=""
+
+    # V2 多跳格式
+    if [[ "${code}" =~ ^chain://v2@ ]]; then
+        local base64Data
+        base64Data=$(echo "${code}" | sed 's/chain:\/\/v2@//')
+
+        # 解码 Base64
+        chainHops=$(echo "${base64Data}" | base64 -d 2>/dev/null)
+        if [[ -z "${chainHops}" ]] || ! echo "${chainHops}" | jq empty 2>/dev/null; then
+            echoContent red " ---> V2 配置码解析失败，JSON格式错误"
+            return 1
+        fi
+
+        chainHopCount=$(echo "${chainHops}" | jq 'length')
+        if [[ "${chainHopCount}" -lt 1 ]]; then
+            echoContent red " ---> 配置码不包含任何跳转节点"
+            return 1
+        fi
+
+        echoContent green " ---> V2 多跳配置码解析成功"
+        echoContent green "  总跳数: ${chainHopCount}"
+
+        # 显示链路
+        local i=1
+        while [[ $i -le ${chainHopCount} ]]; do
+            local hopIP hopPort
+            hopIP=$(echo "${chainHops}" | jq -r ".[$((i-1))].ip")
+            hopPort=$(echo "${chainHops}" | jq -r ".[$((i-1))].port")
+            if [[ $i -eq ${chainHopCount} ]]; then
+                echoContent green "  第${i}跳 (出口): ${hopIP}:${hopPort}"
+            else
+                echoContent green "  第${i}跳 (中继): ${hopIP}:${hopPort}"
+            fi
+            ((i++))
+        done
+
+        # 兼容性：设置最后一跳为出口
+        chainExitIP=$(echo "${chainHops}" | jq -r '.[-1].ip')
+        chainExitPort=$(echo "${chainHops}" | jq -r '.[-1].port')
+        chainExitKey=$(echo "${chainHops}" | jq -r '.[-1].key')
+        chainExitMethod=$(echo "${chainHops}" | jq -r '.[-1].method')
+
+        return 0
     fi
 
-    # 提取 IP:PORT
-    local ipPort
-    ipPort=$(echo "${code}" | sed 's/chain:\/\/ss2022@//' | cut -d'?' -f1)
-    chainExitIP=$(echo "${ipPort}" | cut -d':' -f1)
-    chainExitPort=$(echo "${ipPort}" | cut -d':' -f2)
+    # V1 单跳格式
+    if [[ "${code}" =~ ^chain://ss2022@ ]]; then
+        # 提取 IP:PORT
+        local ipPort
+        ipPort=$(echo "${code}" | sed 's/chain:\/\/ss2022@//' | cut -d'?' -f1)
+        chainExitIP=$(echo "${ipPort}" | cut -d':' -f1)
+        chainExitPort=$(echo "${ipPort}" | cut -d':' -f2)
 
-    # 提取参数
-    local params
-    params=$(echo "${code}" | cut -d'?' -f2)
+        # 提取参数
+        local params
+        params=$(echo "${code}" | cut -d'?' -f2)
 
-    # 提取 key (Base64 编码的密钥需要解码)
-    local keyBase64
-    keyBase64=$(echo "${params}" | grep -oP 'key=\K[^&]+')
-    chainExitKey=$(echo "${keyBase64}" | base64 -d 2>/dev/null)
-    if [[ -z "${chainExitKey}" ]]; then
-        # 如果解码失败，可能密钥本身就是原始格式
-        chainExitKey="${keyBase64}"
+        # 提取 key (Base64 编码的密钥需要解码)
+        local keyBase64
+        keyBase64=$(echo "${params}" | grep -oP 'key=\K[^&]+')
+        chainExitKey=$(echo "${keyBase64}" | base64 -d 2>/dev/null)
+        if [[ -z "${chainExitKey}" ]]; then
+            chainExitKey="${keyBase64}"
+        fi
+
+        # 提取 method
+        chainExitMethod=$(echo "${params}" | grep -oP 'method=\K[^&]+')
+        if [[ -z "${chainExitMethod}" ]]; then
+            chainExitMethod="2022-blake3-aes-128-gcm"
+        fi
+
+        # 验证提取结果
+        if [[ -z "${chainExitIP}" ]] || [[ -z "${chainExitPort}" ]] || [[ -z "${chainExitKey}" ]]; then
+            echoContent red " ---> 配置码解析失败"
+            return 1
+        fi
+
+        # 转换为 V2 格式的单跳数组
+        chainHops=$(jq -n --arg ip "${chainExitIP}" --argjson port "${chainExitPort}" \
+            --arg key "${chainExitKey}" --arg method "${chainExitMethod}" \
+            '[{ip: $ip, port: $port, key: $key, method: $method}]')
+        chainHopCount=1
+
+        echoContent green " ---> V1 配置码解析成功"
+        echoContent green "  出口IP: ${chainExitIP}"
+        echoContent green "  出口端口: ${chainExitPort}"
+        echoContent green "  加密方式: ${chainExitMethod}"
+
+        return 0
     fi
 
-    # 提取 method
-    chainExitMethod=$(echo "${params}" | grep -oP 'method=\K[^&]+')
-    if [[ -z "${chainExitMethod}" ]]; then
-        chainExitMethod="2022-blake3-aes-128-gcm"
-    fi
-
-    # 验证提取结果
-    if [[ -z "${chainExitIP}" ]] || [[ -z "${chainExitPort}" ]] || [[ -z "${chainExitKey}" ]]; then
-        echoContent red " ---> 配置码解析失败"
-        return 1
-    fi
-
-    echoContent green " ---> 配置码解析成功"
-    echoContent green "  出口IP: ${chainExitIP}"
-    echoContent green "  出口端口: ${chainExitPort}"
-    echoContent green "  加密方式: ${chainExitMethod}"
-
-    return 0
+    echoContent red " ---> 配置码格式错误，不支持的格式"
+    return 1
 }
 
 # 通过配置码配置入口节点
@@ -7631,7 +7698,7 @@ setupChainEntryByCode() {
     echoContent skyBlue "\n配置入口节点 (Entry) - 配置码模式"
     echoContent red "\n=============================================================="
 
-    echoContent yellow "请粘贴出口节点生成的配置码:"
+    echoContent yellow "请粘贴出口或中继节点的配置码:"
     read -r -p "配置码:" chainCode
 
     if [[ -z "${chainCode}" ]]; then
@@ -7639,13 +7706,19 @@ setupChainEntryByCode() {
         return 1
     fi
 
-    # 解析配置码
+    # 解析配置码 (支持 V1 单跳和 V2 多跳)
     if ! parseChainCode "${chainCode}"; then
         return 1
     fi
 
-    # 调用通用配置函数
-    setupChainEntry "${chainExitIP}" "${chainExitPort}" "${chainExitKey}" "${chainExitMethod}"
+    # 根据跳数调用不同的配置函数
+    if [[ ${chainHopCount} -gt 1 ]]; then
+        # 多跳模式 - 使用全局 chainHops 变量
+        setupChainEntryMultiHop
+    else
+        # 单跳模式 - 向后兼容
+        setupChainEntry "${chainExitIP}" "${chainExitPort}" "${chainExitKey}" "${chainExitMethod}"
+    fi
 }
 
 # 手动配置入口节点
@@ -7680,7 +7753,535 @@ setupChainEntryManual() {
     setupChainEntry "${chainExitIP}" "${chainExitPort}" "${chainExitKey}" "${chainExitMethod}"
 }
 
-# 配置入口节点 (通用函数)
+# 配置中继节点 (Relay)
+# 中继节点同时作为上游的"出口"（接收流量）和下游的"入口"（转发流量）
+setupChainRelay() {
+    echoContent skyBlue "\n配置中继节点 (Relay)"
+    echoContent red "\n=============================================================="
+    echoContent yellow "中继节点工作原理:"
+    echoContent yellow "  上游节点 → [本机] → 下游节点 → ... → 出口 → 互联网"
+    echoContent yellow "  本机将接收上游流量并转发到下游链路\n"
+
+    # 确保 sing-box 已安装
+    if ! ensureSingBoxInstalled; then
+        return 1
+    fi
+
+    # 检查是否已存在链式代理配置
+    if [[ -f "/etc/v2ray-agent/sing-box/conf/config/chain_inbound.json" ]] || \
+       [[ -f "/etc/v2ray-agent/sing-box/conf/config/chain_outbound.json" ]]; then
+        echoContent yellow "\n检测到已存在链式代理配置"
+        read -r -p "是否覆盖现有配置？[y/n]:" confirmOverwrite
+        if [[ "${confirmOverwrite}" != "y" ]]; then
+            return 0
+        fi
+    fi
+
+    # 步骤1: 导入下游配置码
+    echoContent yellow "步骤 1/3: 导入下游节点配置码"
+    echoContent yellow "请粘贴下游节点（出口或其他中继）的配置码:"
+    read -r -p "配置码:" downstreamCode
+
+    if [[ -z "${downstreamCode}" ]]; then
+        echoContent red " ---> 配置码不能为空"
+        return 1
+    fi
+
+    # 解析下游配置码
+    if ! parseChainCode "${downstreamCode}"; then
+        return 1
+    fi
+
+    # chainHops 现在包含下游所有节点
+
+    # 步骤2: 配置本机监听
+    echoContent yellow "\n步骤 2/3: 配置本机监听端口"
+
+    # 生成随机端口 (10000-60000)
+    local chainPort
+    chainPort=$((RANDOM % 50000 + 10000))
+    echoContent yellow "请输入本机链式代理端口 [回车使用随机端口: ${chainPort}]"
+    read -r -p "端口:" inputPort
+    if [[ -n "${inputPort}" ]]; then
+        if [[ ! "${inputPort}" =~ ^[0-9]+$ ]] || [[ "${inputPort}" -lt 1 ]] || [[ "${inputPort}" -gt 65535 ]]; then
+            echoContent red " ---> 端口格式错误"
+            return 1
+        fi
+        chainPort=${inputPort}
+    fi
+
+    # 生成密钥
+    local chainKey
+    chainKey=$(generateChainKey)
+    local chainMethod="2022-blake3-aes-128-gcm"
+
+    # 获取公网IP
+    local publicIP
+    publicIP=$(getChainPublicIP)
+    if [[ -z "${publicIP}" ]]; then
+        echoContent yellow "\n无法自动获取公网IP，请手动输入"
+        read -r -p "公网IP:" publicIP
+        if [[ -z "${publicIP}" ]]; then
+            echoContent red " ---> IP不能为空"
+            return 1
+        fi
+    fi
+    echoContent green " ---> 本机公网IP: ${publicIP}"
+
+    # 步骤3: 生成配置
+    echoContent yellow "\n步骤 3/3: 生成配置..."
+
+    # 创建入站配置 (接收上游流量)
+    cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/chain_inbound.json
+{
+    "inbounds": [
+        {
+            "type": "shadowsocks",
+            "tag": "chain_inbound",
+            "listen": "::",
+            "listen_port": ${chainPort},
+            "method": "${chainMethod}",
+            "password": "${chainKey}",
+            "multiplex": {
+                "enabled": true
+            }
+        }
+    ]
+}
+EOF
+
+    # 创建出站配置 (detour chain 到下游)
+    # 根据 chainHops 生成 detour 链
+    local outboundsJson="["
+    local i=0
+    local hopCount=${chainHopCount}
+
+    while [[ $i -lt ${hopCount} ]]; do
+        local hopIP hopPort hopKey hopMethod hopTag
+        hopIP=$(echo "${chainHops}" | jq -r ".[$i].ip")
+        hopPort=$(echo "${chainHops}" | jq -r ".[$i].port")
+        hopKey=$(echo "${chainHops}" | jq -r ".[$i].key")
+        hopMethod=$(echo "${chainHops}" | jq -r ".[$i].method")
+        hopTag="chain_hop_$((i+1))"
+
+        if [[ $i -gt 0 ]]; then
+            outboundsJson+=","
+        fi
+
+        # 第一跳直连，后续跳通过前一跳
+        if [[ $i -eq 0 ]]; then
+            outboundsJson+="
+        {
+            \"type\": \"shadowsocks\",
+            \"tag\": \"${hopTag}\",
+            \"server\": \"${hopIP}\",
+            \"server_port\": ${hopPort},
+            \"method\": \"${hopMethod}\",
+            \"password\": \"${hopKey}\",
+            \"multiplex\": {
+                \"enabled\": true,
+                \"protocol\": \"h2mux\",
+                \"max_connections\": 4,
+                \"min_streams\": 4
+            }
+        }"
+        else
+            local prevTag="chain_hop_${i}"
+            outboundsJson+="
+        {
+            \"type\": \"shadowsocks\",
+            \"tag\": \"${hopTag}\",
+            \"server\": \"${hopIP}\",
+            \"server_port\": ${hopPort},
+            \"method\": \"${hopMethod}\",
+            \"password\": \"${hopKey}\",
+            \"multiplex\": {
+                \"enabled\": true,
+                \"protocol\": \"h2mux\",
+                \"max_connections\": 4,
+                \"min_streams\": 4
+            },
+            \"detour\": \"${prevTag}\"
+        }"
+        fi
+
+        ((i++))
+    done
+
+    # 最后添加 chain_outbound 作为最终出站
+    local finalHopTag="chain_hop_${hopCount}"
+    outboundsJson+=",
+        {
+            \"type\": \"direct\",
+            \"tag\": \"chain_outbound\",
+            \"detour\": \"${finalHopTag}\"
+        }
+    ]"
+
+    echo "{\"outbounds\": ${outboundsJson}}" | jq . > /etc/v2ray-agent/sing-box/conf/config/chain_outbound.json
+
+    # 创建路由配置
+    cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/chain_route.json
+{
+    "route": {
+        "rules": [
+            {
+                "inbound": ["chain_inbound"],
+                "outbound": "chain_outbound"
+            }
+        ],
+        "final": "direct"
+    }
+}
+EOF
+
+    # 构建新的 hops 数组 (本机 + 下游所有节点)
+    local newHops
+    newHops=$(jq -n --arg ip "${publicIP}" --argjson port "${chainPort}" \
+        --arg key "${chainKey}" --arg method "${chainMethod}" \
+        --argjson downstream "${chainHops}" \
+        '[{ip: $ip, port: $port, key: $key, method: $method}] + $downstream')
+
+    # 保存配置信息
+    cat <<EOF >/etc/v2ray-agent/sing-box/conf/chain_relay_info.json
+{
+    "role": "relay",
+    "ip": "${publicIP}",
+    "port": ${chainPort},
+    "method": "${chainMethod}",
+    "password": "${chainKey}",
+    "downstream_hops": ${chainHops},
+    "total_hops": $((chainHopCount + 1))
+}
+EOF
+
+    # 开放防火墙端口
+    allowPort "${chainPort}" "tcp"
+    echoContent green " ---> 已开放端口 ${chainPort}"
+
+    # 合并配置并重启
+    mergeSingBoxConfig
+    handleSingBox stop >/dev/null 2>&1
+    handleSingBox start
+
+    # 验证启动成功
+    sleep 1
+    if ! pgrep -x "sing-box" >/dev/null 2>&1; then
+        echoContent red " ---> sing-box 启动失败"
+        echoContent yellow "请手动执行: /etc/v2ray-agent/sing-box/sing-box run -c /etc/v2ray-agent/sing-box/conf/config.json"
+        return 1
+    fi
+
+    # 生成 V2 配置码
+    local newChainCode
+    newChainCode="chain://v2@$(echo -n "${newHops}" | base64 | tr -d '\n')"
+
+    echoContent green "\n=============================================================="
+    echoContent green "中继节点配置完成！"
+    echoContent green "=============================================================="
+    echoContent yellow "\n当前链路 (${chainHopCount} + 1 = $((chainHopCount + 1)) 跳):"
+    echoContent green "  上游 → 本机(${publicIP}:${chainPort})"
+
+    i=1
+    while [[ $i -le ${chainHopCount} ]]; do
+        local hopIP hopPort
+        hopIP=$(echo "${chainHops}" | jq -r ".[$((i-1))].ip")
+        hopPort=$(echo "${chainHops}" | jq -r ".[$((i-1))].port")
+        if [[ $i -eq ${chainHopCount} ]]; then
+            echoContent green "        → 出口(${hopIP}:${hopPort}) → 互联网"
+        else
+            echoContent green "        → 中继${i}(${hopIP}:${hopPort})"
+        fi
+        ((i++))
+    done
+
+    echoContent yellow "\n配置码 (供上游入口或中继节点使用):\n"
+    echoContent skyBlue "${newChainCode}"
+
+    echoContent red "\n请妥善保管配置码，切勿泄露！"
+}
+
+# 配置入口节点 - 多跳模式
+# 使用全局变量 chainHops (由 parseChainCode 设置)
+setupChainEntryMultiHop() {
+    local chainBridgePort=31111  # sing-box SOCKS5 桥接端口
+
+    # 确保 sing-box 已安装
+    if ! ensureSingBoxInstalled; then
+        return 1
+    fi
+
+    # 检查是否已存在链式代理配置
+    if [[ -f "/etc/v2ray-agent/sing-box/conf/config/chain_outbound.json" ]]; then
+        echoContent yellow "\n检测到已存在链式代理配置"
+        read -r -p "是否覆盖现有配置？[y/n]:" confirmOverwrite
+        if [[ "${confirmOverwrite}" != "y" ]]; then
+            return 0
+        fi
+    fi
+
+    echoContent yellow "\n正在配置入口节点 (多跳模式, ${chainHopCount}跳)..."
+
+    # 检测是否有 Xray 代理协议在运行
+    local hasXrayProtocols=false
+    if [[ -f "/etc/v2ray-agent/xray/conf/02_VLESS_TCP_inbounds.json" ]] || \
+       [[ -f "/etc/v2ray-agent/xray/conf/07_VLESS_vision_reality_inbounds.json" ]] || \
+       [[ -f "/etc/v2ray-agent/xray/conf/04_trojan_TCP_inbounds.json" ]]; then
+        hasXrayProtocols=true
+        echoContent green " ---> 检测到 Xray 代理协议，将同时配置 Xray 链式转发"
+    fi
+
+    # ============= sing-box 配置 =============
+
+    # 创建多跳出站配置 (detour chain)
+    local outboundsJson="["
+    local i=0
+    local hopCount=${chainHopCount}
+
+    while [[ $i -lt ${hopCount} ]]; do
+        local hopIP hopPort hopKey hopMethod hopTag
+        hopIP=$(echo "${chainHops}" | jq -r ".[$i].ip")
+        hopPort=$(echo "${chainHops}" | jq -r ".[$i].port")
+        hopKey=$(echo "${chainHops}" | jq -r ".[$i].key")
+        hopMethod=$(echo "${chainHops}" | jq -r ".[$i].method")
+        hopTag="chain_hop_$((i+1))"
+
+        if [[ $i -gt 0 ]]; then
+            outboundsJson+=","
+        fi
+
+        # 第一跳直连，后续跳通过前一跳 (detour)
+        if [[ $i -eq 0 ]]; then
+            outboundsJson+="
+        {
+            \"type\": \"shadowsocks\",
+            \"tag\": \"${hopTag}\",
+            \"server\": \"${hopIP}\",
+            \"server_port\": ${hopPort},
+            \"method\": \"${hopMethod}\",
+            \"password\": \"${hopKey}\",
+            \"multiplex\": {
+                \"enabled\": true,
+                \"protocol\": \"h2mux\",
+                \"max_connections\": 4,
+                \"min_streams\": 4
+            }
+        }"
+        else
+            local prevTag="chain_hop_${i}"
+            outboundsJson+="
+        {
+            \"type\": \"shadowsocks\",
+            \"tag\": \"${hopTag}\",
+            \"server\": \"${hopIP}\",
+            \"server_port\": ${hopPort},
+            \"method\": \"${hopMethod}\",
+            \"password\": \"${hopKey}\",
+            \"multiplex\": {
+                \"enabled\": true,
+                \"protocol\": \"h2mux\",
+                \"max_connections\": 4,
+                \"min_streams\": 4
+            },
+            \"detour\": \"${prevTag}\"
+        }"
+        fi
+
+        ((i++))
+    done
+
+    # 最后添加 chain_outbound 作为最终出站
+    local finalHopTag="chain_hop_${hopCount}"
+    outboundsJson+=",
+        {
+            \"type\": \"direct\",
+            \"tag\": \"chain_outbound\",
+            \"detour\": \"${finalHopTag}\"
+        }
+    ]"
+
+    echo "{\"outbounds\": ${outboundsJson}}" | jq . > /etc/v2ray-agent/sing-box/conf/config/chain_outbound.json
+
+    # 如果有 Xray 代理协议，创建 SOCKS5 桥接入站
+    if [[ "${hasXrayProtocols}" == "true" ]]; then
+        cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/chain_bridge_inbound.json
+{
+    "inbounds": [
+        {
+            "type": "socks",
+            "tag": "chain_bridge_in",
+            "listen": "127.0.0.1",
+            "listen_port": ${chainBridgePort}
+        }
+    ]
+}
+EOF
+        # 路由：桥接入站流量走链式出站
+        cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/chain_route.json
+{
+    "route": {
+        "rules": [
+            {
+                "inbound": ["chain_bridge_in"],
+                "outbound": "chain_outbound"
+            }
+        ],
+        "final": "chain_outbound"
+    }
+}
+EOF
+    else
+        # 没有 Xray，直接设置 final
+        cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/chain_route.json
+{
+    "route": {
+        "final": "chain_outbound"
+    }
+}
+EOF
+    fi
+
+    # 保存配置信息
+    cat <<EOF >/etc/v2ray-agent/sing-box/conf/chain_entry_info.json
+{
+    "role": "entry",
+    "mode": "multi_hop",
+    "hop_count": ${chainHopCount},
+    "hops": ${chainHops},
+    "bridge_port": ${chainBridgePort},
+    "has_xray": ${hasXrayProtocols}
+}
+EOF
+
+    # 合并 sing-box 配置
+    echoContent yellow "正在合并 sing-box 配置..."
+    if ! /etc/v2ray-agent/sing-box/sing-box merge config.json -C /etc/v2ray-agent/sing-box/conf/config/ -D /etc/v2ray-agent/sing-box/conf/ 2>/dev/null; then
+        echoContent red " ---> sing-box 配置合并失败"
+        echoContent yellow "调试命令: /etc/v2ray-agent/sing-box/sing-box merge config.json -C /etc/v2ray-agent/sing-box/conf/config/ -D /etc/v2ray-agent/sing-box/conf/"
+        return 1
+    fi
+
+    # 验证配置文件已生成
+    if [[ ! -f "/etc/v2ray-agent/sing-box/conf/config.json" ]]; then
+        echoContent red " ---> sing-box 配置文件生成失败"
+        return 1
+    fi
+
+    # 启动 sing-box
+    echoContent yellow "正在启动 sing-box..."
+    handleSingBox stop >/dev/null 2>&1
+    handleSingBox start
+
+    # 验证 sing-box 启动成功
+    sleep 1
+    if ! pgrep -x "sing-box" >/dev/null 2>&1; then
+        echoContent red " ---> sing-box 启动失败"
+        echoContent yellow "请手动执行: /etc/v2ray-agent/sing-box/sing-box run -c /etc/v2ray-agent/sing-box/conf/config.json"
+        return 1
+    fi
+    echoContent green " ---> sing-box 启动成功"
+
+    # ============= Xray 配置 (如果存在) =============
+    if [[ "${hasXrayProtocols}" == "true" ]]; then
+        echoContent yellow "正在配置 Xray 链式转发..."
+
+        # 创建 Xray SOCKS5 出站 (指向 sing-box 桥接)
+        cat <<EOF >/etc/v2ray-agent/xray/conf/chain_outbound.json
+{
+    "outbounds": [
+        {
+            "tag": "chain_proxy",
+            "protocol": "socks",
+            "settings": {
+                "servers": [
+                    {
+                        "address": "127.0.0.1",
+                        "port": ${chainBridgePort}
+                    }
+                ]
+            }
+        }
+    ]
+}
+EOF
+
+        # 备份原路由配置
+        if [[ -f "/etc/v2ray-agent/xray/conf/09_routing.json" ]]; then
+            cp /etc/v2ray-agent/xray/conf/09_routing.json /etc/v2ray-agent/xray/conf/09_routing.json.bak.chain
+        fi
+
+        # 创建新的路由配置
+        cat <<EOF >/etc/v2ray-agent/xray/conf/09_routing.json
+{
+    "routing": {
+        "domainStrategy": "AsIs",
+        "rules": [
+            {
+                "type": "field",
+                "domain": [
+                    "domain:gstatic.com",
+                    "domain:googleapis.com",
+                    "domain:googleapis.cn"
+                ],
+                "outboundTag": "chain_proxy"
+            },
+            {
+                "type": "field",
+                "network": "tcp,udp",
+                "outboundTag": "chain_proxy"
+            }
+        ]
+    }
+}
+EOF
+
+        # 重启 Xray
+        echoContent yellow "正在重启 Xray..."
+        handleXray stop >/dev/null 2>&1
+        handleXray start
+
+        sleep 1
+        if pgrep -f "xray/xray" >/dev/null 2>&1; then
+            echoContent green " ---> Xray 重启成功，链式转发已启用"
+        else
+            echoContent red " ---> Xray 重启失败"
+            echoContent yellow "请检查配置: /etc/v2ray-agent/xray/xray run -confdir /etc/v2ray-agent/xray/conf"
+            return 1
+        fi
+    fi
+
+    echoContent green "\n=============================================================="
+    echoContent green "入口节点配置完成！(多跳模式)"
+    echoContent green "=============================================================="
+
+    # 显示链路
+    echoContent yellow "\n当前链路 (${chainHopCount} 跳):"
+    if [[ "${hasXrayProtocols}" == "true" ]]; then
+        echoContent green "  客户端 → Xray → sing-box"
+    else
+        echoContent green "  客户端 → sing-box"
+    fi
+
+    i=1
+    while [[ $i -le ${chainHopCount} ]]; do
+        local hopIP hopPort
+        hopIP=$(echo "${chainHops}" | jq -r ".[$((i-1))].ip")
+        hopPort=$(echo "${chainHops}" | jq -r ".[$((i-1))].port")
+        if [[ $i -eq ${chainHopCount} ]]; then
+            echoContent green "           → 出口(${hopIP}:${hopPort}) → 互联网"
+        else
+            echoContent green "           → 中继${i}(${hopIP}:${hopPort})"
+        fi
+        ((i++))
+    done
+
+    # 自动测试连通性
+    echoContent yellow "\n正在测试链路连通性..."
+    sleep 2
+    testChainConnection
+}
+
+# 配置入口节点 (单跳模式，向后兼容)
 setupChainEntry() {
     local exitIP=$1
     local exitPort=$2
@@ -7941,11 +8542,15 @@ showChainStatus() {
         # 显示配置码
         showExistingChainCode
 
-    # 检查是否为入口节点
-    elif [[ -f "/etc/v2ray-agent/sing-box/conf/chain_entry_info.json" ]]; then
-        role="入口节点 (Entry)"
-        exitIP=$(jq -r '.exit_ip' /etc/v2ray-agent/sing-box/conf/chain_entry_info.json)
-        exitPort=$(jq -r '.exit_port' /etc/v2ray-agent/sing-box/conf/chain_entry_info.json)
+    # 检查是否为中继节点
+    elif [[ -f "/etc/v2ray-agent/sing-box/conf/chain_relay_info.json" ]]; then
+        role="中继节点 (Relay)"
+        local ip port totalHops
+        ip=$(jq -r '.ip' /etc/v2ray-agent/sing-box/conf/chain_relay_info.json)
+        port=$(jq -r '.port' /etc/v2ray-agent/sing-box/conf/chain_relay_info.json)
+        totalHops=$(jq -r '.total_hops' /etc/v2ray-agent/sing-box/conf/chain_relay_info.json)
+        local downstreamHops
+        downstreamHops=$(jq -r '.downstream_hops' /etc/v2ray-agent/sing-box/conf/chain_relay_info.json)
 
         # 检查 sing-box 是否运行
         if pgrep -x "sing-box" >/dev/null 2>&1; then
@@ -7958,9 +8563,85 @@ showChainStatus() {
         echoContent green "║                      链式代理状态                              ║"
         echoContent green "╠══════════════════════════════════════════════════════════════╣"
         echoContent yellow "  当前角色: ${role}"
-        echoContent yellow "  出口地址: ${exitIP}:${exitPort}"
+        echoContent yellow "  监听端口: ${port}"
+        echoContent yellow "  本机IP: ${ip}"
+        echoContent yellow "  链路总跳数: ${totalHops}"
         echoContent yellow "  运行状态: ${status}"
+        echoContent green "╠══════════════════════════════════════════════════════════════╣"
+        echoContent yellow "  下游链路:"
+
+        local i=0
+        local hopCount
+        hopCount=$(echo "${downstreamHops}" | jq 'length')
+        while [[ $i -lt ${hopCount} ]]; do
+            local hopIP hopPort
+            hopIP=$(echo "${downstreamHops}" | jq -r ".[$i].ip")
+            hopPort=$(echo "${downstreamHops}" | jq -r ".[$i].port")
+            if [[ $i -eq $((hopCount - 1)) ]]; then
+                echoContent yellow "    → 出口(${hopIP}:${hopPort}) → 互联网"
+            else
+                echoContent yellow "    → 中继$((i+1))(${hopIP}:${hopPort})"
+            fi
+            ((i++))
+        done
         echoContent green "╚══════════════════════════════════════════════════════════════╝"
+
+        # 显示配置码
+        showRelayChainCode
+
+    # 检查是否为入口节点
+    elif [[ -f "/etc/v2ray-agent/sing-box/conf/chain_entry_info.json" ]]; then
+        local mode
+        mode=$(jq -r '.mode // "single_hop"' /etc/v2ray-agent/sing-box/conf/chain_entry_info.json)
+
+        # 检查 sing-box 是否运行
+        if pgrep -x "sing-box" >/dev/null 2>&1; then
+            status="✅ 运行中"
+        else
+            status="❌ 未运行"
+        fi
+
+        if [[ "${mode}" == "multi_hop" ]]; then
+            role="入口节点 (Entry) - 多跳模式"
+            local hopCount hops
+            hopCount=$(jq -r '.hop_count' /etc/v2ray-agent/sing-box/conf/chain_entry_info.json)
+            hops=$(jq -r '.hops' /etc/v2ray-agent/sing-box/conf/chain_entry_info.json)
+
+            echoContent green "╔══════════════════════════════════════════════════════════════╗"
+            echoContent green "║                      链式代理状态                              ║"
+            echoContent green "╠══════════════════════════════════════════════════════════════╣"
+            echoContent yellow "  当前角色: ${role}"
+            echoContent yellow "  链路跳数: ${hopCount}"
+            echoContent yellow "  运行状态: ${status}"
+            echoContent green "╠══════════════════════════════════════════════════════════════╣"
+            echoContent yellow "  链路详情:"
+
+            local i=0
+            while [[ $i -lt ${hopCount} ]]; do
+                local hopIP hopPort
+                hopIP=$(echo "${hops}" | jq -r ".[$i].ip")
+                hopPort=$(echo "${hops}" | jq -r ".[$i].port")
+                if [[ $i -eq $((hopCount - 1)) ]]; then
+                    echoContent yellow "    → 出口(${hopIP}:${hopPort}) → 互联网"
+                else
+                    echoContent yellow "    → 中继$((i+1))(${hopIP}:${hopPort})"
+                fi
+                ((i++))
+            done
+            echoContent green "╚══════════════════════════════════════════════════════════════╝"
+        else
+            role="入口节点 (Entry)"
+            exitIP=$(jq -r '.exit_ip' /etc/v2ray-agent/sing-box/conf/chain_entry_info.json)
+            exitPort=$(jq -r '.exit_port' /etc/v2ray-agent/sing-box/conf/chain_entry_info.json)
+
+            echoContent green "╔══════════════════════════════════════════════════════════════╗"
+            echoContent green "║                      链式代理状态                              ║"
+            echoContent green "╠══════════════════════════════════════════════════════════════╣"
+            echoContent yellow "  当前角色: ${role}"
+            echoContent yellow "  出口地址: ${exitIP}:${exitPort}"
+            echoContent yellow "  运行状态: ${status}"
+            echoContent green "╚══════════════════════════════════════════════════════════════╝"
+        fi
 
     else
         echoContent yellow "未配置链式代理"
@@ -7968,50 +8649,97 @@ showChainStatus() {
     fi
 }
 
+# 显示中继节点配置码
+showRelayChainCode() {
+    if [[ ! -f "/etc/v2ray-agent/sing-box/conf/chain_relay_info.json" ]]; then
+        echoContent red " ---> 未找到中继节点配置信息"
+        return 1
+    fi
+
+    local publicIP port method password downstreamHops
+    publicIP=$(jq -r '.ip' /etc/v2ray-agent/sing-box/conf/chain_relay_info.json)
+    port=$(jq -r '.port' /etc/v2ray-agent/sing-box/conf/chain_relay_info.json)
+    method=$(jq -r '.method' /etc/v2ray-agent/sing-box/conf/chain_relay_info.json)
+    password=$(jq -r '.password' /etc/v2ray-agent/sing-box/conf/chain_relay_info.json)
+    downstreamHops=$(jq -r '.downstream_hops' /etc/v2ray-agent/sing-box/conf/chain_relay_info.json)
+
+    # 构建新的 hops 数组 (本机 + 下游所有节点)
+    local newHops
+    newHops=$(jq -n --arg ip "${publicIP}" --argjson port "${port}" \
+        --arg key "${password}" --arg method "${method}" \
+        --argjson downstream "${downstreamHops}" \
+        '[{ip: $ip, port: $port, key: $key, method: $method}] + $downstream')
+
+    local chainCode
+    chainCode="chain://v2@$(echo -n "${newHops}" | base64 | tr -d '\n')"
+
+    echoContent yellow "\n配置码 (供上游入口或中继节点使用):\n"
+    echoContent skyBlue "${chainCode}"
+}
+
 # 测试链路连通性
 testChainConnection() {
     echoContent skyBlue "\n测试链路连通性"
     echoContent red "\n=============================================================="
 
-    # 检查是否为入口节点
-    if [[ ! -f "/etc/v2ray-agent/sing-box/conf/chain_entry_info.json" ]]; then
-        # 检查是否为出口节点
-        if [[ -f "/etc/v2ray-agent/sing-box/conf/chain_exit_info.json" ]]; then
-            echoContent yellow "当前为出口节点，无需测试链路"
-            echoContent yellow "请在入口节点测试连通性"
+    # 确定节点角色并获取首跳信息
+    local firstHopIP=""
+    local firstHopPort=""
+    local role=""
 
-            # 测试出口节点自身网络
-            echoContent yellow "\n测试出口节点网络..."
-            local testIP
-            testIP=$(curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null)
-            if [[ -n "${testIP}" ]]; then
-                echoContent green "✅ 出口节点网络正常"
-                echoContent green "   出口IP: ${testIP}"
-            else
-                echoContent red "❌ 出口节点网络异常"
-            fi
-            return 0
+    if [[ -f "/etc/v2ray-agent/sing-box/conf/chain_entry_info.json" ]]; then
+        role="entry"
+        local mode
+        mode=$(jq -r '.mode // "single_hop"' /etc/v2ray-agent/sing-box/conf/chain_entry_info.json)
+
+        if [[ "${mode}" == "multi_hop" ]]; then
+            # 多跳模式，获取第一跳
+            firstHopIP=$(jq -r '.hops[0].ip' /etc/v2ray-agent/sing-box/conf/chain_entry_info.json)
+            firstHopPort=$(jq -r '.hops[0].port' /etc/v2ray-agent/sing-box/conf/chain_entry_info.json)
         else
-            echoContent red " ---> 未配置链式代理"
-            return 1
+            # 单跳模式
+            firstHopIP=$(jq -r '.exit_ip' /etc/v2ray-agent/sing-box/conf/chain_entry_info.json)
+            firstHopPort=$(jq -r '.exit_port' /etc/v2ray-agent/sing-box/conf/chain_entry_info.json)
         fi
+
+    elif [[ -f "/etc/v2ray-agent/sing-box/conf/chain_relay_info.json" ]]; then
+        role="relay"
+        # 中继节点获取下游第一跳
+        firstHopIP=$(jq -r '.downstream_hops[0].ip' /etc/v2ray-agent/sing-box/conf/chain_relay_info.json)
+        firstHopPort=$(jq -r '.downstream_hops[0].port' /etc/v2ray-agent/sing-box/conf/chain_relay_info.json)
+
+    elif [[ -f "/etc/v2ray-agent/sing-box/conf/chain_exit_info.json" ]]; then
+        role="exit"
+        echoContent yellow "当前为出口节点，无需测试链路"
+        echoContent yellow "请在入口节点测试连通性"
+
+        # 测试出口节点自身网络
+        echoContent yellow "\n测试出口节点网络..."
+        local testIP
+        testIP=$(curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null)
+        if [[ -n "${testIP}" ]]; then
+            echoContent green "✅ 出口节点网络正常"
+            echoContent green "   出口IP: ${testIP}"
+        else
+            echoContent red "❌ 出口节点网络异常"
+        fi
+        return 0
+    else
+        echoContent red " ---> 未配置链式代理"
+        return 1
     fi
 
-    local exitIP exitPort
-    exitIP=$(jq -r '.exit_ip' /etc/v2ray-agent/sing-box/conf/chain_entry_info.json)
-    exitPort=$(jq -r '.exit_port' /etc/v2ray-agent/sing-box/conf/chain_entry_info.json)
+    echoContent yellow "首跳节点: ${firstHopIP}:${firstHopPort}\n"
 
-    echoContent yellow "出口节点: ${exitIP}:${exitPort}\n"
-
-    # 测试1: TCP端口连通性
+    # 测试1: TCP端口连通性 (到第一跳)
     echoContent yellow "测试1: TCP端口连通性..."
-    if nc -zv -w 5 "${exitIP}" "${exitPort}" >/dev/null 2>&1; then
-        echoContent green "  ✅ TCP端口连通"
+    if nc -zv -w 5 "${firstHopIP}" "${firstHopPort}" >/dev/null 2>&1; then
+        echoContent green "  ✅ TCP端口连通 (${firstHopIP}:${firstHopPort})"
     else
         echoContent red "  ❌ TCP端口不通"
         echoContent red "  请检查:"
-        echoContent red "  1. 出口节点防火墙是否开放端口 ${exitPort}"
-        echoContent red "  2. 出口节点 sing-box 是否运行"
+        echoContent red "  1. 目标节点防火墙是否开放端口 ${firstHopPort}"
+        echoContent red "  2. 目标节点 sing-box 是否运行"
         echoContent red "  3. IP地址是否正确"
         return 1
     fi
@@ -8025,7 +8753,7 @@ testChainConnection() {
         return 1
     fi
 
-    # 通过链路获取出口IP (需要等待 sing-box 完全启动)
+    # 通过链路获取出口IP
     sleep 1
     local outIP
     outIP=$(curl -s --connect-timeout 10 https://api.ipify.org 2>/dev/null)
@@ -8043,7 +8771,7 @@ testChainConnection() {
         echoContent green "  延迟: ${latency}ms"
     else
         echoContent red "  ❌ 链路转发失败"
-        echoContent red "  请检查出口节点配置和网络"
+        echoContent red "  请检查各节点配置和网络"
         return 1
     fi
 
@@ -8057,7 +8785,7 @@ chainProxyAdvanced() {
     echoContent skyBlue "\n链式代理高级设置"
     echoContent red "\n=============================================================="
 
-    echoContent yellow "1.重新生成配置码 (出口节点)"
+    echoContent yellow "1.显示配置码 (出口/中继节点)"
     echoContent yellow "2.更新密钥"
     echoContent yellow "3.修改端口"
     echoContent yellow "4.查看详细配置"
@@ -8068,8 +8796,10 @@ chainProxyAdvanced() {
     1)
         if [[ -f "/etc/v2ray-agent/sing-box/conf/chain_exit_info.json" ]]; then
             showExistingChainCode
+        elif [[ -f "/etc/v2ray-agent/sing-box/conf/chain_relay_info.json" ]]; then
+            showRelayChainCode
         else
-            echoContent red " ---> 当前不是出口节点"
+            echoContent red " ---> 当前不是出口或中继节点"
         fi
         ;;
     2)
@@ -8131,13 +8861,18 @@ updateChainKey() {
 updateChainPort() {
     echoContent yellow "\n更新链式代理端口"
 
-    if [[ ! -f "/etc/v2ray-agent/sing-box/conf/chain_exit_info.json" ]]; then
-        echoContent red " ---> 仅出口节点可修改端口"
+    local infoFile=""
+    if [[ -f "/etc/v2ray-agent/sing-box/conf/chain_exit_info.json" ]]; then
+        infoFile="/etc/v2ray-agent/sing-box/conf/chain_exit_info.json"
+    elif [[ -f "/etc/v2ray-agent/sing-box/conf/chain_relay_info.json" ]]; then
+        infoFile="/etc/v2ray-agent/sing-box/conf/chain_relay_info.json"
+    else
+        echoContent red " ---> 仅出口或中继节点可修改端口"
         return 1
     fi
 
     local oldPort
-    oldPort=$(jq -r '.port' /etc/v2ray-agent/sing-box/conf/chain_exit_info.json)
+    oldPort=$(jq -r '.port' "${infoFile}")
 
     read -r -p "新端口 [当前: ${oldPort}]:" newPort
     if [[ -z "${newPort}" ]]; then
@@ -8156,8 +8891,8 @@ updateChainPort() {
 
     # 更新信息文件
     jq --argjson port "${newPort}" '.port = $port' \
-        /etc/v2ray-agent/sing-box/conf/chain_exit_info.json > /tmp/chain_exit_info.json
-    mv /tmp/chain_exit_info.json /etc/v2ray-agent/sing-box/conf/chain_exit_info.json
+        "${infoFile}" > /tmp/chain_info_temp.json
+    mv /tmp/chain_info_temp.json "${infoFile}"
 
     # 更新防火墙
     allowPort "${newPort}" "tcp"
@@ -8166,8 +8901,14 @@ updateChainPort() {
     reloadCore
 
     echoContent green " ---> 端口已更新为 ${newPort}"
-    showExistingChainCode
-    echoContent red "\n请更新入口节点配置！"
+
+    # 显示相应的配置码
+    if [[ "${infoFile}" == *"exit"* ]]; then
+        showExistingChainCode
+    else
+        showRelayChainCode
+    fi
+    echoContent red "\n请更新上游节点配置！"
 }
 
 # 显示详细配置
@@ -8208,6 +8949,7 @@ removeChainProxy() {
     rm -f /etc/v2ray-agent/sing-box/conf/config/chain_bridge_inbound.json
     rm -f /etc/v2ray-agent/sing-box/conf/chain_exit_info.json
     rm -f /etc/v2ray-agent/sing-box/conf/chain_entry_info.json
+    rm -f /etc/v2ray-agent/sing-box/conf/chain_relay_info.json
 
     # 删除 Xray 链式代理配置
     if [[ -f "/etc/v2ray-agent/xray/conf/chain_outbound.json" ]]; then
