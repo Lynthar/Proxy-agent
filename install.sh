@@ -29,7 +29,67 @@ fi
 
 # 清理临时变量
 unset _LIB_DIR _module
-# 保留 _SCRIPT_DIR 供 i18n.sh 使用
+
+# ============================================================================
+# i18n 后备机制 - 当模块未加载时提供基本翻译支持
+# ============================================================================
+if ! type t &>/dev/null; then
+    # t() 函数未定义，加载内嵌的基本语言消息
+    # 基本消息定义（中文）
+    MSG_MENU_AUTHOR="作者"
+    MSG_MENU_VERSION="当前版本"
+    MSG_MENU_GITHUB="Github"
+    MSG_MENU_DESC="描述"
+    MSG_MENU_TITLE="八合一共存脚本"
+    MSG_MENU_INSTALL="安装"
+    MSG_MENU_REINSTALL="重新安装"
+    MSG_MENU_COMBO_INSTALL="任意组合安装"
+    MSG_MENU_CHAIN_PROXY="链式代理管理"
+    MSG_MENU_HYSTERIA2="Hysteria2 管理"
+    MSG_MENU_REALITY="REALITY 管理"
+    MSG_MENU_TUIC="Tuic 管理"
+    MSG_MENU_USER="用户管理"
+    MSG_MENU_DISGUISE="伪装站管理"
+    MSG_MENU_CERT="证书管理"
+    MSG_MENU_CDN="CDN 节点管理"
+    MSG_MENU_ROUTING="分流工具"
+    MSG_MENU_ADD_PORT="添加新端口"
+    MSG_MENU_BT="BT 下载管理"
+    MSG_MENU_BLACKLIST="域名黑名单"
+    MSG_MENU_CORE="Core 管理"
+    MSG_MENU_UPDATE_SCRIPT="更新脚本"
+    MSG_MENU_BBR="安装 BBR、DD 脚本"
+    MSG_MENU_UNINSTALL="卸载脚本"
+    MSG_MENU_TOOL_MGMT="工具管理"
+    MSG_MENU_VERSION_MGMT="版本管理"
+    MSG_MENU_SCRIPT_MGMT="脚本管理"
+    MSG_PROMPT_SELECT="请选择"
+    MSG_NOTICE="注意事项"
+    MSG_SYS_SELINUX_NOTICE="检测到 SELinux 已启用，请手动禁用（在 /etc/selinux/config 设置 SELINUX=disabled 并重启）"
+    MSG_SYS_NOT_SUPPORTED="本脚本不支持此系统，请将下方日志反馈给开发者"
+    MSG_SYS_CPU_NOT_SUPPORTED="不支持此 CPU 架构"
+    MSG_SYS_CPU_DEFAULT_AMD64="无法识别 CPU 架构，默认使用 amd64/x86_64"
+    MSG_CORE_CURRENT_RUNNING="核心: %s [运行中]"
+    MSG_CORE_CURRENT_STOPPED="核心: %s [未运行]"
+    MSG_PROTOCOLS_INSTALLED="已安装协议"
+    MSG_PROGRESS_STEP="进度 %s/%s"
+    MSG_PROG_INSTALL_TOOLS="安装工具"
+    MSG_INSTALL_CHECKING="检查、安装更新【新机器会很慢，如长时间无反应，请手动停止后重新执行】"
+    MSG_INSTALL_TOOL="安装 %s"
+
+    # 后备 t() 函数
+    t() {
+        local key="MSG_$1"
+        local text="${!key:-$1}"
+        shift
+        if [[ $# -gt 0 ]]; then
+            # shellcheck disable=SC2059
+            printf "${text}" "$@"
+        else
+            echo "${text}"
+        fi
+    }
+fi
 
 # ============================================================================
 
