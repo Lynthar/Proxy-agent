@@ -1,23 +1,52 @@
 #!/usr/bin/env bash
-# Language Loader for v2ray-agent
-# This script loads the appropriate language file based on LANG_CODE environment variable
-# Usage: source this file after setting LANG_CODE (default: zh_CN)
+# =============================================================================
+# Language Loader for v2ray-agent (Legacy Compatibility)
+# 语言加载器 - 向后兼容层
+# =============================================================================
+# NOTE: This file is kept for backward compatibility.
+# The main i18n system is now in lib/i18n.sh
+#
+# New Usage:
+#   V2RAY_LANG=en bash install.sh    # English
+#   V2RAY_LANG=zh bash install.sh    # Chinese (default)
+# =============================================================================
 
-_LANG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-: "${LANG_CODE:=zh_CN}"
+# If lib/i18n.sh exists, delegate to it
+_LOADER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_LIB_I18N="${_LOADER_DIR}/../../lib/i18n.sh"
 
-# Map common language codes to our supported languages
-case "${LANG_CODE}" in
-    en*|EN*) LANG_CODE="en_US" ;;
-    zh*|ZH*) LANG_CODE="zh_CN" ;;
-esac
-
-# Load language file
-if [[ -f "${_LANG_DIR}/${LANG_CODE}.sh" ]]; then
-    source "${_LANG_DIR}/${LANG_CODE}.sh"
+if [[ -f "${_LIB_I18N}" ]]; then
+    # shellcheck source=/dev/null
+    source "${_LIB_I18N}"
 else
-    # Fallback to Chinese
-    source "${_LANG_DIR}/zh_CN.sh"
+    # Fallback: Direct loading (legacy mode)
+    : "${LANG_CODE:=${V2RAY_LANG:-zh_CN}}"
+
+    case "${LANG_CODE}" in
+        en*|EN*) LANG_CODE="en_US" ;;
+        zh*|ZH*|*) LANG_CODE="zh_CN" ;;
+    esac
+
+    if [[ -f "${_LOADER_DIR}/${LANG_CODE}.sh" ]]; then
+        # shellcheck source=/dev/null
+        source "${_LOADER_DIR}/${LANG_CODE}.sh"
+    else
+        # shellcheck source=/dev/null
+        source "${_LOADER_DIR}/zh_CN.sh"
+    fi
+
+    # Legacy t() function
+    t() {
+        local key="MSG_$1"
+        local text="${!key:-$1}"
+        shift
+        if [[ $# -gt 0 ]]; then
+            # shellcheck disable=SC2059
+            printf "${text}" "$@"
+        else
+            echo "${text}"
+        fi
+    }
 fi
 
-unset _LANG_DIR
+unset _LOADER_DIR _LIB_I18N

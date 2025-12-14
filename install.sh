@@ -16,9 +16,10 @@ _LIB_DIR="${_SCRIPT_DIR}/lib"
 # 加载模块（如果存在）
 if [[ -d "${_LIB_DIR}" ]]; then
     # 加载顺序很重要：
-    # Phase 1: constants -> utils -> system-detect -> service-control
-    # Phase 2: json-utils -> protocol-registry -> config-reader
-    for _module in constants utils json-utils system-detect service-control protocol-registry config-reader; do
+    # Phase 1: i18n (国际化，最先加载)
+    # Phase 2: constants -> utils -> system-detect -> service-control
+    # Phase 3: json-utils -> protocol-registry -> config-reader
+    for _module in i18n constants utils json-utils system-detect service-control protocol-registry config-reader; do
         if [[ -f "${_LIB_DIR}/${_module}.sh" ]]; then
             # shellcheck source=/dev/null
             source "${_LIB_DIR}/${_module}.sh"
@@ -27,7 +28,8 @@ if [[ -d "${_LIB_DIR}" ]]; then
 fi
 
 # 清理临时变量
-unset _SCRIPT_DIR _LIB_DIR _module
+unset _LIB_DIR _module
+# 保留 _SCRIPT_DIR 供 i18n.sh 使用
 
 # ============================================================================
 
@@ -62,8 +64,8 @@ echoContent() {
 # 检查SELinux状态
 checkCentosSELinux() {
     if [[ -f "/etc/selinux/config" ]] && ! grep -q "SELINUX=disabled" <"/etc/selinux/config"; then
-        echoContent yellow "# 注意事项"
-        echoContent yellow "检测到SELinux已开启，请手动关闭（例如在 /etc/selinux/config 设置 SELINUX=disabled 并重启）。"
+        echoContent yellow "# $(t NOTICE)"
+        echoContent yellow "$(t SYS_SELINUX_NOTICE)"
         exit 0
     fi
 }
@@ -109,7 +111,7 @@ checkSystem() {
     fi
 
     if [[ -z ${release} ]]; then
-        echoContent red "\n本脚本不支持此系统，请将下方日志反馈给开发者\n"
+        echoContent red "\n$(t SYS_NOT_SUPPORTED)\n"
         echoContent yellow "$(cat /etc/issue)"
         echoContent yellow "$(cat /proc/version)"
         exit 0
@@ -135,13 +137,13 @@ checkCPUVendor() {
                 singBoxCoreCPUVendor="-linux-arm64"
                 ;;
             *)
-                echo "  不支持此CPU架构--->"
+                echo "  $(t SYS_CPU_NOT_SUPPORTED)--->"
                 exit 1
                 ;;
             esac
         fi
     else
-        echoContent red "  无法识别此CPU架构，默认amd64、x86_64--->"
+        echoContent red "  $(t SYS_CPU_DEFAULT_AMD64)--->"
         xrayCoreCPUVendor="Xray-linux-64"
         #        v2rayCoreCPUVendor="v2ray-linux-64"
     fi
@@ -1087,23 +1089,23 @@ showInstallStatus() {
     if [[ -n "${coreInstallType}" ]]; then
         if [[ "${coreInstallType}" == 1 ]]; then
             if [[ -n $(pgrep -f "xray/xray") ]]; then
-                echoContent yellow "\n核心: Xray-core[运行中]"
+                echoContent yellow "\n$(t CORE_CURRENT_RUNNING "Xray-core")"
             else
-                echoContent yellow "\n核心: Xray-core[未运行]"
+                echoContent yellow "\n$(t CORE_CURRENT_STOPPED "Xray-core")"
             fi
 
         elif [[ "${coreInstallType}" == 2 ]]; then
             if [[ -n $(pgrep -f "sing-box/sing-box") ]]; then
-                echoContent yellow "\n核心: sing-box[运行中]"
+                echoContent yellow "\n$(t CORE_CURRENT_RUNNING "sing-box")"
             else
-                echoContent yellow "\n核心: sing-box[未运行]"
+                echoContent yellow "\n$(t CORE_CURRENT_STOPPED "sing-box")"
             fi
         fi
         # 读取协议类型
         readInstallProtocolType
 
         if [[ -n ${currentInstallProtocolType} ]]; then
-            echoContent yellow "已安装协议: \c"
+            echoContent yellow "$(t PROTOCOLS_INSTALLED): \c"
         fi
         if echo ${currentInstallProtocolType} | grep -q ",0,"; then
             echoContent yellow "VLESS+TCP[TLS_Vision] \c"
@@ -1218,7 +1220,7 @@ checkRoot() {
 }
 # 安装工具包
 installTools() {
-    echoContent skyBlue "\n进度  $1/${totalProgress} : 安装工具"
+    echoContent skyBlue "\n$(t PROGRESS_STEP "$1" "${totalProgress}") : $(t PROG_INSTALL_TOOLS)"
     # 修复ubuntu个别系统问题
     if [[ "${release}" == "ubuntu" ]]; then
         dpkg --configure -a
@@ -1228,7 +1230,7 @@ installTools() {
         pgrep -f apt | xargs kill -9
     fi
 
-    echoContent green " ---> 检查、安装更新【新机器会很慢，如长时间无反应，请手动停止后重新执行】"
+    echoContent green " ---> $(t INSTALL_CHECKING)"
 
     ${upgrade} >/etc/v2ray-agent/install.log 2>&1
     if grep <"/etc/v2ray-agent/install.log" -q "changed"; then
@@ -1241,18 +1243,18 @@ installTools() {
     fi
 
     if ! sudo --version >/dev/null 2>&1; then
-        echoContent green " ---> 安装sudo"
+        echoContent green " ---> $(t INSTALL_TOOL "sudo")"
         ${installType} sudo >/dev/null 2>&1
     fi
 
     if ! wget --help >/dev/null 2>&1; then
-        echoContent green " ---> 安装wget"
+        echoContent green " ---> $(t INSTALL_TOOL "wget")"
         ${installType} wget >/dev/null 2>&1
     fi
 
     if ! command -v netfilter-persistent >/dev/null 2>&1; then
         if [[ "${release}" != "centos" ]]; then
-            echoContent green " ---> 安装iptables"
+            echoContent green " ---> $(t INSTALL_TOOL "iptables")"
             echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | sudo debconf-set-selections
             echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | sudo debconf-set-selections
             ${installType} iptables-persistent >/dev/null 2>&1
@@ -1260,27 +1262,27 @@ installTools() {
     fi
 
     if ! curl --help >/dev/null 2>&1; then
-        echoContent green " ---> 安装curl"
+        echoContent green " ---> $(t INSTALL_TOOL "curl")"
         ${installType} curl >/dev/null 2>&1
     fi
 
     if ! unzip >/dev/null 2>&1; then
-        echoContent green " ---> 安装unzip"
+        echoContent green " ---> $(t INSTALL_TOOL "unzip")"
         ${installType} unzip >/dev/null 2>&1
     fi
 
     if ! socat -h >/dev/null 2>&1; then
-        echoContent green " ---> 安装socat"
+        echoContent green " ---> $(t INSTALL_TOOL "socat")"
         ${installType} socat >/dev/null 2>&1
     fi
 
     if ! tar --help >/dev/null 2>&1; then
-        echoContent green " ---> 安装tar"
+        echoContent green " ---> $(t INSTALL_TOOL "tar")"
         ${installType} tar >/dev/null 2>&1
     fi
 
     if ! crontab -l >/dev/null 2>&1; then
-        echoContent green " ---> 安装crontabs"
+        echoContent green " ---> $(t INSTALL_TOOL "crontabs")"
         if [[ "${release}" == "ubuntu" || "${release}" == "debian" ]]; then
             ${installType} cron >/dev/null 2>&1
         else
@@ -1288,12 +1290,12 @@ installTools() {
         fi
     fi
     if ! jq --help >/dev/null 2>&1; then
-        echoContent green " ---> 安装jq"
+        echoContent green " ---> $(t INSTALL_TOOL "jq")"
         ${installType} jq >/dev/null 2>&1
     fi
 
     if ! command -v ld >/dev/null 2>&1; then
-        echoContent green " ---> 安装binutils"
+        echoContent green " ---> $(t INSTALL_TOOL "binutils")"
         ${installType} binutils >/dev/null 2>&1
     fi
 
@@ -12233,43 +12235,43 @@ singBoxVersionManageMenu() {
 menu() {
     cd "$HOME" || exit
     echoContent red "\n=============================================================="
-    echoContent green "作者：Lynthar"
-    echoContent green "当前版本：v3.5.1"
-    echoContent green "Github：https://github.com/Lynthar/Proxy-agent"
-    echoContent green "描述：八合一共存脚本"
+    echoContent green "$(t MENU_AUTHOR): Lynthar"
+    echoContent green "$(t MENU_VERSION): v3.5.1"
+    echoContent green "$(t MENU_GITHUB): https://github.com/Lynthar/Proxy-agent"
+    echoContent green "$(t MENU_DESC): $(t MENU_TITLE)"
     showInstallStatus
     checkWgetShowProgress
     if [[ -n "${coreInstallType}" ]]; then
-        echoContent yellow "1.重新安装"
+        echoContent yellow "1.$(t MENU_REINSTALL)"
     else
-        echoContent yellow "1.安装"
+        echoContent yellow "1.$(t MENU_INSTALL)"
     fi
 
-    echoContent yellow "2.任意组合安装"
-    echoContent yellow "3.链式代理管理"
-    echoContent yellow "4.Hysteria2管理"
-    echoContent yellow "5.REALITY管理"
-    echoContent yellow "6.Tuic管理"
+    echoContent yellow "2.$(t MENU_COMBO_INSTALL)"
+    echoContent yellow "3.$(t MENU_CHAIN_PROXY)"
+    echoContent yellow "4.$(t MENU_HYSTERIA2)"
+    echoContent yellow "5.$(t MENU_REALITY)"
+    echoContent yellow "6.$(t MENU_TUIC)"
 
-    echoContent skyBlue "-------------------------工具管理-----------------------------"
-    echoContent yellow "7.用户管理"
-    echoContent yellow "8.伪装站管理"
-    echoContent yellow "9.证书管理"
-    echoContent yellow "10.CDN节点管理"
-    echoContent yellow "11.分流工具"
-    echoContent yellow "12.添加新端口"
-    echoContent yellow "13.BT下载管理"
-    echoContent yellow "15.域名黑名单"
-    echoContent skyBlue "-------------------------版本管理-----------------------------"
-    echoContent yellow "16.core管理"
-    echoContent yellow "17.更新脚本"
-    echoContent yellow "18.安装BBR、DD脚本"
-    echoContent skyBlue "-------------------------脚本管理-----------------------------"
-    echoContent yellow "20.卸载脚本"
+    echoContent skyBlue "-------------------------$(t MENU_TOOL_MGMT)-----------------------------"
+    echoContent yellow "7.$(t MENU_USER)"
+    echoContent yellow "8.$(t MENU_DISGUISE)"
+    echoContent yellow "9.$(t MENU_CERT)"
+    echoContent yellow "10.$(t MENU_CDN)"
+    echoContent yellow "11.$(t MENU_ROUTING)"
+    echoContent yellow "12.$(t MENU_ADD_PORT)"
+    echoContent yellow "13.$(t MENU_BT)"
+    echoContent yellow "15.$(t MENU_BLACKLIST)"
+    echoContent skyBlue "-------------------------$(t MENU_VERSION_MGMT)-----------------------------"
+    echoContent yellow "16.$(t MENU_CORE)"
+    echoContent yellow "17.$(t MENU_UPDATE_SCRIPT)"
+    echoContent yellow "18.$(t MENU_BBR)"
+    echoContent skyBlue "-------------------------$(t MENU_SCRIPT_MGMT)-----------------------------"
+    echoContent yellow "20.$(t MENU_UNINSTALL)"
     echoContent red "=============================================================="
     mkdirTools
     aliasInstall
-    read -r -p "请选择:" selectInstallType
+    read -r -p "$(t PROMPT_SELECT):" selectInstallType
     case ${selectInstallType} in
     1)
         selectCoreInstall
