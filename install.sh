@@ -714,6 +714,9 @@ readCredentialBySource() {
 
 # 读取tls证书详情
 readAcmeTLS() {
+    # 重置 DNS API 状态，避免上次调用的残留值
+    installedDNSAPIStatus=""
+
     local readAcmeDomain=
     if [[ -n "${currentHost}" ]]; then
         readAcmeDomain="${currentHost}"
@@ -721,6 +724,11 @@ readAcmeTLS() {
 
     if [[ -n "${domain}" ]]; then
         readAcmeDomain="${domain}"
+    fi
+
+    # 如果没有域名，直接返回
+    if [[ -z "${readAcmeDomain}" ]]; then
+        return
     fi
 
     dnsTLSDomain=$(echo "${readAcmeDomain}" | awk -F "." '{$1="";print $0}' | sed 's/^[[:space:]]*//' | sed 's/ /./g')
@@ -2429,7 +2437,20 @@ installTLS() {
 
         if [[ -z $(find /etc/Proxy-agent/tls/ -name "${tlsDomain}.crt") ]] || [[ -z $(find /etc/Proxy-agent/tls/ -name "${tlsDomain}.key") ]] || [[ -z $(cat "/etc/Proxy-agent/tls/${tlsDomain}.crt") ]]; then
             if [[ "${installedDNSAPIStatus}" == "true" ]]; then
-                sudo "$HOME/.acme.sh/acme.sh" --installcert -d "*.${dnsTLSDomain}" --fullchainpath "/etc/Proxy-agent/tls/${tlsDomain}.crt" --keypath "/etc/Proxy-agent/tls/${tlsDomain}.key" --ecc >/dev/null
+                # 验证通配符证书确实存在于 acme.sh 中
+                local wildcardCertDir
+                wildcardCertDir=$(find "$HOME/.acme.sh" -maxdepth 1 -type d -name "*${dnsTLSDomain}_ecc" 2>/dev/null | head -1)
+                if [[ -n "${wildcardCertDir}" ]] && [[ -f "${wildcardCertDir}/"*".${dnsTLSDomain}.cer" ]]; then
+                    local wildcardDomain
+                    wildcardDomain=$(basename "${wildcardCertDir}" | sed 's/_ecc$//')
+                    sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${wildcardDomain}" --fullchainpath "/etc/Proxy-agent/tls/${tlsDomain}.crt" --keypath "/etc/Proxy-agent/tls/${tlsDomain}.key" --ecc >/dev/null
+                else
+                    echoContent red " ---> 未找到有效的通配符证书，将尝试申请新证书"
+                    installedDNSAPIStatus=""
+                    rm -rf /etc/Proxy-agent/tls/*
+                    installTLS "$1"
+                    return
+                fi
             else
                 sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${tlsDomain}" --fullchainpath "/etc/Proxy-agent/tls/${tlsDomain}.crt" --keypath "/etc/Proxy-agent/tls/${tlsDomain}.key" --ecc >/dev/null
             fi
@@ -2460,7 +2481,16 @@ installTLS() {
         selectAcmeInstallSSL
 
         if [[ "${installedDNSAPIStatus}" == "true" ]]; then
-            sudo "$HOME/.acme.sh/acme.sh" --installcert -d "*.${dnsTLSDomain}" --fullchainpath "/etc/Proxy-agent/tls/${tlsDomain}.crt" --keypath "/etc/Proxy-agent/tls/${tlsDomain}.key" --ecc >/dev/null
+            # 从实际目录名获取正确的证书域名
+            local wildcardCertDir
+            wildcardCertDir=$(find "$HOME/.acme.sh" -maxdepth 1 -type d -name "*${dnsTLSDomain}_ecc" 2>/dev/null | head -1)
+            if [[ -n "${wildcardCertDir}" ]]; then
+                local wildcardDomain
+                wildcardDomain=$(basename "${wildcardCertDir}" | sed 's/_ecc$//')
+                sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${wildcardDomain}" --fullchainpath "/etc/Proxy-agent/tls/${tlsDomain}.crt" --keypath "/etc/Proxy-agent/tls/${tlsDomain}.key" --ecc >/dev/null
+            else
+                echoContent red " ---> 通配符证书目录不存在"
+            fi
         else
             sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${tlsDomain}" --fullchainpath "/etc/Proxy-agent/tls/${tlsDomain}.crt" --keypath "/etc/Proxy-agent/tls/${tlsDomain}.key" --ecc >/dev/null
         fi
@@ -2722,7 +2752,15 @@ renewalTLS() {
         modifyTime=
 
         if [[ "${installedDNSAPIStatus}" == "true" ]]; then
-            modifyTime=$(stat --format=%z "$HOME/.acme.sh/*.${dnsTLSDomain}_ecc/*.${dnsTLSDomain}.cer")
+            # 使用 find 获取通配符证书文件路径，避免 glob 在引号中不展开的问题
+            local wildcardCertFile
+            wildcardCertFile=$(find "$HOME/.acme.sh" -path "*${dnsTLSDomain}_ecc/*.${dnsTLSDomain}.cer" -type f 2>/dev/null | head -1)
+            if [[ -n "${wildcardCertFile}" ]]; then
+                modifyTime=$(stat --format=%z "${wildcardCertFile}")
+            else
+                echoContent red " ---> 未找到通配符证书文件"
+                return 1
+            fi
         else
             modifyTime=$(stat --format=%z "$HOME/.acme.sh/${domain}_ecc/${domain}.cer")
         fi
