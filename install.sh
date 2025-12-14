@@ -7686,6 +7686,7 @@ setupChainEntry() {
     local exitPort=$2
     local exitKey=$3
     local exitMethod=$4
+    local chainBridgePort=31111  # sing-box SOCKS5 桥接端口
 
     # 确保 sing-box 已安装
     if ! ensureSingBoxInstalled; then
@@ -7703,7 +7704,18 @@ setupChainEntry() {
 
     echoContent yellow "\n正在配置入口节点..."
 
-    # 创建出站配置
+    # 检测是否有 Xray 代理协议在运行
+    local hasXrayProtocols=false
+    if [[ -f "/etc/v2ray-agent/xray/conf/02_VLESS_TCP_inbounds.json" ]] || \
+       [[ -f "/etc/v2ray-agent/xray/conf/07_VLESS_vision_reality_inbounds.json" ]] || \
+       [[ -f "/etc/v2ray-agent/xray/conf/04_trojan_TCP_inbounds.json" ]]; then
+        hasXrayProtocols=true
+        echoContent green " ---> 检测到 Xray 代理协议，将同时配置 Xray 链式转发"
+    fi
+
+    # ============= sing-box 配置 =============
+
+    # 创建 Shadowsocks 出站 (到出口节点)
     cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/chain_outbound.json
 {
     "outbounds": [
@@ -7725,14 +7737,44 @@ setupChainEntry() {
 }
 EOF
 
-    # 创建路由配置 (所有流量走链式出站)
-    cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/chain_route.json
+    # 如果有 Xray 代理协议，创建 SOCKS5 桥接入站
+    if [[ "${hasXrayProtocols}" == "true" ]]; then
+        cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/chain_bridge_inbound.json
+{
+    "inbounds": [
+        {
+            "type": "socks",
+            "tag": "chain_bridge_in",
+            "listen": "127.0.0.1",
+            "listen_port": ${chainBridgePort}
+        }
+    ]
+}
+EOF
+        # 路由：桥接入站流量走链式出站
+        cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/chain_route.json
+{
+    "route": {
+        "rules": [
+            {
+                "inbound": ["chain_bridge_in"],
+                "outbound": "chain_outbound"
+            }
+        ],
+        "final": "chain_outbound"
+    }
+}
+EOF
+    else
+        # 没有 Xray，直接设置 final
+        cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/chain_route.json
 {
     "route": {
         "final": "chain_outbound"
     }
 }
 EOF
+    fi
 
     # 保存配置信息
     cat <<EOF >/etc/v2ray-agent/sing-box/conf/chain_entry_info.json
@@ -7741,21 +7783,23 @@ EOF
     "exit_ip": "${exitIP}",
     "exit_port": ${exitPort},
     "method": "${exitMethod}",
-    "password": "${exitKey}"
+    "password": "${exitKey}",
+    "bridge_port": ${chainBridgePort},
+    "has_xray": ${hasXrayProtocols}
 }
 EOF
 
-    # 合并配置
-    echoContent yellow "正在合并配置..."
+    # 合并 sing-box 配置
+    echoContent yellow "正在合并 sing-box 配置..."
     if ! /etc/v2ray-agent/sing-box/sing-box merge config.json -C /etc/v2ray-agent/sing-box/conf/config/ -D /etc/v2ray-agent/sing-box/conf/ 2>/dev/null; then
-        echoContent red " ---> 配置合并失败，请检查配置文件格式"
+        echoContent red " ---> sing-box 配置合并失败"
         echoContent yellow "调试命令: /etc/v2ray-agent/sing-box/sing-box merge config.json -C /etc/v2ray-agent/sing-box/conf/config/ -D /etc/v2ray-agent/sing-box/conf/"
         return 1
     fi
 
     # 验证配置文件已生成
     if [[ ! -f "/etc/v2ray-agent/sing-box/conf/config.json" ]]; then
-        echoContent red " ---> 配置文件生成失败"
+        echoContent red " ---> sing-box 配置文件生成失败"
         return 1
     fi
 
@@ -7764,18 +7808,93 @@ EOF
     handleSingBox stop >/dev/null 2>&1
     handleSingBox start
 
-    # 验证启动成功
+    # 验证 sing-box 启动成功
     sleep 1
     if ! pgrep -x "sing-box" >/dev/null 2>&1; then
         echoContent red " ---> sing-box 启动失败"
-        echoContent yellow "请手动执行以下命令查看错误:"
-        echoContent yellow "/etc/v2ray-agent/sing-box/sing-box run -c /etc/v2ray-agent/sing-box/conf/config.json"
+        echoContent yellow "请手动执行: /etc/v2ray-agent/sing-box/sing-box run -c /etc/v2ray-agent/sing-box/conf/config.json"
         return 1
+    fi
+    echoContent green " ---> sing-box 启动成功"
+
+    # ============= Xray 配置 (如果存在) =============
+    if [[ "${hasXrayProtocols}" == "true" ]]; then
+        echoContent yellow "正在配置 Xray 链式转发..."
+
+        # 创建 Xray SOCKS5 出站 (指向 sing-box 桥接)
+        cat <<EOF >/etc/v2ray-agent/xray/conf/chain_outbound.json
+{
+    "outbounds": [
+        {
+            "tag": "chain_proxy",
+            "protocol": "socks",
+            "settings": {
+                "servers": [
+                    {
+                        "address": "127.0.0.1",
+                        "port": ${chainBridgePort}
+                    }
+                ]
+            }
+        }
+    ]
+}
+EOF
+
+        # 修改 Xray 路由，让流量走链式代理
+        # 备份原路由配置
+        if [[ -f "/etc/v2ray-agent/xray/conf/09_routing.json" ]]; then
+            cp /etc/v2ray-agent/xray/conf/09_routing.json /etc/v2ray-agent/xray/conf/09_routing.json.bak.chain
+        fi
+
+        # 创建新的路由配置，默认出站改为 chain_proxy
+        cat <<EOF >/etc/v2ray-agent/xray/conf/09_routing.json
+{
+    "routing": {
+        "domainStrategy": "AsIs",
+        "rules": [
+            {
+                "type": "field",
+                "domain": [
+                    "domain:gstatic.com",
+                    "domain:googleapis.com",
+                    "domain:googleapis.cn"
+                ],
+                "outboundTag": "chain_proxy"
+            },
+            {
+                "type": "field",
+                "network": "tcp,udp",
+                "outboundTag": "chain_proxy"
+            }
+        ]
+    }
+}
+EOF
+
+        # 重启 Xray
+        echoContent yellow "正在重启 Xray..."
+        handleXray stop >/dev/null 2>&1
+        handleXray start
+
+        sleep 1
+        if pgrep -f "xray/xray" >/dev/null 2>&1; then
+            echoContent green " ---> Xray 重启成功，链式转发已启用"
+        else
+            echoContent red " ---> Xray 重启失败"
+            echoContent yellow "请检查配置: /etc/v2ray-agent/xray/xray run -confdir /etc/v2ray-agent/xray/conf"
+            return 1
+        fi
     fi
 
     echoContent green "\n=============================================================="
     echoContent green "入口节点配置完成！"
     echoContent green "=============================================================="
+    if [[ "${hasXrayProtocols}" == "true" ]]; then
+        echoContent yellow "流量路径: 客户端 → Xray → sing-box → 出口节点"
+    else
+        echoContent yellow "流量路径: 客户端 → sing-box → 出口节点"
+    fi
 
     # 自动测试连通性
     echoContent yellow "\n正在测试链路连通性..."
@@ -8082,14 +8201,51 @@ removeChainProxy() {
         return 0
     fi
 
-    # 删除配置文件
+    # 删除 sing-box 配置文件
     rm -f /etc/v2ray-agent/sing-box/conf/config/chain_inbound.json
     rm -f /etc/v2ray-agent/sing-box/conf/config/chain_outbound.json
     rm -f /etc/v2ray-agent/sing-box/conf/config/chain_route.json
+    rm -f /etc/v2ray-agent/sing-box/conf/config/chain_bridge_inbound.json
     rm -f /etc/v2ray-agent/sing-box/conf/chain_exit_info.json
     rm -f /etc/v2ray-agent/sing-box/conf/chain_entry_info.json
 
-    # 重新合并配置
+    # 删除 Xray 链式代理配置
+    if [[ -f "/etc/v2ray-agent/xray/conf/chain_outbound.json" ]]; then
+        rm -f /etc/v2ray-agent/xray/conf/chain_outbound.json
+        echoContent yellow " ---> 已删除 Xray 链式出站配置"
+
+        # 恢复原路由配置
+        if [[ -f "/etc/v2ray-agent/xray/conf/09_routing.json.bak.chain" ]]; then
+            mv /etc/v2ray-agent/xray/conf/09_routing.json.bak.chain /etc/v2ray-agent/xray/conf/09_routing.json
+            echoContent yellow " ---> 已恢复 Xray 原路由配置"
+        else
+            # 如果没有备份，创建默认路由配置
+            cat <<EOF >/etc/v2ray-agent/xray/conf/09_routing.json
+{
+    "routing": {
+        "rules": [
+            {
+                "type": "field",
+                "domain": [
+                    "domain:gstatic.com",
+                    "domain:googleapis.com",
+                    "domain:googleapis.cn"
+                ],
+                "outboundTag": "z_direct_outbound"
+            }
+        ]
+    }
+}
+EOF
+            echoContent yellow " ---> 已重置 Xray 路由配置为默认"
+        fi
+
+        # 重启 Xray
+        handleXray stop >/dev/null 2>&1
+        handleXray start
+    fi
+
+    # 重新合并 sing-box 配置
     mergeSingBoxConfig
     reloadCore
 
