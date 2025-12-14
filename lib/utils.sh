@@ -108,12 +108,26 @@ base64Decode() {
 # 数值处理函数
 # ============================================================================
 
-# 生成随机数
+# 生成随机数 - 使用更安全的随机源
 # 用法: num=$(randomNum 1000 9999)
+# 注意: 对于非敏感场景，使用 /dev/urandom 提供足够的随机性
 randomNum() {
     local min="${1:-0}"
     local max="${2:-65535}"
-    echo $((RANDOM % (max - min + 1) + min))
+    local range=$((max - min + 1))
+
+    # 优先使用 /dev/urandom（更安全）
+    if [[ -r /dev/urandom ]]; then
+        local random_bytes
+        random_bytes=$(od -An -tu4 -N4 /dev/urandom | tr -d ' ')
+        echo $((random_bytes % range + min))
+    # 回退到 shuf（如果可用）
+    elif command -v shuf &>/dev/null; then
+        shuf -i "${min}-${max}" -n 1
+    # 最后回退到 $RANDOM（不够安全，但保证兼容性）
+    else
+        echo $((RANDOM % range + min))
+    fi
 }
 
 # 生成随机端口 (10000-30000)
