@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# i18n Language Loader for v2ray-agent
+# i18n Language Loader for Proxy-agent
 # 国际化语言加载器
 # =============================================================================
 # Usage:
@@ -13,10 +13,23 @@ _I18N_DIR="${_SCRIPT_DIR:-$(dirname "${BASH_SOURCE[0]}")/..}/shell/lang"
 
 # =============================================================================
 # 语言检测 - Language Detection
-# 优先级: V2RAY_LANG > LANGUAGE > LANG > 默认中文
+# 优先级: V2RAY_LANG > 持久配置文件 > LANGUAGE > LANG > 默认中文
 # =============================================================================
 _detect_language() {
-    local lang="${V2RAY_LANG:-${LANGUAGE:-${LANG:-zh_CN}}}"
+    local lang=""
+    local langFile="/etc/Proxy-agent/lang_pref"
+
+    # 优先级1: 环境变量 V2RAY_LANG
+    if [[ -n "${V2RAY_LANG}" ]]; then
+        lang="${V2RAY_LANG}"
+    # 优先级2: 持久化语言配置文件
+    elif [[ -f "${langFile}" ]]; then
+        lang=$(cat "${langFile}" 2>/dev/null)
+    # 优先级3: 系统环境变量
+    else
+        lang="${LANGUAGE:-${LANG:-zh_CN}}"
+    fi
+
     case "${lang}" in
         en*|EN*) echo "en_US" ;;
         zh*|ZH*|*) echo "zh_CN" ;;  # 默认中文

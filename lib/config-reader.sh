@@ -16,23 +16,23 @@ readonly _CONFIG_READER_LOADED=1
 # ============================================================================
 
 # Xray配置路径
-: "${XRAY_CONFIG_BASE:=/etc/v2ray-agent/xray}"
+: "${XRAY_CONFIG_BASE:=/etc/Proxy-agent/xray}"
 : "${XRAY_CONFIG_PATH:=${XRAY_CONFIG_BASE}/conf/}"
 : "${XRAY_BINARY:=${XRAY_CONFIG_BASE}/xray}"
 
 # sing-box配置路径
-: "${SINGBOX_CONFIG_BASE:=/etc/v2ray-agent/sing-box}"
+: "${SINGBOX_CONFIG_BASE:=/etc/Proxy-agent/sing-box}"
 : "${SINGBOX_CONFIG_PATH:=${SINGBOX_CONFIG_BASE}/conf/config/}"
 : "${SINGBOX_BINARY:=${SINGBOX_CONFIG_BASE}/sing-box}"
 
 # TLS证书路径
-: "${TLS_PATH:=/etc/v2ray-agent/tls/}"
+: "${TLS_PATH:=/etc/Proxy-agent/tls/}"
 
 # Nginx配置路径
 : "${NGINX_CONFIG_PATH:=/etc/nginx/conf.d/}"
 
 # 订阅路径
-: "${SUBSCRIBE_LOCAL_PATH:=/etc/v2ray-agent/subscribe_local/}"
+: "${SUBSCRIBE_LOCAL_PATH:=/etc/Proxy-agent/subscribe_local/}"
 
 # ============================================================================
 # 核心检测函数
@@ -455,7 +455,7 @@ readNginxSubscribeConfig() {
 # 读取WARP配置
 # 输出: JSON对象 {privateKey, address, publicKey, reserved}
 readWarpConfig() {
-    local configFile="/etc/v2ray-agent/warp/config"
+    local configFile="/etc/Proxy-agent/warp/config"
     [[ ! -f "${configFile}" ]] && return 1
 
     local privateKey address publicKey reserved

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Language Loader for v2ray-agent (Legacy Compatibility)
+# Language Loader for Proxy-agent (Legacy Compatibility)
 # 语言加载器 - 向后兼容层
 # =============================================================================
 # NOTE: This file is kept for backward compatibility.
@@ -9,6 +9,7 @@
 # New Usage:
 #   V2RAY_LANG=en bash install.sh    # English
 #   V2RAY_LANG=zh bash install.sh    # Chinese (default)
+#   pasly  -> Menu 21 to switch language permanently
 # =============================================================================
 
 # If lib/i18n.sh exists, delegate to it
@@ -20,7 +21,14 @@ if [[ -f "${_LIB_I18N}" ]]; then
     source "${_LIB_I18N}"
 else
     # Fallback: Direct loading (legacy mode)
-    : "${LANG_CODE:=${V2RAY_LANG:-zh_CN}}"
+    # 优先级: V2RAY_LANG > 持久配置 > 默认中文
+    if [[ -n "${V2RAY_LANG}" ]]; then
+        LANG_CODE="${V2RAY_LANG}"
+    elif [[ -f "/etc/Proxy-agent/lang_pref" ]]; then
+        LANG_CODE=$(cat "/etc/Proxy-agent/lang_pref" 2>/dev/null)
+    else
+        LANG_CODE="zh_CN"
+    fi
 
     case "${LANG_CODE}" in
         en*|EN*) LANG_CODE="en_US" ;;

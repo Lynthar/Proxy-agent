@@ -74,9 +74,9 @@ readonly PROTOCOL_ANYTLS=13
 readonly PROTOCOL_SS2022=14
 
 # 配置文件路径
-readonly XRAY_CONFIG_DIR="/etc/v2ray-agent/xray/conf"
-readonly SINGBOX_CONFIG_DIR="/etc/v2ray-agent/sing-box/conf/config"
-readonly TLS_DIR="/etc/v2ray-agent/tls"
+readonly XRAY_CONFIG_DIR="/etc/Proxy-agent/xray/conf"
+readonly SINGBOX_CONFIG_DIR="/etc/Proxy-agent/sing-box/conf/config"
+readonly TLS_DIR="/etc/Proxy-agent/tls"
 ```
 
 ### 1.2 utils.sh
