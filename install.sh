@@ -15,8 +15,10 @@ _LIB_DIR="${_SCRIPT_DIR}/lib"
 
 # 加载模块（如果存在）
 if [[ -d "${_LIB_DIR}" ]]; then
-    # 加载顺序很重要：constants -> utils -> system-detect -> service-control
-    for _module in constants utils system-detect service-control; do
+    # 加载顺序很重要：
+    # Phase 1: constants -> utils -> system-detect -> service-control
+    # Phase 2: json-utils -> protocol-registry -> config-reader
+    for _module in constants utils json-utils system-detect service-control protocol-registry config-reader; do
         if [[ -f "${_LIB_DIR}/${_module}.sh" ]]; then
             # shellcheck source=/dev/null
             source "${_LIB_DIR}/${_module}.sh"

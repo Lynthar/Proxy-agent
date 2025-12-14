@@ -181,14 +181,34 @@ protocols      # 表示协议数组
 outbounds      # 表示出站配置数组
 ```
 
+## 完成状态
+
+### Phase 1: 已完成 ✅
+
+- [x] `lib/constants.sh` - 协议ID、配置路径、默认值、辅助函数
+- [x] `lib/utils.sh` - 字符串处理、JSON验证、UUID、网络工具
+- [x] `lib/system-detect.sh` - 系统检测、CPU检测、容器检测
+- [x] `lib/service-control.sh` - Xray/sing-box/Nginx服务控制
+
+### Phase 2: 已完成 ✅
+
+- [x] `lib/json-utils.sh` - JSON安全读写、验证、修改、原子操作
+- [x] `lib/protocol-registry.sh` - 协议注册表、检测、属性查询
+- [x] `lib/config-reader.sh` - 配置读取接口、Reality/Hysteria2/TUIC配置
+
+### Phase 3: 待实施 ⏳
+
+- [ ] `lib/tls-manager.sh` - TLS证书管理（ACME、SSL续期）
+- [ ] `lib/subscription.sh` - 订阅生成（各格式支持）
+- [ ] `lib/user-manager.sh` - 用户CRUD操作
+- [ ] `lib/menu-framework.sh` - 菜单渲染框架
+
 ## 下一步行动
 
-1. 创建 `lib/` 目录结构
-2. 实现 `constants.sh`
-3. 实现 `utils.sh`
-4. 添加模块加载逻辑
-5. 测试完整功能
-6. 提交 Phase 1 更改
+Phase 3 为高风险模块，建议：
+1. 在生产环境验证 Phase 1-2 稳定性
+2. 收集用户反馈
+3. 逐步实施 Phase 3 模块
 
 ## 注意事项
 
