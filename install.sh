@@ -31,6 +31,28 @@ fi
 unset _LIB_DIR _module
 
 # ============================================================================
+# 版本号管理
+# 版本号来源优先级: VERSION文件 > 硬编码默认值
+# ============================================================================
+_load_version() {
+    local versionFile="${_SCRIPT_DIR}/VERSION"
+    local installedVersionFile="/etc/Proxy-agent/VERSION"
+
+    # 优先从脚本目录读取
+    if [[ -f "${versionFile}" ]]; then
+        SCRIPT_VERSION="v$(cat "${versionFile}" 2>/dev/null | tr -d '[:space:]')"
+    # 其次从安装目录读取
+    elif [[ -f "${installedVersionFile}" ]]; then
+        SCRIPT_VERSION="v$(cat "${installedVersionFile}" 2>/dev/null | tr -d '[:space:]')"
+    else
+        # 默认版本
+        SCRIPT_VERSION="v3.6.0"
+    fi
+    export SCRIPT_VERSION
+}
+_load_version
+
+# ============================================================================
 # 路径迁移 - 从 v2ray-agent 迁移到 Proxy-agent
 # 用于从旧版本平滑升级
 # ============================================================================
@@ -6705,22 +6727,47 @@ removeUser() {
 # 更新脚本
 updateV2RayAgent() {
     echoContent skyBlue "\n进度  $1/${totalProgress} : 更新 Proxy-agent 脚本"
-    rm -rf /etc/Proxy-agent/install.sh
-    if [[ "${release}" == "alpine" ]]; then
-        wget -c -q -P /etc/Proxy-agent/ -N "https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/install.sh"
-    else
-        wget -c -q "${wgetShowProgressStatus}" -P /etc/Proxy-agent/ -N "https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/install.sh"
-    fi
 
-    sudo chmod 700 /etc/Proxy-agent/install.sh
+    local repoBase="https://raw.githubusercontent.com/Lynthar/Proxy-agent/master"
+    local installDir="/etc/Proxy-agent"
+
+    # 下载新版本脚本
+    rm -rf "${installDir}/install.sh"
+    if [[ "${release}" == "alpine" ]]; then
+        wget -c -q -P "${installDir}/" -N "${repoBase}/install.sh"
+    else
+        wget -c -q "${wgetShowProgressStatus}" -P "${installDir}/" -N "${repoBase}/install.sh"
+    fi
+    sudo chmod 700 "${installDir}/install.sh"
+
+    # 下载 VERSION 文件
+    wget -c -q -O "${installDir}/VERSION" "${repoBase}/VERSION" 2>/dev/null
+
+    # 下载/更新 lib 目录模块
+    mkdir -p "${installDir}/lib"
+    for module in i18n constants utils json-utils system-detect service-control protocol-registry config-reader; do
+        wget -c -q -O "${installDir}/lib/${module}.sh" "${repoBase}/lib/${module}.sh" 2>/dev/null
+    done
+
+    # 下载/更新语言文件
+    mkdir -p "${installDir}/shell/lang"
+    for langFile in zh_CN en_US loader; do
+        wget -c -q -O "${installDir}/shell/lang/${langFile}.sh" "${repoBase}/shell/lang/${langFile}.sh" 2>/dev/null
+    done
+
+    # 读取新版本号
     local version
-    version=$(grep '当前版本：v' "/etc/Proxy-agent/install.sh" | awk -F "[v]" '{print $2}' | tail -n +2 | head -n 1 | awk -F "[\"]" '{print $1}')
+    if [[ -f "${installDir}/VERSION" ]]; then
+        version="v$(cat "${installDir}/VERSION" 2>/dev/null | tr -d '[:space:]')"
+    else
+        version="unknown"
+    fi
 
     echoContent green "\n ---> 更新完毕"
     echoContent yellow " ---> 请手动执行[pasly]打开脚本"
     echoContent green " ---> 当前版本：${version}\n"
     echoContent yellow "如更新不成功，请手动执行下面命令\n"
-    echoContent skyBlue "wget -P /root -N https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/install.sh && chmod 700 /root/install.sh && /root/install.sh"
+    echoContent skyBlue "wget -P /root -N ${repoBase}/install.sh && chmod 700 /root/install.sh && /root/install.sh"
     echo
     exit 0
 }
@@ -6913,6 +6960,24 @@ aliasInstall() {
 
     if [[ -f "$HOME/install.sh" ]] && [[ -d "/etc/Proxy-agent" ]] && grep -Eq "作者[:：]Lynthar|Proxy-agent" "$HOME/install.sh"; then
         mv "$HOME/install.sh" /etc/Proxy-agent/install.sh
+
+        # 复制 VERSION 文件（如果存在于脚本目录）
+        if [[ -f "${_SCRIPT_DIR}/VERSION" ]]; then
+            cp -f "${_SCRIPT_DIR}/VERSION" /etc/Proxy-agent/VERSION 2>/dev/null
+        fi
+
+        # 复制 lib 目录（如果存在）
+        if [[ -d "${_SCRIPT_DIR}/lib" ]]; then
+            mkdir -p /etc/Proxy-agent/lib
+            cp -rf "${_SCRIPT_DIR}/lib/"*.sh /etc/Proxy-agent/lib/ 2>/dev/null
+        fi
+
+        # 复制 shell/lang 目录（如果存在）
+        if [[ -d "${_SCRIPT_DIR}/shell/lang" ]]; then
+            mkdir -p /etc/Proxy-agent/shell/lang
+            cp -rf "${_SCRIPT_DIR}/shell/lang/"*.sh /etc/Proxy-agent/shell/lang/ 2>/dev/null
+        fi
+
         local paslyType=
         if [[ -d "/usr/bin/" ]]; then
             rm -f "/usr/bin/vasma"
@@ -12410,7 +12475,7 @@ menu() {
     cd "$HOME" || exit
     echoContent red "\n=============================================================="
     echoContent green "$(t MENU_AUTHOR): Lynthar"
-    echoContent green "$(t MENU_VERSION): v3.5.1"
+    echoContent green "$(t MENU_VERSION): ${SCRIPT_VERSION}"
     echoContent green "$(t MENU_GITHUB): https://github.com/Lynthar/Proxy-agent"
     echoContent green "$(t MENU_DESC): $(t MENU_TITLE)"
     showInstallStatus
