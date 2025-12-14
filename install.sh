@@ -8142,9 +8142,21 @@ EOF
 EOF
     fi
 
-    # 确保 systemd 服务已安装（修复：链式代理需要服务才能启动）
+    # 确保 systemd 服务已安装且路径正确（修复：链式代理需要服务才能启动）
+    # 检查服务文件是否存在，以及是否指向正确的路径
+    local needUpdateService=false
     if [[ ! -f "/etc/systemd/system/sing-box.service" ]] && [[ ! -f "/etc/init.d/sing-box" ]]; then
+        needUpdateService=true
         echoContent yellow "\n检测到 sing-box 服务未配置，正在配置..."
+    elif [[ -f "/etc/systemd/system/sing-box.service" ]]; then
+        # 检查服务文件是否指向正确路径（修复从 v2ray-agent 迁移的问题）
+        if grep -q "v2ray-agent" /etc/systemd/system/sing-box.service; then
+            needUpdateService=true
+            echoContent yellow "\n检测到 sing-box 服务路径需要更新..."
+        fi
+    fi
+
+    if [[ "${needUpdateService}" == "true" ]]; then
         local execStart='/etc/Proxy-agent/sing-box/sing-box run -c /etc/Proxy-agent/sing-box/conf/config.json'
 
         if [[ -n $(find /bin /usr/bin -name "systemctl") ]] && [[ "${release}" != "alpine" ]]; then
