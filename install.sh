@@ -6807,86 +6807,95 @@ updateV2RayAgent() {
     echoContent skyBlue "\n进度  $1/${totalProgress} : 更新 Proxy-agent 脚本"
 
     local installDir="/etc/Proxy-agent"
-    local latestVersion
-    local downloadBase
+    local latestVersion=""
+    local rawBase="https://raw.githubusercontent.com/Lynthar/Proxy-agent/master"
 
     # 检查 GitHub Release 最新版本
     echoContent yellow " ---> 检查最新版本..."
-    latestVersion=$(getLatestReleaseVersion)
 
-    if [[ -n "${latestVersion}" ]]; then
-        echoContent green " ---> 发现最新版本: ${latestVersion}"
+    # 确保函数存在才调用
+    if type getLatestReleaseVersion &>/dev/null; then
+        latestVersion=$(getLatestReleaseVersion 2>/dev/null)
+    fi
 
-        # 比较版本
-        if ! compareVersions "${SCRIPT_VERSION}" "${latestVersion}"; then
-            echoContent green " ---> 当前已是最新版本 (${SCRIPT_VERSION})"
-            echoContent yellow " ---> 如需强制更新，请使用手动命令"
-            read -r -p "是否继续更新? [y/N]: " forceUpdate
-            if [[ "${forceUpdate}" != "y" && "${forceUpdate}" != "Y" ]]; then
-                menu
-                return
+    if [[ -n "${latestVersion}" && "${latestVersion}" != "null" ]]; then
+        echoContent green " ---> 发现最新 Release: ${latestVersion}"
+
+        # 比较版本（确保函数存在）
+        if type compareVersions &>/dev/null; then
+            if ! compareVersions "${SCRIPT_VERSION}" "${latestVersion}"; then
+                echoContent green " ---> 当前已是最新版本 (${SCRIPT_VERSION})"
+                echoContent yellow " ---> 如需强制更新，请使用手动命令"
+                read -r -p "是否继续更新? [y/N]: " forceUpdate
+                if [[ "${forceUpdate}" != "y" && "${forceUpdate}" != "Y" ]]; then
+                    menu
+                    return
+                fi
             fi
         fi
-
-        # 使用 GitHub Release 下载地址
-        # 格式: https://github.com/user/repo/releases/download/v1.0.0/file
-        downloadBase="https://github.com/${GITHUB_REPO}/releases/download/${latestVersion}"
     else
-        echoContent yellow " ---> 无法获取 Release 版本，使用 master 分支"
-        latestVersion="master"
-        downloadBase="https://raw.githubusercontent.com/${GITHUB_REPO}/master"
+        echoContent yellow " ---> 使用 master 分支更新"
+        latestVersion=""
     fi
 
     # 下载新版本脚本
     echoContent yellow " ---> 下载脚本文件..."
     rm -rf "${installDir}/install.sh"
 
-    # Release 模式下尝试从 release assets 下载，失败则从 raw 下载
-    local rawBase="https://raw.githubusercontent.com/${GITHUB_REPO}/master"
-
     if [[ "${release}" == "alpine" ]]; then
         wget -c -q -P "${installDir}/" -N "${rawBase}/install.sh"
     else
         wget -c -q "${wgetShowProgressStatus}" -P "${installDir}/" -N "${rawBase}/install.sh"
     fi
-    sudo chmod 700 "${installDir}/install.sh"
 
-    # 保存版本号到 VERSION 文件
-    if [[ "${latestVersion}" != "master" ]]; then
+    if [[ ! -f "${installDir}/install.sh" ]]; then
+        echoContent red " ---> 下载脚本失败!"
+        echoContent yellow "请手动执行: wget -P /root -N ${rawBase}/install.sh"
+        exit 1
+    fi
+    chmod 700 "${installDir}/install.sh"
+
+    # 下载 VERSION 文件
+    echoContent yellow " ---> 下载版本文件..."
+    if [[ -n "${latestVersion}" ]]; then
+        # 从 Release tag 提取版本号保存
         echo "${latestVersion#v}" > "${installDir}/VERSION"
     else
-        wget -c -q -O "${installDir}/VERSION" "${rawBase}/VERSION" 2>/dev/null
+        wget -c -q -O "${installDir}/VERSION" "${rawBase}/VERSION" 2>/dev/null || true
     fi
 
     # 下载/更新 lib 目录模块
     echoContent yellow " ---> 下载模块文件..."
     mkdir -p "${installDir}/lib"
+    local moduleCount=0
     for module in i18n constants utils json-utils system-detect service-control protocol-registry config-reader; do
-        wget -c -q -O "${installDir}/lib/${module}.sh" "${rawBase}/lib/${module}.sh" 2>/dev/null
+        if wget -c -q -O "${installDir}/lib/${module}.sh" "${rawBase}/lib/${module}.sh" 2>/dev/null; then
+            ((moduleCount++))
+        fi
     done
+    echoContent green " ---> 已下载 ${moduleCount} 个模块"
 
     # 下载/更新语言文件
     echoContent yellow " ---> 下载语言文件..."
     mkdir -p "${installDir}/shell/lang"
     for langFile in zh_CN en_US loader; do
-        wget -c -q -O "${installDir}/shell/lang/${langFile}.sh" "${rawBase}/shell/lang/${langFile}.sh" 2>/dev/null
+        wget -c -q -O "${installDir}/shell/lang/${langFile}.sh" "${rawBase}/shell/lang/${langFile}.sh" 2>/dev/null || true
     done
 
     # 读取新版本号
-    local version
-    if [[ -f "${installDir}/VERSION" ]]; then
+    local version=""
+    if [[ -f "${installDir}/VERSION" && -s "${installDir}/VERSION" ]]; then
         version="v$(cat "${installDir}/VERSION" 2>/dev/null | tr -d '[:space:]')"
-    else
+    elif [[ -n "${latestVersion}" ]]; then
         version="${latestVersion}"
+    else
+        version="latest"
     fi
 
     echoContent green "\n ---> 更新完毕"
     echoContent yellow " ---> 请手动执行[pasly]打开脚本"
-    echoContent green " ---> 当前版本：${version}"
-    if [[ "${latestVersion}" != "master" ]]; then
-        echoContent green " ---> Release: ${latestVersion}\n"
-    fi
-    echoContent yellow "如更新不成功，请手动执行下面命令\n"
+    echoContent green " ---> 当前版本: ${version}"
+    echoContent yellow "\n如更新不成功，请手动执行下面命令\n"
     echoContent skyBlue "wget -P /root -N ${rawBase}/install.sh && chmod 700 /root/install.sh && /root/install.sh"
     echo
     exit 0
@@ -12558,6 +12567,12 @@ singBoxVersionManageMenu() {
 switchLanguage() {
     local langFile="/etc/Proxy-agent/lang_pref"
     local currentLang="${CURRENT_LANG:-zh_CN}"
+    local scriptPath="/etc/Proxy-agent/install.sh"
+
+    # 如果安装目录的脚本不存在，使用当前脚本路径
+    if [[ ! -f "${scriptPath}" ]]; then
+        scriptPath="${_SCRIPT_DIR}/install.sh"
+    fi
 
     echoContent red "\n=============================================================="
     echoContent skyBlue "当前语言 / Current Language: ${currentLang}"
@@ -12575,14 +12590,14 @@ switchLanguage() {
             export V2RAY_LANG="zh_CN"
             echoContent green "语言已设置为中文，重新加载菜单..."
             sleep 1
-            exec bash "$0"
+            exec bash "${scriptPath}"
             ;;
         2)
             echo "en_US" > "${langFile}"
             export V2RAY_LANG="en_US"
             echoContent green "Language set to English, reloading menu..."
             sleep 1
-            exec bash "$0"
+            exec bash "${scriptPath}"
             ;;
         0|*)
             menu
