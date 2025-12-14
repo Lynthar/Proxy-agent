@@ -41,7 +41,6 @@ A fork of [v2ray-agent](https://github.com/mack-a/v2ray-agent), providing one-cl
 ### System Features
 - **Bilingual UI** - Switch between Chinese/English anytime
 - **Auto Update** - Detect and update from GitHub Releases
-- **Smooth Migration** - Automatic migration from legacy v2ray-agent
 
 ## Requirements
 
@@ -137,14 +136,6 @@ Language settings are saved to `/etc/Proxy-agent/lang_pref` and auto-loaded on s
 21.Switch Language        # Chinese/English toggle
 ==============================================================
 ```
-
-## Migration
-
-Migrating from legacy v2ray-agent:
-- Script automatically detects `/etc/v2ray-agent/` on first run
-- Auto-migrates configuration to `/etc/Proxy-agent/`
-- Auto-updates service files and crontab
-- No manual action required
 
 ## Documentation
 
