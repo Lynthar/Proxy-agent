@@ -4,6 +4,31 @@
 # 检查系统
 export LANG=en_US.UTF-8
 
+# ============================================================================
+# 模块加载
+# 如果 lib 目录存在，加载模块化组件
+# 这允许逐步重构而保持向后兼容
+# ============================================================================
+
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_LIB_DIR="${_SCRIPT_DIR}/lib"
+
+# 加载模块（如果存在）
+if [[ -d "${_LIB_DIR}" ]]; then
+    # 加载顺序很重要：constants -> utils -> system-detect -> service-control
+    for _module in constants utils system-detect service-control; do
+        if [[ -f "${_LIB_DIR}/${_module}.sh" ]]; then
+            # shellcheck source=/dev/null
+            source "${_LIB_DIR}/${_module}.sh"
+        fi
+    done
+fi
+
+# 清理临时变量
+unset _SCRIPT_DIR _LIB_DIR _module
+
+# ============================================================================
+
 echoContent() {
     case $1 in
     # 红色
