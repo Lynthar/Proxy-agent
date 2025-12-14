@@ -5,6 +5,35 @@
 export LANG=en_US.UTF-8
 
 # ============================================================================
+# 全局错误处理
+# 注意：不使用 set -e 因为脚本中有许多命令允许失败
+# 但启用 pipefail 确保管道错误能被检测
+# ============================================================================
+set -o pipefail
+
+# 错误处理函数
+_error_handler() {
+    local exit_code=$?
+    local line_number=$1
+    local command="$2"
+    if [[ ${exit_code} -ne 0 ]]; then
+        echo -e "\033[31m[错误] 脚本在第 ${line_number} 行发生错误\033[0m" >&2
+        echo -e "\033[31m[错误] 命令: ${command}\033[0m" >&2
+        echo -e "\033[31m[错误] 退出码: ${exit_code}\033[0m" >&2
+    fi
+}
+
+# 捕获 ERR 信号（仅用于调试，不会终止脚本）
+# trap '_error_handler ${LINENO} "${BASH_COMMAND}"' ERR
+
+# 清理函数 - 脚本退出时清理临时文件
+_cleanup() {
+    # 清理可能遗留的临时文件
+    rm -f /tmp/Proxy-agent-*.tmp 2>/dev/null
+}
+trap '_cleanup' EXIT
+
+# ============================================================================
 # 模块加载
 # 如果 lib 目录存在，加载模块化组件
 # 这允许逐步重构而保持向后兼容
@@ -232,6 +261,57 @@ isValidRedirectUrl() {
         return 1
     fi
     return 0
+}
+
+# SHA256校验和验证函数
+# 用法: verifySHA256 <文件路径> <预期的SHA256值>
+# 返回: 0=验证成功, 1=验证失败
+verifySHA256() {
+    local file="$1"
+    local expectedHash="$2"
+
+    if [[ ! -f "${file}" ]]; then
+        echoContent red " ---> 校验失败: 文件不存在"
+        return 1
+    fi
+
+    local actualHash
+    if command -v sha256sum &>/dev/null; then
+        actualHash=$(sha256sum "${file}" | awk '{print $1}')
+    elif command -v shasum &>/dev/null; then
+        actualHash=$(shasum -a 256 "${file}" | awk '{print $1}')
+    else
+        echoContent yellow " ---> 警告: 未找到sha256sum工具，跳过校验"
+        return 0
+    fi
+
+    if [[ "${actualHash,,}" == "${expectedHash,,}" ]]; then
+        return 0
+    else
+        echoContent red " ---> 校验失败: SHA256不匹配"
+        echoContent red "     预期: ${expectedHash}"
+        echoContent red "     实际: ${actualHash}"
+        return 1
+    fi
+}
+
+# 从Xray .dgst文件中提取SHA256值
+# 用法: extractXrayHash <dgst文件路径>
+extractXrayHash() {
+    local dgstFile="$1"
+    if [[ -f "${dgstFile}" ]]; then
+        grep "SHA2-256" "${dgstFile}" | awk '{print $2}' | head -1
+    fi
+}
+
+# 从sing-box校验文件中提取SHA256值
+# 用法: extractSingBoxHash <校验文件路径> <目标文件名>
+extractSingBoxHash() {
+    local checksumFile="$1"
+    local targetFile="$2"
+    if [[ -f "${checksumFile}" ]]; then
+        grep "${targetFile}" "${checksumFile}" | awk '{print $1}' | head -1
+    fi
 }
 
 echoContent() {
@@ -644,8 +724,17 @@ readAcmeTLS() {
     fi
 
     dnsTLSDomain=$(echo "${readAcmeDomain}" | awk -F "." '{$1="";print $0}' | sed 's/^[[:space:]]*//' | sed 's/ /./g')
-    if [[ -d "$HOME/.acme.sh/*.${dnsTLSDomain}_ecc" && -f "$HOME/.acme.sh/*.${dnsTLSDomain}_ecc/*.${dnsTLSDomain}.key" && -f "$HOME/.acme.sh/*.${dnsTLSDomain}_ecc/*.${dnsTLSDomain}.cer" ]]; then
-        installedDNSAPIStatus=true
+    # 使用 find 命令检查通配符目录和文件是否存在
+    # 注意：[[ -d "*.xxx" ]] 中的 glob 不会展开，必须使用 find
+    local acmeEccDir
+    acmeEccDir=$(find "$HOME/.acme.sh" -maxdepth 1 -type d -name "*.${dnsTLSDomain}_ecc" 2>/dev/null | head -1)
+    if [[ -n "${acmeEccDir}" ]]; then
+        local keyFile certFile
+        keyFile=$(find "${acmeEccDir}" -maxdepth 1 -type f -name "*.${dnsTLSDomain}.key" 2>/dev/null | head -1)
+        certFile=$(find "${acmeEccDir}" -maxdepth 1 -type f -name "*.${dnsTLSDomain}.cer" 2>/dev/null | head -1)
+        if [[ -n "${keyFile}" && -n "${certFile}" ]]; then
+            installedDNSAPIStatus=true
+        fi
     fi
 }
 
@@ -1385,7 +1474,10 @@ readSingBoxConfig
 
 # 初始化安装目录
 mkdirTools() {
+    # TLS证书目录 - 设置严格权限保护私钥
     mkdir -p /etc/Proxy-agent/tls
+    chmod 700 /etc/Proxy-agent/tls
+
     mkdir -p /etc/Proxy-agent/subscribe_local/default
     mkdir -p /etc/Proxy-agent/subscribe_local/clashMeta
 
@@ -1400,15 +1492,21 @@ mkdirTools() {
     mkdir -p /etc/Proxy-agent/subscribe/sing-box_profiles
     mkdir -p /etc/Proxy-agent/subscribe_local/sing-box
 
+    # Xray配置目录 - 设置适当权限
     mkdir -p /etc/Proxy-agent/xray/conf
+    chmod 700 /etc/Proxy-agent/xray/conf
     mkdir -p /etc/Proxy-agent/xray/reality_scan
     mkdir -p /etc/Proxy-agent/xray/tmp
     mkdir -p /etc/systemd/system/
     mkdir -p /tmp/Proxy-agent-tls/
 
+    # WARP配置目录 - 包含私钥
     mkdir -p /etc/Proxy-agent/warp
+    chmod 700 /etc/Proxy-agent/warp
 
+    # sing-box配置目录 - 设置适当权限
     mkdir -p /etc/Proxy-agent/sing-box/conf/config
+    chmod 700 /etc/Proxy-agent/sing-box/conf
 
     mkdir -p /usr/share/nginx/html/
 }
@@ -1624,7 +1722,7 @@ installNginxTools() {
 
     if [[ "${release}" == "debian" ]]; then
         sudo apt install gnupg2 ca-certificates lsb-release -y >/dev/null 2>&1
-        echo "deb http://nginx.org/packages/mainline/debian $(lsb_release -cs) nginx" | sudo tee /etc/apt/sources.list.d/nginx.list >/dev/null 2>&1
+        echo "deb https://nginx.org/packages/mainline/debian $(lsb_release -cs) nginx" | sudo tee /etc/apt/sources.list.d/nginx.list >/dev/null 2>&1
         echo -e "Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900\n" | sudo tee /etc/apt/preferences.d/99nginx >/dev/null 2>&1
         curl -o /tmp/nginx_signing.key https://nginx.org/keys/nginx_signing.key >/dev/null 2>&1
         # gpg --dry-run --quiet --import --import-options import-show /tmp/nginx_signing.key
@@ -1633,7 +1731,7 @@ installNginxTools() {
 
     elif [[ "${release}" == "ubuntu" ]]; then
         sudo apt install gnupg2 ca-certificates lsb-release -y >/dev/null 2>&1
-        echo "deb http://nginx.org/packages/mainline/ubuntu $(lsb_release -cs) nginx" | sudo tee /etc/apt/sources.list.d/nginx.list >/dev/null 2>&1
+        echo "deb https://nginx.org/packages/mainline/ubuntu $(lsb_release -cs) nginx" | sudo tee /etc/apt/sources.list.d/nginx.list >/dev/null 2>&1
         echo -e "Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900\n" | sudo tee /etc/apt/preferences.d/99nginx >/dev/null 2>&1
         curl -o /tmp/nginx_signing.key https://nginx.org/keys/nginx_signing.key >/dev/null 2>&1
         # gpg --dry-run --quiet --import --import-options import-show /tmp/nginx_signing.key
@@ -1645,7 +1743,7 @@ installNginxTools() {
         cat <<EOF >/etc/yum.repos.d/nginx.repo
 [nginx-stable]
 name=nginx stable repo
-baseurl=http://nginx.org/packages/centos/\$releasever/\$basearch/
+baseurl=https://nginx.org/packages/centos/\$releasever/\$basearch/
 gpgcheck=1
 enabled=1
 gpgkey=https://nginx.org/keys/nginx_signing.key
@@ -1653,7 +1751,7 @@ module_hotfixes=true
 
 [nginx-mainline]
 name=nginx mainline repo
-baseurl=http://nginx.org/packages/mainline/centos/\$releasever/\$basearch/
+baseurl=https://nginx.org/packages/mainline/centos/\$releasever/\$basearch/
 gpgcheck=1
 enabled=0
 gpgkey=https://nginx.org/keys/nginx_signing.key
@@ -1677,17 +1775,17 @@ installWarp() {
     ${installType} gnupg2 -y >/dev/null 2>&1
     if [[ "${release}" == "debian" ]]; then
         curl -s https://pkg.cloudflareclient.com/pubkey.gpg | sudo apt-key add - >/dev/null 2>&1
-        echo "deb http://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null 2>&1
+        echo "deb https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null 2>&1
         sudo apt update >/dev/null 2>&1
 
     elif [[ "${release}" == "ubuntu" ]]; then
         curl -s https://pkg.cloudflareclient.com/pubkey.gpg | sudo apt-key add - >/dev/null 2>&1
-        echo "deb http://pkg.cloudflareclient.com/ focal main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null 2>&1
+        echo "deb https://pkg.cloudflareclient.com/ focal main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null 2>&1
         sudo apt update >/dev/null 2>&1
 
     elif [[ "${release}" == "centos" ]]; then
         ${installType} yum-utils >/dev/null 2>&1
-        sudo rpm -ivh "http://pkg.cloudflareclient.com/cloudflare-release-el${centosVersion}.rpm" >/dev/null 2>&1
+        sudo rpm -ivh "https://pkg.cloudflareclient.com/cloudflare-release-el${centosVersion}.rpm" >/dev/null 2>&1
     fi
 
     echoContent green " ---> 安装WARP"
@@ -1850,10 +1948,10 @@ initTLSNginxConfig() {
 
 # 删除nginx默认的配置
 removeNginxDefaultConf() {
-    if [[ -f ${nginxConfigPath}default.conf ]]; then
-        if [[ "$(grep -c "server_name" <${nginxConfigPath}default.conf)" == "1" ]] && [[ "$(grep -c "server_name  localhost;" <${nginxConfigPath}default.conf)" == "1" ]]; then
+    if [[ -f "${nginxConfigPath}default.conf" ]]; then
+        if [[ "$(grep -c "server_name" <"${nginxConfigPath}default.conf")" == "1" ]] && [[ "$(grep -c "server_name  localhost;" <"${nginxConfigPath}default.conf")" == "1" ]]; then
             echoContent green " ---> 删除Nginx默认配置"
-            rm -rf ${nginxConfigPath}default.conf >/dev/null 2>&1
+            rm -rf "${nginxConfigPath}default.conf" >/dev/null 2>&1
         fi
     fi
 }
@@ -2275,7 +2373,7 @@ customPortFunction() {
             echoContent yellow "请输入端口[不可与BT Panel/1Panel端口相同，回车随机]"
             read -r -p "端口:" port
             if [[ -z "${port}" ]]; then
-                port=$((RANDOM % 20001 + 10000))
+                port=$(randomNum 10000 30000)
             fi
         else
             echo
@@ -2394,13 +2492,15 @@ installTLS() {
     fi
 }
 
-# 初始化随机字符串
+# 初始化随机字符串 - 使用更安全的随机源
 initRandomPath() {
     local chars="abcdefghijklmnopqrtuxyz"
     local initCustomPath=
+    local charLen=${#chars}
     for i in {1..4}; do
-        echo "${i}" >/dev/null
-        initCustomPath+="${chars:RANDOM%${#chars}:1}"
+        local idx
+        idx=$(randomNum 0 $((charLen - 1)))
+        initCustomPath+="${chars:idx:1}"
     done
     customPath=${initCustomPath}
 }
@@ -2443,14 +2543,24 @@ randomPathFunction() {
     echoContent yellow "\n path:${currentPath}"
     echoContent skyBlue "\n----------------------------"
 }
-# 随机数
+# 随机数 - 使用更安全的随机源
+# 用法: randomNum min max
 randomNum() {
-    if [[ "${release}" == "alpine" ]]; then
-        local ranNum=
-        ranNum="$(shuf -i "$1"-"$2" -n 1)"
-        echo "${ranNum}"
+    local min="${1:-0}"
+    local max="${2:-65535}"
+    local range=$((max - min + 1))
+
+    # 优先使用 /dev/urandom（更安全）
+    if [[ -r /dev/urandom ]]; then
+        local random_bytes
+        random_bytes=$(od -An -tu4 -N4 /dev/urandom | tr -d ' ')
+        echo $((random_bytes % range + min))
+    # 回退到 shuf（如果可用，常见于 Alpine）
+    elif command -v shuf &>/dev/null; then
+        shuf -i "${min}-${max}" -n 1
+    # 最后回退到 $RANDOM
     else
-        echo $((RANDOM % $2 + $1))
+        echo $((RANDOM % range + min))
     fi
 }
 # Nginx伪装博客
@@ -2669,20 +2779,45 @@ installSingBox() {
 
         echoContent green " ---> 最新版本:${version}"
 
+        local singBoxTarFile="/etc/Proxy-agent/sing-box/sing-box-${version/v/}${singBoxCoreCPUVendor}.tar.gz"
+        local singBoxChecksumFile="/etc/Proxy-agent/sing-box/sing-box_${version/v/}_checksums.txt"
+        local singBoxTarFileName="sing-box-${version/v/}${singBoxCoreCPUVendor}.tar.gz"
+
+        # 下载sing-box核心文件和校验和文件
         if [[ "${release}" == "alpine" ]]; then
-            wget -c -q -P /etc/Proxy-agent/sing-box/ "https://github.com/SagerNet/sing-box/releases/download/${version}/sing-box-${version/v/}${singBoxCoreCPUVendor}.tar.gz"
+            wget -c -q -P /etc/Proxy-agent/sing-box/ "https://github.com/SagerNet/sing-box/releases/download/${version}/${singBoxTarFileName}"
+            wget -c -q -P /etc/Proxy-agent/sing-box/ "https://github.com/SagerNet/sing-box/releases/download/${version}/sing-box_${version/v/}_checksums.txt"
         else
-            wget -c -q "${wgetShowProgressStatus}" -P /etc/Proxy-agent/sing-box/ "https://github.com/SagerNet/sing-box/releases/download/${version}/sing-box-${version/v/}${singBoxCoreCPUVendor}.tar.gz"
+            wget -c -q "${wgetShowProgressStatus}" -P /etc/Proxy-agent/sing-box/ "https://github.com/SagerNet/sing-box/releases/download/${version}/${singBoxTarFileName}"
+            wget -c -q "${wgetShowProgressStatus}" -P /etc/Proxy-agent/sing-box/ "https://github.com/SagerNet/sing-box/releases/download/${version}/sing-box_${version/v/}_checksums.txt"
         fi
 
-        if [[ ! -f "/etc/Proxy-agent/sing-box/sing-box-${version/v/}${singBoxCoreCPUVendor}.tar.gz" ]]; then
+        if [[ ! -f "${singBoxTarFile}" ]]; then
             read -r -p "核心下载失败，请重新尝试安装，是否重新尝试？[y/n]" downloadStatus
             if [[ "${downloadStatus}" == "y" ]]; then
                 installSingBox "$1"
             fi
         else
+            # 校验SHA256
+            local expectedHash
+            expectedHash=$(extractSingBoxHash "${singBoxChecksumFile}" "${singBoxTarFileName}")
+            if [[ -n "${expectedHash}" ]]; then
+                echoContent green " ---> 验证文件完整性..."
+                if ! verifySHA256 "${singBoxTarFile}" "${expectedHash}"; then
+                    echoContent red " ---> 文件校验失败，可能已被篡改，请重新下载"
+                    rm -f "${singBoxTarFile}" "${singBoxChecksumFile}"
+                    read -r -p "是否重新尝试？[y/n]" retryStatus
+                    if [[ "${retryStatus}" == "y" ]]; then
+                        installSingBox "$1"
+                    fi
+                    return 1
+                fi
+                echoContent green " ---> 文件校验通过"
+            else
+                echoContent yellow " ---> 警告: 未能获取校验信息，跳过完整性验证"
+            fi
 
-            tar zxvf "/etc/Proxy-agent/sing-box/sing-box-${version/v/}${singBoxCoreCPUVendor}.tar.gz" -C "/etc/Proxy-agent/sing-box/" >/dev/null 2>&1
+            tar zxvf "${singBoxTarFile}" -C "/etc/Proxy-agent/sing-box/" >/dev/null 2>&1
 
             mv "/etc/Proxy-agent/sing-box/sing-box-${version/v/}${singBoxCoreCPUVendor}/sing-box" /etc/Proxy-agent/sing-box/sing-box
             rm -rf /etc/Proxy-agent/sing-box/sing-box-*
@@ -2727,20 +2862,46 @@ installXray() {
 
         version=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=5" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
         echoContent green " ---> Xray-core版本:${version}"
+
+        local xrayZipFile="/etc/Proxy-agent/xray/${xrayCoreCPUVendor}.zip"
+        local xrayDgstFile="/etc/Proxy-agent/xray/${xrayCoreCPUVendor}.zip.dgst"
+
+        # 下载Xray核心文件
         if [[ "${release}" == "alpine" ]]; then
             wget -c -q -P /etc/Proxy-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip"
+            wget -c -q -P /etc/Proxy-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip.dgst"
         else
             wget -c -q "${wgetShowProgressStatus}" -P /etc/Proxy-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip"
+            wget -c -q "${wgetShowProgressStatus}" -P /etc/Proxy-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip.dgst"
         fi
 
-        if [[ ! -f "/etc/Proxy-agent/xray/${xrayCoreCPUVendor}.zip" ]]; then
+        if [[ ! -f "${xrayZipFile}" ]]; then
             read -r -p "核心下载失败，请重新尝试安装，是否重新尝试？[y/n]" downloadStatus
             if [[ "${downloadStatus}" == "y" ]]; then
                 installXray "$1"
             fi
         else
-            unzip -o "/etc/Proxy-agent/xray/${xrayCoreCPUVendor}.zip" -d /etc/Proxy-agent/xray >/dev/null
-            rm -rf "/etc/Proxy-agent/xray/${xrayCoreCPUVendor}.zip"
+            # 校验SHA256
+            local expectedHash
+            expectedHash=$(extractXrayHash "${xrayDgstFile}")
+            if [[ -n "${expectedHash}" ]]; then
+                echoContent green " ---> 验证文件完整性..."
+                if ! verifySHA256 "${xrayZipFile}" "${expectedHash}"; then
+                    echoContent red " ---> 文件校验失败，可能已被篡改，请重新下载"
+                    rm -f "${xrayZipFile}" "${xrayDgstFile}"
+                    read -r -p "是否重新尝试？[y/n]" retryStatus
+                    if [[ "${retryStatus}" == "y" ]]; then
+                        installXray "$1" "$2"
+                    fi
+                    return 1
+                fi
+                echoContent green " ---> 文件校验通过"
+            else
+                echoContent yellow " ---> 警告: 未能获取校验信息，跳过完整性验证"
+            fi
+
+            unzip -o "${xrayZipFile}" -d /etc/Proxy-agent/xray >/dev/null
+            rm -f "${xrayZipFile}" "${xrayDgstFile}"
 
             version=$(curl -s https://api.github.com/repos/Loyalsoldier/v2ray-rules-dat/releases?per_page=1 | jq -r '.[]|.tag_name')
             echoContent skyBlue "------------------------Version-------------------------------"
@@ -3335,7 +3496,7 @@ initHysteriaPort() {
         echoContent yellow "请输入Hysteria端口[回车随机10000-30000]，不可与其他服务重复"
         read -r -p "端口:" hysteriaPort
         if [[ -z "${hysteriaPort}" ]]; then
-            hysteriaPort=$((RANDOM % 20001 + 10000))
+            hysteriaPort=$(randomNum 10000 30000)
         fi
     fi
     if [[ -z ${hysteriaPort} ]]; then
@@ -3396,7 +3557,7 @@ initSS2022Config() {
         echoContent yellow "请输入Shadowsocks 2022端口[回车随机10000-30000]"
         read -r -p "端口:" ss2022Port
         if [[ -z "${ss2022Port}" ]]; then
-            ss2022Port=$((RANDOM % 20001 + 10000))
+            ss2022Port=$(randomNum 10000 30000)
         fi
         echoContent green "\n ---> 端口: ${ss2022Port}"
     fi
@@ -3630,7 +3791,7 @@ initTuicPort() {
         echoContent yellow "请输入Tuic端口[回车随机10000-30000]，不可与其他服务重复"
         read -r -p "端口:" tuicPort
         if [[ -z "${tuicPort}" ]]; then
-            tuicPort=$((RANDOM % 20001 + 10000))
+            tuicPort=$(randomNum 10000 30000)
         fi
     fi
     if [[ -z ${tuicPort} ]]; then
@@ -4242,7 +4403,7 @@ initSingBoxPort() {
     if [[ -z "${port}" ]]; then
         read -r -p '请输入自定义端口[需合法]，端口不可重复，[回车]随机端口:' port
         if [[ -z "${port}" ]]; then
-            port=$((RANDOM % 50001 + 10000))
+            port=$(randomNum 10000 60000)
         fi
         if ((port >= 1 && port <= 65535)); then
             allowPort "${port}"
@@ -4315,14 +4476,16 @@ EOF
     fi
 
     if [[ ! -f "/etc/Proxy-agent/xray/conf/12_policy.json" ]]; then
-
+        local handshakeVal connIdleVal
+        handshakeVal=$(randomNum 1 4)
+        connIdleVal=$(randomNum 250 300)
         cat <<EOF >/etc/Proxy-agent/xray/conf/12_policy.json
 {
   "policy": {
       "levels": {
           "0": {
-              "handshake": $((1 + RANDOM % 4)),
-              "connIdle": $((250 + RANDOM % 51))
+              "handshake": ${handshakeVal},
+              "connIdle": ${connIdleVal}
           }
       }
   }
@@ -6217,14 +6380,16 @@ addCorePort() {
         read -r -p "请输入端口号:" newPort
         read -r -p "请输入默认的端口号，同时会更改订阅端口以及节点端口，[回车]默认443:" defaultPort
 
-        if [[ -n "${defaultPort}" ]]; then
-            rm -rf "$(find ${configPath}* | grep "default")"
+        if [[ -n "${defaultPort}" && -n "${configPath}" ]]; then
+            find "${configPath}" -maxdepth 1 -type f -name "*default*" -exec rm -f {} \;
         fi
 
         if [[ -n "${newPort}" ]]; then
 
             while read -r port; do
-                rm -rf "$(find ${configPath}* | grep "${port}")"
+                if [[ -n "${configPath}" && -n "${port}" ]]; then
+                    find "${configPath}" -maxdepth 1 -type f -name "*${port}*" -exec rm -f {} \;
+                fi
 
                 local fileName=
                 local hysteriaFileName=
@@ -6355,10 +6520,9 @@ unInstall() {
     fi
 
     rm -rf /etc/Proxy-agent
-    rm -rf ${nginxConfigPath}alone.conf
-    rm -rf ${nginxConfigPath}checkPortOpen.conf >/dev/null 2>&1
+    rm -rf "${nginxConfigPath}alone.conf"
+    rm -rf "${nginxConfigPath}checkPortOpen.conf" >/dev/null 2>&1
     rm -rf "${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf" >/dev/null 2>&1
-    rm -rf ${nginxConfigPath}checkPortOpen.conf >/dev/null 2>&1
 
     unInstallSubscribe
 
@@ -7290,7 +7454,7 @@ btTools() {
     echoContent skyBlue "\n功能 1/${totalProgress} : bt下载管理"
     echoContent red "\n=============================================================="
 
-    if [[ -f ${configPath}09_routing.json ]] && grep -q bittorrent <${configPath}09_routing.json; then
+    if [[ -f "${configPath}09_routing.json" ]] && grep -q bittorrent <"${configPath}09_routing.json"; then
         echoContent yellow "当前状态:已禁止下载BT"
     else
         echoContent yellow "当前状态:允许下载BT"
@@ -8021,7 +8185,7 @@ setupChainExit() {
 
     # 生成随机端口 (10000-60000)
     local chainPort
-    chainPort=$((RANDOM % 50000 + 10000))
+    chainPort=$(randomNum 10000 60000)
     echoContent yellow "\n请输入链式代理端口 [回车使用随机端口: ${chainPort}]"
     read -r -p "端口:" inputPort
     if [[ -n "${inputPort}" ]]; then
@@ -8390,7 +8554,7 @@ setupChainRelay() {
 
     # 生成随机端口 (10000-60000)
     local chainPort
-    chainPort=$((RANDOM % 50000 + 10000))
+    chainPort=$(randomNum 10000 60000)
     echoContent yellow "请输入本机链式代理端口 [回车使用随机端口: ${chainPort}]"
     read -r -p "端口:" inputPort
     if [[ -n "${inputPort}" ]]; then
@@ -11438,7 +11602,7 @@ EOF
 }
 # 卸载订阅
 unInstallSubscribe() {
-    rm -rf ${nginxConfigPath}subscribe.conf >/dev/null 2>&1
+    rm -rf "${nginxConfigPath}subscribe.conf" >/dev/null 2>&1
 }
 
 # 添加订阅
@@ -11585,7 +11749,7 @@ proxy-groups:
     proxies: null
   - name: 自动选择
     type: url-test
-    url: http://www.gstatic.com/generate_204
+    url: https://www.gstatic.com/generate_204
     interval: 36000
     tolerance: 50
     use:
@@ -11883,13 +12047,15 @@ rules:
 EOF
 
 }
-# 随机salt
+# 随机salt - 使用更安全的随机源
 initRandomSalt() {
     local chars="abcdefghijklmnopqrtuxyz"
     local initCustomPath=
+    local charLen=${#chars}
     for i in {1..10}; do
-        echo "${i}" >/dev/null
-        initCustomPath+="${chars:RANDOM%${#chars}:1}"
+        local idx
+        idx=$(randomNum 0 $((charLen - 1)))
+        initCustomPath+="${chars:idx:1}"
     done
     echo "${initCustomPath}"
 }
@@ -12332,7 +12498,7 @@ initXrayRealityPort() {
 
         read -r -p "端口:" realityPort
         if [[ -z "${realityPort}" ]]; then
-            realityPort=$((RANDOM % 20001 + 10000))
+            realityPort=$(randomNum 10000 30000)
         fi
         #        fi
         if [[ -n "${realityPort}" && "${xrayVLESSRealityPort}" == "${realityPort}" ]]; then
@@ -12365,7 +12531,7 @@ initXrayXHTTPort() {
         echoContent yellow "请输入端口[回车随机10000-30000]"
         read -r -p "端口:" xHTTPort
         if [[ -z "${xHTTPort}" ]]; then
-            xHTTPort=$((RANDOM % 20001 + 10000))
+            xHTTPort=$(randomNum 10000 30000)
         fi
         if [[ -n "${xHTTPort}" && "${xrayVLESSRealityXHTTPort}" == "${xHTTPort}" ]]; then
             handleXray stop
