@@ -137,12 +137,6 @@ V2RAY_LANG=zh pasly   # 中文界面
 ==============================================================
 ```
 
-## 相关文档
-
-- [Nginx 代理配置](documents/nginx_proxy.md)
-- [性能优化指南](documents/optimize_V2Ray.md)
-- [安装工具说明](documents/install_tools.md)
-
 ## 贡献
 
 欢迎提交 Issue 和 Pull Request。
