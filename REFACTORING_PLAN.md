@@ -196,6 +196,20 @@ outbounds      # 表示出站配置数组
 - [x] `lib/protocol-registry.sh` - 协议注册表、检测、属性查询
 - [x] `lib/config-reader.sh` - 配置读取接口、Reality/Hysteria2/TUIC配置
 
+### Phase 2.5: 测试框架 ✅ (2025-12-14 融合)
+
+融合了 GK39e 分支的测试框架和 Master 分支的完整模块系统：
+
+- [x] `tests/test_modules.sh` - 模块单元测试 (68个测试用例)
+- [x] `tests/test_integration.sh` - 集成测试 (32个测试用例)
+- [x] `lib/json-utils.sh` 新增 Xray/sing-box 专用读取函数:
+  - `xrayGetInboundPort()`, `xrayGetInboundProtocol()`, `xrayGetClientUUID()`
+  - `xrayGetRealityConfig()`, `xrayGetStreamPath()`, `xrayGetTLSDomain()`
+  - `singboxGetInboundPort()`, `singboxGetUserUUID()`, `singboxGetTLSServerName()`
+  - `singboxGetRealityConfig()`, `singboxGetHysteria2Config()`, `singboxGetTuicConfig()`
+
+运行测试: `bash tests/test_modules.sh && bash tests/test_integration.sh`
+
 ### Phase 3: 待实施 ⏳
 
 - [ ] `lib/tls-manager.sh` - TLS证书管理（ACME、SSL续期）

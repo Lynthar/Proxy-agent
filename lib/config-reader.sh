@@ -12,26 +12,27 @@ readonly _CONFIG_READER_LOADED=1
 
 # ============================================================================
 # 默认路径常量
+# 使用 :- 语法避免与 constants.sh 冲突，只在未定义时赋值
 # ============================================================================
 
 # Xray配置路径
-readonly XRAY_CONFIG_BASE="/etc/v2ray-agent/xray"
-readonly XRAY_CONFIG_PATH="${XRAY_CONFIG_BASE}/conf/"
-readonly XRAY_BINARY="${XRAY_CONFIG_BASE}/xray"
+: "${XRAY_CONFIG_BASE:=/etc/v2ray-agent/xray}"
+: "${XRAY_CONFIG_PATH:=${XRAY_CONFIG_BASE}/conf/}"
+: "${XRAY_BINARY:=${XRAY_CONFIG_BASE}/xray}"
 
 # sing-box配置路径
-readonly SINGBOX_CONFIG_BASE="/etc/v2ray-agent/sing-box"
-readonly SINGBOX_CONFIG_PATH="${SINGBOX_CONFIG_BASE}/conf/config/"
-readonly SINGBOX_BINARY="${SINGBOX_CONFIG_BASE}/sing-box"
+: "${SINGBOX_CONFIG_BASE:=/etc/v2ray-agent/sing-box}"
+: "${SINGBOX_CONFIG_PATH:=${SINGBOX_CONFIG_BASE}/conf/config/}"
+: "${SINGBOX_BINARY:=${SINGBOX_CONFIG_BASE}/sing-box}"
 
 # TLS证书路径
-readonly TLS_PATH="/etc/v2ray-agent/tls/"
+: "${TLS_PATH:=/etc/v2ray-agent/tls/}"
 
 # Nginx配置路径
-readonly NGINX_CONFIG_PATH="/etc/nginx/conf.d/"
+: "${NGINX_CONFIG_PATH:=/etc/nginx/conf.d/}"
 
 # 订阅路径
-readonly SUBSCRIBE_LOCAL_PATH="/etc/v2ray-agent/subscribe_local/"
+: "${SUBSCRIBE_LOCAL_PATH:=/etc/v2ray-agent/subscribe_local/}"
 
 # ============================================================================
 # 核心检测函数
