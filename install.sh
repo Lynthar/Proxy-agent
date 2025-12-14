@@ -3262,17 +3262,18 @@ handleHysteria() {
 
 # 操作sing-box
 handleSingBox() {
+    local startResult=0
     if [[ -f "/etc/systemd/system/sing-box.service" ]]; then
         if [[ -z $(pgrep -f "sing-box") ]] && [[ "$1" == "start" ]]; then
             singBoxMergeConfig
-            systemctl start sing-box.service
+            systemctl start sing-box.service || startResult=$?
         elif [[ -n $(pgrep -f "sing-box") ]] && [[ "$1" == "stop" ]]; then
             systemctl stop sing-box.service
         fi
     elif [[ -f "/etc/init.d/sing-box" ]]; then
         if [[ -z $(pgrep -f "sing-box") ]] && [[ "$1" == "start" ]]; then
             singBoxMergeConfig
-            rc-service sing-box start
+            rc-service sing-box start || startResult=$?
         elif [[ -n $(pgrep -f "sing-box") ]] && [[ "$1" == "stop" ]]; then
             rc-service sing-box stop
         fi
@@ -3284,7 +3285,12 @@ handleSingBox() {
             echoContent green " ---> sing-box启动成功"
         else
             echoContent red "sing-box启动失败"
-            echoContent yellow "请手动执行【 /etc/Proxy-agent/sing-box/sing-box merge config.json -C /etc/Proxy-agent/sing-box/conf/config/ -D /etc/Proxy-agent/sing-box/conf/ 】，查看错误日志"
+            # 显示 systemd 服务状态以帮助诊断
+            if [[ -f "/etc/systemd/system/sing-box.service" ]]; then
+                echoContent yellow "\n ---> systemd 服务状态:"
+                systemctl status sing-box.service --no-pager -l 2>&1 | head -20
+            fi
+            echoContent yellow "\n请手动执行【 /etc/Proxy-agent/sing-box/sing-box merge config.json -C /etc/Proxy-agent/sing-box/conf/config/ -D /etc/Proxy-agent/sing-box/conf/ 】，查看错误日志"
             echo
             echoContent yellow "如上面命令没有错误，请手动执行【 /etc/Proxy-agent/sing-box/sing-box run -c /etc/Proxy-agent/sing-box/conf/config.json 】，查看错误日志"
             exit 0
@@ -8100,7 +8106,7 @@ ensureSingBoxInstalled() {
 EOF
     fi
 
-    # 确保 DNS 配置存在
+    # 确保 DNS 配置存在 (使用 sing-box 1.12+ 新格式)
     if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config/01_dns.json" ]]; then
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_dns.json
 {
@@ -8108,7 +8114,13 @@ EOF
         "servers": [
             {
                 "tag": "google",
-                "address": "8.8.8.8"
+                "address": "https://dns.google/dns-query",
+                "detour": "direct"
+            },
+            {
+                "tag": "local",
+                "address": "local",
+                "detour": "direct"
             }
         ]
     }
