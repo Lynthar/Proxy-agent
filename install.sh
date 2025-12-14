@@ -732,14 +732,16 @@ readAcmeTLS() {
     fi
 
     dnsTLSDomain=$(echo "${readAcmeDomain}" | awk -F "." '{$1="";print $0}' | sed 's/^[[:space:]]*//' | sed 's/ /./g')
-    # 使用 find 命令检查通配符目录和文件是否存在
-    # 注意：[[ -d "*.xxx" ]] 中的 glob 不会展开，必须使用 find
+    # 检查通配符证书目录是否存在
+    # 注意：通配符证书目录名以字面 "*." 开头，如 *.example.com_ecc
+    # 使用 \* 匹配字面星号，避免匹配普通证书目录如 sub.example.com_ecc
     local acmeEccDir
-    acmeEccDir=$(find "$HOME/.acme.sh" -maxdepth 1 -type d -name "*.${dnsTLSDomain}_ecc" 2>/dev/null | head -1)
+    acmeEccDir=$(find "$HOME/.acme.sh" -maxdepth 1 -type d -name '\*.'"${dnsTLSDomain}_ecc" 2>/dev/null | head -1)
     if [[ -n "${acmeEccDir}" ]]; then
         local keyFile certFile
-        keyFile=$(find "${acmeEccDir}" -maxdepth 1 -type f -name "*.${dnsTLSDomain}.key" 2>/dev/null | head -1)
-        certFile=$(find "${acmeEccDir}" -maxdepth 1 -type f -name "*.${dnsTLSDomain}.cer" 2>/dev/null | head -1)
+        # 通配符证书文件名也以字面 "*." 开头
+        keyFile=$(find "${acmeEccDir}" -maxdepth 1 -type f -name '\*.'"${dnsTLSDomain}.key" 2>/dev/null | head -1)
+        certFile=$(find "${acmeEccDir}" -maxdepth 1 -type f -name '\*.'"${dnsTLSDomain}.cer" 2>/dev/null | head -1)
         if [[ -n "${keyFile}" && -n "${certFile}" ]]; then
             installedDNSAPIStatus=true
         fi
@@ -2437,10 +2439,13 @@ installTLS() {
 
         if [[ -z $(find /etc/Proxy-agent/tls/ -name "${tlsDomain}.crt") ]] || [[ -z $(find /etc/Proxy-agent/tls/ -name "${tlsDomain}.key") ]] || [[ -z $(cat "/etc/Proxy-agent/tls/${tlsDomain}.crt") ]]; then
             if [[ "${installedDNSAPIStatus}" == "true" ]]; then
-                # 验证通配符证书确实存在于 acme.sh 中
-                local wildcardCertDir
-                wildcardCertDir=$(find "$HOME/.acme.sh" -maxdepth 1 -type d -name "*${dnsTLSDomain}_ecc" 2>/dev/null | head -1)
-                if [[ -n "${wildcardCertDir}" ]] && [[ -f "${wildcardCertDir}/"*".${dnsTLSDomain}.cer" ]]; then
+                # 验证通配符证书确实存在于 acme.sh 中（目录名以字面 *. 开头）
+                local wildcardCertDir wildcardCertFile
+                wildcardCertDir=$(find "$HOME/.acme.sh" -maxdepth 1 -type d -name '\*.'"${dnsTLSDomain}_ecc" 2>/dev/null | head -1)
+                if [[ -n "${wildcardCertDir}" ]]; then
+                    wildcardCertFile=$(find "${wildcardCertDir}" -maxdepth 1 -type f -name '\*.'"${dnsTLSDomain}.cer" 2>/dev/null | head -1)
+                fi
+                if [[ -n "${wildcardCertFile}" ]]; then
                     local wildcardDomain
                     wildcardDomain=$(basename "${wildcardCertDir}" | sed 's/_ecc$//')
                     sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${wildcardDomain}" --fullchainpath "/etc/Proxy-agent/tls/${tlsDomain}.crt" --keypath "/etc/Proxy-agent/tls/${tlsDomain}.key" --ecc >/dev/null
@@ -2483,7 +2488,7 @@ installTLS() {
         if [[ "${installedDNSAPIStatus}" == "true" ]]; then
             # 从实际目录名获取正确的证书域名
             local wildcardCertDir
-            wildcardCertDir=$(find "$HOME/.acme.sh" -maxdepth 1 -type d -name "*${dnsTLSDomain}_ecc" 2>/dev/null | head -1)
+            wildcardCertDir=$(find "$HOME/.acme.sh" -maxdepth 1 -type d -name '\*.'"${dnsTLSDomain}_ecc" 2>/dev/null | head -1)
             if [[ -n "${wildcardCertDir}" ]]; then
                 local wildcardDomain
                 wildcardDomain=$(basename "${wildcardCertDir}" | sed 's/_ecc$//')
@@ -2754,7 +2759,7 @@ renewalTLS() {
         if [[ "${installedDNSAPIStatus}" == "true" ]]; then
             # 使用 find 获取通配符证书文件路径，避免 glob 在引号中不展开的问题
             local wildcardCertFile
-            wildcardCertFile=$(find "$HOME/.acme.sh" -path "*${dnsTLSDomain}_ecc/*.${dnsTLSDomain}.cer" -type f 2>/dev/null | head -1)
+            wildcardCertFile=$(find "$HOME/.acme.sh" -path '*/\*.'"${dnsTLSDomain}_ecc"'/\*.'"${dnsTLSDomain}.cer" -type f 2>/dev/null | head -1)
             if [[ -n "${wildcardCertFile}" ]]; then
                 modifyTime=$(stat --format=%z "${wildcardCertFile}")
             else
