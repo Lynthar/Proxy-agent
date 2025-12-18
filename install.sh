@@ -4372,6 +4372,7 @@ initSingBoxHysteria2Config() {
             "users": $(initXrayClients 6),
             "up_mbps":${hysteria2ClientDownloadSpeed},
             "down_mbps":${hysteria2ClientUploadSpeed},
+            "ignore_client_bandwidth": false,
             ${hysteria2ObfsConfig}
             "tls": {
                 "enabled": true,
@@ -4683,7 +4684,10 @@ EOF
         "xhttpSettings": {
             "host": "${realityServerName}",
             "path": "/${customPath}xHTTP",
-            "mode": "auto"
+            "mode": "auto",
+            "extra": {
+                "xPaddingBytes": "100-1000"
+            }
         }
 	  }
 	}
@@ -5231,6 +5235,7 @@ EOF
             "users": $(initSingBoxClients 6),
             "up_mbps":${hysteria2ClientDownloadSpeed},
             "down_mbps":${hysteria2ClientUploadSpeed},
+            "ignore_client_bandwidth": false,
             ${hysteria2ObfsConfig}
             "tls": {
                 "enabled": true,
@@ -5294,7 +5299,8 @@ EOF
             "listen_port": ${result[-1]},
             "users": $(initSingBoxClients 9),
             "congestion_control": "${tuicAlgorithm}",
-            "zero_rtt_handshake": true,
+            "auth_timeout": "3s",
+            "zero_rtt_handshake": false,
             "heartbeat": "10s",
             "tls": {
                 "enabled": true,
