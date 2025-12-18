@@ -314,6 +314,100 @@ extractSingBoxHash() {
     fi
 }
 
+# TLS证书与私钥匹配验证函数
+# 用法: verifyCertKeyMatch <证书文件路径> <私钥文件路径>
+# 返回: 0=匹配成功, 1=匹配失败或文件不存在
+verifyCertKeyMatch() {
+    local certFile="$1"
+    local keyFile="$2"
+
+    # 检查文件是否存在
+    if [[ ! -f "${certFile}" ]]; then
+        echoContent red " ---> 证书验证失败: 证书文件不存在 ${certFile}"
+        return 1
+    fi
+    if [[ ! -f "${keyFile}" ]]; then
+        echoContent red " ---> 证书验证失败: 私钥文件不存在 ${keyFile}"
+        return 1
+    fi
+
+    # 检查文件是否为空
+    if [[ ! -s "${certFile}" ]]; then
+        echoContent red " ---> 证书验证失败: 证书文件为空"
+        return 1
+    fi
+    if [[ ! -s "${keyFile}" ]]; then
+        echoContent red " ---> 证书验证失败: 私钥文件为空"
+        return 1
+    fi
+
+    # 提取证书和私钥的公钥哈希进行比对
+    local certHash keyHash
+
+    # 检测密钥类型（ECC或RSA）
+    if openssl x509 -in "${certFile}" -noout -text 2>/dev/null | grep -q "EC Public Key\|id-ecPublicKey"; then
+        # ECC证书
+        certHash=$(openssl x509 -in "${certFile}" -pubkey -noout 2>/dev/null | openssl ec -pubin -outform DER 2>/dev/null | sha256sum | awk '{print $1}')
+        keyHash=$(openssl ec -in "${keyFile}" -pubout -outform DER 2>/dev/null | sha256sum | awk '{print $1}')
+    else
+        # RSA证书
+        certHash=$(openssl x509 -in "${certFile}" -noout -modulus 2>/dev/null | sha256sum | awk '{print $1}')
+        keyHash=$(openssl rsa -in "${keyFile}" -noout -modulus 2>/dev/null | sha256sum | awk '{print $1}')
+    fi
+
+    if [[ -z "${certHash}" || -z "${keyHash}" ]]; then
+        echoContent yellow " ---> 证书验证警告: 无法提取证书/私钥信息进行匹配验证"
+        return 0
+    fi
+
+    if [[ "${certHash}" == "${keyHash}" ]]; then
+        return 0
+    else
+        echoContent red " ---> 证书验证失败: 证书与私钥不匹配"
+        echoContent red "     证书公钥哈希: ${certHash:0:16}..."
+        echoContent red "     私钥公钥哈希: ${keyHash:0:16}..."
+        return 1
+    fi
+}
+
+# 验证证书有效期
+# 用法: verifyCertExpiry <证书文件路径>
+# 返回: 0=有效, 1=已过期或即将过期(7天内)
+verifyCertExpiry() {
+    local certFile="$1"
+
+    if [[ ! -f "${certFile}" ]]; then
+        return 1
+    fi
+
+    local expiryDate expiryTimestamp currentTimestamp daysLeft
+    expiryDate=$(openssl x509 -in "${certFile}" -noout -enddate 2>/dev/null | cut -d= -f2)
+
+    if [[ -z "${expiryDate}" ]]; then
+        echoContent yellow " ---> 无法读取证书过期时间"
+        return 0
+    fi
+
+    expiryTimestamp=$(date -d "${expiryDate}" +%s 2>/dev/null)
+    currentTimestamp=$(date +%s)
+
+    if [[ -z "${expiryTimestamp}" ]]; then
+        return 0
+    fi
+
+    ((daysLeft = (expiryTimestamp - currentTimestamp) / 86400))
+
+    if [[ ${daysLeft} -lt 0 ]]; then
+        echoContent red " ---> 证书已过期 ${daysLeft#-} 天"
+        return 1
+    elif [[ ${daysLeft} -lt 7 ]]; then
+        echoContent yellow " ---> 警告: 证书将在 ${daysLeft} 天后过期"
+        return 0
+    fi
+
+    return 0
+}
+
 echoContent() {
     case $1 in
     # 红色
@@ -2505,7 +2599,8 @@ installTLS() {
             tail -n 10 /etc/Proxy-agent/tls/acme.log
             if [[ ${installTLSCount} == "1" ]]; then
                 echoContent red " ---> TLS安装失败，请检查acme日志"
-                exit 0
+                echoContent yellow "     日志文件: /etc/Proxy-agent/tls/acme.log"
+                exit 1
             fi
 
             installTLSCount=1
@@ -2521,10 +2616,20 @@ installTLS() {
             fi
         fi
 
+        # 验证证书与私钥匹配
+        echoContent green " ---> 验证证书与私钥..."
+        if ! verifyCertKeyMatch "/etc/Proxy-agent/tls/${tlsDomain}.crt" "/etc/Proxy-agent/tls/${tlsDomain}.key"; then
+            echoContent red " ---> 证书验证失败，请检查证书文件"
+            exit 1
+        fi
+
+        # 验证证书有效期
+        verifyCertExpiry "/etc/Proxy-agent/tls/${tlsDomain}.crt"
+
         echoContent green " ---> TLS生成成功"
     else
         echoContent yellow " ---> 未安装acme.sh"
-        exit 0
+        exit 1
     fi
 }
 
@@ -2819,7 +2924,18 @@ installSingBox() {
 
     if [[ ! -f "/etc/Proxy-agent/sing-box/sing-box" ]]; then
 
-        version=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=20" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
+        version=$(curl -s --connect-timeout 10 "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=20" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
+
+        # 检查版本获取是否成功
+        if [[ -z "${version}" ]]; then
+            echoContent red " ---> 获取 sing-box 版本失败，请检查网络连接或 GitHub API 访问"
+            echoContent yellow "     可能原因: 网络超时、GitHub API 限流、DNS 解析失败"
+            read -r -p "是否重新尝试？[y/n]" retryStatus
+            if [[ "${retryStatus}" == "y" ]]; then
+                installSingBox "$1"
+            fi
+            return 1
+        fi
 
         echoContent green " ---> 最新版本:${version}"
 
@@ -2870,8 +2986,12 @@ installSingBox() {
     else
         echoContent green " ---> 当前版本:v$(/etc/Proxy-agent/sing-box/sing-box version | grep "sing-box version" | awk '{print $3}')"
 
-        version=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=20" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
-        echoContent green " ---> 最新版本:${version}"
+        version=$(curl -s --connect-timeout 10 "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=20" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
+        if [[ -n "${version}" ]]; then
+            echoContent green " ---> 最新版本:${version}"
+        else
+            echoContent yellow " ---> 无法获取最新版本信息"
+        fi
 
         if [[ -z "${lastInstallationConfig}" ]]; then
             read -r -p "是否更新、升级？[y/n]:" reInstallSingBoxStatus
@@ -2904,7 +3024,19 @@ installXray() {
 
     if [[ ! -f "/etc/Proxy-agent/xray/xray" ]]; then
 
-        version=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=5" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
+        version=$(curl -s --connect-timeout 10 "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=5" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
+
+        # 检查版本获取是否成功
+        if [[ -z "${version}" ]]; then
+            echoContent red " ---> 获取 Xray-core 版本失败，请检查网络连接或 GitHub API 访问"
+            echoContent yellow "     可能原因: 网络超时、GitHub API 限流、DNS 解析失败"
+            read -r -p "是否重新尝试？[y/n]" retryStatus
+            if [[ "${retryStatus}" == "y" ]]; then
+                installXray "$1" "$2"
+            fi
+            return 1
+        fi
+
         echoContent green " ---> Xray-core版本:${version}"
 
         local xrayZipFile="/etc/Proxy-agent/xray/${xrayCoreCPUVendor}.zip"
@@ -2979,7 +3111,7 @@ xrayVersionManageMenu() {
     echoContent skyBlue "\n进度  $1/${totalProgress} : Xray版本管理"
     if [[ "${coreInstallType}" != "1" ]]; then
         echoContent red " ---> 没有检测到安装目录，请执行脚本安装内容"
-        exit 0
+        exit 1
     fi
     echoContent red "\n=============================================================="
     echoContent yellow "1.升级Xray-core"
@@ -3232,23 +3364,29 @@ EOF
 
 # 操作Hysteria
 handleHysteria() {
+    local startResult=0
+
     # shellcheck disable=SC2010
     if find /bin /usr/bin | grep -q systemctl && ls /etc/systemd/system/ | grep -q hysteria.service; then
         if [[ -z $(pgrep -f "hysteria/hysteria") ]] && [[ "$1" == "start" ]]; then
-            systemctl start hysteria.service
+            systemctl start hysteria.service || startResult=$?
         elif [[ -n $(pgrep -f "hysteria/hysteria") ]] && [[ "$1" == "stop" ]]; then
             systemctl stop hysteria.service
         fi
     fi
-    sleep 0.8
+    sleep 1.5
 
     if [[ "$1" == "start" ]]; then
         if [[ -n $(pgrep -f "hysteria/hysteria") ]]; then
             echoContent green " ---> Hysteria启动成功"
         else
-            echoContent red "Hysteria启动失败"
-            echoContent red "请手动执行【/etc/Proxy-agent/hysteria/hysteria --log-level debug -c /etc/Proxy-agent/hysteria/conf/config.json server】，查看错误日志"
-            exit 0
+            echoContent red "Hysteria启动失败 (systemctl 返回码: ${startResult})"
+            if [[ -f "/etc/systemd/system/hysteria.service" ]]; then
+                echoContent yellow "\n ---> systemd 服务状态:"
+                systemctl status hysteria.service --no-pager -l 2>&1 | head -20
+            fi
+            echoContent yellow "\n请手动执行【/etc/Proxy-agent/hysteria/hysteria --log-level debug -c /etc/Proxy-agent/hysteria/conf/config.json server】查看详细错误日志"
+            exit 1
         fi
     elif [[ "$1" == "stop" ]]; then
         if [[ -z $(pgrep -f "hysteria/hysteria") ]]; then
@@ -3256,7 +3394,7 @@ handleHysteria() {
         else
             echoContent red "Hysteria关闭失败"
             echoContent red "请手动执行【ps -ef|grep -v grep|grep hysteria|awk '{print \$2}'|xargs kill -9】"
-            exit 0
+            exit 1
         fi
     fi
 }
@@ -3264,37 +3402,47 @@ handleHysteria() {
 # 操作sing-box
 handleSingBox() {
     local startResult=0
+    local mergeResult=0
+
     if [[ -f "/etc/systemd/system/sing-box.service" ]]; then
         if [[ -z $(pgrep -f "sing-box") ]] && [[ "$1" == "start" ]]; then
-            singBoxMergeConfig
+            singBoxMergeConfig || mergeResult=$?
+            if [[ ${mergeResult} -ne 0 ]]; then
+                echoContent red " ---> sing-box 配置合并失败，无法启动服务"
+                exit 1
+            fi
             systemctl start sing-box.service || startResult=$?
         elif [[ -n $(pgrep -f "sing-box") ]] && [[ "$1" == "stop" ]]; then
             systemctl stop sing-box.service
         fi
     elif [[ -f "/etc/init.d/sing-box" ]]; then
         if [[ -z $(pgrep -f "sing-box") ]] && [[ "$1" == "start" ]]; then
-            singBoxMergeConfig
+            singBoxMergeConfig || mergeResult=$?
+            if [[ ${mergeResult} -ne 0 ]]; then
+                echoContent red " ---> sing-box 配置合并失败，无法启动服务"
+                exit 1
+            fi
             rc-service sing-box start || startResult=$?
         elif [[ -n $(pgrep -f "sing-box") ]] && [[ "$1" == "stop" ]]; then
             rc-service sing-box stop
         fi
     fi
-    sleep 1
+    sleep 1.5
 
     if [[ "$1" == "start" ]]; then
         if [[ -n $(pgrep -f "sing-box") ]]; then
             echoContent green " ---> sing-box启动成功"
         else
-            echoContent red "sing-box启动失败"
+            echoContent red "sing-box启动失败 (systemctl 返回码: ${startResult})"
             # 显示 systemd 服务状态以帮助诊断
             if [[ -f "/etc/systemd/system/sing-box.service" ]]; then
                 echoContent yellow "\n ---> systemd 服务状态:"
                 systemctl status sing-box.service --no-pager -l 2>&1 | head -20
+                echoContent yellow "\n ---> 最近日志:"
+                journalctl -u sing-box.service --no-pager -n 15 2>/dev/null || true
             fi
-            echoContent yellow "\n请手动执行【 /etc/Proxy-agent/sing-box/sing-box merge config.json -C /etc/Proxy-agent/sing-box/conf/config/ -D /etc/Proxy-agent/sing-box/conf/ 】，查看错误日志"
-            echo
-            echoContent yellow "如上面命令没有错误，请手动执行【 /etc/Proxy-agent/sing-box/sing-box run -c /etc/Proxy-agent/sing-box/conf/config.json 】，查看错误日志"
-            exit 0
+            echoContent yellow "\n请手动执行【 /etc/Proxy-agent/sing-box/sing-box run -c /etc/Proxy-agent/sing-box/conf/config.json 】，查看详细错误日志"
+            exit 1
         fi
     elif [[ "$1" == "stop" ]]; then
         if [[ -z $(pgrep -f "sing-box") ]]; then
@@ -3302,44 +3450,53 @@ handleSingBox() {
         else
             echoContent red " ---> sing-box关闭失败"
             echoContent red "请手动执行【ps -ef|grep -v grep|grep sing-box|awk '{print \$2}'|xargs kill -9】"
-            exit 0
+            exit 1
         fi
     fi
 }
 
 # 操作xray
 handleXray() {
+    local startResult=0
+
     if [[ -n $(find /bin /usr/bin -name "systemctl") ]] && [[ -n $(find /etc/systemd/system/ -name "xray.service") ]]; then
         if [[ -z $(pgrep -f "xray/xray") ]] && [[ "$1" == "start" ]]; then
-            systemctl start xray.service
+            systemctl start xray.service || startResult=$?
         elif [[ -n $(pgrep -f "xray/xray") ]] && [[ "$1" == "stop" ]]; then
             systemctl stop xray.service
         fi
     elif [[ -f "/etc/init.d/xray" ]]; then
         if [[ -z $(pgrep -f "xray/xray") ]] && [[ "$1" == "start" ]]; then
-            rc-service xray start
+            rc-service xray start || startResult=$?
         elif [[ -n $(pgrep -f "xray/xray") ]] && [[ "$1" == "stop" ]]; then
             rc-service xray stop
         fi
     fi
 
-    sleep 0.8
+    sleep 1.5
 
     if [[ "$1" == "start" ]]; then
         if [[ -n $(pgrep -f "xray/xray") ]]; then
             echoContent green " ---> Xray启动成功"
         else
-            echoContent red "Xray启动失败"
-            echoContent red "请手动执行以下的命令后【/etc/Proxy-agent/xray/xray -confdir /etc/Proxy-agent/xray/conf】将错误日志进行反馈"
-            exit 0
+            echoContent red "Xray启动失败 (systemctl 返回码: ${startResult})"
+            # 显示 systemd 服务状态以帮助诊断
+            if [[ -f "/etc/systemd/system/xray.service" ]]; then
+                echoContent yellow "\n ---> systemd 服务状态:"
+                systemctl status xray.service --no-pager -l 2>&1 | head -20
+                echoContent yellow "\n ---> 最近日志:"
+                journalctl -u xray.service --no-pager -n 15 2>/dev/null || true
+            fi
+            echoContent yellow "\n请手动执行【/etc/Proxy-agent/xray/xray -confdir /etc/Proxy-agent/xray/conf】查看详细错误日志"
+            exit 1
         fi
     elif [[ "$1" == "stop" ]]; then
         if [[ -z $(pgrep -f "xray/xray") ]]; then
             echoContent green " ---> Xray关闭成功"
         else
-            echoContent red "xray关闭失败"
+            echoContent red "Xray关闭失败"
             echoContent red "请手动执行【ps -ef|grep -v grep|grep xray|awk '{print \$2}'|xargs kill -9】"
-            exit 0
+            exit 1
         fi
     fi
 }
@@ -4435,7 +4592,25 @@ singBoxSS2022Install() {
 # 合并config
 singBoxMergeConfig() {
     rm /etc/Proxy-agent/sing-box/conf/config.json >/dev/null 2>&1
-    /etc/Proxy-agent/sing-box/sing-box merge config.json -C /etc/Proxy-agent/sing-box/conf/config/ -D /etc/Proxy-agent/sing-box/conf/ >/dev/null 2>&1
+
+    local mergeOutput mergeResult
+    mergeOutput=$(/etc/Proxy-agent/sing-box/sing-box merge config.json -C /etc/Proxy-agent/sing-box/conf/config/ -D /etc/Proxy-agent/sing-box/conf/ 2>&1)
+    mergeResult=$?
+
+    if [[ ${mergeResult} -ne 0 ]]; then
+        echoContent red " ---> sing-box 配置合并失败"
+        echoContent red " ---> 错误信息:"
+        echo "${mergeOutput}" | head -20
+        return 1
+    fi
+
+    # 验证合并后的配置文件存在且有效
+    if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config.json" ]]; then
+        echoContent red " ---> sing-box 配置文件生成失败"
+        return 1
+    fi
+
+    return 0
 }
 
 # 初始化sing-box端口
