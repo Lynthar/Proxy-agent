@@ -441,7 +441,7 @@ checkCentosSELinux() {
     if command -v getenforce >/dev/null 2>&1 && [[ "$(getenforce)" == "Enforcing" ]]; then
         echoContent yellow "# $(t NOTICE)"
         echoContent yellow "$(t SYS_SELINUX_NOTICE)"
-        echoContent yellow "https://www.v2ray-agent.com/archives/1684115970026#centos-%E5%85%B3%E9%97%ADselinux"
+        echoContent yellow "https://github.com/Lynthar/Proxy-agent/blob/master/documents/selinux.md"
         exit 0
     fi
 }
@@ -1239,7 +1239,7 @@ allowPort() {
         fi
     elif command -v nft >/dev/null 2>&1 && systemctl status nftables 2>/dev/null | grep -q "active"; then
         if nft list chain inet filter input >/dev/null 2>&1; then
-            local nftComment="allow $1/${type}(mack-a)"
+            local nftComment="allow $1/${type}(Proxy-agent)"
             local nftSourceRange="${sourceRange:-0.0.0.0/0}"
             local nftRules
             local updateNftablesStatus=
@@ -1257,13 +1257,13 @@ allowPort() {
     elif command -v dpkg >/dev/null 2>&1 && dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+netfilter-persistent" && systemctl status netfilter-persistent 2>/dev/null | grep -q "active (exited)"; then
         local updateFirewalldStatus=
         if [[ -n "${sourceRange}" && "${sourceRange}" != "0.0.0.0/0" ]]; then
-            if ! iptables -C INPUT -p ${type} -s "${sourceRange}" --dport "$1" -m comment --comment "allow $1/${type}(mack-a)" -j ACCEPT 2>/dev/null; then
+            if ! iptables -C INPUT -p ${type} -s "${sourceRange}" --dport "$1" -m comment --comment "allow $1/${type}(Proxy-agent)" -j ACCEPT 2>/dev/null; then
                 updateFirewalldStatus=true
-                iptables -I INPUT -p ${type} -s "${sourceRange}" --dport "$1" -m comment --comment "allow $1/${type}(mack-a)" -j ACCEPT
+                iptables -I INPUT -p ${type} -s "${sourceRange}" --dport "$1" -m comment --comment "allow $1/${type}(Proxy-agent)" -j ACCEPT
             fi
-        elif ! iptables -L | grep -q "$1/${type}(mack-a)"; then
+        elif ! iptables -L | grep -q "$1/${type}(Proxy-agent)"; then
             updateFirewalldStatus=true
-            iptables -I INPUT -p ${type} --dport "$1" -m comment --comment "allow $1/${type}(mack-a)" -j ACCEPT
+            iptables -I INPUT -p ${type} --dport "$1" -m comment --comment "allow $1/${type}(Proxy-agent)" -j ACCEPT
         fi
 
         if echo "${updateFirewalldStatus}" | grep -q "true"; then
@@ -2089,35 +2089,63 @@ server {
 	server_name ${domain};
 	root ${nginxStaticPath};
 
-    set_real_ip_from 127.0.0.1;
-    real_ip_header proxy_protocol;
+	set_real_ip_from 127.0.0.1;
+	real_ip_header proxy_protocol;
 
-	client_header_timeout 1071906480m;
-    keepalive_timeout 1071906480m;
+	# 基础超时配置
+	client_header_timeout 60s;
+	keepalive_timeout 65;
 
-    location /${currentPath}grpc {
-    	if (\$content_type !~ "application/grpc") {
-    		return 404;
-    	}
- 		client_max_body_size 0;
+	# 安全头部
+	server_tokens off;
+	add_header X-Content-Type-Options "nosniff" always;
+	add_header X-Frame-Options "SAMEORIGIN" always;
+	add_header X-XSS-Protection "1; mode=block" always;
+
+	location /${currentPath}grpc {
+		if (\$content_type !~ "application/grpc") {
+			return 404;
+		}
+		client_max_body_size 0;
 		grpc_set_header X-Real-IP \$proxy_add_x_forwarded_for;
-		client_body_timeout 1071906480m;
-		grpc_read_timeout 1071906480m;
+		client_body_timeout 86400s;
+		grpc_read_timeout 86400s;
 		grpc_pass grpc://127.0.0.1:31301;
 	}
 
 	location /${currentPath}trojangrpc {
 		if (\$content_type !~ "application/grpc") {
-            		return 404;
+			return 404;
 		}
- 		client_max_body_size 0;
+		client_max_body_size 0;
 		grpc_set_header X-Real-IP \$proxy_add_x_forwarded_for;
-		client_body_timeout 1071906480m;
-		grpc_read_timeout 1071906480m;
+		client_body_timeout 86400s;
+		grpc_read_timeout 86400s;
 		grpc_pass grpc://127.0.0.1:31304;
 	}
+
+	# 伪装站静态文件
 	location / {
-    }
+		try_files \$uri \$uri/ =404;
+	}
+
+	# 常见静态资源缓存
+	location ~* \.(ico|css|js|gif|jpeg|jpg|png|woff|woff2|ttf|svg|eot)$ {
+		expires 30d;
+		add_header Cache-Control "public, immutable";
+	}
+
+	# favicon 处理
+	location = /favicon.ico {
+		log_not_found off;
+		access_log off;
+	}
+
+	# robots.txt 处理
+	location = /robots.txt {
+		log_not_found off;
+		access_log off;
+	}
 }
 EOF
     elif echo "${selectCustomInstallType}" | grep -q ",5," || [[ -z "${selectCustomInstallType}" ]]; then
@@ -2126,23 +2154,33 @@ server {
 	${nginxH2Conf}
 
 	set_real_ip_from 127.0.0.1;
-    real_ip_header proxy_protocol;
+	real_ip_header proxy_protocol;
 
 	server_name ${domain};
 	root ${nginxStaticPath};
 
+	# 安全头部
+	server_tokens off;
+	add_header X-Content-Type-Options "nosniff" always;
+	add_header X-Frame-Options "SAMEORIGIN" always;
+
 	location /${currentPath}grpc {
 		client_max_body_size 0;
-		keepalive_requests 4294967296;
-		client_body_timeout 1071906480m;
- 		send_timeout 1071906480m;
- 		lingering_close always;
- 		grpc_read_timeout 1071906480m;
- 		grpc_send_timeout 1071906480m;
+		keepalive_requests 10000;
+		client_body_timeout 86400s;
+		send_timeout 86400s;
+		lingering_close always;
+		grpc_read_timeout 86400s;
+		grpc_send_timeout 86400s;
 		grpc_pass grpc://127.0.0.1:31301;
 	}
+
 	location / {
-    }
+		try_files \$uri \$uri/ =404;
+	}
+
+	location = /favicon.ico { log_not_found off; access_log off; }
+	location = /robots.txt { log_not_found off; access_log off; }
 }
 EOF
 
@@ -2152,24 +2190,33 @@ server {
 	${nginxH2Conf}
 
 	set_real_ip_from 127.0.0.1;
-    real_ip_header proxy_protocol;
+	real_ip_header proxy_protocol;
 
-    server_name ${domain};
+	server_name ${domain};
 	root ${nginxStaticPath};
+
+	# 安全头部
+	server_tokens off;
+	add_header X-Content-Type-Options "nosniff" always;
+	add_header X-Frame-Options "SAMEORIGIN" always;
 
 	location /${currentPath}trojangrpc {
 		client_max_body_size 0;
-		# keepalive_time 1071906480m;
-		keepalive_requests 4294967296;
-		client_body_timeout 1071906480m;
- 		send_timeout 1071906480m;
- 		lingering_close always;
- 		grpc_read_timeout 1071906480m;
- 		grpc_send_timeout 1071906480m;
+		keepalive_requests 10000;
+		client_body_timeout 86400s;
+		send_timeout 86400s;
+		lingering_close always;
+		grpc_read_timeout 86400s;
+		grpc_send_timeout 86400s;
 		grpc_pass grpc://127.0.0.1:31301;
 	}
+
 	location / {
-    }
+		try_files \$uri \$uri/ =404;
+	}
+
+	location = /favicon.ico { log_not_found off; access_log off; }
+	location = /robots.txt { log_not_found off; access_log off; }
 }
 EOF
     else
@@ -2179,13 +2226,22 @@ server {
 	${nginxH2Conf}
 
 	set_real_ip_from 127.0.0.1;
-    real_ip_header proxy_protocol;
+	real_ip_header proxy_protocol;
 
 	server_name ${domain};
 	root ${nginxStaticPath};
 
+	# 安全头部
+	server_tokens off;
+	add_header X-Content-Type-Options "nosniff" always;
+	add_header X-Frame-Options "SAMEORIGIN" always;
+
 	location / {
+		try_files \$uri \$uri/ =404;
 	}
+
+	location = /favicon.ico { log_not_found off; access_log off; }
+	location = /robots.txt { log_not_found off; access_log off; }
 }
 EOF
     fi
@@ -2199,8 +2255,16 @@ server {
 	real_ip_header proxy_protocol;
 
 	root ${nginxStaticPath};
+
+	# 安全头部
+	server_tokens off;
+
 	location / {
+		try_files \$uri \$uri/ =404;
 	}
+
+	location = /favicon.ico { log_not_found off; access_log off; }
+	location = /robots.txt { log_not_found off; access_log off; }
 }
 EOF
     handleNginx stop
@@ -3873,9 +3937,9 @@ addPortHopping() {
                     exit 0
                 fi
             else
-                iptables -t nat -A PREROUTING -p udp --dport "${portStart}:${portEnd}" -m comment --comment "mack-a_${type}_portHopping" -j DNAT --to-destination ":${targetPort}"
+                iptables -t nat -A PREROUTING -p udp --dport "${portStart}:${portEnd}" -m comment --comment "Proxy-agent_${type}_portHopping" -j DNAT --to-destination ":${targetPort}"
                 sudo netfilter-persistent save
-                if ! iptables-save | grep -q "mack-a_${type}_portHopping"; then
+                if ! iptables-save | grep -q "Proxy-agent_${type}_portHopping"; then
                     echoContent red " ---> 端口跳跃添加失败"
                     exit 0
                 fi
@@ -3897,9 +3961,9 @@ readPortHopping() {
         portHoppingStart=$(sudo firewall-cmd --list-forward-ports | grep "toport=${targetPort}" | head -1 | cut -d ":" -f 1 | cut -d "=" -f 2)
         portHoppingEnd=$(sudo firewall-cmd --list-forward-ports | grep "toport=${targetPort}" | tail -n 1 | cut -d ":" -f 1 | cut -d "=" -f 2)
     else
-        if iptables-save | grep -q "mack-a_${type}_portHopping"; then
+        if iptables-save | grep -q "Proxy-agent_${type}_portHopping"; then
             local portHopping=
-            portHopping=$(iptables-save | grep "mack-a_${type}_portHopping" | cut -d " " -f 8)
+            portHopping=$(iptables-save | grep "Proxy-agent_${type}_portHopping" | cut -d " " -f 8)
 
             portHoppingStart=$(echo "${portHopping}" | cut -d ":" -f 1)
             portHoppingEnd=$(echo "${portHopping}" | cut -d ":" -f 2)
@@ -3928,7 +3992,7 @@ deletePortHoppingRules() {
         done
         sudo firewall-cmd --reload
     else
-        iptables -t nat -L PREROUTING --line-numbers | grep "mack-a_${type}_portHopping" | awk '{print $1}' | while read -r line; do
+        iptables -t nat -L PREROUTING --line-numbers | grep "Proxy-agent_${type}_portHopping" | awk '{print $1}' | while read -r line; do
             iptables -t nat -D PREROUTING 1
             sudo netfilter-persistent save
         done
