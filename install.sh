@@ -342,11 +342,12 @@ echoContent() {
         ;;
     esac
 }
-# 检查SELinux状态
+# 检查SELinux状态（使用运行时检测）
 checkCentosSELinux() {
-    if [[ -f "/etc/selinux/config" ]] && ! grep -q "SELINUX=disabled" <"/etc/selinux/config"; then
+    if command -v getenforce >/dev/null 2>&1 && [[ "$(getenforce)" == "Enforcing" ]]; then
         echoContent yellow "# $(t NOTICE)"
         echoContent yellow "$(t SYS_SELINUX_NOTICE)"
+        echoContent yellow "https://www.v2ray-agent.com/archives/1684115970026#centos-%E5%85%B3%E9%97%ADselinux"
         exit 0
     fi
 }
@@ -1103,7 +1104,7 @@ allowPort() {
         type=tcp
     fi
     # 如果防火墙启动状态则添加相应的开放端口
-    if dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+ufw"; then
+    if command -v dpkg >/dev/null 2>&1 && dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+ufw"; then
         if ufw status | grep -q "Status: active"; then
             if [[ -n "${sourceRange}" && "${sourceRange}" != "0.0.0.0/0" ]]; then
                 sudo ufw allow from "${sourceRange}" to any port "$1" proto "${type}"
@@ -1159,7 +1160,7 @@ allowPort() {
                 systemctl reload nftables >/dev/null 2>&1 || nft -f /etc/nftables.conf
             fi
         fi
-    elif dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+netfilter-persistent" && systemctl status netfilter-persistent 2>/dev/null | grep -q "active (exited)"; then
+    elif command -v dpkg >/dev/null 2>&1 && dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+netfilter-persistent" && systemctl status netfilter-persistent 2>/dev/null | grep -q "active (exited)"; then
         local updateFirewalldStatus=
         if [[ -n "${sourceRange}" && "${sourceRange}" != "0.0.0.0/0" ]]; then
             if ! iptables -C INPUT -p ${type} -s "${sourceRange}" --dport "$1" -m comment --comment "allow $1/${type}(mack-a)" -j ACCEPT 2>/dev/null; then
@@ -6810,12 +6811,15 @@ addUser() {
         # vless reality vision
         if echo "${currentInstallProtocolType}" | grep -q ",7,"; then
             local clients=
+            local realityUserConfig=
             if [[ "${coreInstallType}" == "1" ]]; then
                 clients=$(initXrayClients 7 "${uuid}" "${email}")
+                realityUserConfig=".inbounds[1].settings.clients"
             elif [[ "${coreInstallType}" == "2" ]]; then
                 clients=$(initSingBoxClients 7 "${uuid}" "${email}")
+                realityUserConfig=".inbounds[0].users"
             fi
-            clients=$(jq -r "${userConfig} = ${clients}" ${configPath}07_VLESS_vision_reality_inbounds.json)
+            clients=$(jq -r "${realityUserConfig} = ${clients}" ${configPath}07_VLESS_vision_reality_inbounds.json)
             echo "${clients}" | jq . >${configPath}07_VLESS_vision_reality_inbounds.json
         fi
 
@@ -6915,16 +6919,21 @@ removeUser() {
     local uuid=
     if [[ -n "${userConfigType}" ]]; then
         if [[ "${coreInstallType}" == "1" ]]; then
-            jq -r -c .inbounds[0].settings.clients[].email ${configPath}${userConfigType}.json | awk '{print NR""":"$0}'
+            jq -r -c '(.inbounds[0].settings.clients // .inbounds[1].settings.clients)[]?|.email' ${configPath}${userConfigType}.json | awk '{print NR""":"$0}'
+            read -r -p "请选择要删除的用户编号[仅支持单个删除]:" delUserIndex
+            if [[ $(jq -r '(.inbounds[0].settings.clients // .inbounds[1].settings.clients)?|length' ${configPath}${userConfigType}.json) -lt ${delUserIndex} ]]; then
+                echoContent red " ---> 选择错误"
+            else
+                delUserIndex=$((delUserIndex - 1))
+            fi
         elif [[ "${coreInstallType}" == "2" ]]; then
             jq -r -c .inbounds[0].users[].name//.inbounds[0].users[].username ${configPath}${userConfigType}.json | awk '{print NR""":"$0}'
-        fi
-
-        read -r -p "请选择要删除的用户编号[仅支持单个删除]:" delUserIndex
-        if [[ $(jq -r '.inbounds[0].settings.clients|length' ${configPath}${userConfigType}.json) -lt ${delUserIndex} && $(jq -r '.inbounds[0].users|length' ${configPath}${userConfigType}.json) -lt ${delUserIndex} ]]; then
-            echoContent red " ---> 选择错误"
-        else
-            delUserIndex=$((delUserIndex - 1))
+            read -r -p "请选择要删除的用户编号[仅支持单个删除]:" delUserIndex
+            if [[ $(jq -r '.inbounds[0].users|length' ${configPath}${userConfigType}.json) -lt ${delUserIndex} ]]; then
+                echoContent red " ---> 选择错误"
+            else
+                delUserIndex=$((delUserIndex - 1))
+            fi
         fi
     fi
 
@@ -6967,7 +6976,7 @@ removeUser() {
 
         if echo ${currentInstallProtocolType} | grep -q ",7,"; then
             local vlessRealityResult
-            vlessRealityResult=$(jq -r 'del(.inbounds[0].settings.clients['${delUserIndex}']//.inbounds[0].users['${delUserIndex}'])' ${configPath}07_VLESS_vision_reality_inbounds.json)
+            vlessRealityResult=$(jq -r 'del(.inbounds[0].settings.clients['${delUserIndex}']//.inbounds[1].settings.clients['${delUserIndex}']//.inbounds[0].users['${delUserIndex}'])' ${configPath}07_VLESS_vision_reality_inbounds.json)
             echo "${vlessRealityResult}" | jq . >${configPath}07_VLESS_vision_reality_inbounds.json
         fi
         if echo ${currentInstallProtocolType} | grep -q ",8,"; then
