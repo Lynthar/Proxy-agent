@@ -9269,7 +9269,7 @@ setupChainEntryMultiHop() {
     echo "{\"outbounds\": ${outboundsJson}}" | jq . > /etc/Proxy-agent/sing-box/conf/config/chain_outbound.json
 
     # 如果有 Xray 代理协议，创建 SOCKS5 桥接入站
-    # 启用 sniff 嗅探 TLS/HTTP 域名，配合 domain_strategy 优先使用 IPv4
+    # 启用 sniff 嗅探域名并用 prefer_ipv4 重新解析，解决出口机无 IPv6 的问题
     if [[ "${hasXrayProtocols}" == "true" ]]; then
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json
 {
@@ -9279,7 +9279,9 @@ setupChainEntryMultiHop() {
             "tag": "chain_bridge_in",
             "listen": "127.0.0.1",
             "listen_port": ${chainBridgePort},
-            "sniff": true
+            "sniff": true,
+            "sniff_override_destination": true,
+            "domain_strategy": "prefer_ipv4"
         }
     ]
 }
@@ -9512,7 +9514,7 @@ setupChainEntry() {
 EOF
 
     # 如果有 Xray 代理协议，创建 SOCKS5 桥接入站
-    # 启用 sniff 嗅探 TLS/HTTP 域名，配合 domain_strategy 优先使用 IPv4
+    # 启用 sniff 嗅探域名并用 prefer_ipv4 重新解析，解决出口机无 IPv6 的问题
     if [[ "${hasXrayProtocols}" == "true" ]]; then
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json
 {
@@ -9522,7 +9524,9 @@ EOF
             "tag": "chain_bridge_in",
             "listen": "127.0.0.1",
             "listen_port": ${chainBridgePort},
-            "sniff": true
+            "sniff": true,
+            "sniff_override_destination": true,
+            "domain_strategy": "prefer_ipv4"
         }
     ]
 }
