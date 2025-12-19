@@ -436,13 +436,40 @@ echoContent() {
         ;;
     esac
 }
+
+# 验证IP地址格式
+# 参数1: IP地址字符串
+# 返回: 0=有效, 1=无效
+isValidIP() {
+    local ip=$1
+    # IPv4 验证
+    if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        local IFS='.'
+        read -ra octets <<< "$ip"
+        for octet in "${octets[@]}"; do
+            if [[ $octet -gt 255 ]]; then
+                return 1
+            fi
+        done
+        return 0
+    fi
+    # IPv6 验证 (简化版，支持完整格式和压缩格式)
+    if [[ "$ip" =~ ^([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}$ ]] || \
+       [[ "$ip" =~ ^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$ ]] || \
+       [[ "$ip" =~ ^::([0-9a-fA-F]{1,4}:){0,5}[0-9a-fA-F]{1,4}$ ]] || \
+       [[ "$ip" =~ ^([0-9a-fA-F]{1,4}:){1,6}:$ ]]; then
+        return 0
+    fi
+    return 1
+}
+
 # 检查SELinux状态（使用运行时检测）
 checkCentosSELinux() {
     if command -v getenforce >/dev/null 2>&1 && [[ "$(getenforce)" == "Enforcing" ]]; then
         echoContent yellow "# $(t NOTICE)"
         echoContent yellow "$(t SYS_SELINUX_NOTICE)"
         echoContent yellow "https://github.com/Lynthar/Proxy-agent/blob/master/documents/selinux.md"
-        exit 0
+        exit 1
     fi
 }
 checkSystem() {
@@ -490,7 +517,7 @@ checkSystem() {
         echoContent red "\n$(t SYS_NOT_SUPPORTED)\n"
         echoContent yellow "$(cat /etc/issue)"
         echoContent yellow "$(cat /proc/version)"
-        exit 0
+        exit 1
     fi
 }
 
@@ -733,14 +760,6 @@ initVar() {
     addressWarpReg=
     secretKeyWarpReg=
 
-    socks5RoutingOutboundAuthType=
-    socks5RoutingOutboundUnifiedKey=
-
-    socks5InboundAuthType=
-    socks5InboundUserName=
-    socks5InboundPassword=
-    socks5InboundUnifiedKey=
-
     # 上次安装配置状态
     lastInstallationConfig=
 
@@ -756,7 +775,7 @@ validateJsonFile() {
     if ! jq -e . "${jsonPath}" >/dev/null 2>&1; then
         echoContent red " ---> ${jsonPath} 解析失败，已移除，请检查上方录入并重试"
         rm -f "${jsonPath}"
-        exit 0
+        exit 1
     fi
 }
 
@@ -778,7 +797,7 @@ readCredentialBySource() {
         read -r credentialPath
         if [[ -z "${credentialPath}" || ! -f "${credentialPath}" ]]; then
             echoContent red " ---> 文件路径无效"
-            exit 0
+            exit 1
         fi
         credentialValue=$(tr -d '\n' <"${credentialPath}")
         ;;
@@ -801,7 +820,7 @@ readCredentialBySource() {
 
     if [[ -z "${credentialValue}" ]]; then
         echoContent red " ---> ${tips}不可为空"
-        exit 0
+        exit 1
     fi
 
     echo "${credentialValue}"
@@ -893,7 +912,7 @@ readInstallType() {
                 if [[ -f "${configPath}07_VLESS_vision_reality_inbounds.json" ]]; then
                     realityStatus=1
                 fi
-                if [[ -f "/etc/Proxy-agent/sing-box/sing-box" ]] && [[ -f "/etc/Proxy-agent/sing-box/conf/config/06_hysteria2_inbounds.json" || -f "/etc/Proxy-agent/sing-box/conf/config/09_tuic_inbounds.json" || -f "/etc/Proxy-agent/sing-box/conf/config/20_socks5_inbounds.json" ]]; then
+                if [[ -f "/etc/Proxy-agent/sing-box/sing-box" ]] && [[ -f "/etc/Proxy-agent/sing-box/conf/config/06_hysteria2_inbounds.json" || -f "/etc/Proxy-agent/sing-box/conf/config/09_tuic_inbounds.json" ]]; then
                     singBoxConfigPath=/etc/Proxy-agent/sing-box/conf/config/
                 fi
             fi
@@ -940,7 +959,6 @@ readInstallProtocolType() {
     singBoxTuicPort=
     singBoxNaivePort=
     singBoxVMessWSPort=
-    singBoxSocks5Port=
 
     while read -r row; do
         if echo "${row}" | grep -q VLESS_TCP_inbounds; then
@@ -1076,10 +1094,6 @@ readInstallProtocolType() {
                 frontingType=11_VMess_HTTPUpgrade_inbounds
                 singBoxVMessHTTPUpgradePort=$(grep 'listen' <${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf | awk '{print $2}')
             fi
-        fi
-        if echo "${row}" | grep -q socks5_inbounds; then
-            currentInstallProtocolType="${currentInstallProtocolType}20,"
-            singBoxSocks5Port=$(jq .inbounds[0].listen_port "${row}.json")
         fi
 
     done < <(find ${configPath} -name "*inbounds.json" | sort | awk -F "[.]" '{print $1}')
@@ -1296,7 +1310,7 @@ checkUFWAllowPort() {
         echoContent green " ---> $1端口开放成功"
     else
         echoContent red " ---> $1端口开放失败"
-        exit 0
+        exit 1
     fi
 }
 
@@ -1306,7 +1320,7 @@ checkFirewalldAllowPort() {
         echoContent green " ---> $1端口开放成功"
     else
         echoContent red " ---> $1端口开放失败"
-        exit 0
+        exit 1
     fi
 }
 
@@ -1806,7 +1820,7 @@ installTools() {
                 echoContent red "  2.acme.sh脚本出现bug，可查看[https://github.com/acmesh-official/acme.sh] issues"
                 echoContent red "  3.如纯IPv6机器，请设置NAT64,可执行下方命令，如果添加下方命令还是不可用，请尝试更换其他NAT64"
                 echoContent skyBlue "  sed -i \"1i\\\nameserver 2a00:1098:2b::1\\\nnameserver 2a00:1098:2c::1\\\nnameserver 2a01:4f8:c2c:123f::1\\\nnameserver 2a01:4f9:c010:3f02::1\" /etc/resolv.conf"
-                exit 0
+                exit 1
             fi
         fi
     fi
@@ -1874,7 +1888,7 @@ EOF
 installWarp() {
     if [[ "${cpuVendor}" == "arm" ]]; then
         echoContent red " ---> 官方WARP客户端不支持ARM架构"
-        exit 0
+        exit 1
     fi
 
     ${installType} gnupg2 -y >/dev/null 2>&1
@@ -1897,7 +1911,7 @@ installWarp() {
     ${installType} cloudflare-warp >/dev/null 2>&1
     if [[ -z $(which warp-cli) ]]; then
         echoContent red " ---> 安装WARP失败"
-        exit 0
+        exit 1
     fi
     systemctl enable warp-svc
     warp-cli --accept-tos register
@@ -1931,7 +1945,7 @@ checkDNSIP() {
         ipType=6
         if echo "${dnsIP}" | grep -q "network unreachable" || [[ -z "${dnsIP}" ]]; then
             echoContent red " ---> 无法通过DNS获取域名IPv6地址，退出安装"
-            exit 0
+            exit 1
         fi
     fi
     local publicIP=
@@ -2005,7 +2019,7 @@ EOF
                     echoContent red " ---> 错误日志：${checkPortOpenResult}，请将此错误日志通过issues提交反馈"
                 fi
             fi
-            exit 0
+            exit 1
         fi
         checkIP "${localIP}"
     fi
@@ -2340,13 +2354,13 @@ checkIP() {
             echoContent yellow " ---> 检测返回值异常，建议手动卸载nginx后重新执行脚本"
             echoContent red " ---> 异常结果：${localIP}"
         fi
-        exit 0
+        exit 1
     else
         if echo "${localIP}" | awk -F "[,]" '{print $2}' | grep -q "." || echo "${localIP}" | awk -F "[,]" '{print $2}' | grep -q ":"; then
             echoContent red "\n ---> 检测到多个ip，请确认是否关闭cloudflare的云朵"
             echoContent yellow " ---> 关闭云朵后等待三分钟后重试"
             echoContent yellow " ---> 检测到的ip如下:[${localIP}]"
-            exit 0
+            exit 1
         fi
         echoContent green " ---> 检查当前域名IP正确"
     fi
@@ -2456,7 +2470,7 @@ switchSSLType() {
         esac
         if [[ -n "${dnsAPIType}" && "${sslType}" == "buypass" ]]; then
             echoContent red " ---> buypass不支持API申请证书"
-            exit 0
+            exit 1
         fi
         echo "${sslType}" >/etc/Proxy-agent/tls/ssl_type
     fi
@@ -2567,11 +2581,11 @@ customPortFunction() {
                 fi
             else
                 echoContent red " ---> 端口输入错误"
-                exit 0
+                exit 1
             fi
         else
             echoContent red " ---> 端口不可为空"
-            exit 0
+            exit 1
         fi
     fi
 }
@@ -2581,7 +2595,7 @@ checkPort() {
     if [[ -n "$1" ]] && lsof -i "tcp:$1" | grep -q LISTEN; then
         echoContent red "\n ---> $1端口被占用，请手动关闭后安装\n"
         lsof -i "tcp:$1" | grep LISTEN
-        exit 0
+        exit 1
     fi
 }
 
@@ -2896,7 +2910,7 @@ installCronUpdateGeo() {
     if [[ "${coreInstallType}" == "1" ]]; then
         if crontab -l | grep -q "UpdateGeo"; then
             echoContent red "\n ---> 已添加自动更新定时任务，请不要重复添加"
-            exit 0
+            exit 1
         fi
         echoContent skyBlue "\n进度 1/1 : 添加定时更新geo文件"
         crontab -l >/etc/Proxy-agent/backup_crontab.cron
@@ -3326,7 +3340,7 @@ checkGFWStatue() {
         echoContent green " ---> 服务启动成功"
     else
         echoContent red " ---> 服务启动失败，请检查终端是否有日志打印"
-        exit 0
+        exit 1
     fi
 }
 
@@ -3888,12 +3902,12 @@ addPortHopping() {
     local targetPort=$2
     if [[ -n "${portHoppingStart}" || -n "${portHoppingEnd}" ]]; then
         echoContent red " ---> 已添加不可重复添加，可删除后重新添加"
-        exit 0
+        exit 1
     fi
     if [[ "${release}" == "centos" ]]; then
         if ! systemctl status firewalld 2>/dev/null | grep -q "active (running)"; then
             echoContent red " ---> 未启动firewalld防火墙，无法设置端口跳跃。"
-            exit 0
+            exit 1
         fi
     fi
 
@@ -3934,14 +3948,14 @@ addPortHopping() {
                 addFirewalldPortHopping "${portStart}" "${portEnd}" "${targetPort}"
                 if ! sudo firewall-cmd --list-forward-ports | grep -q "toport=${targetPort}"; then
                     echoContent red " ---> 端口跳跃添加失败"
-                    exit 0
+                    exit 1
                 fi
             else
                 iptables -t nat -A PREROUTING -p udp --dport "${portStart}:${portEnd}" -m comment --comment "Proxy-agent_${type}_portHopping" -j DNAT --to-destination ":${targetPort}"
                 sudo netfilter-persistent save
                 if ! iptables-save | grep -q "Proxy-agent_${type}_portHopping"; then
                     echoContent red " ---> 端口跳跃添加失败"
-                    exit 0
+                    exit 1
                 fi
             fi
             allowPort "${portStart}:${portEnd}" udp
@@ -4005,7 +4019,7 @@ portHoppingMenu() {
     # 判断iptables是否存在
     if ! find /usr/bin /usr/sbin | grep -q -w iptables; then
         echoContent red " ---> 无法识别iptables工具，无法使用端口跳跃，退出安装"
-        exit 0
+        exit 1
     fi
 
     local targetPort=
@@ -4152,6 +4166,35 @@ downloadSingBoxGeositeDB() {
         fi
 
     fi
+}
+
+# 初始化sing-box规则配置（检查geosite可用性）
+# 参数1: 域名列表(逗号分隔)
+# 参数2: 路由名称后缀
+# 返回: JSON格式 {"domainRules":[], "ruleSet":[]}
+initSingBoxRules() {
+    local domainRules=[]
+    local ruleSet=[]
+    while read -r line; do
+        if [[ -z "${line}" ]]; then
+            continue
+        fi
+        local geositeStatus
+        # 添加超时和错误处理
+        geositeStatus=$(curl -s --connect-timeout 5 --max-time 10 \
+            "https://api.github.com/repos/SagerNet/sing-geosite/contents/geosite-${line}.srs?ref=rule-set" 2>/dev/null | jq -r '.message // empty')
+
+        # 如果API返回null或空(即文件存在)，使用rule_set
+        # 如果API失败或返回错误消息，回退到domain_regex
+        if [[ -z "${geositeStatus}" ]]; then
+            ruleSet=$(echo "${ruleSet}" | jq -r ". += [{\"tag\":\"${line}_$2\",\"type\":\"remote\",\"format\":\"binary\",\"url\":\"https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-${line}.srs\",\"download_detour\":\"01_direct_outbound\"}]")
+        else
+            # 转义域名中的点号用于正则表达式
+            local escapedLine="${line//./\\.}"
+            domainRules=$(echo "${domainRules}" | jq -r ". += [\"^([a-zA-Z0-9_-]+\\\\.)*${escapedLine}\"]")
+        fi
+    done < <(echo "$1" | tr ',' '\n' | grep -v '^$' | sort -u)
+    echo "{ \"domainRules\":${domainRules},\"ruleSet\":${ruleSet}}"
 }
 
 # 添加sing-box路由规则
@@ -4329,96 +4372,6 @@ EOF
     ]
 }
 EOF
-    fi
-    # socks5 outbound（Xray 用，提供给分流规则统一指向的上游 SOCKS 出站）
-    if echo "${tag}" | grep -q "socks5"; then
-        socks5RoutingOutboundIP=$(stripAnsi "${socks5RoutingOutboundIP}")
-        socks5RoutingOutboundPort=$(stripAnsi "${socks5RoutingOutboundPort}")
-        socks5RoutingOutboundUserName=$(stripAnsi "${socks5RoutingOutboundUserName}")
-        socks5RoutingOutboundPassword=$(stripAnsi "${socks5RoutingOutboundPassword}")
-        if [[ -z "${socks5RoutingOutboundAuthType}" ]]; then
-            socks5RoutingOutboundAuthType="password"
-        fi
-        local socks5OutboundUserValue=${socks5RoutingOutboundUserName}
-        local socks5OutboundPassValue=${socks5RoutingOutboundPassword}
-        if [[ "${socks5RoutingOutboundAuthType}" == "unified" ]]; then
-            socks5OutboundUserValue=${socks5RoutingOutboundUnifiedKey}
-            socks5OutboundPassValue=${socks5RoutingOutboundUnifiedKey}
-        fi
-        socks5OutboundUserValue=$(stripAnsi "${socks5OutboundUserValue}")
-        socks5OutboundPassValue=$(stripAnsi "${socks5OutboundPassValue}")
-        socks5RoutingProxyTag=$(stripAnsi "${socks5RoutingProxyTag}")
-
-        local socks5OutboundJson
-        socks5OutboundJson=$(jq -n \
-            --arg tag "${tag}" \
-            --arg auth "${socks5RoutingOutboundAuthType}" \
-            --arg address "${socks5RoutingOutboundIP}" \
-            --arg port "${socks5RoutingOutboundPort}" \
-            --arg user "${socks5OutboundUserValue}" \
-            --arg pass "${socks5OutboundPassValue}" '
-            {
-              outbounds: [
-                {
-                  protocol: "socks",
-                  tag: $tag,
-                  settings: {
-                    auth: $auth,
-                    servers: [
-                      {
-                        address: $address,
-                        port: ($port|tonumber),
-                        users: [ {user: $user, pass: $pass} ]
-                      }
-                    ]
-                  }
-                }
-              ]
-            }
-        ')
-
-        if [[ -n "${socks5RoutingProxyTag}" ]]; then
-            socks5OutboundJson=$(echo "${socks5OutboundJson}" | jq --arg proxyTag "${socks5RoutingProxyTag}" '.outbounds[0].proxySettings = {tag:$proxyTag,transportLayer:true}')
-        fi
-
-        if [[ -n "${socks5TransportType}" && "${socks5TransportType}" != "1" ]]; then
-            local socks5XrayNetwork="tcp"
-            if [[ "${socks5TransportType}" == "3" ]]; then
-                socks5XrayNetwork="ws"
-            elif [[ "${socks5TransportType}" == "4" ]]; then
-                socks5XrayNetwork="http"
-            fi
-
-            socks5OutboundJson=$(echo "${socks5OutboundJson}" | jq \
-                --arg network "${socks5XrayNetwork}" \
-                --arg serverName "${socks5TransportServerName}" \
-                --argjson alpn "${socks5TransportAlpnJson:-[]}" \
-                --argjson insecure "${socks5TransportInsecure:-false}" '
-                .outbounds[0].streamSettings = {
-                  network: $network,
-                  security: "tls",
-                  tlsSettings: {
-                    serverName: $serverName,
-                    alpn: $alpn,
-                    allowInsecure: $insecure
-                  }
-                }
-            ')
-
-            if [[ "${socks5TransportType}" == "3" ]]; then
-                socks5OutboundJson=$(echo "${socks5OutboundJson}" | jq \
-                    --arg path "${socks5TransportPath}" \
-                    --arg host "${socks5TransportHost}" '.outbounds[0].streamSettings.wsSettings = {path:$path,headers:{Host:$host}}')
-            elif [[ "${socks5TransportType}" == "4" ]]; then
-                socks5OutboundJson=$(echo "${socks5OutboundJson}" | jq \
-                    --arg path "${socks5TransportPath}" \
-                    --argjson hostList "${socks5TransportHostList:-[]}" '.outbounds[0].streamSettings.httpSettings = {path:$path,host:$hostList}')
-            fi
-        fi
-
-        local socks5XrayOutboundPath="/etc/Proxy-agent/xray/conf/${tag}.json"
-        echo "${socks5OutboundJson}" | jq . >"${socks5XrayOutboundPath}"
-        validateJsonFile "${socks5XrayOutboundPath}"
     fi
     if echo "${tag}" | grep -q "wireguard_out_IPv4"; then
         cat <<EOF >"/etc/Proxy-agent/xray/conf/${tag}.json"
@@ -4614,7 +4567,7 @@ EOF
 singBoxTuicInstall() {
     if ! echo "${currentInstallProtocolType}" | grep -qE ",0,|,1,|,2,|,3,|,4,|,5,|,6,|,9,|,10,"; then
         echoContent red "\n ---> 由于需要依赖证书，如安装Tuic，请先安装带有TLS标识协议"
-        exit 0
+        exit 1
     fi
 
     totalProgress=5
@@ -4630,7 +4583,7 @@ singBoxTuicInstall() {
 singBoxHysteria2Install() {
     if ! echo "${currentInstallProtocolType}" | grep -qE ",0,|,1,|,2,|,3,|,4,|,5,|,6,|,9,|,10,"; then
         echoContent red "\n ---> 由于需要依赖证书，如安装Hysteria2，请先安装带有TLS标识协议"
-        exit 0
+        exit 1
     fi
 
     totalProgress=5
@@ -4701,7 +4654,7 @@ initSingBoxPort() {
             echo "${port}"
         else
             echoContent red " ---> 端口输入错误"
-            exit 0
+            exit 1
         fi
     fi
 }
@@ -6057,7 +6010,7 @@ EOF
 
         if [[ -z "${email}" ]]; then
             echoContent red " ---> 读取配置失败，请重新安装"
-            exit 0
+            exit 1
         fi
 
         echoContent yellow " ---> 格式化明文(Tuic+TLS)"
@@ -6565,14 +6518,14 @@ addNginx302() {
 updateNginxBlog() {
     if [[ "${coreInstallType}" == "2" ]]; then
         echoContent red "\n ---> 此功能仅支持Xray-core内核"
-        exit 0
+        exit 1
     fi
 
     echoContent skyBlue "\n进度 $1/${totalProgress} : 更换伪装站点"
 
     if ! echo "${currentInstallProtocolType}" | grep -q ",0," || [[ -z "${coreInstallType}" ]]; then
         echoContent red "\n ---> 由于环境依赖，请先安装Xray-core的VLESS_TCP_TLS_Vision"
-        exit 0
+        exit 1
     fi
     echoContent red "=============================================================="
     echoContent yellow "# 如需自定义，请手动复制模版文件到 ${nginxStaticPath} \n"
@@ -6592,7 +6545,7 @@ updateNginxBlog() {
     if [[ "${selectInstallNginxBlogType}" == "10" ]]; then
         if [[ "${coreInstallType}" == "2" ]]; then
             echoContent red "\n ---> 此功能仅支持Xray-core内核，请等待后续更新"
-            exit 0
+            exit 1
         fi
         echoContent red "\n=============================================================="
         echoContent yellow "重定向的优先级更高，配置302之后如果更改伪装站点，根路由下伪装站点将不起作用"
@@ -6607,7 +6560,7 @@ updateNginxBlog() {
             read -r -p "请输入要重定向的域名,例如 https://www.baidu.com:" redirectDomain
             if ! isValidRedirectUrl "${redirectDomain}"; then
                 echoContent red " ---> URL格式无效，必须以 http:// 或 https:// 开头且不含特殊字符"
-                exit 0
+                exit 1
             fi
             removeNginx302
             addNginx302 "${redirectDomain}"
@@ -6650,7 +6603,7 @@ addCorePort() {
 
     if [[ "${coreInstallType}" == "2" ]]; then
         echoContent red "\n ---> 此功能仅支持Xray-core内核"
-        exit 0
+        exit 1
     fi
 
     echoContent skyBlue "\n功能 1/${totalProgress} : 添加新端口"
@@ -6872,7 +6825,7 @@ manageCDN() {
             # 验证输入不包含危险字符
             if [[ "${setCDNDomain}" =~ [\;\|\&\$\`\(\)\{\}\[\]\<\>\!\#\*\?\~\'\"] ]] || [[ "${setCDNDomain}" =~ [[:space:]] ]]; then
                 echoContent red " ---> 输入包含不安全字符"
-                exit 0
+                exit 1
             fi
             ;;
         6)
@@ -6920,7 +6873,7 @@ customUUID() {
 
         if [[ -n "${checkUUID}" ]]; then
             echoContent red " ---> UUID不可重复"
-            exit 0
+            exit 1
         fi
     fi
 }
@@ -6949,7 +6902,7 @@ customUserEmail() {
 
         if [[ -n "${checkEmail}" ]]; then
             echoContent red " ---> email不可重复"
-            exit 0
+            exit 1
         fi
     fi
 }
@@ -6960,7 +6913,7 @@ addUser() {
     echo
     if [[ -z ${userNum} || ${userNum} -le 0 ]]; then
         echoContent red " ---> 输入有误，请重新输入"
-        exit 0
+        exit 1
     fi
     local userConfig=
     if [[ "${coreInstallType}" == "1" ]]; then
@@ -7400,11 +7353,11 @@ bbrInstall() {
 checkLog() {
     if [[ "${coreInstallType}" == "2" ]]; then
         echoContent red "\n ---> 此功能仅支持Xray-core内核"
-        exit 0
+        exit 1
     fi
     if [[ -z "${configPath}" && -z "${realityStatus}" ]]; then
         echoContent red " ---> 没有检测到安装目录，请执行脚本安装内容"
-        exit 0
+        exit 1
     fi
     local realityLogShow=
     local logStatus=false
@@ -7602,7 +7555,7 @@ checkIPv6() {
 
     if [[ -z "${currentIPv6IP}" ]]; then
         echoContent red " ---> 不支持ipv6"
-        exit 0
+        exit 1
     fi
 }
 
@@ -7611,7 +7564,7 @@ ipv6Routing() {
     if [[ -z "${configPath}" ]]; then
         echoContent red " ---> 未安装，请使用脚本安装"
         menu
-        exit 0
+        exit 1
     fi
 
     checkIPv6
@@ -7710,7 +7663,7 @@ ipv6Routing() {
         echoContent green " ---> IPv6分流卸载成功"
     else
         echoContent red " ---> 选择错误"
-        exit 0
+        exit 1
     fi
 
     reloadCore
@@ -7746,12 +7699,12 @@ showIPv6Routing() {
 btTools() {
     if [[ "${coreInstallType}" == "2" ]]; then
         echoContent red "\n ---> 此功能仅支持Xray-core内核，请等待后续更新"
-        exit 0
+        exit 1
     fi
     if [[ -z "${configPath}" ]]; then
         echoContent red " ---> 未安装，请使用脚本安装"
         menu
-        exit 0
+        exit 1
     fi
 
     echoContent skyBlue "\n功能 1/${totalProgress} : bt下载管理"
@@ -7809,7 +7762,7 @@ EOF
         echoContent green " ---> 允许BT下载"
     else
         echoContent red " ---> 选择错误"
-        exit 0
+        exit 1
     fi
 
     reloadCore
@@ -7820,7 +7773,7 @@ blacklist() {
     if [[ -z "${configPath}" ]]; then
         echoContent red " ---> 未安装，请使用脚本安装"
         menu
-        exit 0
+        exit 1
     fi
 
     echoContent skyBlue "\n进度  $1/${totalProgress} : 域名黑名单"
@@ -7895,7 +7848,7 @@ blacklist() {
         echoContent green " ---> 域名黑名单删除完毕"
     else
         echoContent red " ---> 选择错误"
-        exit 0
+        exit 1
     fi
     reloadCore
 }
@@ -7908,7 +7861,7 @@ addXrayRouting() {
 
     if [[ -z "${tag}" || -z "${type}" || -z "${domain}" ]]; then
         echoContent red " ---> 参数错误"
-        exit 0
+        exit 1
     fi
 
     local routingRule=
@@ -7937,13 +7890,20 @@ EOF
     fi
 
     while read -r line; do
+        if [[ -z "${line}" ]]; then
+            continue
+        fi
         if echo "${routingRule}" | grep -q "${line}"; then
             echoContent yellow " ---> ${line}已存在，跳过"
         else
             local geositeStatus
-            geositeStatus=$(curl -s "https://api.github.com/repos/v2fly/domain-list-community/contents/data/${line}" | jq .message)
+            # 添加超时和错误处理
+            geositeStatus=$(curl -s --connect-timeout 5 --max-time 10 \
+                "https://api.github.com/repos/v2fly/domain-list-community/contents/data/${line}" 2>/dev/null | jq -r '.message // empty')
 
-            if [[ "${geositeStatus}" == "null" ]]; then
+            # 如果API返回空(文件存在)，使用geosite格式
+            # 如果API失败或返回错误消息，回退到domain格式
+            if [[ -z "${geositeStatus}" ]]; then
                 routingRule=$(echo "${routingRule}" | jq -r '.domain += ["geosite:'"${line}"'"]')
             else
                 routingRule=$(echo "${routingRule}" | jq -r '.domain += ["domain:'"${line}"'"]')
@@ -8254,7 +8214,7 @@ warpRoutingReg() {
     else
 
         echoContent red " ---> 选择错误"
-        exit 0
+        exit 1
     fi
     reloadCore
 }
@@ -8535,6 +8495,10 @@ setupChainExit() {
             echoContent red " ---> IP不能为空"
             return 1
         fi
+        if ! isValidIP "${publicIP}"; then
+            echoContent red " ---> IP地址格式无效"
+            return 1
+        fi
     fi
     echoContent green " ---> 本机公网IP: ${publicIP}"
 
@@ -8549,6 +8513,10 @@ setupChainExit() {
         read -r -p "请输入允许连接的入口节点IP:" allowedIP
         if [[ -z "${allowedIP}" ]]; then
             echoContent red " ---> IP不能为空"
+            return 1
+        fi
+        if ! isValidIP "${allowedIP}"; then
+            echoContent red " ---> IP地址格式无效"
             return 1
         fi
     fi
@@ -8807,6 +8775,10 @@ setupChainEntryManual() {
         echoContent red " ---> IP不能为空"
         return 1
     fi
+    if ! isValidIP "${chainExitIP}"; then
+        echoContent red " ---> IP地址格式无效"
+        return 1
+    fi
 
     read -r -p "出口节点端口:" chainExitPort
     if [[ -z "${chainExitPort}" ]]; then
@@ -8899,6 +8871,10 @@ setupChainRelay() {
         read -r -p "公网IP:" publicIP
         if [[ -z "${publicIP}" ]]; then
             echoContent red " ---> IP不能为空"
+            return 1
+        fi
+        if ! isValidIP "${publicIP}"; then
+            echoContent red " ---> IP地址格式无效"
             return 1
         fi
     fi
@@ -10109,10 +10085,8 @@ routingToolsMenu() {
     echoContent yellow "1.WARP分流【第三方 IPv4】"
     echoContent yellow "2.WARP分流【第三方 IPv6】"
     echoContent yellow "3.IPv6分流"
-    echoContent yellow "4.Socks5分流【替换任意门分流】"
-    echoContent yellow "5.DNS分流"
-    #    echoContent yellow "6.VMess+WS+TLS分流"
-    echoContent yellow "7.SNI反向代理分流"
+    echoContent yellow "4.DNS分流"
+    echoContent yellow "5.SNI反向代理分流"
 
     read -r -p "请选择:" selectType
 
@@ -10127,18 +10101,9 @@ routingToolsMenu() {
         ipv6Routing 1
         ;;
     4)
-        socks5Routing
-        ;;
-    5)
         dnsRouting 1
         ;;
-        #    6)
-        #        if [[ -n "${singBoxConfigPath}" ]]; then
-        #            echoContent red "\n ---> 此功能不支持Hysteria2、Tuic"
-        #        fi
-        #        vmessWSRouting 1
-        #        ;;
-    7)
+    5)
         if [[ -n "${singBoxConfigPath}" ]]; then
             echoContent red "\n ---> 此功能不支持Hysteria2、Tuic"
         fi
@@ -10167,937 +10132,6 @@ vmessWSRouting() {
         removeVMessWSRouting
         ;;
     esac
-}
-# Socks5配置检查
-checkSocksConfig() {
-    readInstallType
-
-    if [[ -z "${singBoxConfigPath}" && -d "/etc/Proxy-agent/sing-box/conf/config/" ]]; then
-        singBoxConfigPath="/etc/Proxy-agent/sing-box/conf/config/"
-    fi
-
-    echoContent skyBlue "\n功能 1/1 : Socks5配置检查"
-
-    if [[ -z "${singBoxConfigPath}" && "${coreInstallType}" != "1" ]]; then
-        echoContent red " ---> 未检测到Socks5配置，请先安装对应功能"
-        exit 0
-    fi
-
-    local socksInboundFile="${singBoxConfigPath}20_socks5_inbounds.json"
-    local socksOutboundFile="${singBoxConfigPath}socks5_outbound.json"
-    local socksOutboundRouteFile="${singBoxConfigPath}socks5_01_outbound_route.json"
-    local socksInboundRouteFile="${singBoxConfigPath}socks5_02_inbound_route.json"
-    local singBoxSocksStatus=false
-    local xraySocksStatus=false
-
-    if [[ -f "${socksInboundFile}" || -f "${socksOutboundFile}" ]]; then
-        singBoxSocksStatus=true
-    fi
-
-    if [[ -n "${configPath}" && -f "${configPath}socks5_outbound.json" ]]; then
-        xraySocksStatus=true
-    fi
-
-    if [[ "${singBoxSocksStatus}" != "true" && "${xraySocksStatus}" != "true" ]]; then
-        echoContent red " ---> 未找到Socks5入站或出站配置文件"
-        exit 0
-    fi
-
-    # 端口占用检查
-    if [[ -f "${socksInboundFile}" ]]; then
-        local socksListenPort
-        socksListenPort=$(jq -r '.inbounds[0].listen_port // empty' "${socksInboundFile}")
-        if [[ -n "${socksListenPort}" ]]; then
-            local portConflicts
-            portConflicts=$(lsof -i "tcp:${socksListenPort}" | awk 'NR>1 && $1!="sing-box" {print}')
-            if [[ -n "${portConflicts}" ]]; then
-                echoContent red " ---> Socks5入站端口 ${socksListenPort} 已被其他进程占用"
-                echoContent yellow " ---> 修复指引：停止占用该端口的进程或修改 ${socksInboundFile} 中的 listen_port 后重启"
-            else
-                echoContent green " ---> Socks5入站端口 ${socksListenPort} 正常"
-            fi
-        fi
-    fi
-
-    # 凭据及证书路径检查
-    if [[ -f "${socksInboundFile}" ]]; then
-        local socksInboundUser
-        local socksInboundPassword
-        socksInboundUser=$(jq -r '.inbounds[0].users[0].username // empty' "${socksInboundFile}")
-        socksInboundPassword=$(jq -r '.inbounds[0].users[0].password // empty' "${socksInboundFile}")
-
-        if [[ -z "${socksInboundUser}" || -z "${socksInboundPassword}" ]]; then
-            echoContent red " ---> Socks5入站凭据缺失"
-            echoContent yellow " ---> 修复指引：在 ${socksInboundFile} 填写 username/password，或重新执行 Socks5 入站安装"
-        else
-            echoContent green " ---> Socks5入站凭据正常"
-        fi
-    fi
-
-    if [[ -f "${socksOutboundFile}" ]]; then
-        local socksOutboundUser
-        local socksOutboundPassword
-        socksOutboundUser=$(jq -r '.outbounds[0].username // empty' "${socksOutboundFile}")
-        socksOutboundPassword=$(jq -r '.outbounds[0].password // empty' "${socksOutboundFile}")
-        local socksOutboundCertPath
-        local socksOutboundKeyPath
-        socksOutboundCertPath=$(jq -r '.outbounds[0].tls.certificate_path // empty' "${socksOutboundFile}")
-        socksOutboundKeyPath=$(jq -r '.outbounds[0].tls.key_path // empty' "${socksOutboundFile}")
-
-        if [[ -z "${socksOutboundUser}" || -z "${socksOutboundPassword}" ]]; then
-            echoContent red " ---> Socks5出站凭据缺失"
-            echoContent yellow " ---> 修复指引：在 ${socksOutboundFile} 填写 username/password，或重新执行 Socks5 出站安装"
-        else
-            echoContent green " ---> Socks5出站凭据正常"
-        fi
-
-        if [[ -n "${socksOutboundCertPath}" && ! -f "${socksOutboundCertPath}" ]]; then
-            echoContent red " ---> Socks5出站证书路径无效: ${socksOutboundCertPath}"
-            echoContent yellow " ---> 修复指引：更新证书路径或上传证书文件后重启服务"
-        fi
-
-        if [[ -n "${socksOutboundKeyPath}" && ! -f "${socksOutboundKeyPath}" ]]; then
-            echoContent red " ---> Socks5出站私钥路径无效: ${socksOutboundKeyPath}"
-            echoContent yellow " ---> 修复指引：更新私钥路径或上传私钥文件后重启服务"
-        fi
-    fi
-
-    local outboundTags=()
-    if [[ -n "${singBoxConfigPath}" ]]; then
-        while read -r outboundFile; do
-            while read -r outboundTag; do
-                if [[ -n "${outboundTag}" && "${outboundTag}" != "null" ]]; then
-                    outboundTags+=("${outboundTag}")
-                fi
-            done < <(jq -r '.outbounds[]?.tag // empty' "${outboundFile}" 2>/dev/null)
-        done < <(find "${singBoxConfigPath}" -maxdepth 1 -type f -name "*.json")
-    fi
-
-    checkRouteTarget() {
-        local routeFile=$1
-        local routeName=$2
-        if [[ -f "${routeFile}" ]]; then
-            while read -r targetTag; do
-                if [[ -z "${targetTag}" ]]; then
-                    continue
-                fi
-
-                if [[ ! " ${outboundTags[*]} " =~ " ${targetTag} " ]]; then
-                    echoContent red " ---> 路由 ${routeName} 中的目标标签 ${targetTag} 不存在"
-                    echoContent yellow " ---> 修复指引：重新安装 Socks5 分流或在 ${singBoxConfigPath} 内补充该出站配置"
-                fi
-            done < <(jq -r '.route.rules[]?.outbound // empty' "${routeFile}" 2>/dev/null)
-        fi
-    }
-
-    checkRouteTarget "${socksOutboundRouteFile}" "socks5_01_outbound_route"
-    checkRouteTarget "${socksInboundRouteFile}" "socks5_02_inbound_route"
-
-    if [[ "${coreInstallType}" == "1" ]]; then
-        local xrayOutbounds=()
-        if [[ -n "${configPath}" ]]; then
-            while read -r outboundFile; do
-                while read -r outboundTag; do
-                    if [[ -n "${outboundTag}" && "${outboundTag}" != "null" ]]; then
-                        xrayOutbounds+=("${outboundTag}")
-                    fi
-                done < <(jq -r '.outbounds[]?.tag // empty' "${outboundFile}" 2>/dev/null)
-            done < <(find "${configPath}" -maxdepth 1 -type f -name "*.json")
-        fi
-
-        if [[ -f "${configPath}09_routing.json" ]]; then
-            while read -r xrayTarget; do
-                if [[ -z "${xrayTarget}" ]]; then
-                    continue
-                fi
-
-                if [[ ! " ${xrayOutbounds[*]} " =~ " ${xrayTarget} " ]]; then
-                    echoContent red " ---> Xray 分流规则中的出站标签 ${xrayTarget} 不存在"
-                    echoContent yellow " ---> 修复指引：检查 ${configPath}${xrayTarget}.json 是否缺失，或重新执行 Socks5 出站配置"
-                fi
-            done < <(jq -r '.routing.rules[]?.outboundTag // empty' "${configPath}09_routing.json" 2>/dev/null)
-        fi
-    fi
-}
-# Socks5分流
-socks5Routing() {
-    if [[ -z "${coreInstallType}" ]]; then
-        echoContent red " ---> 未安装任意协议，请使用 1.安装 或者 2.任意组合安装 进行安装后使用"
-        exit 0
-    fi
-    echoContent skyBlue "\n功能 1/${totalProgress} : Socks5分流"
-    echoContent red "\n=============================================================="
-    echoContent red "# 注意事项"
-    echoContent yellow "# 流量明文访问"
-
-    echoContent yellow "# 仅限正常网络环境下设备间流量转发，禁止用于代理访问。"
-    echoContent yellow "# 出站=将本机流量交给上游/落地机；入站=让本机提供Socks供其他节点拨号。"
-    echoContent yellow "# 使用提示：更多示例见 documents 目录\n"
-
-    echoContent yellow "1.Socks5出站"
-    echoContent yellow "2.Socks5入站"
-    echoContent yellow "3.卸载"
-    echoContent yellow "4.检查配置"
-    read -r -p "请选择:" selectType
-
-    case ${selectType} in
-    1)
-        socks5OutboundRoutingMenu
-        ;;
-    2)
-        socks5InboundRoutingMenu
-        ;;
-    3)
-        removeSocks5Routing
-        ;;
-    4)
-        checkSocksConfig
-        ;;
-    esac
-}
-# Socks5入站菜单
-socks5InboundRoutingMenu() {
-    readInstallType
-    echoContent skyBlue "\n功能 1/1 : Socks5入站"
-    echoContent red "\n=============================================================="
-
-    echoContent yellow "1.安装Socks5入站"
-    echoContent yellow "2.查看分流规则"
-    echoContent yellow "3.添加分流规则"
-    echoContent yellow "4.查看入站配置"
-    read -r -p "请选择:" selectType
-    case ${selectType} in
-    1)
-        totalProgress=1
-        installSingBox 1
-        installSingBoxService 1
-        setSocks5Inbound
-        setSocks5InboundRouting
-        reloadCore
-        socks5InboundRoutingMenu
-        ;;
-    2)
-        showSingBoxRoutingRules socks5_02_inbound_route
-        socks5InboundRoutingMenu
-        ;;
-    3)
-        setSocks5InboundRouting addRules
-        reloadCore
-        socks5InboundRoutingMenu
-        ;;
-    4)
-        if [[ -f "${singBoxConfigPath}20_socks5_inbounds.json" ]]; then
-            echoContent yellow "\n ---> 下列内容需要配置到其他机器的出站，请不要进行代理行为\n"
-            echoContent green " 端口：$(jq .inbounds[0].listen_port ${singBoxConfigPath}20_socks5_inbounds.json)"
-            echoContent green " 用户名称：$(jq -r .inbounds[0].users[0].username ${singBoxConfigPath}20_socks5_inbounds.json)"
-            echoContent green " 用户密码：$(jq -r .inbounds[0].users[0].password ${singBoxConfigPath}20_socks5_inbounds.json)"
-        else
-            echoContent red " ---> 未安装相应功能"
-            socks5InboundRoutingMenu
-        fi
-        ;;
-    esac
-
-}
-
-# Socks5出站菜单
-socks5OutboundRoutingMenu() {
-    echoContent skyBlue "\n功能 1/1 : Socks5出站"
-    echoContent red "\n=============================================================="
-
-    echoContent yellow "1.安装Socks5出站"
-    echoContent yellow "2.设置Socks5全局转发"
-    echoContent yellow "3.查看分流规则"
-    echoContent yellow "4.添加分流规则"
-    read -r -p "请选择:" selectType
-    case ${selectType} in
-    1)
-        setSocks5Outbound
-        setSocks5OutboundRouting
-        reloadCore
-        socks5OutboundRoutingMenu
-        ;;
-    2)
-        setSocks5Outbound
-        setSocks5OutboundRoutingAll
-        reloadCore
-        socks5OutboundRoutingMenu
-        ;;
-    3)
-        showSingBoxRoutingRules socks5_01_outbound_route
-        showXrayRoutingRules socks5_outbound
-        socks5OutboundRoutingMenu
-        ;;
-    4)
-        setSocks5OutboundRouting addRules
-        reloadCore
-        socks5OutboundRoutingMenu
-        ;;
-    esac
-
-}
-
-# socks5全局
-setSocks5OutboundRoutingAll() {
-
-    echoContent red "=============================================================="
-    echoContent yellow "# 注意事项\n"
-    echoContent yellow "1.会删除所有已经设置的分流规则，包括其他分流（warp、IPv6等）"
-    echoContent yellow "2.会删除Socks5之外的所有出站规则"
-    echoContent yellow "3.所有入站流量将通过Socks5出站转发\n"
-    read -r -p "是否确认设置？[y/n]:" socksOutStatus
-
-    if [[ "${socksOutStatus}" == "y" ]]; then
-        if [[ "${coreInstallType}" == "1" ]]; then
-            removeXrayOutbound IPv4_out
-            removeXrayOutbound IPv6_out
-            removeXrayOutbound z_direct_outbound
-            removeXrayOutbound blackhole_out
-            removeXrayOutbound wireguard_out_IPv4
-            removeXrayOutbound wireguard_out_IPv6
-
-            rm ${configPath}09_routing.json >/dev/null 2>&1
-        fi
-        if [[ -n "${singBoxConfigPath}" ]]; then
-
-            removeSingBoxConfig IPv4_out
-            removeSingBoxConfig IPv6_out
-
-            removeSingBoxConfig wireguard_endpoints_IPv4_route
-            removeSingBoxConfig wireguard_endpoints_IPv6_route
-            removeSingBoxConfig wireguard_endpoints_IPv4
-            removeSingBoxConfig wireguard_endpoints_IPv6
-
-            removeSingBoxConfig socks5_01_outbound_route
-            removeSingBoxConfig 01_direct_outbound
-
-            # 创建全局路由配置，让所有流量走 socks5_outbound
-            cat <<EOF >"${singBoxConfigPath}socks5_01_outbound_route.json"
-{
-  "route": {
-    "final": "socks5_outbound"
-  }
-}
-EOF
-        fi
-
-        echoContent green " ---> Socks5全局出站设置完毕"
-    fi
-}
-# socks5 分流规则
-showSingBoxRoutingRules() {
-    if [[ -n "${singBoxConfigPath}" ]]; then
-        if [[ -f "${singBoxConfigPath}$1.json" ]]; then
-            jq .route.rules "${singBoxConfigPath}$1.json"
-        elif [[ "$1" == "socks5_01_outbound_route" && -f "${singBoxConfigPath}socks5_outbound.json" ]]; then
-            jq .outbounds[0] "${singBoxConfigPath}socks5_outbound.json"
-        elif [[ "$1" == "socks5_02_inbound_route" && -f "${singBoxConfigPath}20_socks5_inbounds.json" ]]; then
-            jq .inbounds[0] "${singBoxConfigPath}20_socks5_inbounds.json"
-        fi
-    fi
-}
-
-# xray内核分流规则
-showXrayRoutingRules() {
-    if [[ "${coreInstallType}" == "1" ]]; then
-        if [[ -f "${configPath}09_routing.json" ]]; then
-            jq ".routing.rules[]|select(.outboundTag==\"$1\")" "${configPath}09_routing.json"
-        elif [[ "$1" == "socks5_outbound" && -f "${configPath}socks5_outbound.json" ]]; then
-            jq .outbounds[0].settings.servers[0] "${configPath}socks5_outbound.json"
-        fi
-    fi
-}
-
-# 卸载Socks5分流
-removeSocks5Routing() {
-    echoContent skyBlue "\n功能 1/1 : 卸载Socks5分流"
-    echoContent red "\n=============================================================="
-
-    echoContent yellow "1.卸载Socks5出站"
-    echoContent yellow "2.卸载Socks5入站"
-    echoContent yellow "3.卸载全部"
-    read -r -p "请选择:" unInstallSocks5RoutingStatus
-    if [[ "${unInstallSocks5RoutingStatus}" == "1" ]]; then
-        if [[ "${coreInstallType}" == "1" ]]; then
-            removeXrayOutbound socks5_outbound
-            unInstallRouting socks5_outbound outboundTag
-            addXrayOutbound z_direct_outbound
-        fi
-
-        if [[ -n "${singBoxConfigPath}" ]]; then
-            removeSingBoxConfig socks5_outbound
-            removeSingBoxConfig socks5_01_outbound_route
-            addSingBoxOutbound 01_direct_outbound
-        fi
-
-    elif [[ "${unInstallSocks5RoutingStatus}" == "2" ]]; then
-
-        removeSingBoxConfig 20_socks5_inbounds
-        removeSingBoxConfig socks5_02_inbound_route
-
-        handleSingBox stop
-    elif [[ "${unInstallSocks5RoutingStatus}" == "3" ]]; then
-        if [[ "${coreInstallType}" == "1" ]]; then
-            removeXrayOutbound socks5_outbound
-            unInstallRouting socks5_outbound outboundTag
-            addXrayOutbound z_direct_outbound
-        fi
-
-        if [[ -n "${singBoxConfigPath}" ]]; then
-            removeSingBoxConfig socks5_outbound
-            removeSingBoxConfig socks5_01_outbound_route
-            removeSingBoxConfig 20_socks5_inbounds
-            removeSingBoxConfig socks5_02_inbound_route
-            addSingBoxOutbound 01_direct_outbound
-        fi
-
-        handleSingBox stop
-    else
-        echoContent red " ---> 选择错误"
-        exit 0
-    fi
-    echoContent green " ---> 卸载完毕"
-    reloadCore
-}
-# Socks5入站
-setSocks5Inbound() {
-
-    echoContent yellow "\n==================== 配置 Socks5 入站(解锁机、落地机) =====================\n"
-    echoContent yellow "用于让本机提供 Socks5 服务，通常给另一台机器或内网设备作为出站上游。"
-    echoContent skyBlue "\n开始配置Socks5协议入站端口"
-    echoContent skyBlue "该入站提供给其他VPS或本机作为上游，请根据连通性选择监听范围"
-    echoContent yellow "若仅监听内网或127.0.0.1，只能同机或同内网机器访问，跨VPS互联需选择可被对端访问的地址"
-    echo
-    mapfile -t result < <(initSingBoxPort "${singBoxSocks5Port}")
-    local socks5InboundPort=${result[-1]}
-    socks5InboundPort=$(stripAnsi "${socks5InboundPort}")
-    if [[ -z "${socks5InboundPort}" || ! "${socks5InboundPort}" =~ ^[0-9]+$ ]]; then
-        echoContent red " ---> 端口读取异常，请重新输入"
-        exit 0
-    fi
-    echoContent green "\n ---> 入站Socks5端口：${socks5InboundPort}"
-    echoContent green "\n ---> 此端口需要配置到其他机器出站，请不要进行代理行为"
-
-    # 监听范围选择（合并了安全提示）
-    echoContent yellow "\n请选择监听范围（将监听改为 0.0.0.0/:: 时会暴露到公网，存在被扫描和滥用风险）"
-    echoContent yellow "1.仅本机 127.0.0.1[回车默认]"
-    echoContent yellow "2.自定义内网网段"
-    echoContent yellow "3.全部IPv4 0.0.0.0/0"
-    read -r -p "监听范围:" socks5InboundListenStatus
-    local socks5InboundListen="127.0.0.1"
-    local socks5InboundAllowRange="127.0.0.0/8"
-
-    if [[ "${socks5InboundListenStatus}" == "2" ]]; then
-        read -r -p "请输入允许访问的内网网段(示例:192.168.0.0/16):" socks5InboundAllowRange
-        if [[ -z "${socks5InboundAllowRange}" ]]; then
-            echoContent red " ---> 网段不可为空"
-            exit 0
-        fi
-        socks5InboundAllowRange=$(stripAnsi "${socks5InboundAllowRange}")
-        socks5InboundListen="0.0.0.0"
-    elif [[ "${socks5InboundListenStatus}" == "3" ]]; then
-        socks5InboundListen="0.0.0.0"
-        socks5InboundAllowRange="0.0.0.0/0"
-    fi
-
-    socks5InboundListen=$(stripAnsi "${socks5InboundListen}")
-
-    # 认证方式选择
-    # 注意: sing-box SOCKS 仅支持用户名/密码认证，以下两种模式最终都使用用户名+密码
-    # - password: 用户可分别设置用户名和密码
-    # - unified: 用户名和密码使用相同的UUID，便于记忆和管理
-    echoContent yellow "\n请选择认证方式（落地机与上游需保持一致）"
-    echoContent yellow "1.用户名/密码[回车默认，可自定义]"
-    echoContent yellow "2.统一密钥[用户名和密码使用相同UUID，便于管理]"
-    read -r -p "请选择:" socks5InboundAuthType
-
-    if [[ -z "${socks5InboundAuthType}" || "${socks5InboundAuthType}" == "1" ]]; then
-        socks5InboundAuthType="password"
-    elif [[ "${socks5InboundAuthType}" == "2" ]]; then
-        socks5InboundAuthType="unified"
-    else
-        echoContent red " ---> 选择错误"
-        exit 0
-    fi
-
-    echo
-
-    echoContent yellow "\n请输入自定义UUID[需合法]，[回车]随机UUID"
-    read -r -p 'UUID:' socks5RoutingUUID
-    if [[ -z "${socks5RoutingUUID}" ]]; then
-        if [[ "${coreInstallType}" == "1" ]]; then
-            socks5RoutingUUID=$(/etc/Proxy-agent/xray/xray uuid)
-        elif [[ -n "${singBoxConfigPath}" ]]; then
-            socks5RoutingUUID=$(/etc/Proxy-agent/sing-box/sing-box generate uuid)
-        fi
-    fi
-    socks5RoutingUUID=$(stripAnsi "${socks5RoutingUUID}")
-    echo
-
-    if [[ "${socks5InboundAuthType}" == "unified" ]]; then
-        echoContent skyBlue "统一密钥需与上游一致，可直接回车沿用上方UUID或选择其他录入方式"
-        echoContent yellow "下方\"请选择\"对应：1 直接输入(回车默认UUID) / 2 读取文件 / 3 读取环境变量"
-        socks5InboundUnifiedKey=$(readCredentialBySource "统一密钥" "${socks5RoutingUUID}" | stripAnsi | tail -n 1)
-        socks5InboundUserName="${socks5InboundUnifiedKey}"
-        socks5InboundPassword="${socks5InboundUnifiedKey}"
-    else
-        socks5InboundUserName=$(readCredentialBySource "用户名称" "${socks5RoutingUUID}" | stripAnsi | tail -n 1)
-        socks5InboundPassword=$(readCredentialBySource "用户密码" "${socks5RoutingUUID}" | stripAnsi | tail -n 1)
-    fi
-
-    echoContent yellow "\n请选择分流域名DNS解析类型"
-    echoContent yellow "# 注意事项：需要保证vps支持相应的DNS解析"
-    echoContent yellow "1.IPv4[回车默认]"
-    echoContent yellow "2.IPv6"
-
-    read -r -p 'IP类型:' socks5InboundDomainStrategyStatus
-    local domainStrategy=
-    if [[ -z "${socks5InboundDomainStrategyStatus}" || "${socks5InboundDomainStrategyStatus}" == "1" ]]; then
-        domainStrategy="ipv4_only"
-    elif [[ "${socks5InboundDomainStrategyStatus}" == "2" ]]; then
-        domainStrategy="ipv6_only"
-    else
-        echoContent red " ---> 选择类型错误"
-        exit 0
-    fi
-    socks5InboundAllowRange=$(stripAnsi "${socks5InboundAllowRange}")
-    socks5InboundUserName=$(stripAnsi "${socks5InboundUserName}")
-    socks5InboundPassword=$(stripAnsi "${socks5InboundPassword}")
-
-    local socks5InboundJsonFile
-    socks5InboundJsonFile=$(mktemp)
-    chmod 600 "${socks5InboundJsonFile}"
-    # sing-box SOCKS 入站支持的字段: listen, listen_port, tag, users, domain_strategy
-    # 不支持: aead (sing-box SOCKS 仅支持用户名/密码认证)
-    if ! jq -n \
-        --arg listen "${socks5InboundListen}" \
-        --argjson listenPort "${socks5InboundPort}" \
-        --arg tag "socks5_inbound" \
-        --arg user "${socks5InboundUserName}" \
-        --arg pass "${socks5InboundPassword}" \
-        --arg domainStrategy "${domainStrategy}" '
-        {
-          inbounds: [
-            {
-              type: "socks",
-              listen: $listen,
-              listen_port: $listenPort,
-              tag: $tag,
-              users: [
-                {
-                  username: $user,
-                  password: $pass
-                }
-              ],
-              domain_strategy: $domainStrategy
-            }
-          ]
-        }
-    ' >"${socks5InboundJsonFile}"; then
-        rm -f "${socks5InboundJsonFile}"
-        echoContent red " ---> 生成 Socks5 入站配置失败，请检查输入"
-        exit 0
-    fi
-
-    mv "${socks5InboundJsonFile}" /etc/Proxy-agent/sing-box/conf/config/20_socks5_inbounds.json
-
-    validateJsonFile "/etc/Proxy-agent/sing-box/conf/config/20_socks5_inbounds.json"
-
-    if [[ "${socks5InboundListen}" != "127.0.0.1" ]]; then
-        allowPort "${socks5InboundPort}" tcp "${socks5InboundAllowRange}"
-    fi
-
-}
-
-# 初始化sing-box rule配置
-initSingBoxRules() {
-    local domainRules=[]
-    local ruleSet=[]
-    while read -r line; do
-        local geositeStatus
-        geositeStatus=$(curl -s "https://api.github.com/repos/SagerNet/sing-geosite/contents/geosite-${line}.srs?ref=rule-set" | jq .message)
-
-        if [[ "${geositeStatus}" == "null" ]]; then
-            ruleSet=$(echo "${ruleSet}" | jq -r ". += [{\"tag\":\"${line}_$2\",\"type\":\"remote\",\"format\":\"binary\",\"url\":\"https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-${line}.srs\",\"download_detour\":\"01_direct_outbound\"}]")
-        else
-            domainRules=$(echo "${domainRules}" | jq -r ". += [\"^([a-zA-Z0-9_-]+\\\.)*${line//./\\\\.}\"]")
-        fi
-    done < <(echo "$1" | tr ',' '\n' | grep -v '^$' | sort -n | uniq | paste -sd ',' | tr ',' '\n')
-    echo "{ \"domainRules\":${domainRules},\"ruleSet\":${ruleSet}}"
-}
-
-# socks5 inbound routing规则
-setSocks5InboundRouting() {
-
-    singBoxConfigPath=/etc/Proxy-agent/sing-box/conf/config/
-
-    if [[ "$1" == "addRules" && ! -f "${singBoxConfigPath}socks5_02_inbound_route.json" && ! -f "${configPath}09_routing.json" ]]; then
-        echoContent red " ---> 请安装入站分流后再添加分流规则"
-        echoContent red " ---> 如已选择允许所有网站，请重新安装分流后设置规则"
-        exit 0
-    fi
-    local socks5InboundRoutingIPs=
-    if [[ "$1" == "addRules" ]]; then
-        socks5InboundRoutingIPs=$(jq .route.rules[0].source_ip_cidr "${singBoxConfigPath}socks5_02_inbound_route.json")
-    else
-        echoContent red "=============================================================="
-        echoContent skyBlue "请输入允许访问的IP地址，多个IP英文逗号隔开。例如:1.1.1.1,2.2.2.2\n"
-        echoContent yellow "仅允许这些来源访问本机 Socks5 入站，未列出来源将被拒绝。"
-        read -r -p "IP:" socks5InboundRoutingIPs
-
-        if [[ -z "${socks5InboundRoutingIPs}" ]]; then
-            echoContent red " ---> IP不可为空"
-            exit 0
-        fi
-        socks5InboundRoutingIPs=$(echo "\"${socks5InboundRoutingIPs}"\" | jq -c '.|split(",")')
-    fi
-
-    echoContent red "=============================================================="
-    echoContent skyBlue "请输入要分流的域名\n"
-    echoContent yellow "支持Xray-core geosite匹配，支持sing-box1.8+ rule_set匹配\n"
-    echoContent yellow "非增量添加，会替换原有规则\n"
-    echoContent yellow "当输入的规则匹配到geosite或者rule_set后会使用相应的规则\n"
-    echoContent yellow "如无法匹配则，则使用domain精确匹配\n"
-
-    read -r -p "是否允许所有网站？请选择[y/n]:" socks5InboundRoutingDomainStatus
-    if [[ "${socks5InboundRoutingDomainStatus}" == "y" ]]; then
-        addSingBoxRouteRule "01_direct_outbound" "" "socks5_02_inbound_route"
-        local route=
-        route=$(jq ".route.rules[0].inbound = [\"socks5_inbound\"]" "${singBoxConfigPath}socks5_02_inbound_route.json")
-        route=$(echo "${route}" | jq ".route.rules[0].source_ip_cidr=${socks5InboundRoutingIPs}")
-        echo "${route}" | jq . >"${singBoxConfigPath}socks5_02_inbound_route.json"
-
-        addSingBoxOutbound block
-        addSingBoxOutbound "01_direct_outbound"
-    else
-        echoContent yellow "录入示例:netflix,openai,example.com\n"
-        read -r -p "域名:" socks5InboundRoutingDomain
-        if [[ -z "${socks5InboundRoutingDomain}" ]]; then
-            echoContent red " ---> 域名不可为空"
-            exit 0
-        fi
-        socks5InboundRoutingDomain=$(stripAnsi "${socks5InboundRoutingDomain}")
-        addSingBoxRouteRule "01_direct_outbound" "${socks5InboundRoutingDomain}" "socks5_02_inbound_route"
-        local route=
-        route=$(jq ".route.rules[0].inbound = [\"socks5_inbound\"]" "${singBoxConfigPath}socks5_02_inbound_route.json")
-        route=$(echo "${route}" | jq ".route.rules[0].source_ip_cidr=${socks5InboundRoutingIPs}")
-        echo "${route}" | jq . >"${singBoxConfigPath}socks5_02_inbound_route.json"
-
-        addSingBoxOutbound block
-        addSingBoxOutbound "01_direct_outbound"
-    fi
-
-}
-
-# socks5 出站
-setSocks5Outbound() {
-
-    echoContent yellow "\n==================== 配置 Socks5 出站（转发机、代理机） =====================\n"
-    echoContent skyBlue "本步骤配置本机连接落地机的上游 SOCKS 服务，参数需与落地机一致"
-    echo
-    echoContent yellow "上游地址：填Socks上游/落地机IP或域名，留空无法继续。"
-    read -r -p "请输入落地机IP地址:" socks5RoutingOutboundIP
-    if [[ -z "${socks5RoutingOutboundIP}" ]]; then
-        echoContent red " ---> IP不可为空"
-        exit 0
-    fi
-    socks5RoutingOutboundIP=$(stripAnsi "${socks5RoutingOutboundIP}")
-    echo
-    echoContent yellow "上游端口：填Socks监听端口(示例:1080/443)，与上游实际端口一致。"
-    read -r -p "请输入落地机端口:" socks5RoutingOutboundPort
-    if [[ -z "${socks5RoutingOutboundPort}" ]]; then
-        echoContent red " ---> 端口不可为空"
-        exit 0
-    fi
-    socks5RoutingOutboundPort=$(stripAnsi "${socks5RoutingOutboundPort}")
-    if [[ ! "${socks5RoutingOutboundPort}" =~ ^[0-9]+$ ]]; then
-        echoContent red " ---> 端口格式错误，仅支持数字"
-        exit 0
-    fi
-    echo
-    # 注意: sing-box SOCKS 仅支持用户名/密码认证
-    # unified 模式是便捷功能，用户名和密码使用相同的UUID
-    echoContent yellow "请选择上游认证方式（必须与落地机配置一致）"
-    echoContent yellow "1.用户名/密码[回车默认，可自定义]"
-    echoContent yellow "2.统一密钥[用户名和密码使用相同UUID，便于管理]"
-    read -r -p "请选择:" socks5RoutingOutboundAuthType
-    if [[ -z "${socks5RoutingOutboundAuthType}" || "${socks5RoutingOutboundAuthType}" == "1" ]]; then
-        socks5RoutingOutboundAuthType="password"
-    elif [[ "${socks5RoutingOutboundAuthType}" == "2" ]]; then
-        socks5RoutingOutboundAuthType="unified"
-    else
-        echoContent red " ---> 选择错误"
-        exit 0
-    fi
-    echo
-    if [[ "${socks5RoutingOutboundAuthType}" == "unified" ]]; then
-        echoContent skyBlue "统一密钥模式：用户名和密码使用相同的UUID，需与落地机配置一致"
-        echoContent yellow "下方\"请选择\"对应：1 直接输入(回车默认随机值) / 2 读取文件 / 3 读取环境变量"
-        local defaultSocks5OutboundUnifiedKey
-        defaultSocks5OutboundUnifiedKey=$(cat /proc/sys/kernel/random/uuid)
-        socks5RoutingOutboundUnifiedKey=$(readCredentialBySource "统一密钥" "${defaultSocks5OutboundUnifiedKey}" | stripAnsi | tail -n 1)
-        socks5RoutingOutboundUserName=${socks5RoutingOutboundUnifiedKey}
-        socks5RoutingOutboundPassword=${socks5RoutingOutboundUnifiedKey}
-    else
-        socks5RoutingOutboundUserName=$(readCredentialBySource "请输入用户名" "" | stripAnsi | tail -n 1)
-        socks5RoutingOutboundPassword=$(readCredentialBySource "请输入用户密码" "" | stripAnsi | tail -n 1)
-    fi
-    echo
-
-    # 注意: sing-box SOCKS 出站不支持 TLS，如需加密链路请使用链式代理功能
-    echoContent yellow "可选：通过已有出站进行链式拨号（如先走WARP/直连/其他出站标签），留空则直接连上游。"
-    read -r -p "链式出站标签(多个英文逗号分隔，按顺序生效):" socks5RoutingProxyTag
-    socks5RoutingProxyTag=$(stripAnsi "${socks5RoutingProxyTag}")
-    socks5RoutingProxyTagList=()
-    if [[ -n "${socks5RoutingProxyTag}" ]]; then
-        while IFS=',' read -r tag; do
-            if [[ -n "${tag}" ]]; then
-                socks5RoutingProxyTagList+=("$(stripAnsi "${tag}")")
-            fi
-        done < <(echo "${socks5RoutingProxyTag}" | tr -s ',' '\n')
-    fi
-    if [[ ${#socks5RoutingProxyTagList[@]} -gt 0 ]]; then
-        echoContent green " ---> 当前Socks5出站将按顺序通过：${socks5RoutingProxyTagList[*]}"
-        socks5RoutingFallbackDefault=${socks5RoutingProxyTagList[1]:-01_direct_outbound}
-    else
-        socks5RoutingFallbackDefault=01_direct_outbound
-    fi
-    echo
-
-    # healthcheck 配置（仅用于 Xray 定时检测脚本，sing-box SOCKS 出站不支持 healthcheck）
-    echoContent yellow "可选：配置探测URL/端口/间隔，用于 Xray 定时检测脚本（留空跳过）"
-    read -r -p "探测URL(默认https://www.gstatic.com/generate_204):" socks5HealthCheckURL
-    read -r -p "探测端口(默认使用落地机端口):" socks5HealthCheckPort
-    read -r -p "探测间隔(默认30s):" socks5HealthCheckInterval
-    socks5HealthCheckURL=$(stripAnsi "${socks5HealthCheckURL}")
-    socks5HealthCheckPort=$(stripAnsi "${socks5HealthCheckPort}")
-    socks5HealthCheckInterval=$(stripAnsi "${socks5HealthCheckInterval}")
-    echo
-
-    # 仅当指定配置文件目录时才生成 sing-box 出站 JSON
-    if [[ -n "${singBoxConfigPath}" ]]; then
-        local socks5ConfigFile="${singBoxConfigPath}socks5_outbound.json"
-        socks5HealthCheckURL=${socks5HealthCheckURL:-https://www.gstatic.com/generate_204}
-        socks5HealthCheckInterval=${socks5HealthCheckInterval:-30s}
-
-        if [[ -z "${socks5RoutingOutboundIP}" ]]; then
-            echoContent red " ---> 上游地址不可为空"
-            exit 0
-        fi
-
-        if [[ -z "${socks5RoutingOutboundPort}" || ! "${socks5RoutingOutboundPort}" =~ ^[0-9]+$ ]]; then
-            echoContent red " ---> 上游端口格式错误"
-            exit 0
-        fi
-
-        if [[ "${socks5RoutingOutboundAuthType}" == "password" ]]; then
-            if [[ -z "${socks5RoutingOutboundUserName}" ]]; then
-                socks5RoutingOutboundUserName="admin"
-            fi
-            if [[ -z "${socks5RoutingOutboundPassword}" ]]; then
-                socks5RoutingOutboundPassword="${uuidNew}"
-            fi
-        elif [[ "${socks5RoutingOutboundAuthType}" == "unified" ]]; then
-            if [[ -z "${socks5RoutingOutboundUnifiedKey}" ]]; then
-                echoContent red " ---> 统一密钥不可为空"
-                exit 0
-            fi
-            socks5RoutingOutboundUserName="${socks5RoutingOutboundUnifiedKey}"
-            socks5RoutingOutboundPassword="${socks5RoutingOutboundUnifiedKey}"
-        fi
-
-        local socks5ConfigTemp
-        socks5ConfigTemp=$(mktemp)
-        chmod 600 "${socks5ConfigTemp}"
-
-        # sing-box SOCKS 出站支持的字段: server, server_port, version, username, password, detour
-        # 不支持: tls, transport, healthcheck
-        if ! jq -n \
-            --arg server "${socks5RoutingOutboundIP}" \
-            --argjson port "${socks5RoutingOutboundPort}" \
-            --arg user "${socks5RoutingOutboundUserName}" \
-            --arg pass "${socks5RoutingOutboundPassword}" \
-            --arg detour "${socks5RoutingProxyTagList[0]}" ' {
-  outbounds: [
-    {
-      type: "socks",
-      tag: "socks5_outbound",
-      server: $server,
-      server_port: $port,
-      version: "5"
-    }
-  ]
-}
-            | .outbounds[0].username = $user
-            | .outbounds[0].password = $pass
-            | (if ($detour|length)>0 then (.outbounds[0].detour=$detour) else . end)
-' >"${socks5ConfigTemp}"; then
-            rm -f "${socks5ConfigTemp}"
-            echoContent red " ---> 生成 Socks5 出站配置失败，请检查输入"
-            exit 0
-        fi
-
-        mv "${socks5ConfigTemp}" "${socks5ConfigFile}"
-        validateJsonFile "${socks5ConfigFile}"
-    fi
-    if [[ "${coreInstallType}" == "1" ]]; then
-        addXrayOutbound socks5_outbound
-        echoContent yellow "可选：创建 Xray 定时检测脚本，探测失败后切换路由标签或重启"
-        read -r -p "是否创建并注册cron任务？[y/n]:" socks5XrayCronStatus
-        if [[ "${socks5XrayCronStatus}" == "y" ]]; then
-            local socks5XrayFailoverTag=
-            local socks5XrayCronInterval=
-            read -r -p "检测失败后切换到的路由标签（留空则重启Xray）:" socks5XrayFailoverTag
-            read -r -p "检测频率(分钟,默认5):" socks5XrayCronInterval
-            if [[ -z "${socks5XrayCronInterval}" || ! ${socks5XrayCronInterval} =~ ^[0-9]+$ || "${socks5XrayCronInterval}" == "0" ]]; then
-                socks5XrayCronInterval=5
-            fi
-            cat <<EOF >/etc/Proxy-agent/socks5_outbound_healthcheck.sh
-#!/usr/bin/env bash
-check_url="${socks5HealthCheckURL:-https://www.gstatic.com/generate_204}"
-proxy_auth="${socks5RoutingOutboundUserName}:${socks5RoutingOutboundPassword}@${socks5RoutingOutboundIP}:${socks5RoutingOutboundPort}"
-failover_tag="${socks5XrayFailoverTag}"
-routing_file="/etc/Proxy-agent/xray/conf/09_routing.json"
-
-if ! curl -x "socks5://${proxy_auth}" --max-time 10 -ks "${check_url}" >/dev/null 2>&1; then
-    if [[ -n "${failover_tag}" && -f "${routing_file}" ]] && command -v jq >/dev/null 2>&1; then
-        updated_route=$(jq "if .routing and .routing.rules then .routing.rules |= map(if .outboundTag==\"socks5_outbound\" then (.outboundTag=\"${failover_tag}\") else . end) else . end" "${routing_file}")
-        if [[ -n "${updated_route}" ]]; then
-            echo "${updated_route}" | jq . >"${routing_file}"
-            systemctl restart xray >/dev/null 2>&1
-        fi
-    else
-        systemctl restart xray >/dev/null 2>&1
-    fi
-fi
-EOF
-            chmod 700 /etc/Proxy-agent/socks5_outbound_healthcheck.sh
-            if crontab -l >/dev/null 2>&1; then
-                crontab -l | sed '/socks5_outbound_healthcheck/d' >/etc/Proxy-agent/backup_crontab.cron
-            else
-                echo "" >/etc/Proxy-agent/backup_crontab.cron
-            fi
-            echo "*/${socks5XrayCronInterval} * * * * /bin/bash /etc/Proxy-agent/socks5_outbound_healthcheck.sh >/etc/Proxy-agent/socks5_outbound_healthcheck.log 2>&1" >>/etc/Proxy-agent/backup_crontab.cron
-            crontab /etc/Proxy-agent/backup_crontab.cron
-        fi
-    fi
-}
-
-# socks5 outbound routing规则：匹配域名/IP/端口后转发到 socks5 出站
-setSocks5OutboundRouting() {
-
-    if [[ "$1" == "addRules" && ! -f "${singBoxConfigPath}socks5_01_outbound_route.json" && ! -f "${configPath}09_routing.json" ]]; then
-        echoContent red " ---> 请安装出站分流后再添加分流规则"
-        exit 0
-    fi
-
-    echoContent red "=============================================================="
-    echoContent skyBlue "请输入要绑定到 socks 标签的域名/IP/端口（至少填写一项）\n"
-    echoContent yellow "域名支持 geosite/rule_set，示例: netflix,openai,example.com\n"
-    echoContent yellow "IP 示例: 1.1.1.1,8.8.8.8  |  端口示例: 80,443\n"
-    read -r -p "域名(可留空，用逗号分隔):" socks5RoutingOutboundDomain
-    read -r -p "IP(可留空，用逗号分隔):" socks5RoutingOutboundIP
-    read -r -p "端口(可留空，用逗号分隔):" socks5RoutingOutboundPort
-    socks5RoutingOutboundDomain=$(stripAnsi "${socks5RoutingOutboundDomain}")
-    socks5RoutingOutboundIP=$(stripAnsi "${socks5RoutingOutboundIP}")
-    socks5RoutingOutboundPort=$(stripAnsi "${socks5RoutingOutboundPort}")
-
-    if [[ -z "${socks5RoutingOutboundDomain}" && -z "${socks5RoutingOutboundIP}" && -z "${socks5RoutingOutboundPort}" ]]; then
-        echoContent red " ---> 至少需要填写域名、IP 或端口中的一项"
-        exit 0
-    fi
-
-    local rules=
-    rules=$(initSingBoxRules "${socks5RoutingOutboundDomain}" "socks5_01_outbound_route")
-    local domainRules=
-    domainRules=$(echo "${rules}" | jq .domainRules)
-
-    local ruleSet=
-    ruleSet=$(echo "${rules}" | jq .ruleSet)
-    local ruleSetTag=[]
-    if [[ "$(echo "${ruleSet}" | jq '.|length')" != "0" ]]; then
-        ruleSetTag=$(echo "${ruleSet}" | jq '.|map(.tag)')
-    fi
-
-    local ipRules="[]"
-    if [[ -n "${socks5RoutingOutboundIP}" ]]; then
-        ipRules=$(echo "\"${socks5RoutingOutboundIP}\"" | jq -c '[split(",")[]|select(length>0)]')
-    fi
-
-    local portRules="[]"
-    if [[ -n "${socks5RoutingOutboundPort}" ]]; then
-        portRules=$(echo "\"${socks5RoutingOutboundPort}\"" | jq -c '[split(",")[]|select(length>0)|(tonumber? // .)]')
-    fi
-
-    local socks5RoutingFallbackOutbound=${socks5RoutingFallbackDefault:-01_direct_outbound}
-    read -r -p "未命中规则的fallback出站标签[默认${socks5RoutingFallbackOutbound}]:" socks5RoutingFallbackOutboundInput
-    if [[ -n "${socks5RoutingFallbackOutboundInput}" ]]; then
-        socks5RoutingFallbackOutbound=$(stripAnsi "${socks5RoutingFallbackOutboundInput}")
-    fi
-
-    if [[ -n "${singBoxConfigPath}" ]]; then
-        cat <<EOF >"${singBoxConfigPath}socks5_01_outbound_route.json"
-{
-  "route": {
-    "rules": [
-      {
-        "rule_set":${ruleSetTag},
-        "domain_regex":${domainRules},
-        "ip_cidr":${ipRules},
-        "port":${portRules},
-        "outbound": "socks5_outbound"
-      },
-      {
-        "outbound": "${socks5RoutingFallbackOutbound}"
-      }
-    ],
-    "rule_set":${ruleSet}
-  }
-}
-EOF
-
-        jq '(.route.rules[]|select(.rule_set==[])|del(.rule_set))|(.route.rules[]|select(.domain_regex==[])|del(.domain_regex))|(.route.rules[]|select(.ip_cidr==[])|del(.ip_cidr))|(.route.rules[]|select(.port==[])|del(.port))|if .route.rule_set == [] then del(.route.rule_set) else . end' "${singBoxConfigPath}socks5_01_outbound_route.json" >"${singBoxConfigPath}socks5_01_outbound_route_tmp.json" && mv "${singBoxConfigPath}socks5_01_outbound_route_tmp.json" "${singBoxConfigPath}socks5_01_outbound_route.json"
-    fi
-
-    addSingBoxOutbound "01_direct_outbound"
-
-    if [[ "${coreInstallType}" == "1" ]]; then
-        if [[ -z "${socks5RoutingOutboundDomain}" ]]; then
-            echoContent yellow " ---> 检测到未录入域名，Xray-core 分流规则跳过生成"
-        else
-            unInstallRouting "socks5_outbound" "outboundTag"
-            local domainRules=[]
-            while read -r line; do
-                if echo "${routingRule}" | grep -q "${line}"; then
-                    echoContent yellow " ---> ${line}已存在，跳过"
-                else
-                    local geositeStatus
-                    geositeStatus=$(curl -s "https://api.github.com/repos/v2fly/domain-list-community/contents/data/${line}" | jq .message)
-
-                    if [[ "${geositeStatus}" == "null" ]]; then
-                        domainRules=$(echo "${domainRules}" | jq -r ". += [\"geosite:${line}\"]")
-                    else
-                        domainRules=$(echo "${domainRules}" | jq -r ". += [\"domain:${line}\"]")
-                    fi
-                fi
-            done < <(echo "${socks5RoutingOutboundDomain}" | tr ',' '\n')
-            if [[ ! -f "${configPath}09_routing.json" ]]; then
-                cat <<EOF >${configPath}09_routing.json
-{
-    "routing":{
-        "rules": []
-  }
-}
-EOF
-            fi
-            routing=$(jq -r ".routing.rules += [{\"type\": \"field\",\"domain\": ${domainRules},\"outboundTag\": \"socks5_outbound\"}]" ${configPath}09_routing.json)
-            echo "${routing}" | jq . >${configPath}09_routing.json
-        fi
-    fi
-
-    echoContent green "\n=============================================================="
-    echoContent green " ---> socks5分流规则添加完毕"
-    echoContent green "==============================================================\n"
 }
 
 # 设置VMess+WS+TLS【仅出站】
@@ -11175,7 +10209,7 @@ dnsRouting() {
     if [[ -z "${configPath}" ]]; then
         echoContent red " ---> 未安装，请使用脚本安装"
         menu
-        exit 0
+        exit 1
     fi
     echoContent skyBlue "\n功能 1/${totalProgress} : DNS分流"
     echoContent red "\n=============================================================="
@@ -11202,7 +10236,7 @@ sniRouting() {
     if [[ -z "${configPath}" ]]; then
         echoContent red " ---> 未安装，请使用脚本安装"
         menu
-        exit 0
+        exit 1
     fi
     echoContent skyBlue "\n功能 1/${totalProgress} : SNI反向代理分流"
     echoContent red "\n=============================================================="
@@ -11227,6 +10261,11 @@ sniRouting() {
 setUnlockSNI() {
     read -r -p "请输入分流的SNI IP:" setSNIP
     if [[ -n ${setSNIP} ]]; then
+        # 验证IP格式
+        if ! isValidIP "${setSNIP}"; then
+            echoContent red " ---> IP地址格式无效，请输入正确的IPv4或IPv6地址"
+            exit 1
+        fi
         echoContent red "=============================================================="
 
         if [[ "${coreInstallType}" == 1 ]]; then
@@ -11258,7 +10297,7 @@ EOF
     else
         echoContent red " ---> SNI IP不可为空"
     fi
-    exit 0
+    exit 1
 }
 
 # 添加xray dns 配置
@@ -11267,10 +10306,16 @@ addXrayDNSConfig() {
     local domainList=$2
     local domains=[]
     while read -r line; do
+        if [[ -z "${line}" ]]; then
+            continue
+        fi
         local geositeStatus
-        geositeStatus=$(curl -s "https://api.github.com/repos/v2fly/domain-list-community/contents/data/${line}" | jq .message)
+        # 添加超时和错误处理
+        geositeStatus=$(curl -s --connect-timeout 5 --max-time 10 \
+            "https://api.github.com/repos/v2fly/domain-list-community/contents/data/${line}" 2>/dev/null | jq -r '.message // empty')
 
-        if [[ "${geositeStatus}" == "null" ]]; then
+        # 如果API返回空(文件存在)，使用geosite格式
+        if [[ -z "${geositeStatus}" ]]; then
             domains=$(echo "${domains}" | jq -r '. += ["geosite:'"${line}"'"]')
         else
             domains=$(echo "${domains}" | jq -r '. += ["domain:'"${line}"'"]')
@@ -11403,7 +10448,7 @@ setUnlockDNS() {
     else
         echoContent red " ---> dns不可为空"
     fi
-    exit 0
+    exit 1
 }
 
 # 移除 DNS分流
@@ -11495,11 +10540,11 @@ customSingBoxInstall() {
     echoContent skyBlue "--------------------------------------------------------------"
     if echo "${selectCustomInstallType}" | grep -q "，"; then
         echoContent red " ---> 请使用英文逗号分隔"
-        exit 0
+        exit 1
     fi
     if [[ "${selectCustomInstallType}" != "10" ]] && [[ "${selectCustomInstallType}" != "11" ]] && [[ "${selectCustomInstallType}" != "13" ]] && [[ "${selectCustomInstallType}" != "14" ]] && ((${#selectCustomInstallType} >= 2)) && ! echo "${selectCustomInstallType}" | grep -q ","; then
         echoContent red " ---> 多选请使用英文逗号分隔"
-        exit 0
+        exit 1
     fi
     if [[ "${selectCustomInstallType: -1}" != "," ]]; then
         selectCustomInstallType="${selectCustomInstallType},"
@@ -11562,11 +10607,11 @@ customXrayInstall() {
     echoContent skyBlue "--------------------------------------------------------------"
     if echo "${selectCustomInstallType}" | grep -q "，"; then
         echoContent red " ---> 请使用英文逗号分隔"
-        exit 0
+        exit 1
     fi
     if [[ "${selectCustomInstallType}" != "12" ]] && ((${#selectCustomInstallType} >= 2)) && ! echo "${selectCustomInstallType}" | grep -q ","; then
         echoContent red " ---> 多选请使用英文逗号分隔"
-        exit 0
+        exit 1
     fi
 
     if [[ "${selectCustomInstallType}" == "7" ]]; then
@@ -11767,7 +10812,7 @@ coreVersionManageMenu() {
     if [[ -z "${coreInstallType}" ]]; then
         echoContent red "\n ---> 没有检测到安装目录，请执行脚本安装内容"
         menu
-        exit 0
+        exit 1
     fi
     echoContent skyBlue "\n功能 1/1 : 请选择核心"
     echoContent red "\n=============================================================="
@@ -11798,7 +10843,7 @@ manageAccount() {
     echoContent skyBlue "\n功能 1/${totalProgress} : 账号管理"
     if [[ -z "${configPath}" ]]; then
         echoContent red " ---> 未安装"
-        exit 0
+        exit 1
     fi
 
     echoContent red "\n=============================================================="
@@ -11845,7 +10890,7 @@ installSubscribe() {
                 installNginxTools
             else
                 echoContent red " ---> 放弃安装nginx\n"
-                exit 0
+                exit 1
             fi
         fi
         echoContent yellow "开始配置订阅，请输入订阅的端口\n"
@@ -11978,7 +11023,7 @@ addOtherSubscribe() {
 
         if [[ -f "/etc/Proxy-agent/subscribe_remote/remoteSubscribeUrl" ]] && grep -q "${remoteSubscribeUrl}" /etc/Proxy-agent/subscribe_remote/remoteSubscribeUrl; then
             echoContent red " ---> 此订阅已添加"
-            exit 0
+            exit 1
         fi
         echo
         read -r -p "是否是HTTP订阅？[y/n]" httpSubscribeStatus
@@ -12595,7 +11640,7 @@ switchAlpn() {
     echoContent skyBlue "\n功能 1/${totalProgress} : 切换alpn"
     if [[ -z ${currentAlpn} ]]; then
         echoContent red " ---> 无法读取alpn，请检查是否安装"
-        exit 0
+        exit 1
     fi
 
     echoContent red "\n=============================================================="
@@ -12628,7 +11673,7 @@ switchAlpn() {
         echo "${frontingTypeJSON}" | jq . >${configPath}${frontingType}.json
     else
         echoContent red " ---> 选择错误"
-        exit 0
+        exit 1
     fi
     reloadCore
 }
@@ -12729,7 +11774,7 @@ checkRealityDest() {
         echoContent red "\n ---> 检测到使用的域名，托管在cloudflare并开启了代理，使用此类型域名可能导致VPS流量被其他人使用[不建议使用]\n"
         read -r -p "是否继续 ？[y/n]" setRealityDestStatus
         if [[ "${setRealityDestStatus}" != 'y' ]]; then
-            exit 0
+            exit 1
         fi
         echoContent yellow "\n ---> 忽略风险，继续使用"
     fi
@@ -12794,7 +11839,7 @@ initRealityClientServersName() {
                 local realityDomainCheck="${realityServerName%%:*}"
                 if ! isValidDomain "${realityDomainCheck}"; then
                     echoContent red " ---> 域名格式无效或包含不安全字符"
-                    exit 0
+                    exit 1
                 fi
             fi
             if echo "${realityServerName}" | grep -q ":"; then
@@ -12888,7 +11933,7 @@ manageReality() {
 
     if ! echo "${currentInstallProtocolType}" | grep -q -E "7,|8," || [[ -z "${coreInstallType}" ]]; then
         echoContent red "\n ---> 请先安装Reality协议，并确认已配置可用的 serverName/公钥。"
-        exit 0
+        exit 1
     fi
 
     if [[ "${coreInstallType}" == "1" ]]; then
@@ -12944,7 +11989,7 @@ realityScanner() {
     echoContent yellow "IP:${publicIP}"
     if [[ -z "${publicIP}" ]]; then
         echoContent red " ---> 无法获取IP"
-        exit 0
+        exit 1
     fi
 
     read -r -p "IP是否正确？[y/n]:" ipStatus
@@ -13031,7 +12076,7 @@ singBoxVersionManageMenu() {
     if [[ -z "${singBoxConfigPath}" ]]; then
         echoContent red " ---> 没有检测到安装程序，请执行脚本安装内容"
         menu
-        exit 0
+        exit 1
     fi
     echoContent red "\n=============================================================="
     echoContent yellow "1.升级 sing-box"
