@@ -8344,14 +8344,15 @@ EOF
 EOF
     fi
 
-    # 确保直连出站存在
+    # 确保直连出站存在（使用 prefer_ipv4 策略，优先IPv4但保留IPv6兼容）
     if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json" ]]; then
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
 {
     "outbounds": [
         {
             "type": "direct",
-            "tag": "direct"
+            "tag": "direct",
+            "domain_strategy": "prefer_ipv4"
         }
     ]
 }
@@ -8523,8 +8524,35 @@ setupChainExit() {
         fi
     fi
 
+    # 询问网络策略（IPv4/IPv6）
+    echoContent yellow "\n选择出站网络策略："
+    echoContent yellow "1.优先IPv4 [回车默认] - 推荐：出口机只有IPv4或网络不稳定时使用"
+    echoContent yellow "2.优先IPv6 - 出口机双栈且希望优先使用IPv6"
+    echoContent yellow "3.双栈自动 - 出口机双栈，按DNS返回顺序连接"
+    read -r -p "请选择:" networkStrategyChoice
+
+    local domainStrategy="prefer_ipv4"
+    local strategyDesc="优先IPv4"
+    case "${networkStrategyChoice}" in
+        2)
+            domainStrategy="prefer_ipv6"
+            strategyDesc="优先IPv6"
+            ;;
+        3)
+            domainStrategy=""
+            strategyDesc="双栈自动"
+            ;;
+        *)
+            domainStrategy="prefer_ipv4"
+            strategyDesc="优先IPv4"
+            ;;
+    esac
+    echoContent green " ---> 网络策略: ${strategyDesc}"
+
     # 创建入站配置
-    cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
+    # 启用 sniff 嗅探 TLS/HTTP 域名，配合 domain_strategy 进行智能路由
+    if [[ -n "${domainStrategy}" ]]; then
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
 {
     "inbounds": [
         {
@@ -8536,11 +8564,62 @@ setupChainExit() {
             "password": "${chainKey}",
             "multiplex": {
                 "enabled": true
-            }
+            },
+            "sniff": true,
+            "sniff_override_destination": true,
+            "domain_strategy": "${domainStrategy}"
         }
     ]
 }
 EOF
+    else
+        # 双栈自动模式：不设置 domain_strategy
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
+{
+    "inbounds": [
+        {
+            "type": "shadowsocks",
+            "tag": "chain_inbound",
+            "listen": "::",
+            "listen_port": ${chainPort},
+            "method": "${chainMethod}",
+            "password": "${chainKey}",
+            "multiplex": {
+                "enabled": true
+            },
+            "sniff": true,
+            "sniff_override_destination": true
+        }
+    ]
+}
+EOF
+    fi
+
+    # 同步更新 direct 出站配置
+    if [[ -n "${domainStrategy}" ]]; then
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
+{
+    "outbounds": [
+        {
+            "type": "direct",
+            "tag": "direct",
+            "domain_strategy": "${domainStrategy}"
+        }
+    ]
+}
+EOF
+    else
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
+{
+    "outbounds": [
+        {
+            "type": "direct",
+            "tag": "direct"
+        }
+    ]
+}
+EOF
+    fi
 
     # 创建路由配置 (让链式入站流量走直连)
     cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
@@ -8557,7 +8636,7 @@ EOF
 }
 EOF
 
-    # 保存配置信息用于生成配置码
+    # 保存配置信息用于生成配置码（包含网络策略）
     cat <<EOF >/etc/Proxy-agent/sing-box/conf/chain_exit_info.json
 {
     "role": "exit",
@@ -8565,7 +8644,8 @@ EOF
     "port": ${chainPort},
     "method": "${chainMethod}",
     "password": "${chainKey}",
-    "allowed_ip": "${allowedIP}"
+    "allowed_ip": "${allowedIP}",
+    "domain_strategy": "${domainStrategy}"
 }
 EOF
 
@@ -8886,6 +8966,7 @@ setupChainRelay() {
     echoContent yellow "\n步骤 3/3: 生成配置..."
 
     # 创建入站配置 (接收上游流量)
+    # 启用 sniff 嗅探域名用于日志记录（中继节点不设置 domain_strategy，由出口节点决定）
     cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
 {
     "inbounds": [
@@ -8898,7 +8979,8 @@ setupChainRelay() {
             "password": "${chainKey}",
             "multiplex": {
                 "enabled": true
-            }
+            },
+            "sniff": true
         }
     ]
 }
@@ -9157,6 +9239,7 @@ setupChainEntryMultiHop() {
     echo "{\"outbounds\": ${outboundsJson}}" | jq . > /etc/Proxy-agent/sing-box/conf/config/chain_outbound.json
 
     # 如果有 Xray 代理协议，创建 SOCKS5 桥接入站
+    # 启用 sniff 嗅探 TLS/HTTP 域名，配合 domain_strategy 优先使用 IPv4
     if [[ "${hasXrayProtocols}" == "true" ]]; then
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json
 {
@@ -9165,7 +9248,8 @@ setupChainEntryMultiHop() {
             "type": "socks",
             "tag": "chain_bridge_in",
             "listen": "127.0.0.1",
-            "listen_port": ${chainBridgePort}
+            "listen_port": ${chainBridgePort},
+            "sniff": true
         }
     ]
 }
@@ -9398,6 +9482,7 @@ setupChainEntry() {
 EOF
 
     # 如果有 Xray 代理协议，创建 SOCKS5 桥接入站
+    # 启用 sniff 嗅探 TLS/HTTP 域名，配合 domain_strategy 优先使用 IPv4
     if [[ "${hasXrayProtocols}" == "true" ]]; then
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json
 {
@@ -9406,7 +9491,8 @@ EOF
             "type": "socks",
             "tag": "chain_bridge_in",
             "listen": "127.0.0.1",
-            "listen_port": ${chainBridgePort}
+            "listen_port": ${chainBridgePort},
+            "sniff": true
         }
     ]
 }
