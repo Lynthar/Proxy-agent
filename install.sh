@@ -436,13 +436,40 @@ echoContent() {
         ;;
     esac
 }
+
+# 验证IP地址格式
+# 参数1: IP地址字符串
+# 返回: 0=有效, 1=无效
+isValidIP() {
+    local ip=$1
+    # IPv4 验证
+    if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        local IFS='.'
+        read -ra octets <<< "$ip"
+        for octet in "${octets[@]}"; do
+            if [[ $octet -gt 255 ]]; then
+                return 1
+            fi
+        done
+        return 0
+    fi
+    # IPv6 验证 (简化版，支持完整格式和压缩格式)
+    if [[ "$ip" =~ ^([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}$ ]] || \
+       [[ "$ip" =~ ^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$ ]] || \
+       [[ "$ip" =~ ^::([0-9a-fA-F]{1,4}:){0,5}[0-9a-fA-F]{1,4}$ ]] || \
+       [[ "$ip" =~ ^([0-9a-fA-F]{1,4}:){1,6}:$ ]]; then
+        return 0
+    fi
+    return 1
+}
+
 # 检查SELinux状态（使用运行时检测）
 checkCentosSELinux() {
     if command -v getenforce >/dev/null 2>&1 && [[ "$(getenforce)" == "Enforcing" ]]; then
         echoContent yellow "# $(t NOTICE)"
         echoContent yellow "$(t SYS_SELINUX_NOTICE)"
         echoContent yellow "https://github.com/Lynthar/Proxy-agent/blob/master/documents/selinux.md"
-        exit 0
+        exit 1
     fi
 }
 checkSystem() {
@@ -490,7 +517,7 @@ checkSystem() {
         echoContent red "\n$(t SYS_NOT_SUPPORTED)\n"
         echoContent yellow "$(cat /etc/issue)"
         echoContent yellow "$(cat /proc/version)"
-        exit 0
+        exit 1
     fi
 }
 
@@ -748,7 +775,7 @@ validateJsonFile() {
     if ! jq -e . "${jsonPath}" >/dev/null 2>&1; then
         echoContent red " ---> ${jsonPath} 解析失败，已移除，请检查上方录入并重试"
         rm -f "${jsonPath}"
-        exit 0
+        exit 1
     fi
 }
 
@@ -770,7 +797,7 @@ readCredentialBySource() {
         read -r credentialPath
         if [[ -z "${credentialPath}" || ! -f "${credentialPath}" ]]; then
             echoContent red " ---> 文件路径无效"
-            exit 0
+            exit 1
         fi
         credentialValue=$(tr -d '\n' <"${credentialPath}")
         ;;
@@ -793,7 +820,7 @@ readCredentialBySource() {
 
     if [[ -z "${credentialValue}" ]]; then
         echoContent red " ---> ${tips}不可为空"
-        exit 0
+        exit 1
     fi
 
     echo "${credentialValue}"
@@ -1283,7 +1310,7 @@ checkUFWAllowPort() {
         echoContent green " ---> $1端口开放成功"
     else
         echoContent red " ---> $1端口开放失败"
-        exit 0
+        exit 1
     fi
 }
 
@@ -1293,7 +1320,7 @@ checkFirewalldAllowPort() {
         echoContent green " ---> $1端口开放成功"
     else
         echoContent red " ---> $1端口开放失败"
-        exit 0
+        exit 1
     fi
 }
 
@@ -1793,7 +1820,7 @@ installTools() {
                 echoContent red "  2.acme.sh脚本出现bug，可查看[https://github.com/acmesh-official/acme.sh] issues"
                 echoContent red "  3.如纯IPv6机器，请设置NAT64,可执行下方命令，如果添加下方命令还是不可用，请尝试更换其他NAT64"
                 echoContent skyBlue "  sed -i \"1i\\\nameserver 2a00:1098:2b::1\\\nnameserver 2a00:1098:2c::1\\\nnameserver 2a01:4f8:c2c:123f::1\\\nnameserver 2a01:4f9:c010:3f02::1\" /etc/resolv.conf"
-                exit 0
+                exit 1
             fi
         fi
     fi
@@ -1861,7 +1888,7 @@ EOF
 installWarp() {
     if [[ "${cpuVendor}" == "arm" ]]; then
         echoContent red " ---> 官方WARP客户端不支持ARM架构"
-        exit 0
+        exit 1
     fi
 
     ${installType} gnupg2 -y >/dev/null 2>&1
@@ -1884,7 +1911,7 @@ installWarp() {
     ${installType} cloudflare-warp >/dev/null 2>&1
     if [[ -z $(which warp-cli) ]]; then
         echoContent red " ---> 安装WARP失败"
-        exit 0
+        exit 1
     fi
     systemctl enable warp-svc
     warp-cli --accept-tos register
@@ -1918,7 +1945,7 @@ checkDNSIP() {
         ipType=6
         if echo "${dnsIP}" | grep -q "network unreachable" || [[ -z "${dnsIP}" ]]; then
             echoContent red " ---> 无法通过DNS获取域名IPv6地址，退出安装"
-            exit 0
+            exit 1
         fi
     fi
     local publicIP=
@@ -1992,7 +2019,7 @@ EOF
                     echoContent red " ---> 错误日志：${checkPortOpenResult}，请将此错误日志通过issues提交反馈"
                 fi
             fi
-            exit 0
+            exit 1
         fi
         checkIP "${localIP}"
     fi
@@ -2327,13 +2354,13 @@ checkIP() {
             echoContent yellow " ---> 检测返回值异常，建议手动卸载nginx后重新执行脚本"
             echoContent red " ---> 异常结果：${localIP}"
         fi
-        exit 0
+        exit 1
     else
         if echo "${localIP}" | awk -F "[,]" '{print $2}' | grep -q "." || echo "${localIP}" | awk -F "[,]" '{print $2}' | grep -q ":"; then
             echoContent red "\n ---> 检测到多个ip，请确认是否关闭cloudflare的云朵"
             echoContent yellow " ---> 关闭云朵后等待三分钟后重试"
             echoContent yellow " ---> 检测到的ip如下:[${localIP}]"
-            exit 0
+            exit 1
         fi
         echoContent green " ---> 检查当前域名IP正确"
     fi
@@ -2443,7 +2470,7 @@ switchSSLType() {
         esac
         if [[ -n "${dnsAPIType}" && "${sslType}" == "buypass" ]]; then
             echoContent red " ---> buypass不支持API申请证书"
-            exit 0
+            exit 1
         fi
         echo "${sslType}" >/etc/Proxy-agent/tls/ssl_type
     fi
@@ -2554,11 +2581,11 @@ customPortFunction() {
                 fi
             else
                 echoContent red " ---> 端口输入错误"
-                exit 0
+                exit 1
             fi
         else
             echoContent red " ---> 端口不可为空"
-            exit 0
+            exit 1
         fi
     fi
 }
@@ -2568,7 +2595,7 @@ checkPort() {
     if [[ -n "$1" ]] && lsof -i "tcp:$1" | grep -q LISTEN; then
         echoContent red "\n ---> $1端口被占用，请手动关闭后安装\n"
         lsof -i "tcp:$1" | grep LISTEN
-        exit 0
+        exit 1
     fi
 }
 
@@ -2883,7 +2910,7 @@ installCronUpdateGeo() {
     if [[ "${coreInstallType}" == "1" ]]; then
         if crontab -l | grep -q "UpdateGeo"; then
             echoContent red "\n ---> 已添加自动更新定时任务，请不要重复添加"
-            exit 0
+            exit 1
         fi
         echoContent skyBlue "\n进度 1/1 : 添加定时更新geo文件"
         crontab -l >/etc/Proxy-agent/backup_crontab.cron
@@ -3313,7 +3340,7 @@ checkGFWStatue() {
         echoContent green " ---> 服务启动成功"
     else
         echoContent red " ---> 服务启动失败，请检查终端是否有日志打印"
-        exit 0
+        exit 1
     fi
 }
 
@@ -3875,12 +3902,12 @@ addPortHopping() {
     local targetPort=$2
     if [[ -n "${portHoppingStart}" || -n "${portHoppingEnd}" ]]; then
         echoContent red " ---> 已添加不可重复添加，可删除后重新添加"
-        exit 0
+        exit 1
     fi
     if [[ "${release}" == "centos" ]]; then
         if ! systemctl status firewalld 2>/dev/null | grep -q "active (running)"; then
             echoContent red " ---> 未启动firewalld防火墙，无法设置端口跳跃。"
-            exit 0
+            exit 1
         fi
     fi
 
@@ -3921,14 +3948,14 @@ addPortHopping() {
                 addFirewalldPortHopping "${portStart}" "${portEnd}" "${targetPort}"
                 if ! sudo firewall-cmd --list-forward-ports | grep -q "toport=${targetPort}"; then
                     echoContent red " ---> 端口跳跃添加失败"
-                    exit 0
+                    exit 1
                 fi
             else
                 iptables -t nat -A PREROUTING -p udp --dport "${portStart}:${portEnd}" -m comment --comment "Proxy-agent_${type}_portHopping" -j DNAT --to-destination ":${targetPort}"
                 sudo netfilter-persistent save
                 if ! iptables-save | grep -q "Proxy-agent_${type}_portHopping"; then
                     echoContent red " ---> 端口跳跃添加失败"
-                    exit 0
+                    exit 1
                 fi
             fi
             allowPort "${portStart}:${portEnd}" udp
@@ -3992,7 +4019,7 @@ portHoppingMenu() {
     # 判断iptables是否存在
     if ! find /usr/bin /usr/sbin | grep -q -w iptables; then
         echoContent red " ---> 无法识别iptables工具，无法使用端口跳跃，退出安装"
-        exit 0
+        exit 1
     fi
 
     local targetPort=
@@ -4139,6 +4166,35 @@ downloadSingBoxGeositeDB() {
         fi
 
     fi
+}
+
+# 初始化sing-box规则配置（检查geosite可用性）
+# 参数1: 域名列表(逗号分隔)
+# 参数2: 路由名称后缀
+# 返回: JSON格式 {"domainRules":[], "ruleSet":[]}
+initSingBoxRules() {
+    local domainRules=[]
+    local ruleSet=[]
+    while read -r line; do
+        if [[ -z "${line}" ]]; then
+            continue
+        fi
+        local geositeStatus
+        # 添加超时和错误处理
+        geositeStatus=$(curl -s --connect-timeout 5 --max-time 10 \
+            "https://api.github.com/repos/SagerNet/sing-geosite/contents/geosite-${line}.srs?ref=rule-set" 2>/dev/null | jq -r '.message // empty')
+
+        # 如果API返回null或空(即文件存在)，使用rule_set
+        # 如果API失败或返回错误消息，回退到domain_regex
+        if [[ -z "${geositeStatus}" ]]; then
+            ruleSet=$(echo "${ruleSet}" | jq -r ". += [{\"tag\":\"${line}_$2\",\"type\":\"remote\",\"format\":\"binary\",\"url\":\"https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-${line}.srs\",\"download_detour\":\"01_direct_outbound\"}]")
+        else
+            # 转义域名中的点号用于正则表达式
+            local escapedLine="${line//./\\.}"
+            domainRules=$(echo "${domainRules}" | jq -r ". += [\"^([a-zA-Z0-9_-]+\\\\.)*${escapedLine}\"]")
+        fi
+    done < <(echo "$1" | tr ',' '\n' | grep -v '^$' | sort -u)
+    echo "{ \"domainRules\":${domainRules},\"ruleSet\":${ruleSet}}"
 }
 
 # 添加sing-box路由规则
@@ -4511,7 +4567,7 @@ EOF
 singBoxTuicInstall() {
     if ! echo "${currentInstallProtocolType}" | grep -qE ",0,|,1,|,2,|,3,|,4,|,5,|,6,|,9,|,10,"; then
         echoContent red "\n ---> 由于需要依赖证书，如安装Tuic，请先安装带有TLS标识协议"
-        exit 0
+        exit 1
     fi
 
     totalProgress=5
@@ -4527,7 +4583,7 @@ singBoxTuicInstall() {
 singBoxHysteria2Install() {
     if ! echo "${currentInstallProtocolType}" | grep -qE ",0,|,1,|,2,|,3,|,4,|,5,|,6,|,9,|,10,"; then
         echoContent red "\n ---> 由于需要依赖证书，如安装Hysteria2，请先安装带有TLS标识协议"
-        exit 0
+        exit 1
     fi
 
     totalProgress=5
@@ -4598,7 +4654,7 @@ initSingBoxPort() {
             echo "${port}"
         else
             echoContent red " ---> 端口输入错误"
-            exit 0
+            exit 1
         fi
     fi
 }
@@ -5954,7 +6010,7 @@ EOF
 
         if [[ -z "${email}" ]]; then
             echoContent red " ---> 读取配置失败，请重新安装"
-            exit 0
+            exit 1
         fi
 
         echoContent yellow " ---> 格式化明文(Tuic+TLS)"
@@ -6462,14 +6518,14 @@ addNginx302() {
 updateNginxBlog() {
     if [[ "${coreInstallType}" == "2" ]]; then
         echoContent red "\n ---> 此功能仅支持Xray-core内核"
-        exit 0
+        exit 1
     fi
 
     echoContent skyBlue "\n进度 $1/${totalProgress} : 更换伪装站点"
 
     if ! echo "${currentInstallProtocolType}" | grep -q ",0," || [[ -z "${coreInstallType}" ]]; then
         echoContent red "\n ---> 由于环境依赖，请先安装Xray-core的VLESS_TCP_TLS_Vision"
-        exit 0
+        exit 1
     fi
     echoContent red "=============================================================="
     echoContent yellow "# 如需自定义，请手动复制模版文件到 ${nginxStaticPath} \n"
@@ -6489,7 +6545,7 @@ updateNginxBlog() {
     if [[ "${selectInstallNginxBlogType}" == "10" ]]; then
         if [[ "${coreInstallType}" == "2" ]]; then
             echoContent red "\n ---> 此功能仅支持Xray-core内核，请等待后续更新"
-            exit 0
+            exit 1
         fi
         echoContent red "\n=============================================================="
         echoContent yellow "重定向的优先级更高，配置302之后如果更改伪装站点，根路由下伪装站点将不起作用"
@@ -6504,7 +6560,7 @@ updateNginxBlog() {
             read -r -p "请输入要重定向的域名,例如 https://www.baidu.com:" redirectDomain
             if ! isValidRedirectUrl "${redirectDomain}"; then
                 echoContent red " ---> URL格式无效，必须以 http:// 或 https:// 开头且不含特殊字符"
-                exit 0
+                exit 1
             fi
             removeNginx302
             addNginx302 "${redirectDomain}"
@@ -6547,7 +6603,7 @@ addCorePort() {
 
     if [[ "${coreInstallType}" == "2" ]]; then
         echoContent red "\n ---> 此功能仅支持Xray-core内核"
-        exit 0
+        exit 1
     fi
 
     echoContent skyBlue "\n功能 1/${totalProgress} : 添加新端口"
@@ -6769,7 +6825,7 @@ manageCDN() {
             # 验证输入不包含危险字符
             if [[ "${setCDNDomain}" =~ [\;\|\&\$\`\(\)\{\}\[\]\<\>\!\#\*\?\~\'\"] ]] || [[ "${setCDNDomain}" =~ [[:space:]] ]]; then
                 echoContent red " ---> 输入包含不安全字符"
-                exit 0
+                exit 1
             fi
             ;;
         6)
@@ -6817,7 +6873,7 @@ customUUID() {
 
         if [[ -n "${checkUUID}" ]]; then
             echoContent red " ---> UUID不可重复"
-            exit 0
+            exit 1
         fi
     fi
 }
@@ -6846,7 +6902,7 @@ customUserEmail() {
 
         if [[ -n "${checkEmail}" ]]; then
             echoContent red " ---> email不可重复"
-            exit 0
+            exit 1
         fi
     fi
 }
@@ -6857,7 +6913,7 @@ addUser() {
     echo
     if [[ -z ${userNum} || ${userNum} -le 0 ]]; then
         echoContent red " ---> 输入有误，请重新输入"
-        exit 0
+        exit 1
     fi
     local userConfig=
     if [[ "${coreInstallType}" == "1" ]]; then
@@ -7297,11 +7353,11 @@ bbrInstall() {
 checkLog() {
     if [[ "${coreInstallType}" == "2" ]]; then
         echoContent red "\n ---> 此功能仅支持Xray-core内核"
-        exit 0
+        exit 1
     fi
     if [[ -z "${configPath}" && -z "${realityStatus}" ]]; then
         echoContent red " ---> 没有检测到安装目录，请执行脚本安装内容"
-        exit 0
+        exit 1
     fi
     local realityLogShow=
     local logStatus=false
@@ -7499,7 +7555,7 @@ checkIPv6() {
 
     if [[ -z "${currentIPv6IP}" ]]; then
         echoContent red " ---> 不支持ipv6"
-        exit 0
+        exit 1
     fi
 }
 
@@ -7508,7 +7564,7 @@ ipv6Routing() {
     if [[ -z "${configPath}" ]]; then
         echoContent red " ---> 未安装，请使用脚本安装"
         menu
-        exit 0
+        exit 1
     fi
 
     checkIPv6
@@ -7607,7 +7663,7 @@ ipv6Routing() {
         echoContent green " ---> IPv6分流卸载成功"
     else
         echoContent red " ---> 选择错误"
-        exit 0
+        exit 1
     fi
 
     reloadCore
@@ -7643,12 +7699,12 @@ showIPv6Routing() {
 btTools() {
     if [[ "${coreInstallType}" == "2" ]]; then
         echoContent red "\n ---> 此功能仅支持Xray-core内核，请等待后续更新"
-        exit 0
+        exit 1
     fi
     if [[ -z "${configPath}" ]]; then
         echoContent red " ---> 未安装，请使用脚本安装"
         menu
-        exit 0
+        exit 1
     fi
 
     echoContent skyBlue "\n功能 1/${totalProgress} : bt下载管理"
@@ -7706,7 +7762,7 @@ EOF
         echoContent green " ---> 允许BT下载"
     else
         echoContent red " ---> 选择错误"
-        exit 0
+        exit 1
     fi
 
     reloadCore
@@ -7717,7 +7773,7 @@ blacklist() {
     if [[ -z "${configPath}" ]]; then
         echoContent red " ---> 未安装，请使用脚本安装"
         menu
-        exit 0
+        exit 1
     fi
 
     echoContent skyBlue "\n进度  $1/${totalProgress} : 域名黑名单"
@@ -7792,7 +7848,7 @@ blacklist() {
         echoContent green " ---> 域名黑名单删除完毕"
     else
         echoContent red " ---> 选择错误"
-        exit 0
+        exit 1
     fi
     reloadCore
 }
@@ -7805,7 +7861,7 @@ addXrayRouting() {
 
     if [[ -z "${tag}" || -z "${type}" || -z "${domain}" ]]; then
         echoContent red " ---> 参数错误"
-        exit 0
+        exit 1
     fi
 
     local routingRule=
@@ -7834,13 +7890,20 @@ EOF
     fi
 
     while read -r line; do
+        if [[ -z "${line}" ]]; then
+            continue
+        fi
         if echo "${routingRule}" | grep -q "${line}"; then
             echoContent yellow " ---> ${line}已存在，跳过"
         else
             local geositeStatus
-            geositeStatus=$(curl -s "https://api.github.com/repos/v2fly/domain-list-community/contents/data/${line}" | jq .message)
+            # 添加超时和错误处理
+            geositeStatus=$(curl -s --connect-timeout 5 --max-time 10 \
+                "https://api.github.com/repos/v2fly/domain-list-community/contents/data/${line}" 2>/dev/null | jq -r '.message // empty')
 
-            if [[ "${geositeStatus}" == "null" ]]; then
+            # 如果API返回空(文件存在)，使用geosite格式
+            # 如果API失败或返回错误消息，回退到domain格式
+            if [[ -z "${geositeStatus}" ]]; then
                 routingRule=$(echo "${routingRule}" | jq -r '.domain += ["geosite:'"${line}"'"]')
             else
                 routingRule=$(echo "${routingRule}" | jq -r '.domain += ["domain:'"${line}"'"]')
@@ -8151,7 +8214,7 @@ warpRoutingReg() {
     else
 
         echoContent red " ---> 选择错误"
-        exit 0
+        exit 1
     fi
     reloadCore
 }
@@ -8432,6 +8495,10 @@ setupChainExit() {
             echoContent red " ---> IP不能为空"
             return 1
         fi
+        if ! isValidIP "${publicIP}"; then
+            echoContent red " ---> IP地址格式无效"
+            return 1
+        fi
     fi
     echoContent green " ---> 本机公网IP: ${publicIP}"
 
@@ -8446,6 +8513,10 @@ setupChainExit() {
         read -r -p "请输入允许连接的入口节点IP:" allowedIP
         if [[ -z "${allowedIP}" ]]; then
             echoContent red " ---> IP不能为空"
+            return 1
+        fi
+        if ! isValidIP "${allowedIP}"; then
+            echoContent red " ---> IP地址格式无效"
             return 1
         fi
     fi
@@ -8704,6 +8775,10 @@ setupChainEntryManual() {
         echoContent red " ---> IP不能为空"
         return 1
     fi
+    if ! isValidIP "${chainExitIP}"; then
+        echoContent red " ---> IP地址格式无效"
+        return 1
+    fi
 
     read -r -p "出口节点端口:" chainExitPort
     if [[ -z "${chainExitPort}" ]]; then
@@ -8796,6 +8871,10 @@ setupChainRelay() {
         read -r -p "公网IP:" publicIP
         if [[ -z "${publicIP}" ]]; then
             echoContent red " ---> IP不能为空"
+            return 1
+        fi
+        if ! isValidIP "${publicIP}"; then
+            echoContent red " ---> IP地址格式无效"
             return 1
         fi
     fi
@@ -10130,7 +10209,7 @@ dnsRouting() {
     if [[ -z "${configPath}" ]]; then
         echoContent red " ---> 未安装，请使用脚本安装"
         menu
-        exit 0
+        exit 1
     fi
     echoContent skyBlue "\n功能 1/${totalProgress} : DNS分流"
     echoContent red "\n=============================================================="
@@ -10157,7 +10236,7 @@ sniRouting() {
     if [[ -z "${configPath}" ]]; then
         echoContent red " ---> 未安装，请使用脚本安装"
         menu
-        exit 0
+        exit 1
     fi
     echoContent skyBlue "\n功能 1/${totalProgress} : SNI反向代理分流"
     echoContent red "\n=============================================================="
@@ -10182,6 +10261,11 @@ sniRouting() {
 setUnlockSNI() {
     read -r -p "请输入分流的SNI IP:" setSNIP
     if [[ -n ${setSNIP} ]]; then
+        # 验证IP格式
+        if ! isValidIP "${setSNIP}"; then
+            echoContent red " ---> IP地址格式无效，请输入正确的IPv4或IPv6地址"
+            exit 1
+        fi
         echoContent red "=============================================================="
 
         if [[ "${coreInstallType}" == 1 ]]; then
@@ -10213,7 +10297,7 @@ EOF
     else
         echoContent red " ---> SNI IP不可为空"
     fi
-    exit 0
+    exit 1
 }
 
 # 添加xray dns 配置
@@ -10222,10 +10306,16 @@ addXrayDNSConfig() {
     local domainList=$2
     local domains=[]
     while read -r line; do
+        if [[ -z "${line}" ]]; then
+            continue
+        fi
         local geositeStatus
-        geositeStatus=$(curl -s "https://api.github.com/repos/v2fly/domain-list-community/contents/data/${line}" | jq .message)
+        # 添加超时和错误处理
+        geositeStatus=$(curl -s --connect-timeout 5 --max-time 10 \
+            "https://api.github.com/repos/v2fly/domain-list-community/contents/data/${line}" 2>/dev/null | jq -r '.message // empty')
 
-        if [[ "${geositeStatus}" == "null" ]]; then
+        # 如果API返回空(文件存在)，使用geosite格式
+        if [[ -z "${geositeStatus}" ]]; then
             domains=$(echo "${domains}" | jq -r '. += ["geosite:'"${line}"'"]')
         else
             domains=$(echo "${domains}" | jq -r '. += ["domain:'"${line}"'"]')
@@ -10358,7 +10448,7 @@ setUnlockDNS() {
     else
         echoContent red " ---> dns不可为空"
     fi
-    exit 0
+    exit 1
 }
 
 # 移除 DNS分流
@@ -10450,11 +10540,11 @@ customSingBoxInstall() {
     echoContent skyBlue "--------------------------------------------------------------"
     if echo "${selectCustomInstallType}" | grep -q "，"; then
         echoContent red " ---> 请使用英文逗号分隔"
-        exit 0
+        exit 1
     fi
     if [[ "${selectCustomInstallType}" != "10" ]] && [[ "${selectCustomInstallType}" != "11" ]] && [[ "${selectCustomInstallType}" != "13" ]] && [[ "${selectCustomInstallType}" != "14" ]] && ((${#selectCustomInstallType} >= 2)) && ! echo "${selectCustomInstallType}" | grep -q ","; then
         echoContent red " ---> 多选请使用英文逗号分隔"
-        exit 0
+        exit 1
     fi
     if [[ "${selectCustomInstallType: -1}" != "," ]]; then
         selectCustomInstallType="${selectCustomInstallType},"
@@ -10517,11 +10607,11 @@ customXrayInstall() {
     echoContent skyBlue "--------------------------------------------------------------"
     if echo "${selectCustomInstallType}" | grep -q "，"; then
         echoContent red " ---> 请使用英文逗号分隔"
-        exit 0
+        exit 1
     fi
     if [[ "${selectCustomInstallType}" != "12" ]] && ((${#selectCustomInstallType} >= 2)) && ! echo "${selectCustomInstallType}" | grep -q ","; then
         echoContent red " ---> 多选请使用英文逗号分隔"
-        exit 0
+        exit 1
     fi
 
     if [[ "${selectCustomInstallType}" == "7" ]]; then
@@ -10722,7 +10812,7 @@ coreVersionManageMenu() {
     if [[ -z "${coreInstallType}" ]]; then
         echoContent red "\n ---> 没有检测到安装目录，请执行脚本安装内容"
         menu
-        exit 0
+        exit 1
     fi
     echoContent skyBlue "\n功能 1/1 : 请选择核心"
     echoContent red "\n=============================================================="
@@ -10753,7 +10843,7 @@ manageAccount() {
     echoContent skyBlue "\n功能 1/${totalProgress} : 账号管理"
     if [[ -z "${configPath}" ]]; then
         echoContent red " ---> 未安装"
-        exit 0
+        exit 1
     fi
 
     echoContent red "\n=============================================================="
@@ -10800,7 +10890,7 @@ installSubscribe() {
                 installNginxTools
             else
                 echoContent red " ---> 放弃安装nginx\n"
-                exit 0
+                exit 1
             fi
         fi
         echoContent yellow "开始配置订阅，请输入订阅的端口\n"
@@ -10933,7 +11023,7 @@ addOtherSubscribe() {
 
         if [[ -f "/etc/Proxy-agent/subscribe_remote/remoteSubscribeUrl" ]] && grep -q "${remoteSubscribeUrl}" /etc/Proxy-agent/subscribe_remote/remoteSubscribeUrl; then
             echoContent red " ---> 此订阅已添加"
-            exit 0
+            exit 1
         fi
         echo
         read -r -p "是否是HTTP订阅？[y/n]" httpSubscribeStatus
@@ -11550,7 +11640,7 @@ switchAlpn() {
     echoContent skyBlue "\n功能 1/${totalProgress} : 切换alpn"
     if [[ -z ${currentAlpn} ]]; then
         echoContent red " ---> 无法读取alpn，请检查是否安装"
-        exit 0
+        exit 1
     fi
 
     echoContent red "\n=============================================================="
@@ -11583,7 +11673,7 @@ switchAlpn() {
         echo "${frontingTypeJSON}" | jq . >${configPath}${frontingType}.json
     else
         echoContent red " ---> 选择错误"
-        exit 0
+        exit 1
     fi
     reloadCore
 }
@@ -11684,7 +11774,7 @@ checkRealityDest() {
         echoContent red "\n ---> 检测到使用的域名，托管在cloudflare并开启了代理，使用此类型域名可能导致VPS流量被其他人使用[不建议使用]\n"
         read -r -p "是否继续 ？[y/n]" setRealityDestStatus
         if [[ "${setRealityDestStatus}" != 'y' ]]; then
-            exit 0
+            exit 1
         fi
         echoContent yellow "\n ---> 忽略风险，继续使用"
     fi
@@ -11749,7 +11839,7 @@ initRealityClientServersName() {
                 local realityDomainCheck="${realityServerName%%:*}"
                 if ! isValidDomain "${realityDomainCheck}"; then
                     echoContent red " ---> 域名格式无效或包含不安全字符"
-                    exit 0
+                    exit 1
                 fi
             fi
             if echo "${realityServerName}" | grep -q ":"; then
@@ -11843,7 +11933,7 @@ manageReality() {
 
     if ! echo "${currentInstallProtocolType}" | grep -q -E "7,|8," || [[ -z "${coreInstallType}" ]]; then
         echoContent red "\n ---> 请先安装Reality协议，并确认已配置可用的 serverName/公钥。"
-        exit 0
+        exit 1
     fi
 
     if [[ "${coreInstallType}" == "1" ]]; then
@@ -11899,7 +11989,7 @@ realityScanner() {
     echoContent yellow "IP:${publicIP}"
     if [[ -z "${publicIP}" ]]; then
         echoContent red " ---> 无法获取IP"
-        exit 0
+        exit 1
     fi
 
     read -r -p "IP是否正确？[y/n]:" ipStatus
@@ -11986,7 +12076,7 @@ singBoxVersionManageMenu() {
     if [[ -z "${singBoxConfigPath}" ]]; then
         echoContent red " ---> 没有检测到安装程序，请执行脚本安装内容"
         menu
-        exit 0
+        exit 1
     fi
     echoContent red "\n=============================================================="
     echoContent yellow "1.升级 sing-box"
