@@ -8324,7 +8324,7 @@ ensureSingBoxInstalled() {
 EOF
     fi
 
-    # 确保 DNS 配置存在 (使用 sing-box 1.12+ 新格式)
+    # 确保 DNS 配置存在 (使用 sing-box 1.12+ 兼容格式)
     if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config/01_dns.json" ]]; then
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_dns.json
 {
@@ -8332,13 +8332,11 @@ EOF
         "servers": [
             {
                 "tag": "google",
-                "address": "https://dns.google/dns-query",
-                "detour": "direct"
+                "address": "8.8.8.8"
             },
             {
-                "tag": "local",
-                "address": "local",
-                "detour": "direct"
+                "tag": "cloudflare",
+                "address": "1.1.1.1"
             }
         ]
     }
