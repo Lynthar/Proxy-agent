@@ -8344,14 +8344,15 @@ EOF
 EOF
     fi
 
-    # 确保直连出站存在
+    # 确保直连出站存在（使用 prefer_ipv4 策略，优先IPv4但保留IPv6兼容）
     if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json" ]]; then
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
 {
     "outbounds": [
         {
             "type": "direct",
-            "tag": "direct"
+            "tag": "direct",
+            "domain_strategy": "prefer_ipv4"
         }
     ]
 }
@@ -8524,6 +8525,7 @@ setupChainExit() {
     fi
 
     # 创建入站配置
+    # 启用 sniff 嗅探 TLS/HTTP 域名，配合 domain_strategy 优先使用 IPv4
     cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
 {
     "inbounds": [
@@ -8536,7 +8538,10 @@ setupChainExit() {
             "password": "${chainKey}",
             "multiplex": {
                 "enabled": true
-            }
+            },
+            "sniff": true,
+            "sniff_override_destination": true,
+            "domain_strategy": "prefer_ipv4"
         }
     ]
 }
@@ -9157,6 +9162,7 @@ setupChainEntryMultiHop() {
     echo "{\"outbounds\": ${outboundsJson}}" | jq . > /etc/Proxy-agent/sing-box/conf/config/chain_outbound.json
 
     # 如果有 Xray 代理协议，创建 SOCKS5 桥接入站
+    # 启用 sniff 嗅探 TLS/HTTP 域名，配合 domain_strategy 优先使用 IPv4
     if [[ "${hasXrayProtocols}" == "true" ]]; then
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json
 {
@@ -9165,7 +9171,10 @@ setupChainEntryMultiHop() {
             "type": "socks",
             "tag": "chain_bridge_in",
             "listen": "127.0.0.1",
-            "listen_port": ${chainBridgePort}
+            "listen_port": ${chainBridgePort},
+            "sniff": true,
+            "sniff_override_destination": true,
+            "domain_strategy": "prefer_ipv4"
         }
     ]
 }
@@ -9398,6 +9407,7 @@ setupChainEntry() {
 EOF
 
     # 如果有 Xray 代理协议，创建 SOCKS5 桥接入站
+    # 启用 sniff 嗅探 TLS/HTTP 域名，配合 domain_strategy 优先使用 IPv4
     if [[ "${hasXrayProtocols}" == "true" ]]; then
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json
 {
@@ -9406,7 +9416,10 @@ EOF
             "type": "socks",
             "tag": "chain_bridge_in",
             "listen": "127.0.0.1",
-            "listen_port": ${chainBridgePort}
+            "listen_port": ${chainBridgePort},
+            "sniff": true,
+            "sniff_override_destination": true,
+            "domain_strategy": "prefer_ipv4"
         }
     ]
 }
