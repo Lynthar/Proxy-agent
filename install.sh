@@ -3487,26 +3487,56 @@ handleSingBox() {
     local mergeResult=0
 
     if [[ -f "/etc/systemd/system/sing-box.service" ]]; then
-        if [[ -z $(pgrep -f "sing-box") ]] && [[ "$1" == "start" ]]; then
+        if [[ "$1" == "start" ]]; then
+            # 先确保停止旧进程
+            if [[ -n $(pgrep -x "sing-box") ]]; then
+                systemctl stop sing-box.service
+                # 等待进程完全退出
+                local waitCount=0
+                while [[ -n $(pgrep -x "sing-box") ]] && [[ ${waitCount} -lt 10 ]]; do
+                    sleep 0.5
+                    ((waitCount++))
+                done
+            fi
             singBoxMergeConfig || mergeResult=$?
             if [[ ${mergeResult} -ne 0 ]]; then
                 echoContent red " ---> sing-box 配置合并失败，无法启动服务"
                 exit 1
             fi
             systemctl start sing-box.service || startResult=$?
-        elif [[ -n $(pgrep -f "sing-box") ]] && [[ "$1" == "stop" ]]; then
+        elif [[ "$1" == "stop" ]] && [[ -n $(pgrep -x "sing-box") ]]; then
             systemctl stop sing-box.service
+            # 等待进程完全退出
+            local waitCount=0
+            while [[ -n $(pgrep -x "sing-box") ]] && [[ ${waitCount} -lt 10 ]]; do
+                sleep 0.5
+                ((waitCount++))
+            done
         fi
     elif [[ -f "/etc/init.d/sing-box" ]]; then
-        if [[ -z $(pgrep -f "sing-box") ]] && [[ "$1" == "start" ]]; then
+        if [[ "$1" == "start" ]]; then
+            # 先确保停止旧进程
+            if [[ -n $(pgrep -x "sing-box") ]]; then
+                rc-service sing-box stop
+                local waitCount=0
+                while [[ -n $(pgrep -x "sing-box") ]] && [[ ${waitCount} -lt 10 ]]; do
+                    sleep 0.5
+                    ((waitCount++))
+                done
+            fi
             singBoxMergeConfig || mergeResult=$?
             if [[ ${mergeResult} -ne 0 ]]; then
                 echoContent red " ---> sing-box 配置合并失败，无法启动服务"
                 exit 1
             fi
             rc-service sing-box start || startResult=$?
-        elif [[ -n $(pgrep -f "sing-box") ]] && [[ "$1" == "stop" ]]; then
+        elif [[ "$1" == "stop" ]] && [[ -n $(pgrep -x "sing-box") ]]; then
             rc-service sing-box stop
+            local waitCount=0
+            while [[ -n $(pgrep -x "sing-box") ]] && [[ ${waitCount} -lt 10 ]]; do
+                sleep 0.5
+                ((waitCount++))
+            done
         fi
     fi
     sleep 1.5
@@ -9239,7 +9269,7 @@ setupChainEntryMultiHop() {
     echo "{\"outbounds\": ${outboundsJson}}" | jq . > /etc/Proxy-agent/sing-box/conf/config/chain_outbound.json
 
     # 如果有 Xray 代理协议，创建 SOCKS5 桥接入站
-    # 启用 sniff 嗅探 TLS/HTTP 域名，配合 domain_strategy 优先使用 IPv4
+    # 启用 sniff 嗅探域名并用 prefer_ipv4 重新解析，解决出口机无 IPv6 的问题
     if [[ "${hasXrayProtocols}" == "true" ]]; then
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json
 {
@@ -9249,7 +9279,9 @@ setupChainEntryMultiHop() {
             "tag": "chain_bridge_in",
             "listen": "127.0.0.1",
             "listen_port": ${chainBridgePort},
-            "sniff": true
+            "sniff": true,
+            "sniff_override_destination": true,
+            "domain_strategy": "prefer_ipv4"
         }
     ]
 }
@@ -9482,7 +9514,7 @@ setupChainEntry() {
 EOF
 
     # 如果有 Xray 代理协议，创建 SOCKS5 桥接入站
-    # 启用 sniff 嗅探 TLS/HTTP 域名，配合 domain_strategy 优先使用 IPv4
+    # 启用 sniff 嗅探域名并用 prefer_ipv4 重新解析，解决出口机无 IPv6 的问题
     if [[ "${hasXrayProtocols}" == "true" ]]; then
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json
 {
@@ -9492,7 +9524,9 @@ EOF
             "tag": "chain_bridge_in",
             "listen": "127.0.0.1",
             "listen_port": ${chainBridgePort},
-            "sniff": true
+            "sniff": true,
+            "sniff_override_destination": true,
+            "domain_strategy": "prefer_ipv4"
         }
     ]
 }
