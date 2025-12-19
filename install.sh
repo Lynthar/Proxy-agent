@@ -9272,6 +9272,11 @@ EOF
         "rules": [
             {
                 "type": "field",
+                "ip": ["127.0.0.0/8", "::1"],
+                "outboundTag": "z_direct_outbound"
+            },
+            {
+                "type": "field",
                 "domain": [
                     "domain:gstatic.com",
                     "domain:googleapis.com",
@@ -9508,6 +9513,11 @@ EOF
     "routing": {
         "domainStrategy": "AsIs",
         "rules": [
+            {
+                "type": "field",
+                "ip": ["127.0.0.0/8", "::1"],
+                "outboundTag": "z_direct_outbound"
+            },
             {
                 "type": "field",
                 "domain": [
