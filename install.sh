@@ -2794,6 +2794,12 @@ nginxBlog() {
         echoContent yellow "\n开始添加伪装站点"
     fi
 
+    # 伪装站模板列表 (来自 Lynthar/website-examples)
+    local templates=("cloud-drive" "game-zone" "net-disk" "play-hub" "stream-box" "video-portal")
+    local templateCount=${#templates[@]}
+    local repoUrl="https://github.com/Lynthar/website-examples/archive/refs/heads/main.zip"
+    local tempDir="/tmp/website-examples-$$"
+
     if [[ -d "${nginxStaticPath}" && -f "${nginxStaticPath}/check" ]]; then
         echo
         if [[ -z "${lastInstallationConfig}" ]]; then
@@ -2803,33 +2809,59 @@ nginxBlog() {
         fi
 
         if [[ "${nginxBlogInstallStatus}" == "y" ]]; then
-            rm -rf "${nginxStaticPath}*"
-            #  randomNum=$((RANDOM % 6 + 1))
-            randomNum=$(randomNum 1 9)
+            rm -rf "${nginxStaticPath}"*
+            # 随机选择模板
+            randomNum=$(randomNum 0 $((templateCount - 1)))
+            local selectedTemplate="${templates[$randomNum]}"
+
+            # 下载并解压仓库
+            mkdir -p "${tempDir}"
             if [[ "${release}" == "alpine" ]]; then
-                wget -q -P "${nginxStaticPath}" "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/fodder/blog/unable/html${randomNum}.zip"
+                wget -q -O "${tempDir}/repo.zip" "${repoUrl}"
             else
-                wget -q "${wgetShowProgressStatus}" -P "${nginxStaticPath}" "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/fodder/blog/unable/html${randomNum}.zip"
+                wget -q ${wgetShowProgressStatus} -O "${tempDir}/repo.zip" "${repoUrl}"
             fi
 
-            unzip -o "${nginxStaticPath}html${randomNum}.zip" -d "${nginxStaticPath}" >/dev/null
-            rm -f "${nginxStaticPath}html${randomNum}.zip*"
-            echoContent green " ---> 添加伪装站点成功"
+            unzip -q -o "${tempDir}/repo.zip" -d "${tempDir}"
+
+            # 复制模板到目标目录
+            mkdir -p "${nginxStaticPath}"
+            cp -rf "${tempDir}/website-examples-main/${selectedTemplate}/"* "${nginxStaticPath}"
+
+            # 创建 check 标记文件
+            echo "${selectedTemplate}" > "${nginxStaticPath}/check"
+
+            # 清理临时文件
+            rm -rf "${tempDir}"
+            echoContent green " ---> 添加伪装站点成功 [${selectedTemplate}]"
         fi
     else
-        randomNum=$(randomNum 1 9)
-        #        randomNum=$((RANDOM % 6 + 1))
-        rm -rf "${nginxStaticPath}*"
+        # 随机选择模板
+        randomNum=$(randomNum 0 $((templateCount - 1)))
+        local selectedTemplate="${templates[$randomNum]}"
 
+        rm -rf "${nginxStaticPath}"*
+        mkdir -p "${tempDir}"
+
+        # 下载并解压仓库
         if [[ "${release}" == "alpine" ]]; then
-            wget -q -P "${nginxStaticPath}" "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/fodder/blog/unable/html${randomNum}.zip"
+            wget -q -O "${tempDir}/repo.zip" "${repoUrl}"
         else
-            wget -q "${wgetShowProgressStatus}" -P "${nginxStaticPath}" "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/fodder/blog/unable/html${randomNum}.zip"
+            wget -q ${wgetShowProgressStatus} -O "${tempDir}/repo.zip" "${repoUrl}"
         fi
 
-        unzip -o "${nginxStaticPath}html${randomNum}.zip" -d "${nginxStaticPath}" >/dev/null
-        rm -f "${nginxStaticPath}html${randomNum}.zip*"
-        echoContent green " ---> 添加伪装站点成功"
+        unzip -q -o "${tempDir}/repo.zip" -d "${tempDir}"
+
+        # 复制模板到目标目录
+        mkdir -p "${nginxStaticPath}"
+        cp -rf "${tempDir}/website-examples-main/${selectedTemplate}/"* "${nginxStaticPath}"
+
+        # 创建 check 标记文件
+        echo "${selectedTemplate}" > "${nginxStaticPath}/check"
+
+        # 清理临时文件
+        rm -rf "${tempDir}"
+        echoContent green " ---> 添加伪装站点成功 [${selectedTemplate}]"
     fi
 
 }
@@ -6561,22 +6593,41 @@ updateNginxBlog() {
         echoContent red "\n ---> 由于环境依赖，请先安装Xray-core的VLESS_TCP_TLS_Vision"
         exit 1
     fi
+
+    # 伪装站模板列表 (来自 Lynthar/website-examples)
+    local templates=("cloud-drive" "game-zone" "net-disk" "play-hub" "stream-box" "video-portal")
+    local templateNames=("云存储网站" "游戏平台" "网盘系统" "游戏中心" "流媒体平台" "视频门户")
+    local templateCount=${#templates[@]}
+    local repoUrl="https://github.com/Lynthar/website-examples/archive/refs/heads/main.zip"
+    local tempDir="/tmp/website-examples-$$"
+
+    # 显示当前模板
+    local currentTemplate=""
+    if [[ -f "${nginxStaticPath}/check" ]]; then
+        currentTemplate=$(cat "${nginxStaticPath}/check")
+    fi
+
     echoContent red "=============================================================="
+    echoContent yellow "# 模板来源: https://github.com/Lynthar/website-examples"
     echoContent yellow "# 如需自定义，请手动复制模版文件到 ${nginxStaticPath} \n"
-    echoContent yellow "1.新手引导"
-    echoContent yellow "2.游戏网站"
-    echoContent yellow "3.个人博客01"
-    echoContent yellow "4.企业站"
-    echoContent yellow "5.解锁加密的音乐文件模版[https://github.com/ix64/unlock-music]"
-    echoContent yellow "6.mikutap[https://github.com/HFIProgramming/mikutap]"
-    echoContent yellow "7.企业站02"
-    echoContent yellow "8.个人博客02"
-    echoContent yellow "9.404自动跳转baidu"
-    echoContent yellow "10.302重定向网站"
+    if [[ -n "${currentTemplate}" ]]; then
+        echoContent green "# 当前模板: ${currentTemplate}\n"
+    fi
+
+    local i=1
+    for name in "${templateNames[@]}"; do
+        local marker=""
+        if [[ "${templates[$((i-1))]}" == "${currentTemplate}" ]]; then
+            marker=" [当前]"
+        fi
+        echoContent yellow "${i}.${name}${marker}"
+        ((i++))
+    done
+    echoContent yellow "7.302重定向网站"
     echoContent red "=============================================================="
     read -r -p "请选择:" selectInstallNginxBlogType
 
-    if [[ "${selectInstallNginxBlogType}" == "10" ]]; then
+    if [[ "${selectInstallNginxBlogType}" == "7" ]]; then
         if [[ "${coreInstallType}" == "2" ]]; then
             echoContent red "\n ---> 此功能仅支持Xray-core内核，请等待后续更新"
             exit 1
@@ -6614,19 +6665,42 @@ updateNginxBlog() {
             exit 0
         fi
     fi
-    if [[ "${selectInstallNginxBlogType}" =~ ^[1-9]$ ]]; then
-        rm -rf "${nginxStaticPath}*"
 
+    if [[ "${selectInstallNginxBlogType}" =~ ^[1-6]$ ]]; then
+        local selectedTemplate="${templates[$((selectInstallNginxBlogType - 1))]}"
+        local selectedName="${templateNames[$((selectInstallNginxBlogType - 1))]}"
+
+        echoContent yellow " ---> 正在下载模板 [${selectedName}]..."
+
+        rm -rf "${nginxStaticPath}"*
+        mkdir -p "${tempDir}"
+
+        # 下载并解压仓库
         if [[ "${release}" == "alpine" ]]; then
-            wget -q -P "${nginxStaticPath}" "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/fodder/blog/unable/html${selectInstallNginxBlogType}.zip"
+            wget -q -O "${tempDir}/repo.zip" "${repoUrl}"
         else
-            wget -q "${wgetShowProgressStatus}" -P "${nginxStaticPath}" "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/fodder/blog/unable/html${selectInstallNginxBlogType}.zip"
+            wget -q ${wgetShowProgressStatus} -O "${tempDir}/repo.zip" "${repoUrl}"
         fi
 
-        unzip -o "${nginxStaticPath}html${selectInstallNginxBlogType}.zip" -d "${nginxStaticPath}" >/dev/null
-        rm -f "${nginxStaticPath}html${selectInstallNginxBlogType}.zip*"
-        echoContent green " ---> 更换伪站成功"
-    else
+        if [[ ! -f "${tempDir}/repo.zip" ]]; then
+            echoContent red " ---> 下载失败，请检查网络连接"
+            rm -rf "${tempDir}"
+            exit 1
+        fi
+
+        unzip -q -o "${tempDir}/repo.zip" -d "${tempDir}"
+
+        # 复制模板到目标目录
+        mkdir -p "${nginxStaticPath}"
+        cp -rf "${tempDir}/website-examples-main/${selectedTemplate}/"* "${nginxStaticPath}"
+
+        # 创建 check 标记文件
+        echo "${selectedTemplate}" > "${nginxStaticPath}/check"
+
+        # 清理临时文件
+        rm -rf "${tempDir}"
+        echoContent green " ---> 更换伪站成功 [${selectedName}]"
+    elif [[ "${selectInstallNginxBlogType}" != "7" ]]; then
         echoContent red " ---> 选择错误，请重新选择"
         updateNginxBlog
     fi
