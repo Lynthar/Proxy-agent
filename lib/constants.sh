@@ -189,53 +189,7 @@ readonly SCRIPT_AUTHOR="Lynthar"
 readonly SCRIPT_REPO="https://github.com/Lynthar/Proxy-agent"
 
 # ============================================================================
-# 辅助函数: 检查协议是否已安装
-# 用法: isProtocolInstalled $PROTOCOL_HYSTERIA2
+# 注意: 协议辅助函数已移至 protocol-registry.sh
+# 包括: isProtocolInstalled, getProtocolConfigPath, getProtocolDisplayName,
+#       protocolRequiresTLS 等
 # ============================================================================
-
-isProtocolInstalled() {
-    local protocolId="$1"
-    [[ -n "${currentInstallProtocolType}" ]] && \
-        echo "${currentInstallProtocolType}" | grep -q ",${protocolId},"
-}
-
-# ============================================================================
-# 辅助函数: 获取协议配置文件路径
-# 用法: getProtocolConfigPath $PROTOCOL_HYSTERIA2 "singbox"
-# ============================================================================
-
-getProtocolConfigPath() {
-    local protocolId="$1"
-    local core="${2:-xray}"  # 默认xray
-    local configFile="${PROTOCOL_CONFIG_FILES[${protocolId}]}"
-
-    if [[ -z "${configFile}" ]]; then
-        return 1
-    fi
-
-    if [[ "${core}" == "singbox" || "${core}" == "sing-box" ]]; then
-        echo "${SINGBOX_CONFIG_DIR}/${configFile}.json"
-    else
-        echo "${XRAY_CONFIG_DIR}/${configFile}.json"
-    fi
-}
-
-# ============================================================================
-# 辅助函数: 获取协议显示名称
-# 用法: getProtocolDisplayName $PROTOCOL_HYSTERIA2
-# ============================================================================
-
-getProtocolDisplayName() {
-    local protocolId="$1"
-    echo "${PROTOCOL_DISPLAY_NAMES[${protocolId}]:-Unknown Protocol}"
-}
-
-# ============================================================================
-# 辅助函数: 检查协议是否需要TLS
-# 用法: protocolRequiresTLS $PROTOCOL_SS2022
-# ============================================================================
-
-protocolRequiresTLS() {
-    local protocolId="$1"
-    [[ "${PROTOCOL_REQUIRES_TLS[${protocolId}]}" == "true" ]]
-}
