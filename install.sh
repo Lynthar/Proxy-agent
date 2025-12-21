@@ -61,7 +61,7 @@ unset _LIB_DIR _module
 
 # ============================================================================
 # 版本号管理
-# 版本号来源优先级: VERSION文件 > 硬编码默认值
+# 版本号来源优先级: VERSION文件 > GitHub Release > 硬编码默认值
 # ============================================================================
 _load_version() {
     local versionFile="${_SCRIPT_DIR}/VERSION"
@@ -74,8 +74,20 @@ _load_version() {
     elif [[ -f "${installedVersionFile}" ]]; then
         SCRIPT_VERSION="v$(cat "${installedVersionFile}" 2>/dev/null | tr -d '[:space:]')"
     else
-        # 默认版本
-        SCRIPT_VERSION="v3.6.0"
+        # 尝试从 GitHub Releases 获取最新版本（初次安装时使用）
+        local remoteVersion
+        local apiUrl="https://api.github.com/repos/Lynthar/Proxy-agent/releases/latest"
+        remoteVersion=$(curl -s --connect-timeout 3 -m 5 "${apiUrl}" 2>/dev/null | \
+            sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+
+        if [[ -n "${remoteVersion}" ]]; then
+            # 确保版本号以 v 开头
+            [[ "${remoteVersion}" != v* ]] && remoteVersion="v${remoteVersion}"
+            SCRIPT_VERSION="${remoteVersion}"
+        else
+            # 网络不可用时显示初始版本标识
+            SCRIPT_VERSION="(initial)"
+        fi
     fi
     export SCRIPT_VERSION
 }
