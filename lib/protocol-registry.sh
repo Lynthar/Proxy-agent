@@ -11,28 +11,8 @@
 readonly _PROTOCOL_REGISTRY_LOADED=1
 
 # ============================================================================
-# 协议ID常量（与constants.sh保持一致）
+# 注意: 协议ID常量定义在 constants.sh 中，本模块依赖其先加载
 # ============================================================================
-
-# 如果constants.sh未定义，则在此定义
-if [[ -z "${PROTOCOL_VLESS_TCP_VISION+x}" ]]; then
-    readonly PROTOCOL_VLESS_TCP_VISION=0
-    readonly PROTOCOL_VLESS_WS=1
-    readonly PROTOCOL_TROJAN_GRPC=2
-    readonly PROTOCOL_VMESS_WS=3
-    readonly PROTOCOL_TROJAN_TCP=4
-    readonly PROTOCOL_VLESS_GRPC=5
-    readonly PROTOCOL_HYSTERIA2=6
-    readonly PROTOCOL_VLESS_REALITY_VISION=7
-    readonly PROTOCOL_VLESS_REALITY_GRPC=8
-    readonly PROTOCOL_TUIC=9
-    readonly PROTOCOL_NAIVE=10
-    readonly PROTOCOL_VMESS_HTTP_UPGRADE=11
-    readonly PROTOCOL_VLESS_REALITY_XHTTP=12
-    readonly PROTOCOL_ANYTLS=13
-    readonly PROTOCOL_SS2022=14
-    readonly PROTOCOL_SOCKS5=20
-fi
 
 # ============================================================================
 # 协议配置文件名映射
