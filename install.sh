@@ -2807,7 +2807,7 @@ nginxBlog() {
     fi
 
     # 伪装站模板列表 (来自 Lynthar/website-examples)
-    local templates=("cloud-drive" "game-zone" "net-disk" "play-hub" "stream-box" "video-portal")
+    local templates=("cloud-drive" "game-zone" "net-disk" "play-hub" "stream-box" "video-portal" "music-flow" "podcast-hub" "ai-forge")
     local templateCount=${#templates[@]}
     local repoUrl="https://github.com/Lynthar/website-examples/archive/refs/heads/main.zip"
     local tempDir="/tmp/website-examples-$$"
@@ -6607,8 +6607,8 @@ updateNginxBlog() {
     fi
 
     # 伪装站模板列表 (来自 Lynthar/website-examples)
-    local templates=("cloud-drive" "game-zone" "net-disk" "play-hub" "stream-box" "video-portal")
-    local templateNames=("云存储网站" "游戏平台" "网盘系统" "游戏中心" "流媒体平台" "视频门户")
+    local templates=("cloud-drive" "game-zone" "net-disk" "play-hub" "stream-box" "video-portal" "music-flow" "podcast-hub" "ai-forge")
+    local templateNames=("云存储网站" "游戏平台" "网盘系统" "游戏中心" "流媒体平台" "视频门户" "音乐平台" "播客平台" "AI平台")
     local templateCount=${#templates[@]}
     local repoUrl="https://github.com/Lynthar/website-examples/archive/refs/heads/main.zip"
     local tempDir="/tmp/website-examples-$$"
@@ -6635,11 +6635,11 @@ updateNginxBlog() {
         echoContent yellow "${i}.${name}${marker}"
         ((i++))
     done
-    echoContent yellow "7.302重定向网站"
+    echoContent yellow "10.302重定向网站"
     echoContent red "=============================================================="
     read -r -p "请选择:" selectInstallNginxBlogType
 
-    if [[ "${selectInstallNginxBlogType}" == "7" ]]; then
+    if [[ "${selectInstallNginxBlogType}" == "10" ]]; then
         if [[ "${coreInstallType}" == "2" ]]; then
             echoContent red "\n ---> 此功能仅支持Xray-core内核，请等待后续更新"
             exit 1
@@ -6678,7 +6678,7 @@ updateNginxBlog() {
         fi
     fi
 
-    if [[ "${selectInstallNginxBlogType}" =~ ^[1-6]$ ]]; then
+    if [[ "${selectInstallNginxBlogType}" =~ ^[1-9]$ ]]; then
         local selectedTemplate="${templates[$((selectInstallNginxBlogType - 1))]}"
         local selectedName="${templateNames[$((selectInstallNginxBlogType - 1))]}"
 
@@ -7459,13 +7459,139 @@ bbrInstall() {
     echoContent red "\n=============================================================="
     echoContent green "BBR、DD脚本用的[ylx2016]的成熟作品，地址[https://github.com/ylx2016/Linux-NetSpeed]，请熟知"
     echoContent yellow "1.安装脚本【推荐原版BBR+FQ】"
-    echoContent yellow "2.回退主目录"
+    echoContent yellow "2.TCP 缓冲区优化（内存自适应）"
+    echoContent yellow "3.回退主目录"
     echoContent red "=============================================================="
     read -r -p "请选择:" installBBRStatus
     if [[ "${installBBRStatus}" == "1" ]]; then
         wget -O tcpx.sh "https://github.com/ylx2016/Linux-NetSpeed/raw/master/tcpx.sh" && chmod +x tcpx.sh && ./tcpx.sh
+    elif [[ "${installBBRStatus}" == "2" ]]; then
+        optimizeTCPBuffers
     else
         menu
+    fi
+}
+
+# TCP缓冲区内存自适应优化
+optimizeTCPBuffers() {
+    echoContent skyBlue "\n===== TCP 缓冲区内存自适应优化 ====="
+
+    # 检测当前 BBR 状态
+    local currentCC
+    currentCC=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    if [[ "${currentCC}" != "bbr" ]]; then
+        echoContent yellow " ---> 当前拥塞控制算法: ${currentCC}"
+        echoContent yellow " ---> 建议先安装 BBR 再进行缓冲区优化"
+        read -r -p "是否继续优化? [y/n]:" confirmOptimize
+        if [[ "${confirmOptimize}" != "y" && "${confirmOptimize}" != "Y" ]]; then
+            return
+        fi
+    else
+        echoContent green " ---> 检测到 BBR 已启用"
+    fi
+
+    # 检测系统内存
+    local memMB
+    memMB=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
+    if [[ -z "${memMB}" || "${memMB}" -le 0 ]]; then
+        echoContent red " ---> 无法检测系统内存，退出"
+        return 1
+    fi
+    echoContent green " ---> 检测到系统内存: ${memMB} MB"
+
+    # 根据内存计算缓冲区参数
+    local rmemMax wmemMax tcpRmem tcpWmem somaxconn fileMax netdevMaxBacklog
+
+    if [[ ${memMB} -le 512 ]]; then
+        echoContent yellow " ---> 小内存模式 (≤512MB)"
+        rmemMax=8388608
+        wmemMax=8388608
+        tcpRmem="4096 65536 8388608"
+        tcpWmem="4096 65536 8388608"
+        somaxconn=32768
+        fileMax=262144
+        netdevMaxBacklog=16384
+    elif [[ ${memMB} -le 1024 ]]; then
+        echoContent yellow " ---> 标准模式 (512MB-1GB)"
+        rmemMax=16777216
+        wmemMax=16777216
+        tcpRmem="4096 65536 16777216"
+        tcpWmem="4096 65536 16777216"
+        somaxconn=49152
+        fileMax=524288
+        netdevMaxBacklog=32768
+    elif [[ ${memMB} -le 2048 ]]; then
+        echoContent yellow " ---> 高性能模式 (1GB-2GB)"
+        rmemMax=33554432
+        wmemMax=33554432
+        tcpRmem="4096 87380 33554432"
+        tcpWmem="4096 65536 33554432"
+        somaxconn=65535
+        fileMax=1048576
+        netdevMaxBacklog=32768
+    else
+        echoContent yellow " ---> 大内存模式 (>2GB)"
+        rmemMax=67108864
+        wmemMax=67108864
+        tcpRmem="4096 131072 67108864"
+        tcpWmem="4096 87380 67108864"
+        somaxconn=65535
+        fileMax=2097152
+        netdevMaxBacklog=65536
+    fi
+
+    # 备份现有配置
+    local configFile="/etc/sysctl.d/99-proxy-agent-tcp.conf"
+    if [[ -f "${configFile}" ]]; then
+        cp "${configFile}" "${configFile}.bak.$(date +%Y%m%d%H%M%S)"
+        echoContent green " ---> 已备份现有配置"
+    fi
+
+    # 写入配置文件
+    cat > "${configFile}" << EOF
+# Proxy-agent TCP Buffer Optimization
+# Generated: $(date)
+# System Memory: ${memMB} MB
+
+# TCP Buffer Sizes (Memory Adaptive)
+net.core.rmem_max = ${rmemMax}
+net.core.wmem_max = ${wmemMax}
+net.ipv4.tcp_rmem = ${tcpRmem}
+net.ipv4.tcp_wmem = ${tcpWmem}
+
+# Connection Backlog
+net.core.somaxconn = ${somaxconn}
+net.ipv4.tcp_max_syn_backlog = ${somaxconn}
+net.core.netdev_max_backlog = ${netdevMaxBacklog}
+
+# File Descriptors
+fs.file-max = ${fileMax}
+
+# TCP Optimization
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_mtu_probing = 1
+
+# Memory Management
+vm.swappiness = 10
+EOF
+
+    # 应用配置
+    if sysctl -p "${configFile}" >/dev/null 2>&1; then
+        echoContent green " ---> TCP 缓冲区优化配置已应用"
+        echoContent green " ---> 配置文件: ${configFile}"
+
+        # 显示关键参数
+        echoContent skyBlue "\n===== 当前生效的关键参数 ====="
+        echoContent yellow " rmem_max: $(sysctl -n net.core.rmem_max) bytes"
+        echoContent yellow " wmem_max: $(sysctl -n net.core.wmem_max) bytes"
+        echoContent yellow " tcp_congestion_control: $(sysctl -n net.ipv4.tcp_congestion_control)"
+        echoContent yellow " somaxconn: $(sysctl -n net.core.somaxconn)"
+    else
+        echoContent red " ---> 配置应用失败，请检查系统权限"
+        return 1
     fi
 }
 
