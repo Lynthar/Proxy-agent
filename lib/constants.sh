@@ -18,13 +18,13 @@ readonly _CONSTANTS_LOADED=1
 
 readonly PROTOCOL_VLESS_TCP_VISION=0      # VLESS+TCP+TLS+Vision
 readonly PROTOCOL_VLESS_WS=1              # VLESS+WebSocket+TLS
-readonly PROTOCOL_TROJAN_GRPC=2           # Trojan+gRPC+TLS (已注释)
+readonly PROTOCOL_TROJAN_GRPC=2           # Trojan+gRPC+TLS (已废弃，推荐XHTTP)
 readonly PROTOCOL_VMESS_WS=3              # VMess+WebSocket+TLS
 readonly PROTOCOL_TROJAN_TCP=4            # Trojan+TCP+TLS
-readonly PROTOCOL_VLESS_GRPC=5            # VLESS+gRPC+TLS
+readonly PROTOCOL_VLESS_GRPC=5            # VLESS+gRPC+TLS (已废弃，推荐XHTTP)
 readonly PROTOCOL_HYSTERIA2=6             # Hysteria2
 readonly PROTOCOL_VLESS_REALITY_VISION=7  # VLESS+Reality+Vision
-readonly PROTOCOL_VLESS_REALITY_GRPC=8    # VLESS+Reality+gRPC
+readonly PROTOCOL_VLESS_REALITY_GRPC=8    # VLESS+Reality+gRPC (已废弃，推荐XHTTP)
 readonly PROTOCOL_TUIC=9                  # TUIC
 readonly PROTOCOL_NAIVE=10                # NaiveProxy
 readonly PROTOCOL_VMESS_HTTPUPGRADE=11    # VMess+HTTPUpgrade+TLS

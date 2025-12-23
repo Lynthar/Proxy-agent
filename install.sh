@@ -2111,147 +2111,8 @@ updateRedirectNginxConf() {
     }
 EOF
 
-    if echo "${selectCustomInstallType}" | grep -qE ",2,|,5," || [[ -z "${selectCustomInstallType}" ]]; then
-
-        cat <<EOF >>${nginxConfigPath}alone.conf
-server {
-	${nginxH2Conf}
-	server_name ${domain};
-	root ${nginxStaticPath};
-
-	set_real_ip_from 127.0.0.1;
-	real_ip_header proxy_protocol;
-
-	# 基础超时配置
-	client_header_timeout 60s;
-	keepalive_timeout 65;
-
-	# 安全头部
-	server_tokens off;
-	add_header X-Content-Type-Options "nosniff" always;
-	add_header X-Frame-Options "SAMEORIGIN" always;
-	add_header X-XSS-Protection "1; mode=block" always;
-
-	location /${currentPath}grpc {
-		if (\$content_type !~ "application/grpc") {
-			return 404;
-		}
-		client_max_body_size 0;
-		grpc_set_header X-Real-IP \$proxy_add_x_forwarded_for;
-		client_body_timeout 86400s;
-		grpc_read_timeout 86400s;
-		grpc_pass grpc://127.0.0.1:31301;
-	}
-
-	location /${currentPath}trojangrpc {
-		if (\$content_type !~ "application/grpc") {
-			return 404;
-		}
-		client_max_body_size 0;
-		grpc_set_header X-Real-IP \$proxy_add_x_forwarded_for;
-		client_body_timeout 86400s;
-		grpc_read_timeout 86400s;
-		grpc_pass grpc://127.0.0.1:31304;
-	}
-
-	# 伪装站静态文件
-	location / {
-		try_files \$uri \$uri/ =404;
-	}
-
-	# 常见静态资源缓存
-	location ~* \.(ico|css|js|gif|jpeg|jpg|png|woff|woff2|ttf|svg|eot)$ {
-		expires 30d;
-		add_header Cache-Control "public, immutable";
-	}
-
-	# favicon 处理
-	location = /favicon.ico {
-		log_not_found off;
-		access_log off;
-	}
-
-	# robots.txt 处理
-	location = /robots.txt {
-		log_not_found off;
-		access_log off;
-	}
-}
-EOF
-    elif echo "${selectCustomInstallType}" | grep -q ",5," || [[ -z "${selectCustomInstallType}" ]]; then
-        cat <<EOF >>${nginxConfigPath}alone.conf
-server {
-	${nginxH2Conf}
-
-	set_real_ip_from 127.0.0.1;
-	real_ip_header proxy_protocol;
-
-	server_name ${domain};
-	root ${nginxStaticPath};
-
-	# 安全头部
-	server_tokens off;
-	add_header X-Content-Type-Options "nosniff" always;
-	add_header X-Frame-Options "SAMEORIGIN" always;
-
-	location /${currentPath}grpc {
-		client_max_body_size 0;
-		keepalive_requests 10000;
-		client_body_timeout 86400s;
-		send_timeout 86400s;
-		lingering_close always;
-		grpc_read_timeout 86400s;
-		grpc_send_timeout 86400s;
-		grpc_pass grpc://127.0.0.1:31301;
-	}
-
-	location / {
-		try_files \$uri \$uri/ =404;
-	}
-
-	location = /favicon.ico { log_not_found off; access_log off; }
-	location = /robots.txt { log_not_found off; access_log off; }
-}
-EOF
-
-    elif echo "${selectCustomInstallType}" | grep -q ",2," || [[ -z "${selectCustomInstallType}" ]]; then
-        cat <<EOF >>${nginxConfigPath}alone.conf
-server {
-	${nginxH2Conf}
-
-	set_real_ip_from 127.0.0.1;
-	real_ip_header proxy_protocol;
-
-	server_name ${domain};
-	root ${nginxStaticPath};
-
-	# 安全头部
-	server_tokens off;
-	add_header X-Content-Type-Options "nosniff" always;
-	add_header X-Frame-Options "SAMEORIGIN" always;
-
-	location /${currentPath}trojangrpc {
-		client_max_body_size 0;
-		keepalive_requests 10000;
-		client_body_timeout 86400s;
-		send_timeout 86400s;
-		lingering_close always;
-		grpc_read_timeout 86400s;
-		grpc_send_timeout 86400s;
-		grpc_pass grpc://127.0.0.1:31301;
-	}
-
-	location / {
-		try_files \$uri \$uri/ =404;
-	}
-
-	location = /favicon.ico { log_not_found off; access_log off; }
-	location = /robots.txt { log_not_found off; access_log off; }
-}
-EOF
-    else
-
-        cat <<EOF >>${nginxConfigPath}alone.conf
+    # gRPC nginx配置块已移除（协议2和5已废弃）
+    cat <<EOF >>${nginxConfigPath}alone.conf
 server {
 	${nginxH2Conf}
 
@@ -2274,7 +2135,6 @@ server {
 	location = /robots.txt { log_not_found off; access_log off; }
 }
 EOF
-    fi
 
     cat <<EOF >>${nginxConfigPath}alone.conf
 server {
@@ -3788,11 +3648,7 @@ initSingBoxClients() {
             currentUser="{\"uuid\":\"${uuid}\",\"flow\":\"xtls-rprx-vision\",\"name\":\"${name}-VLESS_Reality_Vision\"}"
             users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
         fi
-        # VLESS Reality gRPC
-        if echo "${type}" | grep -q ",8,"; then
-            currentUser="{\"uuid\":\"${uuid}\",\"name\":\"${name}-VLESS_Reality_gPRC\"}"
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
-        fi
+        # VLESS Reality gRPC - 已移除，推荐使用XHTTP
 
         # hysteria2
         if echo "${type}" | grep -q ",6,"; then
@@ -4995,31 +4851,9 @@ EOF
     elif [[ -z "$3" ]]; then
         rm /etc/Proxy-agent/xray/conf/05_VMess_WS_inbounds.json >/dev/null 2>&1
     fi
-    # VLESS_gRPC
-    if echo "${selectCustomInstallType}" | grep -q ",5," || [[ "$1" == "all" ]]; then
-        cat <<EOF >/etc/Proxy-agent/xray/conf/06_VLESS_gRPC_inbounds.json
-{
-    "inbounds":[
-        {
-            "port": 31301,
-            "listen": "127.0.0.1",
-            "protocol": "vless",
-            "tag":"VLESSGRPC",
-            "settings": {
-                "clients": $(initXrayClients 5),
-                "decryption": "none"
-            },
-            "streamSettings": {
-                "network": "grpc",
-                "grpcSettings": {
-                    "serviceName": "${customPath}grpc"
-                }
-            }
-        }
-    ]
-}
-EOF
-    elif [[ -z "$3" ]]; then
+    # VLESS_gRPC - 已移除，推荐使用XHTTP
+    # gRPC协议已废弃，清理旧配置文件
+    if [[ -z "$3" ]]; then
         rm /etc/Proxy-agent/xray/conf/06_VLESS_gRPC_inbounds.json >/dev/null 2>&1
     fi
 
@@ -5099,13 +4933,7 @@ EOF
       "protocol": "vless",
       "settings": {
         "clients": $(initXrayClients 7),
-        "decryption": "none",
-        "fallbacks":[
-          {
-            "dest": "31305",
-            "xver": 1
-          }
-        ]
+        "decryption": "none"
       },
       "streamSettings": {
         "network": "tcp",
@@ -5160,33 +4988,7 @@ EOF
   }
 }
 EOF
-        cat <<EOF >/etc/Proxy-agent/xray/conf/08_VLESS_vision_gRPC_inbounds.json
-{
-  "inbounds": [
-    {
-      "port": 31305,
-      "listen": "127.0.0.1",
-      "protocol": "vless",
-      "tag": "VLESSRealityGRPC",
-      "settings": {
-        "clients": $(initXrayClients 8),
-        "decryption": "none"
-      },
-      "streamSettings": {
-            "network": "grpc",
-            "grpcSettings": {
-                "serviceName": "grpc",
-                "multiMode": true
-            },
-            "sockopt": {
-                "acceptProxyProtocol": true
-            }
-      }
-    }
-  ]
-}
-EOF
-
+        # VLESS_Reality_gRPC - 已移除，推荐使用XHTTP
     elif [[ -z "$3" ]]; then
         rm /etc/Proxy-agent/xray/conf/07_VLESS_vision_reality_inbounds.json >/dev/null 2>&1
         rm /etc/Proxy-agent/xray/conf/08_VLESS_vision_gRPC_inbounds.json >/dev/null 2>&1
@@ -5435,49 +5237,9 @@ EOF
         rm /etc/Proxy-agent/sing-box/conf/config/07_VLESS_vision_reality_inbounds.json >/dev/null 2>&1
     fi
 
-    if echo "${selectCustomInstallType}" | grep -q ",8," || [[ "$1" == "all" ]]; then
-        echoContent yellow "\n================== 配置VLESS+Reality+gRPC ==================\n"
-        initRealityClientServersName
-        initRealityKey
-        initRealityShortIds
-        echoContent skyBlue "\n开始配置VLESS+Reality+gRPC协议端口"
-        echo
-        mapfile -t result < <(initSingBoxPort "${singBoxVLESSRealityGRPCPort}")
-        echoContent green "\n ---> VLESS_Reality_gPRC端口：${result[-1]}"
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/08_VLESS_vision_gRPC_inbounds.json
-{
-  "inbounds": [
-    {
-      "type": "vless",
-      "listen":"::",
-      "listen_port":${result[-1]},
-      "users":$(initSingBoxClients 8),
-      "tag": "VLESSRealityGRPC",
-      "tls": {
-        "enabled": true,
-        "server_name": "${realityServerName}",
-        "reality": {
-            "enabled": true,
-            "handshake":{
-                "server":"${realityServerName}",
-                "server_port":${realityDomainPort}
-            },
-            "private_key": "${realityPrivateKey}",
-            "short_id": [
-                "${realityShortId1}",
-                "${realityShortId2}"
-            ]
-        }
-      },
-      "transport": {
-          "type": "grpc",
-          "service_name": "grpc"
-      }
-    }
-  ]
-}
-EOF
-    elif [[ -z "$3" ]]; then
+    # VLESS+Reality+gRPC - 已移除，推荐使用XHTTP
+    # 清理旧配置文件
+    if [[ -z "$3" ]]; then
         rm /etc/Proxy-agent/sing-box/conf/config/08_VLESS_vision_gRPC_inbounds.json >/dev/null 2>&1
     fi
 
@@ -6295,24 +6057,8 @@ showAccounts() {
             done < <(echo "${currentCDNAddress}" | tr ',' '\n')
         done
     fi
-    # trojan grpc
-    if echo ${currentInstallProtocolType} | grep -q ",2,"; then
-        echoContent skyBlue "\n================================  Trojan gRPC TLS [仅CDN推荐]  ================================\n"
-        jq .inbounds[0].settings.clients ${configPath}04_trojan_gRPC_inbounds.json | jq -c '.[]' | while read -r user; do
-            local email=
-            email=$(echo "${user}" | jq -r .email)
-            local count=
-            while read -r line; do
-                echoContent skyBlue "\n ---> 账号:${email}${count}"
-                echo
-                if [[ -n "${line}" ]]; then
-                    defaultBase64Code trojangrpc "${currentDefaultPort}" "${email}${count}" "$(echo "${user}" | jq -r .password)" "${line}"
-                    count=$((count + 1))
-                fi
-            done < <(echo "${currentCDNAddress}" | tr ',' '\n')
+    # trojan grpc - 已移除
 
-        done
-    fi
     # VMess WS
     if echo ${currentInstallProtocolType} | grep -q ",3,"; then
         echoContent skyBlue "\n================================ VMess WS TLS [仅CDN推荐]  ================================\n"
@@ -6354,26 +6100,8 @@ showAccounts() {
             defaultBase64Code trojan "${currentDefaultPort}${singBoxTrojanPort}" "${email}" "$(echo "${user}" | jq -r .password)"
         done
     fi
-    # VLESS grpc
-    if echo ${currentInstallProtocolType} | grep -q ",5,"; then
-        echoContent skyBlue "\n=============================== VLESS gRPC TLS [仅CDN推荐]  ===============================\n"
-        jq .inbounds[0].settings.clients ${configPath}06_VLESS_gRPC_inbounds.json | jq -c '.[]' | while read -r user; do
+    # VLESS grpc - 已移除
 
-            local email=
-            email=$(echo "${user}" | jq -r .email)
-
-            local count=
-            while read -r line; do
-                echoContent skyBlue "\n ---> 账号:${email}${count}"
-                echo
-                if [[ -n "${line}" ]]; then
-                    defaultBase64Code vlessgrpc "${currentDefaultPort}" "${email}${count}" "$(echo "${user}" | jq -r .id)" "${line}"
-                    count=$((count + 1))
-                fi
-            done < <(echo "${currentCDNAddress}" | tr ',' '\n')
-
-        done
-    fi
     # hysteria2
     if echo ${currentInstallProtocolType} | grep -q ",6," || [[ -n "${hysteriaPort}" ]]; then
         readPortHopping "hysteria2" "${singBoxHysteria2Port}"
@@ -6409,18 +6137,8 @@ showAccounts() {
             defaultBase64Code vlessReality "${xrayVLESSRealityVisionPort}${singBoxVLESSRealityVisionPort}" "${email}" "$(echo "${user}" | jq -r .id//.uuid)"
         done
     fi
-    # VLESS reality gRPC
-    if echo ${currentInstallProtocolType} | grep -q ",8,"; then
-        echoContent skyBlue "============================== VLESS reality_gRPC [推荐] ===============================\n"
-        jq .inbounds[0].settings.clients//.inbounds[0].users ${configPath}08_VLESS_vision_gRPC_inbounds.json | jq -c '.[]' | while read -r user; do
-            local email=
-            email=$(echo "${user}" | jq -r .email//.name)
+    # VLESS reality gRPC - 已移除
 
-            echoContent skyBlue "\n ---> 账号:${email}"
-            echo
-            defaultBase64Code vlessRealityGRPC "${xrayVLESSRealityVisionPort}${singBoxVLESSRealityGRPCPort}" "${email}" "$(echo "${user}" | jq -r .id//.uuid)"
-        done
-    fi
     # tuic
     if echo ${currentInstallProtocolType} | grep -q ",9," || [[ -n "${tuicPort}" ]]; then
         echoContent skyBlue "\n================================  Tuic TLS [推荐]  ================================\n"
@@ -7078,18 +6796,8 @@ addUser() {
             echo "${clients}" | jq . >${configPath}03_VLESS_WS_inbounds.json
         fi
 
-        # trojan grpc
-        if echo "${currentInstallProtocolType}" | grep -q ",2,"; then
-            local clients=
-            if [[ "${coreInstallType}" == "1" ]]; then
-                clients=$(initXrayClients 2 "${uuid}" "${email}")
-            elif [[ "${coreInstallType}" == "2" ]]; then
-                clients=$(initSingBoxClients 2 "${uuid}" "${email}")
-            fi
+        # trojan grpc - 已移除
 
-            clients=$(jq -r "${userConfig} = ${clients}" ${configPath}04_trojan_gRPC_inbounds.json)
-            echo "${clients}" | jq . >${configPath}04_trojan_gRPC_inbounds.json
-        fi
         # VMess WS
         if echo "${currentInstallProtocolType}" | grep -q ",3,"; then
             local clients=
@@ -7114,17 +6822,7 @@ addUser() {
             echo "${clients}" | jq . >${configPath}04_trojan_TCP_inbounds.json
         fi
 
-        # vless grpc
-        if echo "${currentInstallProtocolType}" | grep -q ",5,"; then
-            local clients=
-            if [[ "${coreInstallType}" == "1" ]]; then
-                clients=$(initXrayClients 5 "${uuid}" "${email}")
-            elif [[ "${coreInstallType}" == "2" ]]; then
-                clients=$(initSingBoxClients 5 "${uuid}" "${email}")
-            fi
-            clients=$(jq -r "${userConfig} = ${clients}" ${configPath}06_VLESS_gRPC_inbounds.json)
-            echo "${clients}" | jq . >${configPath}06_VLESS_gRPC_inbounds.json
-        fi
+        # vless grpc - 已移除
 
         # vless reality vision
         if echo "${currentInstallProtocolType}" | grep -q ",7,"; then
@@ -7141,17 +6839,7 @@ addUser() {
             echo "${clients}" | jq . >${configPath}07_VLESS_vision_reality_inbounds.json
         fi
 
-        # vless reality grpc
-        if echo "${currentInstallProtocolType}" | grep -q ",8,"; then
-            local clients=
-            if [[ "${coreInstallType}" == "1" ]]; then
-                clients=$(initXrayClients 8 "${uuid}" "${email}")
-            elif [[ "${coreInstallType}" == "2" ]]; then
-                clients=$(initSingBoxClients 8 "${uuid}" "${email}")
-            fi
-            clients=$(jq -r "${userConfig} = ${clients}" ${configPath}08_VLESS_vision_gRPC_inbounds.json)
-            echo "${clients}" | jq . >${configPath}08_VLESS_vision_gRPC_inbounds.json
-        fi
+        # vless reality grpc - 已移除
 
         # hysteria2
         if echo ${currentInstallProtocolType} | grep -q ",6,"; then
@@ -7268,11 +6956,7 @@ removeUser() {
             echo "${vlessWSResult}" | jq . >${configPath}03_VLESS_WS_inbounds.json
         fi
 
-        if echo ${currentInstallProtocolType} | grep -q ",2,"; then
-            local trojangRPCUsers
-            trojangRPCUsers=$(jq -r 'del(.inbounds[0].settings.clients['${delUserIndex}'])' ${configPath}04_trojan_gRPC_inbounds.json)
-            echo "${trojangRPCUsers}" | jq . >${configPath}04_trojan_gRPC_inbounds.json
-        fi
+        # Trojan gRPC - 已移除
 
         if echo ${currentInstallProtocolType} | grep -q ",3,"; then
             local vmessWSResult
@@ -7280,11 +6964,7 @@ removeUser() {
             echo "${vmessWSResult}" | jq . >${configPath}05_VMess_WS_inbounds.json
         fi
 
-        if echo ${currentInstallProtocolType} | grep -q ",5,"; then
-            local vlessGRPCResult
-            vlessGRPCResult=$(jq -r 'del(.inbounds[0].settings.clients['${delUserIndex}']//.inbounds[0].users['${delUserIndex}'])' ${configPath}06_VLESS_gRPC_inbounds.json)
-            echo "${vlessGRPCResult}" | jq . >${configPath}06_VLESS_gRPC_inbounds.json
-        fi
+        # VLESS gRPC - 已移除
 
         if echo ${currentInstallProtocolType} | grep -q ",4,"; then
             local trojanTCPResult
@@ -7297,11 +6977,7 @@ removeUser() {
             vlessRealityResult=$(jq -r 'del(.inbounds[0].settings.clients['${delUserIndex}']//.inbounds[1].settings.clients['${delUserIndex}']//.inbounds[0].users['${delUserIndex}'])' ${configPath}07_VLESS_vision_reality_inbounds.json)
             echo "${vlessRealityResult}" | jq . >${configPath}07_VLESS_vision_reality_inbounds.json
         fi
-        if echo ${currentInstallProtocolType} | grep -q ",8,"; then
-            local vlessRealityGRPCResult
-            vlessRealityGRPCResult=$(jq -r 'del(.inbounds[0].settings.clients['${delUserIndex}']//.inbounds[0].users['${delUserIndex}'])' ${configPath}08_VLESS_vision_gRPC_inbounds.json)
-            echo "${vlessRealityGRPCResult}" | jq . >${configPath}08_VLESS_vision_gRPC_inbounds.json
-        fi
+        # VLESS Reality gRPC - 已移除
 
         if echo ${currentInstallProtocolType} | grep -q ",6,"; then
             local hysteriaResult
@@ -10873,7 +10549,7 @@ customSingBoxInstall() {
     echoContent yellow "4.Trojan+TLS[不推荐]"
     echoContent yellow "6.Hysteria2"
     echoContent yellow "7.VLESS+Reality+Vision"
-    echoContent yellow "8.VLESS+Reality+gRPC"
+    # echoContent yellow "8.VLESS+Reality+gRPC"  # gRPC已移除，推荐使用XHTTP
     echoContent yellow "9.Tuic"
     echoContent yellow "10.Naive"
     echoContent yellow "11.VMess+TLS+HTTPUpgrade"
@@ -10943,7 +10619,7 @@ customXrayInstall() {
     #    echoContent yellow "2.Trojan+TLS+gRPC[仅CDN推荐]"
     echoContent yellow "3.VMess+TLS+WS[仅CDN推荐]"
     echoContent yellow "4.Trojan+TLS[不推荐]"
-    echoContent yellow "5.VLESS+TLS+gRPC[仅CDN推荐]"
+    # echoContent yellow "5.VLESS+TLS+gRPC[仅CDN推荐]"  # gRPC已移除，推荐使用XHTTP
     echoContent yellow "7.VLESS+Reality+uTLS+Vision[推荐]"
     # echoContent yellow "8.VLESS+Reality+gRPC"
     echoContent yellow "12.VLESS+Reality+XHTTP+TLS[CDN可用]"
