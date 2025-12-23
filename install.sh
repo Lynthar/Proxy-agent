@@ -10867,26 +10867,20 @@ EOF
 # sing-box 个性化安装
 customSingBoxInstall() {
     echoContent skyBlue "\n========================个性化安装============================"
-    echoContent yellow "# 提示: 无域名选7或14，多选用英文逗号分隔\n"
-    echoContent skyBlue "--- 推荐协议 (无需域名/证书) ---"
-    echoContent green  "7.VLESS+Reality+Vision [推荐]"
-    echoContent green  "14.Shadowsocks 2022 [无需证书]"
-    echoContent skyBlue "--- 高性能 UDP 协议 ---"
-    echoContent green  "6.Hysteria2 [高速]"
-    echoContent green  "9.Tuic [低延迟]"
-    echoContent skyBlue "--- 需要域名/证书 ---"
     echoContent yellow "0.VLESS+Vision+TCP"
+    echoContent yellow "1.VLESS+TLS+WS[仅CDN推荐]"
+    echoContent yellow "3.VMess+TLS+WS[仅CDN推荐]"
+    echoContent yellow "4.Trojan+TLS[不推荐]"
+    echoContent yellow "6.Hysteria2"
+    echoContent yellow "7.VLESS+Reality+Vision"
     echoContent yellow "8.VLESS+Reality+gRPC"
-    echoContent skyBlue "--- CDN 协议 ---"
-    echoContent yellow "1.VLESS+TLS+WS"
-    echoContent yellow "3.VMess+TLS+WS"
-    echoContent yellow "11.VMess+TLS+HTTPUpgrade"
-    echoContent skyBlue "--- 其他协议 ---"
+    echoContent yellow "9.Tuic"
     echoContent yellow "10.Naive"
+    echoContent yellow "11.VMess+TLS+HTTPUpgrade"
     echoContent yellow "13.anytls"
-    echoContent red    "4.Trojan+TLS [不推荐]"
+    echoContent yellow "14.Shadowsocks 2022[无需TLS证书]"
 
-    read -r -p "请选择[多选]，[例如:7,6]:" selectCustomInstallType
+    read -r -p "请选择[多选]，[例如:1,2,3]:" selectCustomInstallType
     echoContent skyBlue "--------------------------------------------------------------"
     if echo "${selectCustomInstallType}" | grep -q "，"; then
         echoContent red " ---> 请使用英文逗号分隔"
@@ -10943,19 +10937,17 @@ customSingBoxInstall() {
 # Xray-core个性化安装
 customXrayInstall() {
     echoContent skyBlue "\n========================个性化安装============================"
-    echoContent yellow "# 提示: 无域名选7或12，有域名推荐选0，多选用英文逗号分隔\n"
-    echoContent skyBlue "--- 推荐协议 (无需域名) ---"
-    echoContent green  "7.VLESS+Reality+Vision [推荐]"
-    echoContent green  "12.VLESS+Reality+XHTTP [推荐,支持CDN]"
-    echoContent skyBlue "--- 推荐协议 (需要域名) ---"
-    echoContent green  "0.VLESS+TLS+Vision+TCP [推荐]"
-    echoContent skyBlue "--- CDN 协议 (需要域名) ---"
-    echoContent yellow "5.VLESS+TLS+gRPC"
-    echoContent yellow "1.VLESS+TLS+WS"
-    echoContent yellow "3.VMess+TLS+WS"
-    echoContent skyBlue "--- 其他协议 ---"
-    echoContent red    "4.Trojan+TLS [不推荐]"
-    read -r -p "请选择[多选]，[例如:7,12]:" selectCustomInstallType
+    echoContent yellow "VLESS前置，默认安装0，无域名安装Reality只选择7即可"
+    echoContent yellow "0.VLESS+TLS_Vision+TCP[推荐]"
+    echoContent yellow "1.VLESS+TLS+WS[仅CDN推荐]"
+    #    echoContent yellow "2.Trojan+TLS+gRPC[仅CDN推荐]"
+    echoContent yellow "3.VMess+TLS+WS[仅CDN推荐]"
+    echoContent yellow "4.Trojan+TLS[不推荐]"
+    echoContent yellow "5.VLESS+TLS+gRPC[仅CDN推荐]"
+    echoContent yellow "7.VLESS+Reality+uTLS+Vision[推荐]"
+    # echoContent yellow "8.VLESS+Reality+gRPC"
+    echoContent yellow "12.VLESS+Reality+XHTTP+TLS[CDN可用]"
+    read -r -p "请选择[多选]，[例如:1,2,3]:" selectCustomInstallType
     echoContent skyBlue "--------------------------------------------------------------"
     if echo "${selectCustomInstallType}" | grep -q "，"; then
         echoContent red " ---> 请使用英文逗号分隔"
