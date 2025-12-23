@@ -192,8 +192,8 @@ cat > "${TEST_JSON_DIR}/test_xray.json" << 'EOF'
                 "tlsSettings": {
                     "certificates": [
                         {
-                            "certificateFile": "/etc/v2ray-agent/tls/example.com.crt",
-                            "keyFile": "/etc/v2ray-agent/tls/example.com.key"
+                            "certificateFile": "/etc/Proxy-agent/tls/example.com.crt",
+                            "keyFile": "/etc/Proxy-agent/tls/example.com.key"
                         }
                     ],
                     "alpn": ["h2", "http/1.1"]
@@ -359,10 +359,10 @@ echo -e "  detectCoreType() 返回: '${coreType:-empty}'"
 
 # 测试 getConfigPath
 path=$(getConfigPath 1)
-assert_equals "/etc/v2ray-agent/xray/conf/" "${path}" "getConfigPath(1) = xray 配置路径"
+assert_equals "/etc/Proxy-agent/xray/conf/" "${path}" "getConfigPath(1) = xray 配置路径"
 
 path=$(getConfigPath 2)
-assert_equals "/etc/v2ray-agent/sing-box/conf/config/" "${path}" "getConfigPath(2) = sing-box 配置路径"
+assert_equals "/etc/Proxy-agent/sing-box/conf/config/" "${path}" "getConfigPath(2) = sing-box 配置路径"
 
 echo ""
 

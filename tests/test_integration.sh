@@ -96,18 +96,18 @@ cleanup
 echo -e "${YELLOW}=== 创建模拟 VPS 环境 ===${NC}"
 
 # 创建目录结构
-mkdir -p "${MOCK_ROOT}/etc/v2ray-agent/xray/conf"
-mkdir -p "${MOCK_ROOT}/etc/v2ray-agent/sing-box/conf/config"
-mkdir -p "${MOCK_ROOT}/etc/v2ray-agent/tls"
-mkdir -p "${MOCK_ROOT}/etc/v2ray-agent/subscribe"
+mkdir -p "${MOCK_ROOT}/etc/Proxy-agent/xray/conf"
+mkdir -p "${MOCK_ROOT}/etc/Proxy-agent/sing-box/conf/config"
+mkdir -p "${MOCK_ROOT}/etc/Proxy-agent/tls"
+mkdir -p "${MOCK_ROOT}/etc/Proxy-agent/subscribe"
 
 # 创建模拟的 Xray 二进制文件
-touch "${MOCK_ROOT}/etc/v2ray-agent/xray/xray"
-chmod +x "${MOCK_ROOT}/etc/v2ray-agent/xray/xray"
+touch "${MOCK_ROOT}/etc/Proxy-agent/xray/xray"
+chmod +x "${MOCK_ROOT}/etc/Proxy-agent/xray/xray"
 
 # 创建模拟的 sing-box 二进制文件
-touch "${MOCK_ROOT}/etc/v2ray-agent/sing-box/sing-box"
-chmod +x "${MOCK_ROOT}/etc/v2ray-agent/sing-box/sing-box"
+touch "${MOCK_ROOT}/etc/Proxy-agent/sing-box/sing-box"
+chmod +x "${MOCK_ROOT}/etc/Proxy-agent/sing-box/sing-box"
 
 echo -e "${GREEN}✓${NC} 创建目录结构"
 
@@ -116,7 +116,7 @@ echo -e "${GREEN}✓${NC} 创建目录结构"
 # ============================================================================
 
 # VLESS TCP TLS Vision 配置
-cat > "${MOCK_ROOT}/etc/v2ray-agent/xray/conf/02_VLESS_TCP_inbounds.json" << 'EOF'
+cat > "${MOCK_ROOT}/etc/Proxy-agent/xray/conf/02_VLESS_TCP_inbounds.json" << 'EOF'
 {
     "inbounds": [
         {
@@ -149,8 +149,8 @@ cat > "${MOCK_ROOT}/etc/v2ray-agent/xray/conf/02_VLESS_TCP_inbounds.json" << 'EO
                     "alpn": ["h2", "http/1.1"],
                     "certificates": [
                         {
-                            "certificateFile": "/etc/v2ray-agent/tls/test.example.com.crt",
-                            "keyFile": "/etc/v2ray-agent/tls/test.example.com.key"
+                            "certificateFile": "/etc/Proxy-agent/tls/test.example.com.crt",
+                            "keyFile": "/etc/Proxy-agent/tls/test.example.com.key"
                         }
                     ]
                 }
@@ -161,7 +161,7 @@ cat > "${MOCK_ROOT}/etc/v2ray-agent/xray/conf/02_VLESS_TCP_inbounds.json" << 'EO
 EOF
 
 # VLESS WebSocket 配置
-cat > "${MOCK_ROOT}/etc/v2ray-agent/xray/conf/03_VLESS_WS_inbounds.json" << 'EOF'
+cat > "${MOCK_ROOT}/etc/Proxy-agent/xray/conf/03_VLESS_WS_inbounds.json" << 'EOF'
 {
     "inbounds": [
         {
@@ -192,7 +192,7 @@ cat > "${MOCK_ROOT}/etc/v2ray-agent/xray/conf/03_VLESS_WS_inbounds.json" << 'EOF
 EOF
 
 # VLESS Reality Vision 配置
-cat > "${MOCK_ROOT}/etc/v2ray-agent/xray/conf/07_VLESS_vision_reality_inbounds.json" << 'EOF'
+cat > "${MOCK_ROOT}/etc/Proxy-agent/xray/conf/07_VLESS_vision_reality_inbounds.json" << 'EOF'
 {
     "inbounds": [
         {
@@ -246,7 +246,7 @@ echo -e "${GREEN}✓${NC} 创建 Xray 配置文件"
 # ============================================================================
 
 # Hysteria2 配置
-cat > "${MOCK_ROOT}/etc/v2ray-agent/sing-box/conf/config/06_hysteria2_inbounds.json" << 'EOF'
+cat > "${MOCK_ROOT}/etc/Proxy-agent/sing-box/conf/config/06_hysteria2_inbounds.json" << 'EOF'
 {
     "inbounds": [
         {
@@ -273,7 +273,7 @@ cat > "${MOCK_ROOT}/etc/v2ray-agent/sing-box/conf/config/06_hysteria2_inbounds.j
 EOF
 
 # TUIC 配置
-cat > "${MOCK_ROOT}/etc/v2ray-agent/sing-box/conf/config/09_tuic_inbounds.json" << 'EOF'
+cat > "${MOCK_ROOT}/etc/Proxy-agent/sing-box/conf/config/09_tuic_inbounds.json" << 'EOF'
 {
     "inbounds": [
         {
@@ -293,7 +293,7 @@ cat > "${MOCK_ROOT}/etc/v2ray-agent/sing-box/conf/config/09_tuic_inbounds.json" 
 EOF
 
 # sing-box Reality Vision 配置
-cat > "${MOCK_ROOT}/etc/v2ray-agent/sing-box/conf/config/07_VLESS_vision_reality_inbounds.json" << 'EOF'
+cat > "${MOCK_ROOT}/etc/Proxy-agent/sing-box/conf/config/07_VLESS_vision_reality_inbounds.json" << 'EOF'
 {
     "inbounds": [
         {
@@ -329,11 +329,11 @@ echo -e "${GREEN}✓${NC} 创建 sing-box 配置文件"
 # 创建 TLS 证书文件（空文件用于测试）
 # ============================================================================
 
-touch "${MOCK_ROOT}/etc/v2ray-agent/tls/test.example.com.crt"
-touch "${MOCK_ROOT}/etc/v2ray-agent/tls/test.example.com.key"
+touch "${MOCK_ROOT}/etc/Proxy-agent/tls/test.example.com.crt"
+touch "${MOCK_ROOT}/etc/Proxy-agent/tls/test.example.com.key"
 
 # 创建 CDN 配置文件
-echo "cdn.example.com" > "${MOCK_ROOT}/etc/v2ray-agent/cdn"
+echo "cdn.example.com" > "${MOCK_ROOT}/etc/Proxy-agent/cdn"
 
 echo -e "${GREEN}✓${NC} 创建 TLS 证书和 CDN 配置"
 
@@ -353,7 +353,7 @@ source lib/system-detect.sh
 source lib/service-control.sh
 
 # 定义测试路径变量
-_TEST_V2RAY_AGENT_DIR="${MOCK_ROOT}/etc/v2ray-agent"
+_TEST_V2RAY_AGENT_DIR="${MOCK_ROOT}/etc/Proxy-agent"
 _TEST_XRAY_CONFIG_DIR="${_TEST_V2RAY_AGENT_DIR}/xray/conf"
 _TEST_SINGBOX_CONFIG_DIR="${_TEST_V2RAY_AGENT_DIR}/sing-box/conf/config"
 _TEST_TLS_CERT_DIR="${_TEST_V2RAY_AGENT_DIR}/tls"
