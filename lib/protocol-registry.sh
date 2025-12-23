@@ -27,13 +27,13 @@ getProtocolConfigFileName() {
     case "${protocolId}" in
         0)  echo "02_VLESS_TCP_inbounds.json" ;;
         1)  echo "03_VLESS_WS_inbounds.json" ;;
-        2)  echo "04_trojan_gRPC_inbounds.json" ;;
+        2)  echo "04_trojan_gRPC_inbounds.json" ;;  # 已废弃
         3)  echo "05_VMess_WS_inbounds.json" ;;
         4)  echo "04_trojan_TCP_inbounds.json" ;;
-        5)  echo "06_VLESS_gRPC_inbounds.json" ;;
+        5)  echo "06_VLESS_gRPC_inbounds.json" ;;  # 已废弃
         6)  echo "06_hysteria2_inbounds.json" ;;
         7)  echo "07_VLESS_vision_reality_inbounds.json" ;;
-        8)  echo "08_VLESS_vision_gRPC_inbounds.json" ;;
+        8)  echo "08_VLESS_vision_gRPC_inbounds.json" ;;  # 已废弃
         9)  echo "09_tuic_inbounds.json" ;;
         10) echo "10_naive_inbounds.json" ;;
         11) echo "11_VMess_HTTPUpgrade_inbounds.json" ;;

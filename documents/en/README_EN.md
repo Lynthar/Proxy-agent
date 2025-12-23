@@ -15,12 +15,12 @@ A fork of [v2ray-agent](https://github.com/mack-a/v2ray-agent), providing one-cl
 ### Supported Protocols
 | Protocol | Transport | Description |
 |----------|-----------|-------------|
-| VLESS | TCP/Vision, WebSocket, gRPC, XHTTP | Lightweight protocol |
+| VLESS | TCP/Vision, WebSocket, XHTTP | Lightweight protocol |
 | VMess | WebSocket, HTTPUpgrade | V2Ray native protocol |
-| Trojan | TCP, gRPC | HTTPS traffic disguise |
+| Trojan | TCP | HTTPS traffic disguise |
 | Hysteria2 | QUIC | High-speed UDP protocol |
 | TUIC | QUIC | Low-latency UDP protocol |
-| Reality | Vision, gRPC | No domain/certificate required |
+| Reality | Vision, XHTTP | No domain/certificate required |
 | NaiveProxy | - | Anti-detection protocol |
 | Shadowsocks 2022 | - | Next-gen SS protocol |
 | AnyTLS | - | Universal TLS protocol |
