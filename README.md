@@ -5,7 +5,7 @@
 [![Tests](https://img.shields.io/badge/Tests-68%20passed-brightgreen)]()
 [![English](https://img.shields.io/badge/English-README-blue)](documents/en/README_EN.md)
 
-Xray-core / sing-box 多协议代理一键安装脚本，基于 [v2ray-agent](https://github.com/mack-a/v2ray-agent) 重构优化。
+Xray-core / sing-box 多协议代理一键安装脚本，基于 [v2ray-agent](https://github.com/mack-a/v2ray-agent) 修改而来，感谢mack-a的贡献。
 
 ## 快速安装
 
@@ -27,31 +27,14 @@ wget -P /root -N https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/in
 | NaiveProxy | HTTP/2 | TLS | 抗检测 |
 | Shadowsocks 2022 | - | - | 链式代理 |
 
-## 与源项目对比
-
-| 特性 | v2ray-agent | Proxy-agent |
-|------|-------------|-------------|
-| **代码结构** | 单文件 (~9,600行) | 模块化 (8个lib模块) |
-| **国际化** | 仅中文 | 中/英双语切换 |
-| **测试覆盖** | 无 | 68个测试用例 |
-| **Reality shortIds** | 硬编码固定值 | 动态随机生成 |
-| **版本检测** | 硬编码 | GitHub Releases API |
-
 ### 主要改进
 
-**架构重构**
 - 模块化设计：constants, utils, json-utils, system-detect, service-control, protocol-registry, config-reader, i18n
 - 统一的协议注册表和配置读取接口
 - 原子化 JSON 操作，防止配置损坏
-
-**安全修复**
-- 修复 sing-box SOCKS5 无效字段导致启动失败
-- 修复全局 SOCKS5 路由缺少 `route.final` 配置
-- 修复 Hysteria2 上下行带宽配置反向
+- 添加i18n，中英双语
 - Reality shortIds 改为随机生成，移除空值
-
-**代码质量**
-- 移除 300+ 行死代码和冗余文件
+- 移除部分冗余文件并精简部分代码
 - 添加完整的单元测试和集成测试
 - 统一错误处理和日志输出
 
