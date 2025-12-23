@@ -2807,7 +2807,7 @@ nginxBlog() {
     fi
 
     # 伪装站模板列表 (来自 Lynthar/website-examples)
-    local templates=("cloud-drive" "game-zone" "net-disk" "play-hub" "stream-box" "video-portal" "music-flow" "podcast-hub")
+    local templates=("cloud-drive" "game-zone" "net-disk" "play-hub" "stream-box" "video-portal" "music-flow" "podcast-hub" "ai-forge")
     local templateCount=${#templates[@]}
     local repoUrl="https://github.com/Lynthar/website-examples/archive/refs/heads/main.zip"
     local tempDir="/tmp/website-examples-$$"
@@ -6607,8 +6607,8 @@ updateNginxBlog() {
     fi
 
     # 伪装站模板列表 (来自 Lynthar/website-examples)
-    local templates=("cloud-drive" "game-zone" "net-disk" "play-hub" "stream-box" "video-portal" "music-flow" "podcast-hub")
-    local templateNames=("云存储网站" "游戏平台" "网盘系统" "游戏中心" "流媒体平台" "视频门户" "音乐平台" "播客平台")
+    local templates=("cloud-drive" "game-zone" "net-disk" "play-hub" "stream-box" "video-portal" "music-flow" "podcast-hub" "ai-forge")
+    local templateNames=("云存储网站" "游戏平台" "网盘系统" "游戏中心" "流媒体平台" "视频门户" "音乐平台" "播客平台" "AI平台")
     local templateCount=${#templates[@]}
     local repoUrl="https://github.com/Lynthar/website-examples/archive/refs/heads/main.zip"
     local tempDir="/tmp/website-examples-$$"
@@ -6635,11 +6635,11 @@ updateNginxBlog() {
         echoContent yellow "${i}.${name}${marker}"
         ((i++))
     done
-    echoContent yellow "9.302重定向网站"
+    echoContent yellow "10.302重定向网站"
     echoContent red "=============================================================="
     read -r -p "请选择:" selectInstallNginxBlogType
 
-    if [[ "${selectInstallNginxBlogType}" == "9" ]]; then
+    if [[ "${selectInstallNginxBlogType}" == "10" ]]; then
         if [[ "${coreInstallType}" == "2" ]]; then
             echoContent red "\n ---> 此功能仅支持Xray-core内核，请等待后续更新"
             exit 1
@@ -6678,7 +6678,7 @@ updateNginxBlog() {
         fi
     fi
 
-    if [[ "${selectInstallNginxBlogType}" =~ ^[1-8]$ ]]; then
+    if [[ "${selectInstallNginxBlogType}" =~ ^[1-9]$ ]]; then
         local selectedTemplate="${templates[$((selectInstallNginxBlogType - 1))]}"
         local selectedName="${templateNames[$((selectInstallNginxBlogType - 1))]}"
 
