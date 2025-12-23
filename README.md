@@ -35,7 +35,6 @@ wget -P /root -N https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/in
 | **国际化** | 仅中文 | 中/英双语切换 |
 | **测试覆盖** | 无 | 68个测试用例 |
 | **Reality shortIds** | 硬编码固定值 | 动态随机生成 |
-| **已知Bug** | 存在 | 修复12项 |
 | **版本检测** | 硬编码 | GitHub Releases API |
 
 ### 主要改进
