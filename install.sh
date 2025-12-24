@@ -1798,28 +1798,9 @@ installTools() {
         fi
     fi
 
-    if ! command -v semanage >/dev/null 2>&1; then
-        echoContent green " ---> 安装semanage"
-        ${installType} bash-completion >/dev/null 2>&1
-
-        if [[ "${centosVersion}" == "7" ]]; then
-            policyCoreUtils="policycoreutils-python"
-        elif [[ "${centosVersion}" == "8" || "${release}" == "ubuntu" || "${release}" == "debian" ]]; then
-            policyCoreUtils="policycoreutils-python-utils"
-        fi
-
-        if [[ -n "${policyCoreUtils}" ]]; then
-            ${installType} ${policyCoreUtils} >/dev/null 2>&1
-        fi
-        if [[ -n $(which semanage) ]]; then
-            if command -v getenforce >/dev/null 2>&1; then
-                selinux_status=$(getenforce)
-                if [ "$selinux_status" != "Disabled" ]; then
-                    semanage port -a -t http_port_t -p tcp 31300
-                fi
-            fi
-        fi
-    fi
+    # 注意：已移除 semanage 自动安装代码（参考 v2ray-agent v3.5.3）
+    # 如果 SELinux 导致问题，updateSELinuxHTTPPortT() 函数会在 Nginx 启动失败时尝试修复
+    # 用户也可以手动关闭 SELinux，参考: documents/selinux.md
 
     if [[ "${selectCustomInstallType}" == "7" ]]; then
         echoContent green " ---> 检测到无需依赖证书的服务，跳过安装"
@@ -11852,8 +11833,12 @@ initRealityClientServersName() {
             echoContent yellow "录入示例:addons.mozilla.org:443\n"
             read -r -p "请输入目标域名，[回车]随机域名，默认端口443:" realityServerName
             if [[ -z "${realityServerName}" ]]; then
-                randomNum=$(randomNum 1 27)
-                realityServerName=$(echo "${realityDestDomainList}" | awk -F ',' -v randomNum="$randomNum" '{print $randomNum}')
+                # 动态计算域名列表数量，避免硬编码
+                local domainCount
+                domainCount=$(echo "${realityDestDomainList}" | awk -F',' '{print NF}')
+                local randomIndex
+                randomIndex=$(randomNum 1 "${domainCount}")
+                realityServerName=$(echo "${realityDestDomainList}" | awk -F ',' -v idx="${randomIndex}" '{print $idx}')
             else
                 # 验证用户输入的域名（可能包含端口，先提取域名部分验证）
                 local realityDomainCheck="${realityServerName%%:*}"
