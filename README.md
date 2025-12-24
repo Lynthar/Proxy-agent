@@ -19,9 +19,9 @@ wget -P /root -N https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/in
 
 | 协议 | 传输方式 | TLS | 说明 |
 |------|----------|-----|------|
-| VLESS | TCP/Vision, WS, gRPC, XHTTP | TLS/Reality | 推荐 |
+| VLESS | TCP/Vision, WS, XHTTP | TLS/Reality | 推荐 |
 | VMess | WebSocket, HTTPUpgrade | TLS | CDN 友好 |
-| Trojan | TCP, gRPC | TLS | 伪装 HTTPS |
+| Trojan | TCP | TLS | 伪装 HTTPS |
 | Hysteria2 | QUIC | 自签名 | 高速 UDP |
 | TUIC | QUIC | TLS | 低延迟 UDP |
 | NaiveProxy | HTTP/2 | TLS | 抗检测 |
