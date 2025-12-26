@@ -5,7 +5,7 @@
 [![Tests](https://img.shields.io/badge/Tests-68%20passed-brightgreen)]()
 [![English](https://img.shields.io/badge/English-README-blue)](documents/en/README_EN.md)
 
-Xray-core / sing-box 多协议代理一键安装脚本，基于 [v2ray-agent](https://github.com/mack-a/v2ray-agent) 修改而来，感谢mack-a的贡献。
+Xray-core / sing-box 多协议代理一键安装脚本，基于 [v2ray-agent](https://github.com/mack-a/v2ray-agent) 修改而来，感谢@mack-a的贡献。
 
 ## 快速安装
 
@@ -13,10 +13,13 @@ Xray-core / sing-box 多协议代理一键安装脚本，基于 [v2ray-agent](ht
 wget -P /root -N https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/install.sh && chmod 700 /root/install.sh && /root/install.sh
 ```
 
-安装后使用 `pasly` 命令打开管理菜单。
+**安装后使用 `pasly` 命令打开管理菜单**
 
-更详细的[使用指南](https://github.com/Lynthar/Proxy-agent/blob/d80cd04a13e17fe896a5291ff4b989bf588e75b3/documents/user-guide.md)
-如果你想自定义修改或开发，可以参考[开发指南](https://github.com/Lynthar/Proxy-agent/blob/d80cd04a13e17fe896a5291ff4b989bf588e75b3/documents/developer-guide.md)，它可以帮助你更快的理解该项目
+更详细的[使用指南](documents/developer-guide.md)；
+
+如果你想自定义修改或开发，可以参考[开发指南](documents/user-guide.md)，它可以帮助你更快的理解该项目；
+
+
 ## 支持协议
 
 | 协议 | 传输方式 | TLS | 说明 |
@@ -32,13 +35,15 @@ wget -P /root -N https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/in
 ### 主要改进
 
 - 模块化设计：constants, utils, json-utils, system-detect, service-control, protocol-registry, config-reader, i18n
+- 增强的链式代理功能，包括入口节点分流功能和支持外部节点作为出口
 - 统一的协议注册表和配置读取接口
 - 原子化 JSON 操作，防止配置损坏
-- 添加i18n，中英双语
 - Reality shortIds 改为随机生成，移除空值
-- 移除部分冗余文件并精简部分代码
 - 添加完整的单元测试和集成测试
 - 统一错误处理和日志输出
+- 添加i18n，中英双语
+- 脚本版本管理功能
+- 移除部分冗余文件并精简部分代码
 
 ## 功能列表
 
@@ -58,16 +63,6 @@ wget -P /root -N https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/in
 - **架构**: amd64, arm64
 - **权限**: root
 
-## 目录结构
-
-```
-/etc/Proxy-agent/
-├── xray/conf/      # Xray 配置
-├── sing-box/conf/  # sing-box 配置
-├── tls/            # 证书
-├── subscribe/      # 订阅
-├── lib/            # 模块库
-└── shell/lang/     # 语言文件
 ```
 
 ## 语言切换
