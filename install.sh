@@ -10657,16 +10657,43 @@ EOF
 
     while [[ "${continueAdding}" == "y" ]]; do
         ((chainCount++))
-        echoContent skyBlue "\n添加链路 #${chainCount}"
+        echoContent skyBlue "\n$(t CHAIN_ADD_NUMBER) #${chainCount}"
         echoContent red "=============================================================="
 
-        if ! addSingleChainOutbound; then
+        # 选择添加方式
+        echoContent yellow "$(t CHAIN_ADD_TYPE_SELECT):\n"
+        echoContent yellow "1.$(t CHAIN_ADD_BY_CODE)"
+        echoContent yellow "2.$(t CHAIN_ADD_BY_EXTERNAL)"
+        echoContent yellow "0.$(t CANCEL)"
+
+        read -r -p "$(t PROMPT_SELECT): " addType
+
+        local addResult=1
+        case "${addType}" in
+            1)
+                addSingleChainOutbound
+                addResult=$?
+                ;;
+            2)
+                addExternalNodeAsChain
+                addResult=$?
+                ;;
+            0|"")
+                ((chainCount--))
+                ;;
+            *)
+                ((chainCount--))
+                echoContent yellow " ---> $(t INVALID_SELECTION)"
+                ;;
+        esac
+
+        if [[ ${addResult} -ne 0 && "${addType}" != "0" && -n "${addType}" ]]; then
             ((chainCount--))
-            echoContent yellow "\n链路添加失败或已取消"
+            echoContent yellow "\n$(t CHAIN_ADD_FAILED)"
         fi
 
-        echoContent yellow "\n是否继续添加链路？[y/n]"
-        read -r -p "继续:" continueAdding
+        echoContent yellow "\n$(t CHAIN_CONTINUE_ADD)? [y/n]"
+        read -r -p "$(t CONTINUE):" continueAdding
     done
 
     # 检查是否至少添加了一条链路
@@ -10749,6 +10776,271 @@ EOF
 
     # 完成配置
     finalizeMultiChainConfig
+}
+
+# 添加外部节点作为链路
+addExternalNodeAsChain() {
+    initExternalNodeFile
+
+    local nodeCount
+    nodeCount=$(getExternalNodeCount)
+
+    if [[ "${nodeCount}" == "0" ]]; then
+        echoContent red "\n ---> $(t EXT_NO_NODES)"
+        echoContent yellow "$(t EXT_ADD_NODE_HINT)"
+        return 1
+    fi
+
+    echoContent yellow "\n$(t EXT_SELECT_FOR_CHAIN):"
+    echoContent red "=============================================================="
+
+    # 列出可用的外部节点
+    local index=1
+    local nodeIds=()
+    while IFS= read -r node; do
+        local id name type server port
+        id=$(echo "${node}" | jq -r '.id')
+        name=$(echo "${node}" | jq -r '.name')
+        type=$(echo "${node}" | jq -r '.type')
+        server=$(echo "${node}" | jq -r '.server')
+        port=$(echo "${node}" | jq -r '.server_port')
+
+        local typeLabel=""
+        case "${type}" in
+            "shadowsocks") typeLabel="SS" ;;
+            "socks") typeLabel="SOCKS5" ;;
+            "trojan") typeLabel="Trojan" ;;
+            *) typeLabel="${type}" ;;
+        esac
+
+        echoContent yellow "  ${index}. [${typeLabel}] ${name} (${server}:${port})"
+        nodeIds+=("${id}")
+        ((index++))
+    done < <(jq -c '.nodes[]' "${EXTERNAL_NODE_FILE}" 2>/dev/null)
+
+    echoContent yellow "  0. $(t CANCEL)"
+
+    read -r -p "$(t PROMPT_SELECT): " selectIndex
+
+    if [[ -z "${selectIndex}" || "${selectIndex}" == "0" ]]; then
+        return 1
+    fi
+
+    # 获取选择的节点
+    local selectedIndex=$((selectIndex - 1))
+    if [[ ${selectedIndex} -lt 0 || ${selectedIndex} -ge ${#nodeIds[@]} ]]; then
+        echoContent red " ---> $(t EXT_INVALID_SELECTION)"
+        return 1
+    fi
+
+    local selectedNodeId="${nodeIds[${selectedIndex}]}"
+    local selectedNode
+    selectedNode=$(getExternalNodeById "${selectedNodeId}")
+
+    if [[ -z "${selectedNode}" ]]; then
+        echoContent red " ---> $(t EXT_NODE_NOT_FOUND)"
+        return 1
+    fi
+
+    local nodeName nodeType
+    nodeName=$(echo "${selectedNode}" | jq -r '.name')
+    nodeType=$(echo "${selectedNode}" | jq -r '.type')
+
+    echoContent green "\n ---> $(t EXT_SELECTED): ${nodeName}"
+
+    # 步骤2: 命名链路
+    echoContent yellow "\n$(t CHAIN_STEP_NAME)"
+    echoContent yellow "$(t CHAIN_NAME_HINT)"
+
+    local defaultName
+    defaultName=$(generateNextChainName)
+
+    read -r -p "$(t CHAIN_NAME_PROMPT) [${defaultName}]: " inputName
+
+    local chainName="${inputName:-${defaultName}}"
+
+    # 验证名称格式
+    if ! validateChainName "${chainName}"; then
+        echoContent red " ---> $(t CHAIN_NAME_INVALID)"
+        return 1
+    fi
+
+    # 检查名称是否已存在
+    if isChainNameExists "${chainName}"; then
+        echoContent red " ---> $(t CHAIN_NAME_EXISTS)"
+        return 1
+    fi
+
+    # 步骤3: 设置分流规则 (复用现有逻辑)
+    echoContent yellow "\n$(t CHAIN_STEP_RULES)"
+    echoContent yellow "$(t CHAIN_RULES_HINT):\n"
+    echoContent yellow "1.$(t CHAIN_RULE_LATER)"
+    echoContent yellow "2.$(t CHAIN_RULE_PRESET)"
+    echoContent yellow "  a) $(t CHAIN_PRESET_STREAMING)"
+    echoContent yellow "  b) $(t CHAIN_PRESET_AI)"
+    echoContent yellow "  c) $(t CHAIN_PRESET_SOCIAL)"
+    echoContent yellow "  d) $(t CHAIN_PRESET_DEV)"
+    echoContent yellow "  e) $(t CHAIN_PRESET_GAMING)"
+    echoContent yellow "  f) $(t CHAIN_PRESET_GOOGLE)"
+    echoContent yellow "  g) $(t CHAIN_PRESET_MICROSOFT)"
+    echoContent yellow "  h) $(t CHAIN_PRESET_APPLE)"
+    echoContent yellow "3.$(t CHAIN_RULE_CUSTOM)"
+    echoContent yellow "4.$(t CHAIN_RULE_DEFAULT)"
+
+    read -r -p "$(t PROMPT_SELECT): " ruleChoice
+
+    local ruleType=""
+    local ruleName=""
+    local customDomains=""
+    local isDefault="false"
+
+    case "${ruleChoice}" in
+        1)
+            ruleType="none"
+            ;;
+        2a|2A)
+            ruleType="preset"
+            ruleName="streaming"
+            ;;
+        2b|2B)
+            ruleType="preset"
+            ruleName="ai"
+            ;;
+        2c|2C)
+            ruleType="preset"
+            ruleName="social"
+            ;;
+        2d|2D)
+            ruleType="preset"
+            ruleName="developer"
+            ;;
+        2e|2E)
+            ruleType="preset"
+            ruleName="gaming"
+            ;;
+        2f|2F)
+            ruleType="preset"
+            ruleName="google"
+            ;;
+        2g|2G)
+            ruleType="preset"
+            ruleName="microsoft"
+            ;;
+        2h|2H)
+            ruleType="preset"
+            ruleName="apple"
+            ;;
+        3)
+            ruleType="custom"
+            echoContent yellow "$(t CHAIN_CUSTOM_DOMAIN_HINT):"
+            read -r -p "$(t DOMAIN): " customDomains
+            if [[ -z "${customDomains}" ]]; then
+                ruleType="none"
+            fi
+            ;;
+        4)
+            ruleType="default"
+            isDefault="true"
+            ;;
+        *)
+            ruleType="none"
+            ;;
+    esac
+
+    # 添加外部节点链路到配置
+    if ! addExternalChainToConfig "${chainName}" "${selectedNodeId}" "${isDefault}"; then
+        return 1
+    fi
+
+    # 添加规则
+    if [[ "${ruleType}" == "preset" ]]; then
+        addRuleToConfig "preset" "${ruleName}" "${chainName}"
+        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
+        echoContent green "   $(t EXT_NODE): ${nodeName} (${nodeType})"
+        echoContent green "   $(t RULES): $(getPresetDisplayName "${ruleName}")"
+    elif [[ "${ruleType}" == "custom" ]]; then
+        addRuleToConfig "custom" "${customDomains}" "${chainName}"
+        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
+        echoContent green "   $(t EXT_NODE): ${nodeName} (${nodeType})"
+        echoContent green "   $(t RULES): $(t CUSTOM_DOMAIN)"
+    elif [[ "${ruleType}" == "default" ]]; then
+        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}] ($(t DEFAULT_CHAIN))"
+        echoContent green "   $(t EXT_NODE): ${nodeName} (${nodeType})"
+        echoContent green "   $(t RULES): $(t ALL_UNMATCHED)"
+    else
+        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
+        echoContent green "   $(t EXT_NODE): ${nodeName} (${nodeType})"
+        echoContent green "   $(t RULES): $(t PENDING_CONFIG)"
+    fi
+
+    return 0
+}
+
+# 添加外部节点链路到配置文件
+addExternalChainToConfig() {
+    local name=$1
+    local nodeId=$2
+    local isDefault=${3:-false}
+
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+
+    # 获取外部节点信息
+    local node
+    node=$(getExternalNodeById "${nodeId}")
+
+    if [[ -z "${node}" ]]; then
+        echoContent red " ---> $(t EXT_NODE_NOT_FOUND)"
+        return 1
+    fi
+
+    local nodeType server port
+    nodeType=$(echo "${node}" | jq -r '.type')
+    server=$(echo "${node}" | jq -r '.server')
+    port=$(echo "${node}" | jq -r '.server_port')
+
+    # 添加到 chains 数组 (标记为外部节点)
+    local tmpFile
+    tmpFile=$(mktemp)
+    chmod 600 "${tmpFile}"
+
+    jq --arg name "${name}" \
+       --arg server "${server}" \
+       --argjson port "${port}" \
+       --arg nodeType "${nodeType}" \
+       --arg nodeId "${nodeId}" \
+       --argjson isDefault "${isDefault}" \
+       '.chains += [{
+           "name": $name,
+           "ip": $server,
+           "port": $port,
+           "source": "external",
+           "external_node_id": $nodeId,
+           "external_type": $nodeType,
+           "is_default": $isDefault
+       }]' "${infoFile}" > "${tmpFile}"
+
+    mv "${tmpFile}" "${infoFile}"
+
+    # 如果设为默认链路，更新 default_chain
+    if [[ "${isDefault}" == "true" ]]; then
+        tmpFile=$(mktemp)
+        chmod 600 "${tmpFile}"
+        jq --arg name "${name}" '.default_chain = $name' "${infoFile}" > "${tmpFile}"
+        mv "${tmpFile}" "${infoFile}"
+    fi
+
+    # 生成链路出站配置文件 (使用外部节点配置)
+    local outboundConfig
+    outboundConfig=$(generateExternalOutboundConfig "${nodeId}" "${name}")
+
+    if [[ -z "${outboundConfig}" ]]; then
+        echoContent red " ---> $(t EXT_CONFIG_FAILED)"
+        return 1
+    fi
+
+    echo "{\"outbounds\": [${outboundConfig}]}" | jq . > "/etc/Proxy-agent/sing-box/conf/config/chain_outbound_${name}.json"
+
+    return 0
 }
 
 # 添加单条链路
