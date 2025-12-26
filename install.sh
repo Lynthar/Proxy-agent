@@ -8464,13 +8464,14 @@ chainProxyMenu() {
     echoContent yellow "# 支持多层中继: 入口 → 中继1 → 中继2 → ... → 出口 → 互联网"
     echoContent yellow "# 使用 Shadowsocks 2022 协议，加密安全、性能优秀\n"
 
-    echoContent yellow "1.快速配置向导 [推荐]"
-    echoContent yellow "2.查看链路状态"
-    echoContent yellow "3.测试链路连通性"
-    echoContent yellow "4.高级设置"
-    echoContent yellow "5.卸载链式代理"
+    echoContent yellow "1.$(t CHAIN_MENU_WIZARD) [$(t RECOMMENDED)]"
+    echoContent yellow "2.$(t CHAIN_MENU_STATUS)"
+    echoContent yellow "3.$(t CHAIN_MENU_TEST)"
+    echoContent yellow "4.$(t CHAIN_MENU_ADVANCED)"
+    echoContent yellow "5.$(t CHAIN_MENU_UNINSTALL)"
+    echoContent yellow "6.$(t EXT_MENU_TITLE)"
 
-    read -r -p "请选择:" selectType
+    read -r -p "$(t PROMPT_SELECT):" selectType
 
     case ${selectType} in
     1)
@@ -8487,6 +8488,9 @@ chainProxyMenu() {
         ;;
     5)
         removeChainProxy
+        ;;
+    6)
+        externalNodeMenu
         ;;
     esac
 }
@@ -11854,6 +11858,945 @@ showMultiChainDetailConfig() {
 # ======================= 多链路分流功能结束 =======================
 
 # ======================= 链式代理功能结束 =======================
+
+# ======================= 外部节点功能开始 =======================
+
+# 外部节点配置文件路径
+EXTERNAL_NODE_FILE="/etc/Proxy-agent/sing-box/conf/external_node_info.json"
+
+# 初始化外部节点配置文件
+initExternalNodeFile() {
+    local confDir="/etc/Proxy-agent/sing-box/conf"
+    mkdir -p "${confDir}"
+
+    if [[ ! -f "${EXTERNAL_NODE_FILE}" ]]; then
+        echo '{"nodes": []}' > "${EXTERNAL_NODE_FILE}"
+        chmod 600 "${EXTERNAL_NODE_FILE}"
+    fi
+}
+
+# 生成唯一节点ID
+generateNodeId() {
+    echo "ext_$(date +%s)_${RANDOM}"
+}
+
+# 获取外部节点列表
+getExternalNodes() {
+    initExternalNodeFile
+    jq -r '.nodes' "${EXTERNAL_NODE_FILE}" 2>/dev/null || echo "[]"
+}
+
+# 获取外部节点数量
+getExternalNodeCount() {
+    initExternalNodeFile
+    jq -r '.nodes | length' "${EXTERNAL_NODE_FILE}" 2>/dev/null || echo "0"
+}
+
+# 添加外部节点到配置文件
+addExternalNodeToFile() {
+    local nodeJson="$1"
+    initExternalNodeFile
+
+    local tempFile="${EXTERNAL_NODE_FILE}.tmp"
+    jq --argjson node "${nodeJson}" '.nodes += [$node]' "${EXTERNAL_NODE_FILE}" > "${tempFile}"
+    mv "${tempFile}" "${EXTERNAL_NODE_FILE}"
+    chmod 600 "${EXTERNAL_NODE_FILE}"
+}
+
+# 删除外部节点
+removeExternalNodeFromFile() {
+    local nodeId="$1"
+    initExternalNodeFile
+
+    local tempFile="${EXTERNAL_NODE_FILE}.tmp"
+    jq --arg id "${nodeId}" '.nodes = [.nodes[] | select(.id != $id)]' "${EXTERNAL_NODE_FILE}" > "${tempFile}"
+    mv "${tempFile}" "${EXTERNAL_NODE_FILE}"
+    chmod 600 "${EXTERNAL_NODE_FILE}"
+}
+
+# 获取单个节点信息
+getExternalNodeById() {
+    local nodeId="$1"
+    initExternalNodeFile
+    jq -r --arg id "${nodeId}" '.nodes[] | select(.id == $id)' "${EXTERNAL_NODE_FILE}" 2>/dev/null
+}
+
+# Shadowsocks 加密方式列表
+SS_METHODS=(
+    "aes-128-gcm"
+    "aes-256-gcm"
+    "chacha20-ietf-poly1305"
+    "xchacha20-ietf-poly1305"
+    "2022-blake3-aes-128-gcm"
+    "2022-blake3-aes-256-gcm"
+    "2022-blake3-chacha20-poly1305"
+)
+
+# 显示加密方式选择菜单
+selectSSMethod() {
+    echoContent yellow "\n$(t EXT_SELECT_METHOD):"
+    local i=1
+    for method in "${SS_METHODS[@]}"; do
+        echoContent yellow "  ${i}. ${method}"
+        ((i++))
+    done
+
+    read -r -p "$(t PROMPT_SELECT): " methodIndex
+    if [[ "${methodIndex}" -ge 1 && "${methodIndex}" -le ${#SS_METHODS[@]} ]]; then
+        echo "${SS_METHODS[$((methodIndex-1))]}"
+    else
+        echo "aes-256-gcm"
+    fi
+}
+
+# 手动添加 Shadowsocks 节点
+addExternalNodeSS() {
+    echoContent skyBlue "\n$(t EXT_ADD_SS)"
+    echoContent red "=============================================================="
+
+    # 服务器地址
+    read -r -p "$(t EXT_INPUT_SERVER): " server
+    if [[ -z "${server}" ]]; then
+        echoContent red " ---> $(t EXT_SERVER_REQUIRED)"
+        return 1
+    fi
+
+    # 端口
+    read -r -p "$(t EXT_INPUT_PORT): " port
+    if [[ -z "${port}" || ! "${port}" =~ ^[0-9]+$ ]]; then
+        echoContent red " ---> $(t EXT_PORT_INVALID)"
+        return 1
+    fi
+
+    # 加密方式
+    local method
+    method=$(selectSSMethod)
+
+    # 密码
+    read -r -p "$(t EXT_INPUT_PASSWORD): " password
+    if [[ -z "${password}" ]]; then
+        echoContent red " ---> $(t EXT_PASSWORD_REQUIRED)"
+        return 1
+    fi
+
+    # 节点名称
+    read -r -p "$(t EXT_INPUT_NAME) [SS-${server}]: " nodeName
+    if [[ -z "${nodeName}" ]]; then
+        nodeName="SS-${server}"
+    fi
+
+    # 生成节点JSON
+    local nodeId
+    nodeId=$(generateNodeId)
+    local nodeJson
+    nodeJson=$(cat <<EOF
+{
+    "id": "${nodeId}",
+    "name": "${nodeName}",
+    "type": "shadowsocks",
+    "server": "${server}",
+    "server_port": ${port},
+    "method": "${method}",
+    "password": "${password}",
+    "enabled": true,
+    "created_at": "$(date -Iseconds)"
+}
+EOF
+)
+
+    # 添加到配置文件
+    addExternalNodeToFile "${nodeJson}"
+
+    echoContent green "\n ---> $(t EXT_NODE_ADDED): ${nodeName}"
+    echoContent yellow " ---> ID: ${nodeId}"
+}
+
+# 手动添加 SOCKS5 节点
+addExternalNodeSOCKS() {
+    echoContent skyBlue "\n$(t EXT_ADD_SOCKS)"
+    echoContent red "=============================================================="
+
+    # 服务器地址
+    read -r -p "$(t EXT_INPUT_SERVER): " server
+    if [[ -z "${server}" ]]; then
+        echoContent red " ---> $(t EXT_SERVER_REQUIRED)"
+        return 1
+    fi
+
+    # 端口
+    read -r -p "$(t EXT_INPUT_PORT): " port
+    if [[ -z "${port}" || ! "${port}" =~ ^[0-9]+$ ]]; then
+        echoContent red " ---> $(t EXT_PORT_INVALID)"
+        return 1
+    fi
+
+    # 用户名 (可选)
+    read -r -p "$(t EXT_INPUT_USERNAME) ($(t OPTIONAL)): " username
+
+    # 密码 (可选)
+    local password=""
+    if [[ -n "${username}" ]]; then
+        read -r -p "$(t EXT_INPUT_PASSWORD): " password
+    fi
+
+    # 节点名称
+    read -r -p "$(t EXT_INPUT_NAME) [SOCKS5-${server}]: " nodeName
+    if [[ -z "${nodeName}" ]]; then
+        nodeName="SOCKS5-${server}"
+    fi
+
+    # 生成节点JSON
+    local nodeId
+    nodeId=$(generateNodeId)
+    local nodeJson
+
+    if [[ -n "${username}" ]]; then
+        nodeJson=$(cat <<EOF
+{
+    "id": "${nodeId}",
+    "name": "${nodeName}",
+    "type": "socks",
+    "server": "${server}",
+    "server_port": ${port},
+    "version": "5",
+    "username": "${username}",
+    "password": "${password}",
+    "enabled": true,
+    "created_at": "$(date -Iseconds)"
+}
+EOF
+)
+    else
+        nodeJson=$(cat <<EOF
+{
+    "id": "${nodeId}",
+    "name": "${nodeName}",
+    "type": "socks",
+    "server": "${server}",
+    "server_port": ${port},
+    "version": "5",
+    "enabled": true,
+    "created_at": "$(date -Iseconds)"
+}
+EOF
+)
+    fi
+
+    # 添加到配置文件
+    addExternalNodeToFile "${nodeJson}"
+
+    echoContent green "\n ---> $(t EXT_NODE_ADDED): ${nodeName}"
+    echoContent yellow " ---> ID: ${nodeId}"
+}
+
+# 手动添加 Trojan 节点
+addExternalNodeTrojan() {
+    echoContent skyBlue "\n$(t EXT_ADD_TROJAN)"
+    echoContent red "=============================================================="
+
+    # 服务器地址
+    read -r -p "$(t EXT_INPUT_SERVER): " server
+    if [[ -z "${server}" ]]; then
+        echoContent red " ---> $(t EXT_SERVER_REQUIRED)"
+        return 1
+    fi
+
+    # 端口
+    read -r -p "$(t EXT_INPUT_PORT) [443]: " port
+    if [[ -z "${port}" ]]; then
+        port=443
+    fi
+    if [[ ! "${port}" =~ ^[0-9]+$ ]]; then
+        echoContent red " ---> $(t EXT_PORT_INVALID)"
+        return 1
+    fi
+
+    # 密码
+    read -r -p "$(t EXT_INPUT_PASSWORD): " password
+    if [[ -z "${password}" ]]; then
+        echoContent red " ---> $(t EXT_PASSWORD_REQUIRED)"
+        return 1
+    fi
+
+    # SNI (可选)
+    read -r -p "$(t EXT_INPUT_SNI) [${server}]: " sni
+    if [[ -z "${sni}" ]]; then
+        sni="${server}"
+    fi
+
+    # 是否跳过证书验证
+    echoContent yellow "\n$(t EXT_SKIP_CERT_VERIFY)?"
+    echoContent yellow "  1. $(t NO) ($(t RECOMMENDED))"
+    echoContent yellow "  2. $(t YES)"
+    read -r -p "$(t PROMPT_SELECT) [1]: " insecureChoice
+    local insecure="false"
+    if [[ "${insecureChoice}" == "2" ]]; then
+        insecure="true"
+    fi
+
+    # 节点名称
+    read -r -p "$(t EXT_INPUT_NAME) [Trojan-${server}]: " nodeName
+    if [[ -z "${nodeName}" ]]; then
+        nodeName="Trojan-${server}"
+    fi
+
+    # 生成节点JSON
+    local nodeId
+    nodeId=$(generateNodeId)
+    local nodeJson
+    nodeJson=$(cat <<EOF
+{
+    "id": "${nodeId}",
+    "name": "${nodeName}",
+    "type": "trojan",
+    "server": "${server}",
+    "server_port": ${port},
+    "password": "${password}",
+    "tls": {
+        "enabled": true,
+        "server_name": "${sni}",
+        "insecure": ${insecure},
+        "alpn": ["h2", "http/1.1"]
+    },
+    "enabled": true,
+    "created_at": "$(date -Iseconds)"
+}
+EOF
+)
+
+    # 添加到配置文件
+    addExternalNodeToFile "${nodeJson}"
+
+    echoContent green "\n ---> $(t EXT_NODE_ADDED): ${nodeName}"
+    echoContent yellow " ---> ID: ${nodeId}"
+}
+
+# 解析 SS 链接
+parseSSLink() {
+    local link="$1"
+
+    # 移除 ss:// 前缀
+    link="${link#ss://}"
+
+    # 分离名称 (# 后面的部分)
+    local name=""
+    if [[ "${link}" == *"#"* ]]; then
+        name=$(echo "${link}" | sed 's/.*#//' | python3 -c "import sys, urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))" 2>/dev/null || echo "${link##*#}")
+        link="${link%%#*}"
+    fi
+
+    # 分离服务器和端口
+    local serverPart=""
+    local userInfo=""
+
+    if [[ "${link}" == *"@"* ]]; then
+        userInfo="${link%%@*}"
+        serverPart="${link#*@}"
+    else
+        # 整个是 base64 编码的
+        local decoded
+        decoded=$(echo "${link}" | base64 -d 2>/dev/null)
+        if [[ -n "${decoded}" && "${decoded}" == *"@"* ]]; then
+            userInfo="${decoded%%@*}"
+            serverPart="${decoded#*@}"
+        else
+            echo ""
+            return 1
+        fi
+    fi
+
+    # 解析 userInfo (可能是 base64 编码的 method:password)
+    local method=""
+    local password=""
+
+    # 尝试 base64 解码
+    local decodedUser
+    decodedUser=$(echo "${userInfo}" | base64 -d 2>/dev/null)
+    if [[ -n "${decodedUser}" && "${decodedUser}" == *":"* ]]; then
+        method="${decodedUser%%:*}"
+        password="${decodedUser#*:}"
+    elif [[ "${userInfo}" == *":"* ]]; then
+        method="${userInfo%%:*}"
+        password="${userInfo#*:}"
+    else
+        echo ""
+        return 1
+    fi
+
+    # 分离服务器和端口（处理可能的查询参数）
+    serverPart="${serverPart%%\?*}"
+    serverPart="${serverPart%%/*}"
+
+    local server="${serverPart%%:*}"
+    local port="${serverPart##*:}"
+
+    if [[ -z "${server}" || -z "${port}" || -z "${method}" ]]; then
+        echo ""
+        return 1
+    fi
+
+    # 如果没有名称，使用服务器地址
+    if [[ -z "${name}" ]]; then
+        name="SS-${server}"
+    fi
+
+    # 输出 JSON
+    cat <<EOF
+{
+    "name": "${name}",
+    "type": "shadowsocks",
+    "server": "${server}",
+    "server_port": ${port},
+    "method": "${method}",
+    "password": "${password}"
+}
+EOF
+}
+
+# 解析 Trojan 链接
+parseTrojanLink() {
+    local link="$1"
+
+    # 移除 trojan:// 前缀
+    link="${link#trojan://}"
+
+    # 分离名称
+    local name=""
+    if [[ "${link}" == *"#"* ]]; then
+        name=$(echo "${link}" | sed 's/.*#//' | python3 -c "import sys, urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))" 2>/dev/null || echo "${link##*#}")
+        link="${link%%#*}"
+    fi
+
+    # 分离参数
+    local params=""
+    if [[ "${link}" == *"?"* ]]; then
+        params="${link#*\?}"
+        link="${link%%\?*}"
+    fi
+
+    # 解析密码和服务器
+    local password="${link%%@*}"
+    local serverPart="${link#*@}"
+
+    local server="${serverPart%%:*}"
+    local port="${serverPart##*:}"
+
+    # 解析参数
+    local sni="${server}"
+    local insecure="false"
+
+    if [[ -n "${params}" ]]; then
+        # 解析 sni/peer/host
+        if [[ "${params}" == *"sni="* ]]; then
+            sni=$(echo "${params}" | grep -oP 'sni=\K[^&]+')
+        elif [[ "${params}" == *"peer="* ]]; then
+            sni=$(echo "${params}" | grep -oP 'peer=\K[^&]+')
+        fi
+
+        # 解析 allowInsecure
+        if [[ "${params}" == *"allowInsecure=1"* || "${params}" == *"allowInsecure=true"* ]]; then
+            insecure="true"
+        fi
+    fi
+
+    if [[ -z "${server}" || -z "${port}" || -z "${password}" ]]; then
+        echo ""
+        return 1
+    fi
+
+    if [[ -z "${name}" ]]; then
+        name="Trojan-${server}"
+    fi
+
+    cat <<EOF
+{
+    "name": "${name}",
+    "type": "trojan",
+    "server": "${server}",
+    "server_port": ${port},
+    "password": "${password}",
+    "tls": {
+        "enabled": true,
+        "server_name": "${sni}",
+        "insecure": ${insecure},
+        "alpn": ["h2", "http/1.1"]
+    }
+}
+EOF
+}
+
+# 解析 SOCKS5 链接
+parseSOCKS5Link() {
+    local link="$1"
+
+    # 移除 socks5:// 或 socks:// 前缀
+    link="${link#socks5://}"
+    link="${link#socks://}"
+
+    # 分离名称
+    local name=""
+    if [[ "${link}" == *"#"* ]]; then
+        name=$(echo "${link}" | sed 's/.*#//' | python3 -c "import sys, urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))" 2>/dev/null || echo "${link##*#}")
+        link="${link%%#*}"
+    fi
+
+    local username=""
+    local password=""
+    local serverPart=""
+
+    if [[ "${link}" == *"@"* ]]; then
+        local userInfo="${link%%@*}"
+        serverPart="${link#*@}"
+
+        if [[ "${userInfo}" == *":"* ]]; then
+            username="${userInfo%%:*}"
+            password="${userInfo#*:}"
+        fi
+    else
+        serverPart="${link}"
+    fi
+
+    local server="${serverPart%%:*}"
+    local port="${serverPart##*:}"
+
+    if [[ -z "${server}" || -z "${port}" ]]; then
+        echo ""
+        return 1
+    fi
+
+    if [[ -z "${name}" ]]; then
+        name="SOCKS5-${server}"
+    fi
+
+    if [[ -n "${username}" ]]; then
+        cat <<EOF
+{
+    "name": "${name}",
+    "type": "socks",
+    "server": "${server}",
+    "server_port": ${port},
+    "version": "5",
+    "username": "${username}",
+    "password": "${password}"
+}
+EOF
+    else
+        cat <<EOF
+{
+    "name": "${name}",
+    "type": "socks",
+    "server": "${server}",
+    "server_port": ${port},
+    "version": "5"
+}
+EOF
+    fi
+}
+
+# 通过链接添加外部节点
+addExternalNodeByLink() {
+    echoContent skyBlue "\n$(t EXT_ADD_BY_LINK)"
+    echoContent red "=============================================================="
+    echoContent yellow "$(t EXT_SUPPORTED_LINKS):"
+    echoContent yellow "  - ss://..."
+    echoContent yellow "  - trojan://..."
+    echoContent yellow "  - socks5://...\n"
+
+    read -r -p "$(t EXT_PASTE_LINK): " link
+
+    if [[ -z "${link}" ]]; then
+        echoContent red " ---> $(t EXT_LINK_EMPTY)"
+        return 1
+    fi
+
+    local nodeJson=""
+    local nodeType=""
+
+    if [[ "${link}" == ss://* ]]; then
+        nodeType="Shadowsocks"
+        nodeJson=$(parseSSLink "${link}")
+    elif [[ "${link}" == trojan://* ]]; then
+        nodeType="Trojan"
+        nodeJson=$(parseTrojanLink "${link}")
+    elif [[ "${link}" == socks5://* || "${link}" == socks://* ]]; then
+        nodeType="SOCKS5"
+        nodeJson=$(parseSOCKS5Link "${link}")
+    else
+        echoContent red " ---> $(t EXT_LINK_UNSUPPORTED)"
+        return 1
+    fi
+
+    if [[ -z "${nodeJson}" ]]; then
+        echoContent red " ---> $(t EXT_LINK_PARSE_FAILED)"
+        return 1
+    fi
+
+    # 显示解析结果
+    echoContent green "\n$(t EXT_PARSE_RESULT):"
+    echoContent yellow "  $(t EXT_PROTOCOL): ${nodeType}"
+    echoContent yellow "  $(t EXT_SERVER): $(echo "${nodeJson}" | jq -r '.server')"
+    echoContent yellow "  $(t EXT_PORT): $(echo "${nodeJson}" | jq -r '.server_port')"
+    echoContent yellow "  $(t EXT_NAME): $(echo "${nodeJson}" | jq -r '.name')"
+
+    read -r -p "\n$(t EXT_CONFIRM_ADD)? [y/n]: " confirmAdd
+    if [[ "${confirmAdd}" != "y" && "${confirmAdd}" != "Y" ]]; then
+        echoContent yellow " ---> $(t CANCEL)"
+        return 0
+    fi
+
+    # 添加节点ID和时间戳
+    local nodeId
+    nodeId=$(generateNodeId)
+    nodeJson=$(echo "${nodeJson}" | jq --arg id "${nodeId}" --arg time "$(date -Iseconds)" '. + {id: $id, enabled: true, created_at: $time}')
+
+    addExternalNodeToFile "${nodeJson}"
+
+    local nodeName
+    nodeName=$(echo "${nodeJson}" | jq -r '.name')
+    echoContent green "\n ---> $(t EXT_NODE_ADDED): ${nodeName}"
+}
+
+# 显示外部节点列表
+listExternalNodes() {
+    initExternalNodeFile
+
+    echoContent skyBlue "\n$(t EXT_NODE_LIST)"
+    echoContent red "=============================================================="
+
+    local nodeCount
+    nodeCount=$(getExternalNodeCount)
+
+    if [[ "${nodeCount}" == "0" ]]; then
+        echoContent yellow "  ($(t EXT_NO_NODES))"
+        return
+    fi
+
+    local index=1
+    while IFS= read -r node; do
+        local name type server port enabled
+        name=$(echo "${node}" | jq -r '.name')
+        type=$(echo "${node}" | jq -r '.type')
+        server=$(echo "${node}" | jq -r '.server')
+        port=$(echo "${node}" | jq -r '.server_port')
+        enabled=$(echo "${node}" | jq -r '.enabled')
+
+        local typeLabel=""
+        case "${type}" in
+            "shadowsocks") typeLabel="SS" ;;
+            "socks") typeLabel="SOCKS5" ;;
+            "trojan") typeLabel="Trojan" ;;
+            *) typeLabel="${type}" ;;
+        esac
+
+        local status=""
+        if [[ "${enabled}" == "false" ]]; then
+            status=" [$(t DISABLED)]"
+        fi
+
+        echoContent yellow "  ${index}. [${typeLabel}] ${name} (${server}:${port})${status}"
+        ((index++))
+    done < <(jq -c '.nodes[]' "${EXTERNAL_NODE_FILE}" 2>/dev/null)
+}
+
+# 删除外部节点
+deleteExternalNode() {
+    listExternalNodes
+
+    local nodeCount
+    nodeCount=$(getExternalNodeCount)
+
+    if [[ "${nodeCount}" == "0" ]]; then
+        return
+    fi
+
+    echoContent red "=============================================================="
+    read -r -p "$(t EXT_SELECT_DELETE): " selectIndex
+
+    if [[ -z "${selectIndex}" || "${selectIndex}" == "0" ]]; then
+        return
+    fi
+
+    # 获取节点ID
+    local nodeId
+    nodeId=$(jq -r --argjson idx "$((selectIndex-1))" '.nodes[$idx].id' "${EXTERNAL_NODE_FILE}" 2>/dev/null)
+
+    if [[ -z "${nodeId}" || "${nodeId}" == "null" ]]; then
+        echoContent red " ---> $(t EXT_INVALID_SELECTION)"
+        return 1
+    fi
+
+    local nodeName
+    nodeName=$(jq -r --argjson idx "$((selectIndex-1))" '.nodes[$idx].name' "${EXTERNAL_NODE_FILE}" 2>/dev/null)
+
+    read -r -p "$(t EXT_CONFIRM_DELETE) [${nodeName}]? [y/n]: " confirmDelete
+    if [[ "${confirmDelete}" != "y" && "${confirmDelete}" != "Y" ]]; then
+        return
+    fi
+
+    removeExternalNodeFromFile "${nodeId}"
+    echoContent green " ---> $(t EXT_NODE_DELETED): ${nodeName}"
+}
+
+# 生成外部节点的 sing-box 出站配置
+generateExternalOutboundConfig() {
+    local nodeId="$1"
+    local tag="$2"
+
+    local node
+    node=$(getExternalNodeById "${nodeId}")
+
+    if [[ -z "${node}" ]]; then
+        return 1
+    fi
+
+    local type
+    type=$(echo "${node}" | jq -r '.type')
+
+    case "${type}" in
+        "shadowsocks")
+            local server port method password
+            server=$(echo "${node}" | jq -r '.server')
+            port=$(echo "${node}" | jq -r '.server_port')
+            method=$(echo "${node}" | jq -r '.method')
+            password=$(echo "${node}" | jq -r '.password')
+
+            cat <<EOF
+{
+    "type": "shadowsocks",
+    "tag": "${tag}",
+    "server": "${server}",
+    "server_port": ${port},
+    "method": "${method}",
+    "password": "${password}"
+}
+EOF
+            ;;
+        "socks")
+            local server port username password
+            server=$(echo "${node}" | jq -r '.server')
+            port=$(echo "${node}" | jq -r '.server_port')
+            username=$(echo "${node}" | jq -r '.username // empty')
+            password=$(echo "${node}" | jq -r '.password // empty')
+
+            if [[ -n "${username}" ]]; then
+                cat <<EOF
+{
+    "type": "socks",
+    "tag": "${tag}",
+    "server": "${server}",
+    "server_port": ${port},
+    "version": "5",
+    "username": "${username}",
+    "password": "${password}"
+}
+EOF
+            else
+                cat <<EOF
+{
+    "type": "socks",
+    "tag": "${tag}",
+    "server": "${server}",
+    "server_port": ${port},
+    "version": "5"
+}
+EOF
+            fi
+            ;;
+        "trojan")
+            local server port password tlsConfig
+            server=$(echo "${node}" | jq -r '.server')
+            port=$(echo "${node}" | jq -r '.server_port')
+            password=$(echo "${node}" | jq -r '.password')
+            tlsConfig=$(echo "${node}" | jq -c '.tls // {"enabled": true, "server_name": "'${server}'", "insecure": false}')
+
+            cat <<EOF
+{
+    "type": "trojan",
+    "tag": "${tag}",
+    "server": "${server}",
+    "server_port": ${port},
+    "password": "${password}",
+    "tls": ${tlsConfig}
+}
+EOF
+            ;;
+    esac
+}
+
+# 将外部节点设置为链式代理出口（单出口模式）
+setupExternalAsSingleExit() {
+    listExternalNodes
+
+    local nodeCount
+    nodeCount=$(getExternalNodeCount)
+
+    if [[ "${nodeCount}" == "0" ]]; then
+        echoContent red "\n ---> $(t EXT_ADD_NODE_FIRST)"
+        return 1
+    fi
+
+    echoContent red "=============================================================="
+    read -r -p "$(t EXT_SELECT_AS_EXIT): " selectIndex
+
+    if [[ -z "${selectIndex}" || "${selectIndex}" == "0" ]]; then
+        return
+    fi
+
+    # 获取节点信息
+    local nodeId nodeName
+    nodeId=$(jq -r --argjson idx "$((selectIndex-1))" '.nodes[$idx].id' "${EXTERNAL_NODE_FILE}" 2>/dev/null)
+    nodeName=$(jq -r --argjson idx "$((selectIndex-1))" '.nodes[$idx].name' "${EXTERNAL_NODE_FILE}" 2>/dev/null)
+
+    if [[ -z "${nodeId}" || "${nodeId}" == "null" ]]; then
+        echoContent red " ---> $(t EXT_INVALID_SELECTION)"
+        return 1
+    fi
+
+    echoContent yellow "\n$(t EXT_CONFIGURING): ${nodeName}"
+
+    # 生成出站配置
+    local outboundConfig
+    outboundConfig=$(generateExternalOutboundConfig "${nodeId}" "external_outbound")
+
+    if [[ -z "${outboundConfig}" ]]; then
+        echoContent red " ---> $(t EXT_CONFIG_FAILED)"
+        return 1
+    fi
+
+    # 保存出站配置
+    local configDir="/etc/Proxy-agent/sing-box/conf/config"
+    mkdir -p "${configDir}"
+
+    echo "{\"outbounds\": [${outboundConfig}]}" | jq . > "${configDir}/external_outbound.json"
+
+    # 生成路由配置 - 所有流量走外部节点
+    cat <<EOF > "${configDir}/external_route.json"
+{
+    "route": {
+        "rules": [],
+        "final": "external_outbound"
+    }
+}
+EOF
+
+    # 保存外部节点入口信息
+    cat <<EOF > "/etc/Proxy-agent/sing-box/conf/external_entry_info.json"
+{
+    "role": "entry",
+    "mode": "external_single",
+    "external_node_id": "${nodeId}",
+    "external_node_name": "${nodeName}"
+}
+EOF
+
+    # 合并配置
+    mergeSingBoxConfig
+
+    # 重启服务
+    reloadCore
+
+    echoContent green "\n ---> $(t EXT_CONFIG_SUCCESS)"
+    echoContent yellow " ---> $(t EXT_TRAFFIC_ROUTE): $(t USER) → $(t ENTRY_NODE) → ${nodeName} → $(t INTERNET)"
+}
+
+# 测试外部节点连通性
+testExternalNodeConnection() {
+    listExternalNodes
+
+    local nodeCount
+    nodeCount=$(getExternalNodeCount)
+
+    if [[ "${nodeCount}" == "0" ]]; then
+        return
+    fi
+
+    echoContent red "=============================================================="
+    read -r -p "$(t EXT_SELECT_TEST): " selectIndex
+
+    if [[ -z "${selectIndex}" || "${selectIndex}" == "0" ]]; then
+        return
+    fi
+
+    local node
+    node=$(jq -c --argjson idx "$((selectIndex-1))" '.nodes[$idx]' "${EXTERNAL_NODE_FILE}" 2>/dev/null)
+
+    if [[ -z "${node}" || "${node}" == "null" ]]; then
+        echoContent red " ---> $(t EXT_INVALID_SELECTION)"
+        return 1
+    fi
+
+    local server port nodeName
+    server=$(echo "${node}" | jq -r '.server')
+    port=$(echo "${node}" | jq -r '.server_port')
+    nodeName=$(echo "${node}" | jq -r '.name')
+
+    echoContent yellow "\n$(t EXT_TESTING): ${nodeName} (${server}:${port})"
+
+    # TCP 连通性测试
+    if timeout 5 bash -c "echo >/dev/tcp/${server}/${port}" 2>/dev/null; then
+        echoContent green " ---> $(t EXT_TCP_SUCCESS)"
+    else
+        echoContent red " ---> $(t EXT_TCP_FAILED)"
+    fi
+}
+
+# 外部节点管理菜单
+externalNodeMenu() {
+    echoContent skyBlue "\n$(t EXT_MENU_TITLE)"
+    echoContent red "\n=============================================================="
+
+    listExternalNodes
+
+    echoContent red "=============================================================="
+    echoContent yellow "\n$(t EXT_MENU_OPTIONS):"
+    echoContent yellow "  1. $(t EXT_ADD_BY_LINK)"
+    echoContent yellow "  2. $(t EXT_ADD_MANUAL)"
+    echoContent yellow "  3. $(t EXT_DELETE_NODE)"
+    echoContent yellow "  4. $(t EXT_TEST_NODE)"
+    echoContent yellow "  5. $(t EXT_SET_AS_EXIT)"
+    echoContent yellow "  0. $(t BACK)"
+
+    read -r -p "$(t PROMPT_SELECT): " menuChoice
+
+    case "${menuChoice}" in
+        1)
+            addExternalNodeByLink
+            externalNodeMenu
+            ;;
+        2)
+            echoContent yellow "\n$(t EXT_SELECT_PROTOCOL):"
+            echoContent yellow "  1. Shadowsocks"
+            echoContent yellow "  2. SOCKS5"
+            echoContent yellow "  3. Trojan"
+            read -r -p "$(t PROMPT_SELECT): " protocolChoice
+            case "${protocolChoice}" in
+                1) addExternalNodeSS ;;
+                2) addExternalNodeSOCKS ;;
+                3) addExternalNodeTrojan ;;
+            esac
+            externalNodeMenu
+            ;;
+        3)
+            deleteExternalNode
+            externalNodeMenu
+            ;;
+        4)
+            testExternalNodeConnection
+            externalNodeMenu
+            ;;
+        5)
+            setupExternalAsSingleExit
+            ;;
+        0|"")
+            chainProxyMenu
+            ;;
+        *)
+            externalNodeMenu
+            ;;
+    esac
+}
+
+# ======================= 外部节点功能结束 =======================
 
 # 分流工具
 routingToolsMenu() {
