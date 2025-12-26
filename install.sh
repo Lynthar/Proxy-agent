@@ -6996,6 +6996,329 @@ removeUser() {
     fi
     manageAccount 1
 }
+
+# ======================= 脚本版本管理 =======================
+
+# 备份脚本
+# 参数: $1 - 备份原因 (update/manual)
+backupScript() {
+    local reason="${1:-manual}"
+    local installDir="/etc/Proxy-agent"
+    local backupDir="${installDir}/backup"
+    local maxBackups=5
+
+    # 确保备份目录存在
+    mkdir -p "${backupDir}"
+
+    # 获取当前版本号
+    local currentVersion=""
+    if [[ -f "${installDir}/VERSION" ]]; then
+        currentVersion=$(cat "${installDir}/VERSION" 2>/dev/null | tr -d '[:space:]')
+    else
+        currentVersion="unknown"
+    fi
+
+    # 生成备份文件名 (版本_日期时间)
+    local timestamp
+    timestamp=$(date +%Y%m%d_%H%M%S)
+    local backupName="v${currentVersion}_${timestamp}"
+    local backupPath="${backupDir}/${backupName}"
+
+    mkdir -p "${backupPath}"
+
+    # 备份核心文件
+    if [[ -f "${installDir}/install.sh" ]]; then
+        cp -f "${installDir}/install.sh" "${backupPath}/"
+    fi
+    if [[ -f "${installDir}/VERSION" ]]; then
+        cp -f "${installDir}/VERSION" "${backupPath}/"
+    fi
+    if [[ -d "${installDir}/lib" ]]; then
+        cp -rf "${installDir}/lib" "${backupPath}/"
+    fi
+    if [[ -d "${installDir}/shell/lang" ]]; then
+        mkdir -p "${backupPath}/shell"
+        cp -rf "${installDir}/shell/lang" "${backupPath}/shell/"
+    fi
+
+    # 记录备份信息
+    cat > "${backupPath}/backup_info.json" << EOF
+{
+    "version": "${currentVersion}",
+    "timestamp": "${timestamp}",
+    "reason": "${reason}",
+    "date": "$(date '+%Y-%m-%d %H:%M:%S')"
+}
+EOF
+
+    # 清理旧备份，保留最近 N 个
+    local backupCount
+    backupCount=$(ls -1d "${backupDir}"/v* 2>/dev/null | wc -l)
+    if [[ ${backupCount} -gt ${maxBackups} ]]; then
+        ls -1td "${backupDir}"/v* 2>/dev/null | tail -n +$((maxBackups + 1)) | xargs rm -rf 2>/dev/null
+    fi
+
+    echo "${backupPath}"
+}
+
+# 列出可用的脚本版本（本地备份 + GitHub 历史版本）
+listScriptVersions() {
+    local installDir="/etc/Proxy-agent"
+    local backupDir="${installDir}/backup"
+
+    echoContent skyBlue "\n$(t SCRIPT_VERSION_ROLLBACK)"
+    echoContent red "\n=============================================================="
+    echoContent yellow "# $(t NOTE)"
+    echoContent yellow "# 1. $(t SCRIPT_ROLLBACK_NOTE1)"
+    echoContent yellow "# 2. $(t SCRIPT_ROLLBACK_NOTE2)"
+    echoContent yellow "# 3. $(t SCRIPT_ROLLBACK_NOTE3)\n"
+
+    # 显示当前版本
+    local currentVersion=""
+    if [[ -f "${installDir}/VERSION" ]]; then
+        currentVersion=$(cat "${installDir}/VERSION" 2>/dev/null | tr -d '[:space:]')
+    fi
+    echoContent green "$(t SCRIPT_VERSION_CURRENT): v${currentVersion:-unknown}\n"
+
+    # 列出本地备份
+    echoContent skyBlue "------------------------$(t SCRIPT_ROLLBACK_LOCAL)-------------------------------"
+    local index=1
+    local backupList=()
+
+    if [[ -d "${backupDir}" ]]; then
+        while IFS= read -r backup; do
+            if [[ -n "${backup}" && -d "${backup}" ]]; then
+                local backupName
+                backupName=$(basename "${backup}")
+                local backupInfo=""
+                if [[ -f "${backup}/backup_info.json" ]]; then
+                    local backupDate
+                    backupDate=$(jq -r '.date // "unknown"' "${backup}/backup_info.json" 2>/dev/null)
+                    local backupReason
+                    backupReason=$(jq -r '.reason // "unknown"' "${backup}/backup_info.json" 2>/dev/null)
+                    backupInfo=" [${backupDate}] (${backupReason})"
+                fi
+                echoContent yellow "${index}. ${backupName}${backupInfo}"
+                backupList+=("local:${backup}")
+                ((index++))
+            fi
+        done < <(ls -1td "${backupDir}"/v* 2>/dev/null)
+    fi
+
+    if [[ ${#backupList[@]} -eq 0 ]]; then
+        echoContent yellow "  ($(t SCRIPT_NO_BACKUPS))"
+    fi
+
+    # 列出 GitHub 历史版本
+    echoContent skyBlue "------------------------$(t SCRIPT_ROLLBACK_GITHUB)----------------------------"
+    local githubVersions
+    githubVersions=$(curl -s "https://api.github.com/repos/Lynthar/Proxy-agent/releases?per_page=5" 2>/dev/null | jq -r '.[].tag_name' 2>/dev/null)
+
+    if [[ -n "${githubVersions}" && "${githubVersions}" != "null" ]]; then
+        while IFS= read -r version; do
+            if [[ -n "${version}" ]]; then
+                local mark=""
+                if [[ "${version}" == "v${currentVersion}" ]]; then
+                    mark=" [$(t CURRENT)]"
+                fi
+                echoContent yellow "${index}. ${version}${mark} (GitHub)"
+                backupList+=("github:${version}")
+                ((index++))
+            fi
+        done <<< "${githubVersions}"
+    else
+        echoContent yellow "  ($(t SCRIPT_GITHUB_UNAVAILABLE))"
+    fi
+
+    echoContent skyBlue "--------------------------------------------------------------"
+    echoContent yellow "0. $(t BACK)"
+
+    # 返回版本列表供选择
+    echo "${backupList[*]}"
+}
+
+# 回退脚本版本
+rollbackScript() {
+    local installDir="/etc/Proxy-agent"
+    local backupDir="${installDir}/backup"
+    local rawBase="https://raw.githubusercontent.com/Lynthar/Proxy-agent"
+
+    # 获取版本列表
+    local versionListStr
+    versionListStr=$(listScriptVersions)
+
+    # 解析版本列表（最后一行是版本数组）
+    local versionList
+    IFS=' ' read -ra versionList <<< "${versionListStr}"
+
+    if [[ ${#versionList[@]} -eq 0 ]]; then
+        echoContent red "\n ---> $(t SCRIPT_ROLLBACK_NO_VERSIONS)"
+        return 1
+    fi
+
+    read -r -p "$(t SCRIPT_ROLLBACK_SELECT): " selectVersion
+    if [[ "${selectVersion}" == "0" || -z "${selectVersion}" ]]; then
+        return 0
+    fi
+
+    # 验证选择
+    local selectedIndex=$((selectVersion - 1))
+    if [[ ${selectedIndex} -lt 0 || ${selectedIndex} -ge ${#versionList[@]} ]]; then
+        echoContent red " ---> 选择无效"
+        return 1
+    fi
+
+    local selected="${versionList[${selectedIndex}]}"
+    local sourceType="${selected%%:*}"
+    local sourcePath="${selected#*:}"
+
+    echoContent yellow "\n选择: ${sourcePath}"
+
+    # 确认回退
+    read -r -p "$(t SCRIPT_ROLLBACK_CONFIRM) [y/n]: " confirmRollback
+    if [[ "${confirmRollback}" != "y" ]]; then
+        echoContent green " ---> $(t CANCEL)"
+        return 0
+    fi
+
+    # 备份当前版本
+    echoContent yellow " ---> $(t SCRIPT_BACKUP_BEFORE_UPDATE)"
+    local backupPath
+    backupPath=$(backupScript "rollback")
+    echoContent green " ---> $(t SCRIPT_BACKUP_COMPLETE): ${backupPath}"
+
+    if [[ "${sourceType}" == "local" ]]; then
+        # 从本地备份恢复
+        echoContent yellow " ---> 从本地备份恢复..."
+
+        if [[ -f "${sourcePath}/install.sh" ]]; then
+            cp -f "${sourcePath}/install.sh" "${installDir}/"
+            chmod 700 "${installDir}/install.sh"
+        fi
+        if [[ -f "${sourcePath}/VERSION" ]]; then
+            cp -f "${sourcePath}/VERSION" "${installDir}/"
+        fi
+        if [[ -d "${sourcePath}/lib" ]]; then
+            rm -rf "${installDir}/lib"
+            cp -rf "${sourcePath}/lib" "${installDir}/"
+        fi
+        if [[ -d "${sourcePath}/shell/lang" ]]; then
+            mkdir -p "${installDir}/shell"
+            rm -rf "${installDir}/shell/lang"
+            cp -rf "${sourcePath}/shell/lang" "${installDir}/shell/"
+        fi
+
+        echoContent green "\n ---> $(t SCRIPT_ROLLBACK_SUCCESS)!"
+
+    elif [[ "${sourceType}" == "github" ]]; then
+        # 从 GitHub 下载指定版本
+        local version="${sourcePath}"
+        echoContent yellow " ---> 从 GitHub 下载版本 ${version}..."
+
+        # 下载脚本
+        local downloadUrl="${rawBase}/${version}/install.sh"
+        if [[ "${release}" == "alpine" ]]; then
+            wget -c -q -O "${installDir}/install.sh" "${downloadUrl}"
+        else
+            wget -c -q "${wgetShowProgressStatus}" -O "${installDir}/install.sh" "${downloadUrl}"
+        fi
+
+        if [[ ! -f "${installDir}/install.sh" || ! -s "${installDir}/install.sh" ]]; then
+            echoContent red " ---> 下载失败，尝试从备份恢复..."
+            if [[ -f "${backupPath}/install.sh" ]]; then
+                cp -f "${backupPath}/install.sh" "${installDir}/"
+            fi
+            return 1
+        fi
+
+        chmod 700 "${installDir}/install.sh"
+
+        # 更新版本号
+        echo "${version#v}" > "${installDir}/VERSION"
+
+        # 下载相关模块
+        echoContent yellow " ---> 下载模块文件..."
+        mkdir -p "${installDir}/lib"
+        for module in i18n constants utils json-utils system-detect service-control protocol-registry config-reader; do
+            wget -c -q -O "${installDir}/lib/${module}.sh" "${rawBase}/${version}/lib/${module}.sh" 2>/dev/null || true
+        done
+
+        # 下载语言文件
+        echoContent yellow " ---> 下载语言文件..."
+        mkdir -p "${installDir}/shell/lang"
+        for langFile in zh_CN en_US loader; do
+            wget -c -q -O "${installDir}/shell/lang/${langFile}.sh" "${rawBase}/${version}/shell/lang/${langFile}.sh" 2>/dev/null || true
+        done
+
+        echoContent green "\n ---> $(t SCRIPT_ROLLBACK_SUCCESS)!"
+    fi
+
+    # 显示回退后版本
+    local newVersion=""
+    if [[ -f "${installDir}/VERSION" ]]; then
+        newVersion=$(cat "${installDir}/VERSION" 2>/dev/null | tr -d '[:space:]')
+    fi
+    echoContent green " ---> $(t SCRIPT_VERSION_CURRENT): v${newVersion:-unknown}"
+    echoContent yellow " ---> $(t SCRIPT_ROLLBACK_RESTART)\n"
+
+    exit 0
+}
+
+# 脚本版本管理菜单
+scriptVersionMenu() {
+    echoContent skyBlue "\n$(t SCRIPT_VERSION_TITLE)"
+    echoContent red "\n=============================================================="
+
+    local currentVersion=""
+    if [[ -f "/etc/Proxy-agent/VERSION" ]]; then
+        currentVersion=$(cat "/etc/Proxy-agent/VERSION" 2>/dev/null | tr -d '[:space:]')
+    fi
+    echoContent green "$(t SCRIPT_VERSION_CURRENT): v${currentVersion:-unknown}\n"
+
+    echoContent yellow "1.$(t SCRIPT_VERSION_UPDATE)"
+    echoContent yellow "2.$(t SCRIPT_VERSION_ROLLBACK)"
+    echoContent yellow "3.$(t SCRIPT_VERSION_BACKUP)"
+    echoContent yellow "4.$(t SCRIPT_VERSION_LIST)"
+    echoContent yellow "0.$(t SCRIPT_VERSION_BACK)"
+
+    read -r -p "$(t PROMPT_SELECT): " selectType
+    case ${selectType} in
+    1)
+        updateV2RayAgent 1
+        ;;
+    2)
+        rollbackScript
+        ;;
+    3)
+        echoContent yellow "\n ---> $(t PROCESSING)..."
+        local backupPath
+        backupPath=$(backupScript "manual")
+        echoContent green " ---> $(t SCRIPT_BACKUP_SUCCESS): ${backupPath}"
+        ;;
+    4)
+        local backupDir="/etc/Proxy-agent/backup"
+        echoContent skyBlue "\n$(t SCRIPT_VERSION_LIST)"
+        echoContent red "=============================================================="
+        if [[ -d "${backupDir}" ]]; then
+            ls -1td "${backupDir}"/v* 2>/dev/null | while read -r backup; do
+                local backupName
+                backupName=$(basename "${backup}")
+                local backupInfo=""
+                if [[ -f "${backup}/backup_info.json" ]]; then
+                    local backupDate
+                    backupDate=$(jq -r '.date // "unknown"' "${backup}/backup_info.json" 2>/dev/null)
+                    backupInfo=" [${backupDate}]"
+                fi
+                echoContent yellow "  ${backupName}${backupInfo}"
+            done
+        else
+            echoContent yellow "  ($(t SCRIPT_NO_BACKUPS))"
+        fi
+        echoContent red "=============================================================="
+        ;;
+    esac
+}
+
 # 更新脚本
 updateV2RayAgent() {
     echoContent skyBlue "\n进度  $1/${totalProgress} : 更新 Proxy-agent 脚本"
@@ -7030,6 +7353,14 @@ updateV2RayAgent() {
     else
         echoContent yellow " ---> 使用 master 分支更新"
         latestVersion=""
+    fi
+
+    # 更新前自动备份当前版本
+    echoContent yellow " ---> 备份当前版本..."
+    if backupScript "update"; then
+        echoContent green " ---> 备份完成"
+    else
+        echoContent yellow " ---> 备份跳过 (首次安装或备份失败)"
     fi
 
     # 下载新版本脚本
@@ -13665,6 +13996,7 @@ menu() {
     echoContent skyBlue "-------------------------$(t MENU_SCRIPT_MGMT)-----------------------------"
     echoContent yellow "20.$(t MENU_UNINSTALL)"
     echoContent yellow "21.切换语言 / Switch Language"
+    echoContent yellow "22.$(t MENU_SCRIPT_VERSION)"
     echoContent red "=============================================================="
     mkdirTools
     aliasInstall
@@ -13729,6 +14061,9 @@ menu() {
         ;;
     21)
         switchLanguage
+        ;;
+    22)
+        scriptVersionMenu
         ;;
     esac
 }
