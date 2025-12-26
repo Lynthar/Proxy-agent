@@ -6996,6 +6996,329 @@ removeUser() {
     fi
     manageAccount 1
 }
+
+# ======================= 脚本版本管理 =======================
+
+# 备份脚本
+# 参数: $1 - 备份原因 (update/manual)
+backupScript() {
+    local reason="${1:-manual}"
+    local installDir="/etc/Proxy-agent"
+    local backupDir="${installDir}/backup"
+    local maxBackups=5
+
+    # 确保备份目录存在
+    mkdir -p "${backupDir}"
+
+    # 获取当前版本号
+    local currentVersion=""
+    if [[ -f "${installDir}/VERSION" ]]; then
+        currentVersion=$(cat "${installDir}/VERSION" 2>/dev/null | tr -d '[:space:]')
+    else
+        currentVersion="unknown"
+    fi
+
+    # 生成备份文件名 (版本_日期时间)
+    local timestamp
+    timestamp=$(date +%Y%m%d_%H%M%S)
+    local backupName="v${currentVersion}_${timestamp}"
+    local backupPath="${backupDir}/${backupName}"
+
+    mkdir -p "${backupPath}"
+
+    # 备份核心文件
+    if [[ -f "${installDir}/install.sh" ]]; then
+        cp -f "${installDir}/install.sh" "${backupPath}/"
+    fi
+    if [[ -f "${installDir}/VERSION" ]]; then
+        cp -f "${installDir}/VERSION" "${backupPath}/"
+    fi
+    if [[ -d "${installDir}/lib" ]]; then
+        cp -rf "${installDir}/lib" "${backupPath}/"
+    fi
+    if [[ -d "${installDir}/shell/lang" ]]; then
+        mkdir -p "${backupPath}/shell"
+        cp -rf "${installDir}/shell/lang" "${backupPath}/shell/"
+    fi
+
+    # 记录备份信息
+    cat > "${backupPath}/backup_info.json" << EOF
+{
+    "version": "${currentVersion}",
+    "timestamp": "${timestamp}",
+    "reason": "${reason}",
+    "date": "$(date '+%Y-%m-%d %H:%M:%S')"
+}
+EOF
+
+    # 清理旧备份，保留最近 N 个
+    local backupCount
+    backupCount=$(ls -1d "${backupDir}"/v* 2>/dev/null | wc -l)
+    if [[ ${backupCount} -gt ${maxBackups} ]]; then
+        ls -1td "${backupDir}"/v* 2>/dev/null | tail -n +$((maxBackups + 1)) | xargs rm -rf 2>/dev/null
+    fi
+
+    echo "${backupPath}"
+}
+
+# 列出可用的脚本版本（本地备份 + GitHub 历史版本）
+listScriptVersions() {
+    local installDir="/etc/Proxy-agent"
+    local backupDir="${installDir}/backup"
+
+    echoContent skyBlue "\n$(t SCRIPT_VERSION_ROLLBACK)"
+    echoContent red "\n=============================================================="
+    echoContent yellow "# $(t NOTE)"
+    echoContent yellow "# 1. $(t SCRIPT_ROLLBACK_NOTE1)"
+    echoContent yellow "# 2. $(t SCRIPT_ROLLBACK_NOTE2)"
+    echoContent yellow "# 3. $(t SCRIPT_ROLLBACK_NOTE3)\n"
+
+    # 显示当前版本
+    local currentVersion=""
+    if [[ -f "${installDir}/VERSION" ]]; then
+        currentVersion=$(cat "${installDir}/VERSION" 2>/dev/null | tr -d '[:space:]')
+    fi
+    echoContent green "$(t SCRIPT_VERSION_CURRENT): v${currentVersion:-unknown}\n"
+
+    # 列出本地备份
+    echoContent skyBlue "------------------------$(t SCRIPT_ROLLBACK_LOCAL)-------------------------------"
+    local index=1
+    local backupList=()
+
+    if [[ -d "${backupDir}" ]]; then
+        while IFS= read -r backup; do
+            if [[ -n "${backup}" && -d "${backup}" ]]; then
+                local backupName
+                backupName=$(basename "${backup}")
+                local backupInfo=""
+                if [[ -f "${backup}/backup_info.json" ]]; then
+                    local backupDate
+                    backupDate=$(jq -r '.date // "unknown"' "${backup}/backup_info.json" 2>/dev/null)
+                    local backupReason
+                    backupReason=$(jq -r '.reason // "unknown"' "${backup}/backup_info.json" 2>/dev/null)
+                    backupInfo=" [${backupDate}] (${backupReason})"
+                fi
+                echoContent yellow "${index}. ${backupName}${backupInfo}"
+                backupList+=("local:${backup}")
+                ((index++))
+            fi
+        done < <(ls -1td "${backupDir}"/v* 2>/dev/null)
+    fi
+
+    if [[ ${#backupList[@]} -eq 0 ]]; then
+        echoContent yellow "  ($(t SCRIPT_NO_BACKUPS))"
+    fi
+
+    # 列出 GitHub 历史版本
+    echoContent skyBlue "------------------------$(t SCRIPT_ROLLBACK_GITHUB)----------------------------"
+    local githubVersions
+    githubVersions=$(curl -s "https://api.github.com/repos/Lynthar/Proxy-agent/releases?per_page=5" 2>/dev/null | jq -r '.[].tag_name' 2>/dev/null)
+
+    if [[ -n "${githubVersions}" && "${githubVersions}" != "null" ]]; then
+        while IFS= read -r version; do
+            if [[ -n "${version}" ]]; then
+                local mark=""
+                if [[ "${version}" == "v${currentVersion}" ]]; then
+                    mark=" [$(t CURRENT)]"
+                fi
+                echoContent yellow "${index}. ${version}${mark} (GitHub)"
+                backupList+=("github:${version}")
+                ((index++))
+            fi
+        done <<< "${githubVersions}"
+    else
+        echoContent yellow "  ($(t SCRIPT_GITHUB_UNAVAILABLE))"
+    fi
+
+    echoContent skyBlue "--------------------------------------------------------------"
+    echoContent yellow "0. $(t BACK)"
+
+    # 返回版本列表供选择
+    echo "${backupList[*]}"
+}
+
+# 回退脚本版本
+rollbackScript() {
+    local installDir="/etc/Proxy-agent"
+    local backupDir="${installDir}/backup"
+    local rawBase="https://raw.githubusercontent.com/Lynthar/Proxy-agent"
+
+    # 获取版本列表
+    local versionListStr
+    versionListStr=$(listScriptVersions)
+
+    # 解析版本列表（最后一行是版本数组）
+    local versionList
+    IFS=' ' read -ra versionList <<< "${versionListStr}"
+
+    if [[ ${#versionList[@]} -eq 0 ]]; then
+        echoContent red "\n ---> $(t SCRIPT_ROLLBACK_NO_VERSIONS)"
+        return 1
+    fi
+
+    read -r -p "$(t SCRIPT_ROLLBACK_SELECT): " selectVersion
+    if [[ "${selectVersion}" == "0" || -z "${selectVersion}" ]]; then
+        return 0
+    fi
+
+    # 验证选择
+    local selectedIndex=$((selectVersion - 1))
+    if [[ ${selectedIndex} -lt 0 || ${selectedIndex} -ge ${#versionList[@]} ]]; then
+        echoContent red " ---> 选择无效"
+        return 1
+    fi
+
+    local selected="${versionList[${selectedIndex}]}"
+    local sourceType="${selected%%:*}"
+    local sourcePath="${selected#*:}"
+
+    echoContent yellow "\n选择: ${sourcePath}"
+
+    # 确认回退
+    read -r -p "$(t SCRIPT_ROLLBACK_CONFIRM) [y/n]: " confirmRollback
+    if [[ "${confirmRollback}" != "y" ]]; then
+        echoContent green " ---> $(t CANCEL)"
+        return 0
+    fi
+
+    # 备份当前版本
+    echoContent yellow " ---> $(t SCRIPT_BACKUP_BEFORE_UPDATE)"
+    local backupPath
+    backupPath=$(backupScript "rollback")
+    echoContent green " ---> $(t SCRIPT_BACKUP_COMPLETE): ${backupPath}"
+
+    if [[ "${sourceType}" == "local" ]]; then
+        # 从本地备份恢复
+        echoContent yellow " ---> 从本地备份恢复..."
+
+        if [[ -f "${sourcePath}/install.sh" ]]; then
+            cp -f "${sourcePath}/install.sh" "${installDir}/"
+            chmod 700 "${installDir}/install.sh"
+        fi
+        if [[ -f "${sourcePath}/VERSION" ]]; then
+            cp -f "${sourcePath}/VERSION" "${installDir}/"
+        fi
+        if [[ -d "${sourcePath}/lib" ]]; then
+            rm -rf "${installDir}/lib"
+            cp -rf "${sourcePath}/lib" "${installDir}/"
+        fi
+        if [[ -d "${sourcePath}/shell/lang" ]]; then
+            mkdir -p "${installDir}/shell"
+            rm -rf "${installDir}/shell/lang"
+            cp -rf "${sourcePath}/shell/lang" "${installDir}/shell/"
+        fi
+
+        echoContent green "\n ---> $(t SCRIPT_ROLLBACK_SUCCESS)!"
+
+    elif [[ "${sourceType}" == "github" ]]; then
+        # 从 GitHub 下载指定版本
+        local version="${sourcePath}"
+        echoContent yellow " ---> 从 GitHub 下载版本 ${version}..."
+
+        # 下载脚本
+        local downloadUrl="${rawBase}/${version}/install.sh"
+        if [[ "${release}" == "alpine" ]]; then
+            wget -c -q -O "${installDir}/install.sh" "${downloadUrl}"
+        else
+            wget -c -q "${wgetShowProgressStatus}" -O "${installDir}/install.sh" "${downloadUrl}"
+        fi
+
+        if [[ ! -f "${installDir}/install.sh" || ! -s "${installDir}/install.sh" ]]; then
+            echoContent red " ---> 下载失败，尝试从备份恢复..."
+            if [[ -f "${backupPath}/install.sh" ]]; then
+                cp -f "${backupPath}/install.sh" "${installDir}/"
+            fi
+            return 1
+        fi
+
+        chmod 700 "${installDir}/install.sh"
+
+        # 更新版本号
+        echo "${version#v}" > "${installDir}/VERSION"
+
+        # 下载相关模块
+        echoContent yellow " ---> 下载模块文件..."
+        mkdir -p "${installDir}/lib"
+        for module in i18n constants utils json-utils system-detect service-control protocol-registry config-reader; do
+            wget -c -q -O "${installDir}/lib/${module}.sh" "${rawBase}/${version}/lib/${module}.sh" 2>/dev/null || true
+        done
+
+        # 下载语言文件
+        echoContent yellow " ---> 下载语言文件..."
+        mkdir -p "${installDir}/shell/lang"
+        for langFile in zh_CN en_US loader; do
+            wget -c -q -O "${installDir}/shell/lang/${langFile}.sh" "${rawBase}/${version}/shell/lang/${langFile}.sh" 2>/dev/null || true
+        done
+
+        echoContent green "\n ---> $(t SCRIPT_ROLLBACK_SUCCESS)!"
+    fi
+
+    # 显示回退后版本
+    local newVersion=""
+    if [[ -f "${installDir}/VERSION" ]]; then
+        newVersion=$(cat "${installDir}/VERSION" 2>/dev/null | tr -d '[:space:]')
+    fi
+    echoContent green " ---> $(t SCRIPT_VERSION_CURRENT): v${newVersion:-unknown}"
+    echoContent yellow " ---> $(t SCRIPT_ROLLBACK_RESTART)\n"
+
+    exit 0
+}
+
+# 脚本版本管理菜单
+scriptVersionMenu() {
+    echoContent skyBlue "\n$(t SCRIPT_VERSION_TITLE)"
+    echoContent red "\n=============================================================="
+
+    local currentVersion=""
+    if [[ -f "/etc/Proxy-agent/VERSION" ]]; then
+        currentVersion=$(cat "/etc/Proxy-agent/VERSION" 2>/dev/null | tr -d '[:space:]')
+    fi
+    echoContent green "$(t SCRIPT_VERSION_CURRENT): v${currentVersion:-unknown}\n"
+
+    echoContent yellow "1.$(t SCRIPT_VERSION_UPDATE)"
+    echoContent yellow "2.$(t SCRIPT_VERSION_ROLLBACK)"
+    echoContent yellow "3.$(t SCRIPT_VERSION_BACKUP)"
+    echoContent yellow "4.$(t SCRIPT_VERSION_LIST)"
+    echoContent yellow "0.$(t SCRIPT_VERSION_BACK)"
+
+    read -r -p "$(t PROMPT_SELECT): " selectType
+    case ${selectType} in
+    1)
+        updateV2RayAgent 1
+        ;;
+    2)
+        rollbackScript
+        ;;
+    3)
+        echoContent yellow "\n ---> $(t PROCESSING)..."
+        local backupPath
+        backupPath=$(backupScript "manual")
+        echoContent green " ---> $(t SCRIPT_BACKUP_SUCCESS): ${backupPath}"
+        ;;
+    4)
+        local backupDir="/etc/Proxy-agent/backup"
+        echoContent skyBlue "\n$(t SCRIPT_VERSION_LIST)"
+        echoContent red "=============================================================="
+        if [[ -d "${backupDir}" ]]; then
+            ls -1td "${backupDir}"/v* 2>/dev/null | while read -r backup; do
+                local backupName
+                backupName=$(basename "${backup}")
+                local backupInfo=""
+                if [[ -f "${backup}/backup_info.json" ]]; then
+                    local backupDate
+                    backupDate=$(jq -r '.date // "unknown"' "${backup}/backup_info.json" 2>/dev/null)
+                    backupInfo=" [${backupDate}]"
+                fi
+                echoContent yellow "  ${backupName}${backupInfo}"
+            done
+        else
+            echoContent yellow "  ($(t SCRIPT_NO_BACKUPS))"
+        fi
+        echoContent red "=============================================================="
+        ;;
+    esac
+}
+
 # 更新脚本
 updateV2RayAgent() {
     echoContent skyBlue "\n进度  $1/${totalProgress} : 更新 Proxy-agent 脚本"
@@ -7030,6 +7353,14 @@ updateV2RayAgent() {
     else
         echoContent yellow " ---> 使用 master 分支更新"
         latestVersion=""
+    fi
+
+    # 更新前自动备份当前版本
+    echoContent yellow " ---> 备份当前版本..."
+    if backupScript "update"; then
+        echoContent green " ---> 备份完成"
+    else
+        echoContent yellow " ---> 备份跳过 (首次安装或备份失败)"
     fi
 
     # 下载新版本脚本
@@ -8172,10 +8503,13 @@ chainProxyWizard() {
     echoContent yellow "  └─ 导入下游配置码，生成新配置码供上游使用"
     echoContent yellow "  └─ 支持多层中继: 入口→中继1→中继2→...→出口"
     echoContent yellow ""
-    echoContent yellow "3.入口节点 (Entry) - 链路起点，接收客户端连接"
+    echoContent yellow "3.入口节点 (Entry) - 单链路模式"
     echoContent yellow "  └─ 导入出口或中继节点的配置码"
     echoContent yellow ""
-    echoContent yellow "4.手动配置入口节点"
+    echoContent yellow "4.入口节点 (Entry) - 多链路分流模式"
+    echoContent yellow "  └─ 配置多条链路，按规则分流到不同出口"
+    echoContent yellow ""
+    echoContent yellow "5.手动配置入口节点"
     echoContent yellow "  └─ 手动输入出口节点信息 (仅支持单跳)"
 
     read -r -p "请选择:" selectType
@@ -8191,6 +8525,9 @@ chainProxyWizard() {
         setupChainEntryByCode
         ;;
     4)
+        setupMultiChainEntry
+        ;;
+    5)
         setupChainEntryManual
         ;;
     esac
@@ -9561,6 +9898,12 @@ showChainStatus() {
     echoContent skyBlue "\n链式代理状态"
     echoContent red "\n=============================================================="
 
+    # 检查是否为多链路模式
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" ]]; then
+        showMultiChainStatus
+        return $?
+    fi
+
     local role="未配置"
     local exitIP=""
     local exitPort=""
@@ -9732,6 +10075,12 @@ showRelayChainCode() {
 
 # 测试链路连通性
 testChainConnection() {
+    # 检测多链路模式，使用专用测试函数
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" ]]; then
+        testMultiChainConnection
+        return $?
+    fi
+
     echoContent skyBlue "\n测试链路连通性"
     echoContent red "\n=============================================================="
 
@@ -9835,6 +10184,12 @@ testChainConnection() {
 
 # 高级设置
 chainProxyAdvanced() {
+    # 检查是否为多链路模式
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" ]]; then
+        multiChainAdvancedMenu
+        return $?
+    fi
+
     echoContent skyBlue "\n链式代理高级设置"
     echoContent red "\n=============================================================="
 
@@ -10002,12 +10357,31 @@ removeChainProxy() {
     echoContent skyBlue "\n卸载链式代理"
     echoContent red "\n=============================================================="
 
+    # 检测链式代理模式
+    local isMultiChain=false
+    local isSingleChain=false
+
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" ]]; then
+        isMultiChain=true
+        local chainCount
+        chainCount=$(jq -r '.chains | length' /etc/Proxy-agent/sing-box/conf/chain_multi_info.json 2>/dev/null || echo "0")
+        echoContent yellow "\n检测到多链路分流模式，共 ${chainCount} 条链路"
+    elif [[ -f "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json" ]] || \
+         [[ -f "/etc/Proxy-agent/sing-box/conf/chain_exit_info.json" ]] || \
+         [[ -f "/etc/Proxy-agent/sing-box/conf/chain_relay_info.json" ]]; then
+        isSingleChain=true
+        echoContent yellow "\n检测到单链路模式"
+    else
+        echoContent red "\n未检测到链式代理配置"
+        return 0
+    fi
+
     read -r -p "确认卸载链式代理？[y/n]:" confirmRemove
     if [[ "${confirmRemove}" != "y" ]]; then
         return 0
     fi
 
-    # 删除 sing-box 配置文件
+    # 删除 sing-box 配置文件 - 单链路模式
     rm -f /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
     rm -f /etc/Proxy-agent/sing-box/conf/config/chain_outbound.json
     rm -f /etc/Proxy-agent/sing-box/conf/config/chain_route.json
@@ -10015,6 +10389,17 @@ removeChainProxy() {
     rm -f /etc/Proxy-agent/sing-box/conf/chain_exit_info.json
     rm -f /etc/Proxy-agent/sing-box/conf/chain_entry_info.json
     rm -f /etc/Proxy-agent/sing-box/conf/chain_relay_info.json
+
+    # 删除 sing-box 配置文件 - 多链路模式
+    if [[ "${isMultiChain}" == "true" ]]; then
+        # 删除所有链路出站配置文件
+        rm -f /etc/Proxy-agent/sing-box/conf/config/chain_outbound_*.json 2>/dev/null
+        # 删除多链路路由配置
+        rm -f /etc/Proxy-agent/sing-box/conf/config/chain_multi_route.json 2>/dev/null
+        # 删除多链路信息文件
+        rm -f /etc/Proxy-agent/sing-box/conf/chain_multi_info.json
+        echoContent yellow " ---> 已删除多链路分流配置"
+    fi
 
     # 删除 Xray 链式代理配置
     if [[ -f "/etc/Proxy-agent/xray/conf/chain_outbound.json" ]]; then
@@ -10073,6 +10458,1400 @@ if ! type mergeSingBoxConfig >/dev/null 2>&1; then
         fi
     }
 fi
+
+# ======================= 多链路分流功能 =======================
+
+# 预设规则集定义
+# 返回预设规则对应的 geosite 规则集名称
+getPresetRulesets() {
+    local preset=$1
+    case "${preset}" in
+        streaming)
+            echo "geosite-netflix,geosite-disney,geosite-youtube,geosite-hbo,geosite-hulu,geosite-primevideo"
+            ;;
+        ai)
+            echo "geosite-openai,geosite-bing"
+            ;;
+        social)
+            echo "geosite-telegram,geosite-twitter,geosite-instagram,geosite-facebook"
+            ;;
+        developer)
+            echo "geosite-github,geosite-gitlab,geosite-stackoverflow"
+            ;;
+        gaming)
+            echo "geosite-steam,geosite-epicgames"
+            ;;
+        google)
+            echo "geosite-google"
+            ;;
+        microsoft)
+            echo "geosite-microsoft"
+            ;;
+        apple)
+            echo "geosite-apple"
+            ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
+
+# 获取预设规则显示名称
+getPresetDisplayName() {
+    local preset=$1
+    case "${preset}" in
+        streaming) echo "流媒体 (Netflix/Disney+/YouTube/...)" ;;
+        ai) echo "AI服务 (OpenAI/Bing/...)" ;;
+        social) echo "社交媒体 (Telegram/Twitter/...)" ;;
+        developer) echo "开发者 (GitHub/GitLab/...)" ;;
+        gaming) echo "游戏 (Steam/Epic/...)" ;;
+        google) echo "谷歌服务" ;;
+        microsoft) echo "微软服务" ;;
+        apple) echo "苹果服务" ;;
+        *) echo "${preset}" ;;
+    esac
+}
+
+# 验证链路名称格式（仅允许英文字母、数字、下划线）
+validateChainName() {
+    local name=$1
+    if [[ -z "${name}" ]]; then
+        return 1
+    fi
+    if [[ ! "${name}" =~ ^[a-zA-Z0-9_]+$ ]]; then
+        return 1
+    fi
+    # 名称长度限制
+    if [[ ${#name} -gt 32 ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# 生成下一个可用的链路名称
+generateNextChainName() {
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+    local index=1
+
+    if [[ -f "${infoFile}" ]]; then
+        # 找出已有的最大编号
+        local existingNames
+        existingNames=$(jq -r '.chains[].name' "${infoFile}" 2>/dev/null | grep -E '^chain_[0-9]+$' | sed 's/chain_//' | sort -n | tail -1)
+        if [[ -n "${existingNames}" ]]; then
+            index=$((existingNames + 1))
+        fi
+    fi
+
+    echo "chain_${index}"
+}
+
+# 检查链路名称是否已存在
+isChainNameExists() {
+    local name=$1
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+
+    if [[ ! -f "${infoFile}" ]]; then
+        return 1
+    fi
+
+    if jq -e ".chains[] | select(.name == \"${name}\")" "${infoFile}" >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+# 多链路入口配置向导
+setupMultiChainEntry() {
+    echoContent skyBlue "\n配置入口节点 (多链路分流模式)"
+    echoContent red "\n=============================================================="
+    echoContent yellow "此模式允许将不同流量分流到不同的出口节点"
+    echoContent yellow "例如: Netflix → 美国出口, OpenAI → 香港出口\n"
+
+    # 检查是否已存在单链路配置
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json" ]] && \
+       [[ ! -f "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" ]]; then
+        echoContent yellow "检测到已存在单链路配置"
+        echoContent yellow "如需使用多链路分流模式，请先卸载现有链式代理配置"
+        echoContent yellow "菜单路径: 链式代理管理 → 卸载链式代理"
+        return 1
+    fi
+
+    # 检查是否已存在多链路配置
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" ]]; then
+        echoContent yellow "检测到已存在多链路配置"
+        echoContent yellow "1.继续添加新链路"
+        echoContent yellow "2.重新配置 (将清除现有配置)"
+        echoContent yellow "3.取消"
+        read -r -p "请选择:" existingChoice
+
+        case "${existingChoice}" in
+            1)
+                addSingleChainOutbound
+                return $?
+                ;;
+            2)
+                echoContent yellow "确认清除现有多链路配置？[y/n]"
+                read -r -p "确认:" confirmClear
+                if [[ "${confirmClear}" != "y" ]]; then
+                    return 0
+                fi
+                # 清除现有多链路配置
+                rm -f /etc/Proxy-agent/sing-box/conf/chain_multi_info.json
+                rm -f /etc/Proxy-agent/sing-box/conf/config/chain_outbound_*.json
+                rm -f /etc/Proxy-agent/sing-box/conf/config/chain_route.json
+                rm -f /etc/Proxy-agent/sing-box/conf/config/chain_ruleset.json
+                rm -f /etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json
+                ;;
+            *)
+                return 0
+                ;;
+        esac
+    fi
+
+    # 确保 sing-box 已安装
+    if ! ensureSingBoxInstalled; then
+        return 1
+    fi
+
+    echoContent yellow "请选择配置方式:\n"
+    echoContent yellow "1.逐个添加链路 (推荐)"
+    echoContent yellow "2.批量导入配置码"
+    read -r -p "请选择:" configMode
+
+    case "${configMode}" in
+        1)
+            # 逐个添加模式
+            setupMultiChainInteractive
+            ;;
+        2)
+            # 批量导入模式
+            setupMultiChainBatch
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
+# 交互式逐个添加链路
+setupMultiChainInteractive() {
+    local chainCount=0
+    local continueAdding="y"
+
+    # 初始化多链路信息文件
+    cat <<EOF >/etc/Proxy-agent/sing-box/conf/chain_multi_info.json
+{
+    "role": "entry",
+    "mode": "multi_chain",
+    "chains": [],
+    "rules": [],
+    "default_chain": "direct",
+    "bridge_port": 31111,
+    "has_xray": false
+}
+EOF
+
+    while [[ "${continueAdding}" == "y" ]]; do
+        ((chainCount++))
+        echoContent skyBlue "\n添加链路 #${chainCount}"
+        echoContent red "=============================================================="
+
+        if ! addSingleChainOutbound; then
+            ((chainCount--))
+            echoContent yellow "\n链路添加失败或已取消"
+        fi
+
+        echoContent yellow "\n是否继续添加链路？[y/n]"
+        read -r -p "继续:" continueAdding
+    done
+
+    # 检查是否至少添加了一条链路
+    local totalChains
+    totalChains=$(jq '.chains | length' /etc/Proxy-agent/sing-box/conf/chain_multi_info.json)
+
+    if [[ "${totalChains}" -lt 1 ]]; then
+        echoContent red "\n ---> 未添加任何链路，配置已取消"
+        rm -f /etc/Proxy-agent/sing-box/conf/chain_multi_info.json
+        return 1
+    fi
+
+    # 完成配置
+    finalizeMultiChainConfig
+}
+
+# 批量导入配置码
+setupMultiChainBatch() {
+    echoContent skyBlue "\n批量导入配置码"
+    echoContent red "=============================================================="
+    echoContent yellow "请逐行粘贴配置码，每行一个"
+    echoContent yellow "输入完成后输入空行结束\n"
+
+    # 初始化多链路信息文件
+    cat <<EOF >/etc/Proxy-agent/sing-box/conf/chain_multi_info.json
+{
+    "role": "entry",
+    "mode": "multi_chain",
+    "chains": [],
+    "rules": [],
+    "default_chain": "direct",
+    "bridge_port": 31111,
+    "has_xray": false
+}
+EOF
+
+    local chainIndex=0
+    local line
+
+    while true; do
+        read -r -p "配置码 #$((chainIndex + 1)): " line
+
+        # 空行结束输入
+        if [[ -z "${line}" ]]; then
+            break
+        fi
+
+        # 解析配置码
+        if ! parseChainCode "${line}"; then
+            echoContent red " ---> 配置码解析失败，已跳过"
+            continue
+        fi
+
+        # 生成链路名称
+        local chainName
+        chainName=$(generateNextChainName)
+
+        # 添加链路
+        if addChainToConfig "${chainName}" "${chainExitIP}" "${chainExitPort}" "${chainExitKey}" "${chainExitMethod}"; then
+            echoContent green " ---> 链路 [${chainName}] 添加成功 (${chainExitIP}:${chainExitPort})"
+            ((chainIndex++))
+        fi
+    done
+
+    if [[ ${chainIndex} -lt 1 ]]; then
+        echoContent red "\n ---> 未导入任何链路，配置已取消"
+        rm -f /etc/Proxy-agent/sing-box/conf/chain_multi_info.json
+        return 1
+    fi
+
+    echoContent green "\n ---> 成功导入 ${chainIndex} 条链路"
+
+    # 配置分流规则
+    echoContent yellow "\n是否现在配置分流规则？[y/n]"
+    read -r -p "配置:" configRules
+
+    if [[ "${configRules}" == "y" ]]; then
+        configureMultiChainRules
+    fi
+
+    # 完成配置
+    finalizeMultiChainConfig
+}
+
+# 添加单条链路
+addSingleChainOutbound() {
+    echoContent yellow "\n步骤 1/3: 导入配置"
+    echoContent yellow "请粘贴出口/中继节点的配置码:"
+    read -r -p "配置码:" inputCode
+
+    if [[ -z "${inputCode}" ]]; then
+        echoContent red " ---> 配置码不能为空"
+        return 1
+    fi
+
+    # 解析配置码
+    if ! parseChainCode "${inputCode}"; then
+        return 1
+    fi
+
+    echoContent green "\n ---> 解析成功:"
+    echoContent green "   节点IP: ${chainExitIP}"
+    echoContent green "   端口: ${chainExitPort}"
+    echoContent green "   协议: Shadowsocks 2022"
+
+    # 步骤2: 命名链路
+    echoContent yellow "\n步骤 2/3: 命名此链路"
+    echoContent yellow "请为此链路设置标识名称 (仅限英文字母、数字、下划线)"
+
+    local defaultName
+    defaultName=$(generateNextChainName)
+
+    read -r -p "链路名称 [回车使用默认: ${defaultName}]: " inputName
+
+    local chainName="${inputName:-${defaultName}}"
+
+    # 验证名称格式
+    if ! validateChainName "${chainName}"; then
+        echoContent red " ---> 名称格式无效，仅允许英文字母、数字、下划线"
+        return 1
+    fi
+
+    # 检查名称是否已存在
+    if isChainNameExists "${chainName}"; then
+        echoContent red " ---> 链路名称已存在"
+        return 1
+    fi
+
+    # 步骤3: 设置分流规则
+    echoContent yellow "\n步骤 3/3: 设置分流规则"
+    echoContent yellow "选择此链路的分流规则:\n"
+    echoContent yellow "1.稍后统一配置"
+    echoContent yellow "2.使用预设规则"
+    echoContent yellow "  a) 流媒体 (Netflix/Disney+/YouTube/...)"
+    echoContent yellow "  b) AI服务 (OpenAI/Bing/...)"
+    echoContent yellow "  c) 社交媒体 (Telegram/Twitter/...)"
+    echoContent yellow "  d) 开发者 (GitHub/GitLab/...)"
+    echoContent yellow "  e) 游戏 (Steam/Epic/...)"
+    echoContent yellow "  f) 谷歌服务"
+    echoContent yellow "  g) 微软服务"
+    echoContent yellow "  h) 苹果服务"
+    echoContent yellow "3.自定义域名"
+    echoContent yellow "4.设为默认链路 (接收所有未匹配规则的流量)"
+    echoContent yellow ""
+    echoContent skyBlue "提示: 如果不设置默认链路，未匹配规则的流量将从入口节点直连访问"
+
+    read -r -p "请选择: " ruleChoice
+
+    local ruleType=""
+    local ruleName=""
+    local customDomains=""
+    local isDefault="false"
+
+    case "${ruleChoice}" in
+        1)
+            ruleType="none"
+            ;;
+        2a|2A)
+            ruleType="preset"
+            ruleName="streaming"
+            ;;
+        2b|2B)
+            ruleType="preset"
+            ruleName="ai"
+            ;;
+        2c|2C)
+            ruleType="preset"
+            ruleName="social"
+            ;;
+        2d|2D)
+            ruleType="preset"
+            ruleName="developer"
+            ;;
+        2e|2E)
+            ruleType="preset"
+            ruleName="gaming"
+            ;;
+        2f|2F)
+            ruleType="preset"
+            ruleName="google"
+            ;;
+        2g|2G)
+            ruleType="preset"
+            ruleName="microsoft"
+            ;;
+        2h|2H)
+            ruleType="preset"
+            ruleName="apple"
+            ;;
+        3)
+            ruleType="custom"
+            echoContent yellow "请输入域名 (逗号分隔，如: example.com,test.org):"
+            read -r -p "域名: " customDomains
+            if [[ -z "${customDomains}" ]]; then
+                ruleType="none"
+            fi
+            ;;
+        4)
+            ruleType="default"
+            isDefault="true"
+            ;;
+        *)
+            ruleType="none"
+            ;;
+    esac
+
+    # 添加链路到配置
+    if ! addChainToConfig "${chainName}" "${chainExitIP}" "${chainExitPort}" "${chainExitKey}" "${chainExitMethod}" "${isDefault}"; then
+        return 1
+    fi
+
+    # 添加规则
+    if [[ "${ruleType}" == "preset" ]]; then
+        addRuleToConfig "preset" "${ruleName}" "${chainName}"
+        echoContent green "\n ---> 链路 [${chainName}] 添加成功"
+        echoContent green "   目标: ${chainExitIP}:${chainExitPort}"
+        echoContent green "   规则: $(getPresetDisplayName "${ruleName}")"
+    elif [[ "${ruleType}" == "custom" ]]; then
+        addRuleToConfig "custom" "${customDomains}" "${chainName}"
+        echoContent green "\n ---> 链路 [${chainName}] 添加成功"
+        echoContent green "   目标: ${chainExitIP}:${chainExitPort}"
+        echoContent green "   规则: 自定义域名"
+    elif [[ "${ruleType}" == "default" ]]; then
+        echoContent green "\n ---> 链路 [${chainName}] 添加成功 (默认链路)"
+        echoContent green "   目标: ${chainExitIP}:${chainExitPort}"
+        echoContent green "   规则: 所有未匹配流量"
+    else
+        echoContent green "\n ---> 链路 [${chainName}] 添加成功"
+        echoContent green "   目标: ${chainExitIP}:${chainExitPort}"
+        echoContent green "   规则: 待配置"
+    fi
+
+    return 0
+}
+
+# 添加链路到配置文件
+addChainToConfig() {
+    local name=$1
+    local ip=$2
+    local port=$3
+    local key=$4
+    local method=$5
+    local isDefault=${6:-false}
+
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+
+    # 添加到 chains 数组
+    local tmpFile
+    tmpFile=$(mktemp)
+    chmod 600 "${tmpFile}"
+
+    jq --arg name "${name}" \
+       --arg ip "${ip}" \
+       --argjson port "${port}" \
+       --arg key "${key}" \
+       --arg method "${method}" \
+       --argjson isDefault "${isDefault}" \
+       '.chains += [{
+           "name": $name,
+           "ip": $ip,
+           "port": $port,
+           "method": $method,
+           "password": $key,
+           "is_default": $isDefault
+       }]' "${infoFile}" > "${tmpFile}"
+
+    mv "${tmpFile}" "${infoFile}"
+
+    # 如果设为默认链路，更新 default_chain
+    if [[ "${isDefault}" == "true" ]]; then
+        tmpFile=$(mktemp)
+        chmod 600 "${tmpFile}"
+        jq --arg name "${name}" '.default_chain = $name' "${infoFile}" > "${tmpFile}"
+        mv "${tmpFile}" "${infoFile}"
+    fi
+
+    # 生成链路出站配置文件
+    cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_outbound_${name}.json
+{
+    "outbounds": [
+        {
+            "type": "shadowsocks",
+            "tag": "${name}",
+            "server": "${ip}",
+            "server_port": ${port},
+            "method": "${method}",
+            "password": "${key}",
+            "multiplex": {
+                "enabled": true,
+                "protocol": "h2mux",
+                "max_connections": 4,
+                "min_streams": 4
+            }
+        }
+    ]
+}
+EOF
+
+    return 0
+}
+
+# 添加规则到配置
+addRuleToConfig() {
+    local ruleType=$1
+    local ruleValue=$2
+    local chainName=$3
+
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+    local tmpFile
+    tmpFile=$(mktemp)
+    chmod 600 "${tmpFile}"
+
+    jq --arg type "${ruleType}" \
+       --arg value "${ruleValue}" \
+       --arg chain "${chainName}" \
+       '.rules += [{
+           "type": $type,
+           "value": $value,
+           "chain": $chain
+       }]' "${infoFile}" > "${tmpFile}"
+
+    mv "${tmpFile}" "${infoFile}"
+}
+
+# 配置多链路分流规则
+configureMultiChainRules() {
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+
+    if [[ ! -f "${infoFile}" ]]; then
+        echoContent red " ---> 未找到多链路配置"
+        return 1
+    fi
+
+    # 获取所有链路
+    local chains
+    chains=$(jq -r '.chains[].name' "${infoFile}")
+
+    if [[ -z "${chains}" ]]; then
+        echoContent red " ---> 没有可用的链路"
+        return 1
+    fi
+
+    echoContent skyBlue "\n配置分流规则"
+    echoContent red "=============================================================="
+    echoContent yellow "当前链路:\n"
+
+    local index=1
+    while IFS= read -r chain; do
+        local chainIP chainPort
+        chainIP=$(jq -r ".chains[] | select(.name == \"${chain}\") | .ip" "${infoFile}")
+        chainPort=$(jq -r ".chains[] | select(.name == \"${chain}\") | .port" "${infoFile}")
+        echoContent yellow "  ${index}. ${chain} (${chainIP}:${chainPort})"
+        ((index++))
+    done <<< "${chains}"
+
+    echoContent yellow "\n选择要添加规则的链路编号:"
+    read -r -p "链路编号: " chainIndex
+
+    # 获取选中的链路名称
+    local selectedChain
+    selectedChain=$(echo "${chains}" | sed -n "${chainIndex}p")
+
+    if [[ -z "${selectedChain}" ]]; then
+        echoContent red " ---> 无效的选择"
+        return 1
+    fi
+
+    echoContent yellow "\n为链路 [${selectedChain}] 选择规则类型:\n"
+    echoContent yellow "1.预设规则"
+    echoContent yellow "2.自定义域名"
+    echoContent yellow "3.设为默认链路"
+
+    read -r -p "请选择: " ruleTypeChoice
+
+    case "${ruleTypeChoice}" in
+        1)
+            echoContent yellow "\n选择预设规则:\n"
+            echoContent yellow "1.流媒体 (Netflix/Disney+/YouTube/...)"
+            echoContent yellow "2.AI服务 (OpenAI/Bing/...)"
+            echoContent yellow "3.社交媒体 (Telegram/Twitter/...)"
+            echoContent yellow "4.开发者 (GitHub/GitLab/...)"
+            echoContent yellow "5.游戏 (Steam/Epic/...)"
+            echoContent yellow "6.谷歌服务"
+            echoContent yellow "7.微软服务"
+            echoContent yellow "8.苹果服务"
+
+            read -r -p "请选择: " presetChoice
+
+            local presetName
+            case "${presetChoice}" in
+                1) presetName="streaming" ;;
+                2) presetName="ai" ;;
+                3) presetName="social" ;;
+                4) presetName="developer" ;;
+                5) presetName="gaming" ;;
+                6) presetName="google" ;;
+                7) presetName="microsoft" ;;
+                8) presetName="apple" ;;
+                *)
+                    echoContent red " ---> 无效的选择"
+                    return 1
+                    ;;
+            esac
+
+            addRuleToConfig "preset" "${presetName}" "${selectedChain}"
+            echoContent green " ---> 规则已添加: $(getPresetDisplayName "${presetName}") → ${selectedChain}"
+            ;;
+        2)
+            echoContent yellow "请输入域名 (逗号分隔，如: example.com,test.org):"
+            read -r -p "域名: " customDomains
+
+            if [[ -z "${customDomains}" ]]; then
+                echoContent red " ---> 域名不能为空"
+                return 1
+            fi
+
+            addRuleToConfig "custom" "${customDomains}" "${selectedChain}"
+            echoContent green " ---> 自定义域名规则已添加 → ${selectedChain}"
+            ;;
+        3)
+            local tmpFile
+            tmpFile=$(mktemp)
+            chmod 600 "${tmpFile}"
+            jq --arg name "${selectedChain}" '.default_chain = $name' "${infoFile}" > "${tmpFile}"
+            mv "${tmpFile}" "${infoFile}"
+
+            # 更新链路的 is_default 标志
+            tmpFile=$(mktemp)
+            chmod 600 "${tmpFile}"
+            jq --arg name "${selectedChain}" '
+                .chains = [.chains[] | if .name == $name then .is_default = true else .is_default = false end]
+            ' "${infoFile}" > "${tmpFile}"
+            mv "${tmpFile}" "${infoFile}"
+
+            echoContent green " ---> 已将 [${selectedChain}] 设为默认链路"
+            ;;
+        *)
+            echoContent red " ---> 无效的选择"
+            return 1
+            ;;
+    esac
+
+    return 0
+}
+
+# 完成多链路配置
+finalizeMultiChainConfig() {
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+
+    echoContent yellow "\n正在生成配置..."
+
+    # 检查是否设置了默认链路
+    local defaultChain
+    defaultChain=$(jq -r '.default_chain' "${infoFile}")
+
+    if [[ "${defaultChain}" == "direct" ]]; then
+        echoContent yellow "\n当前未设置默认链路，未匹配规则的流量将直连访问"
+        echoContent yellow "是否现在设置默认链路？\n"
+
+        local chains
+        chains=$(jq -r '.chains[].name' "${infoFile}")
+
+        local index=1
+        while IFS= read -r chain; do
+            echoContent yellow "  ${index}. ${chain}"
+            ((index++))
+        done <<< "${chains}"
+        echoContent yellow "  ${index}. 不设置 (未匹配流量直连)"
+
+        read -r -p "请选择 [默认: ${index}]: " defaultChoice
+
+        if [[ -n "${defaultChoice}" ]] && [[ "${defaultChoice}" != "${index}" ]]; then
+            local selectedDefault
+            selectedDefault=$(echo "${chains}" | sed -n "${defaultChoice}p")
+
+            if [[ -n "${selectedDefault}" ]]; then
+                local tmpFile
+                tmpFile=$(mktemp)
+                chmod 600 "${tmpFile}"
+                jq --arg name "${selectedDefault}" '.default_chain = $name' "${infoFile}" > "${tmpFile}"
+                mv "${tmpFile}" "${infoFile}"
+
+                defaultChain="${selectedDefault}"
+                echoContent green " ---> 已将 [${selectedDefault}] 设为默认链路"
+            fi
+        fi
+    fi
+
+    # 检测是否有 Xray 代理协议在运行
+    local hasXrayProtocols=false
+    if [[ -f "/etc/Proxy-agent/xray/conf/02_VLESS_TCP_inbounds.json" ]] || \
+       [[ -f "/etc/Proxy-agent/xray/conf/07_VLESS_vision_reality_inbounds.json" ]] || \
+       [[ -f "/etc/Proxy-agent/xray/conf/04_trojan_TCP_inbounds.json" ]]; then
+        hasXrayProtocols=true
+        echoContent green " ---> 检测到 Xray 代理协议，将同时配置 Xray 链式转发"
+    fi
+
+    # 更新 has_xray 标志
+    local tmpFile
+    tmpFile=$(mktemp)
+    chmod 600 "${tmpFile}"
+    jq --argjson hasXray "${hasXrayProtocols}" '.has_xray = $hasXray' "${infoFile}" > "${tmpFile}"
+    mv "${tmpFile}" "${infoFile}"
+
+    # 生成路由配置
+    generateMultiChainRouteConfig
+
+    # 如果有 Xray，创建 SOCKS5 桥接入站
+    local chainBridgePort=31111
+    if [[ "${hasXrayProtocols}" == "true" ]]; then
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json
+{
+    "inbounds": [
+        {
+            "type": "socks",
+            "tag": "chain_bridge_in",
+            "listen": "127.0.0.1",
+            "listen_port": ${chainBridgePort},
+            "sniff": true,
+            "sniff_override_destination": true,
+            "domain_strategy": "prefer_ipv4"
+        }
+    ]
+}
+EOF
+    fi
+
+    # 合并配置
+    echoContent yellow "正在合并 sing-box 配置..."
+    mergeSingBoxConfig
+
+    # 启动 sing-box
+    echoContent yellow "正在启动 sing-box..."
+    handleSingBox stop >/dev/null 2>&1
+    handleSingBox start
+
+    # 验证 sing-box 启动成功
+    sleep 1
+    if ! pgrep -x "sing-box" >/dev/null 2>&1; then
+        echoContent red " ---> sing-box 启动失败"
+        echoContent yellow "请手动执行: /etc/Proxy-agent/sing-box/sing-box run -c /etc/Proxy-agent/sing-box/conf/config.json"
+        return 1
+    fi
+    echoContent green " ---> sing-box 启动成功"
+
+    # 配置 Xray（如果存在）
+    if [[ "${hasXrayProtocols}" == "true" ]]; then
+        configureXrayForMultiChain "${chainBridgePort}"
+    fi
+
+    # 显示配置摘要
+    showMultiChainSummary
+
+    # 测试连通性
+    echoContent yellow "\n正在测试链路连通性..."
+    sleep 2
+    testMultiChainConnection
+}
+
+# 生成多链路路由配置
+generateMultiChainRouteConfig() {
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+
+    # 获取默认链路
+    local defaultChain
+    defaultChain=$(jq -r '.default_chain' "${infoFile}")
+
+    # 获取是否有 Xray
+    local hasXray
+    hasXray=$(jq -r '.has_xray' "${infoFile}")
+
+    # 开始构建路由配置
+    local routeRules="[]"
+    local ruleSetDefs="[]"
+    local usedRuleSets=""
+
+    # 如果有 SOCKS5 桥接入站，添加对应路由规则
+    if [[ "${hasXray}" == "true" ]]; then
+        routeRules=$(echo "${routeRules}" | jq '. + [{
+            "inbound": ["chain_bridge_in"],
+            "outbound": "'"${defaultChain}"'"
+        }]')
+    fi
+
+    # 处理预设规则
+    local rules
+    rules=$(jq -c '.rules[]' "${infoFile}" 2>/dev/null)
+
+    while IFS= read -r rule; do
+        [[ -z "${rule}" ]] && continue
+
+        local ruleType ruleValue ruleChain
+        ruleType=$(echo "${rule}" | jq -r '.type')
+        ruleValue=$(echo "${rule}" | jq -r '.value')
+        ruleChain=$(echo "${rule}" | jq -r '.chain')
+
+        if [[ "${ruleType}" == "preset" ]]; then
+            # 获取预设规则对应的规则集
+            local rulesets
+            rulesets=$(getPresetRulesets "${ruleValue}")
+
+            IFS=',' read -ra rulesetArray <<< "${rulesets}"
+            local rulesetNames="[]"
+
+            for ruleset in "${rulesetArray[@]}"; do
+                rulesetNames=$(echo "${rulesetNames}" | jq --arg rs "${ruleset}" '. + [$rs]')
+
+                # 如果规则集未添加，添加定义
+                if [[ ! "${usedRuleSets}" =~ "${ruleset}" ]]; then
+                    usedRuleSets="${usedRuleSets},${ruleset}"
+
+                    local rulesetUrl="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/${ruleset#geosite-}.srs"
+
+                    ruleSetDefs=$(echo "${ruleSetDefs}" | jq --arg tag "${ruleset}" --arg url "${rulesetUrl}" '. + [{
+                        "tag": $tag,
+                        "type": "remote",
+                        "format": "binary",
+                        "url": $url,
+                        "download_detour": "direct",
+                        "update_interval": "1d"
+                    }]')
+                fi
+            done
+
+            # 添加路由规则
+            routeRules=$(echo "${routeRules}" | jq --argjson rs "${rulesetNames}" --arg chain "${ruleChain}" '. + [{
+                "rule_set": $rs,
+                "outbound": $chain
+            }]')
+
+        elif [[ "${ruleType}" == "custom" ]]; then
+            # 自定义域名规则
+            local domains="[]"
+            IFS=',' read -ra domainArray <<< "${ruleValue}"
+            for domain in "${domainArray[@]}"; do
+                domain=$(echo "${domain}" | xargs)  # trim
+                domains=$(echo "${domains}" | jq --arg d "${domain}" '. + [$d]')
+            done
+
+            routeRules=$(echo "${routeRules}" | jq --argjson ds "${domains}" --arg chain "${ruleChain}" '. + [{
+                "domain_suffix": $ds,
+                "outbound": $chain
+            }]')
+        fi
+    done <<< "${rules}"
+
+    # 确保 direct 出站存在
+    if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json" ]]; then
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
+{
+    "outbounds": [
+        {
+            "type": "direct",
+            "tag": "direct",
+            "domain_strategy": "prefer_ipv4"
+        }
+    ]
+}
+EOF
+    fi
+
+    # 生成最终路由配置
+    local finalOutbound="${defaultChain}"
+
+    # 构建完整的路由配置 JSON
+    local routeConfig
+    routeConfig=$(jq -n \
+        --argjson rules "${routeRules}" \
+        --argjson ruleSets "${ruleSetDefs}" \
+        --arg final "${finalOutbound}" \
+        '{
+            "route": {
+                "rule_set": $ruleSets,
+                "rules": $rules,
+                "final": $final,
+                "auto_detect_interface": true
+            }
+        }')
+
+    echo "${routeConfig}" > /etc/Proxy-agent/sing-box/conf/config/chain_route.json
+}
+
+# 配置 Xray 链式转发
+configureXrayForMultiChain() {
+    local bridgePort=$1
+
+    echoContent yellow "正在配置 Xray 链式转发..."
+
+    # 创建 Xray SOCKS5 出站 (指向 sing-box 桥接)
+    cat <<EOF >/etc/Proxy-agent/xray/conf/chain_outbound.json
+{
+    "outbounds": [
+        {
+            "tag": "chain_proxy",
+            "protocol": "socks",
+            "settings": {
+                "servers": [
+                    {
+                        "address": "127.0.0.1",
+                        "port": ${bridgePort}
+                    }
+                ]
+            }
+        }
+    ]
+}
+EOF
+
+    # 备份原路由配置
+    if [[ -f "/etc/Proxy-agent/xray/conf/09_routing.json" ]]; then
+        cp /etc/Proxy-agent/xray/conf/09_routing.json /etc/Proxy-agent/xray/conf/09_routing.json.bak.chain
+    fi
+
+    # 创建新的路由配置
+    cat <<EOF >/etc/Proxy-agent/xray/conf/09_routing.json
+{
+    "routing": {
+        "domainStrategy": "AsIs",
+        "rules": [
+            {
+                "type": "field",
+                "ip": ["127.0.0.0/8", "::1"],
+                "outboundTag": "z_direct_outbound"
+            },
+            {
+                "type": "field",
+                "domain": [
+                    "domain:gstatic.com",
+                    "domain:googleapis.com",
+                    "domain:googleapis.cn"
+                ],
+                "outboundTag": "chain_proxy"
+            },
+            {
+                "type": "field",
+                "network": "tcp,udp",
+                "outboundTag": "chain_proxy"
+            }
+        ]
+    }
+}
+EOF
+
+    # 重启 Xray
+    echoContent yellow "正在重启 Xray..."
+    handleXray stop >/dev/null 2>&1
+    handleXray start
+
+    sleep 1
+    if pgrep -f "xray/xray" >/dev/null 2>&1; then
+        echoContent green " ---> Xray 重启成功，链式转发已启用"
+    else
+        echoContent red " ---> Xray 重启失败"
+        echoContent yellow "请检查配置: /etc/Proxy-agent/xray/xray run -confdir /etc/Proxy-agent/xray/conf"
+    fi
+}
+
+# 显示多链路配置摘要
+showMultiChainSummary() {
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+
+    echoContent green "\n=============================================================="
+    echoContent green "多链路分流配置完成！"
+    echoContent green "=============================================================="
+
+    local chainCount
+    chainCount=$(jq '.chains | length' "${infoFile}")
+
+    echoContent yellow "\n已配置 ${chainCount} 条链路:\n"
+
+    # 表头
+    printf "  %-15s %-20s %-20s\n" "链路名称" "目标节点" "分流规则"
+    printf "  %-15s %-20s %-20s\n" "---------------" "--------------------" "--------------------"
+
+    # 遍历链路
+    local chains
+    chains=$(jq -c '.chains[]' "${infoFile}")
+
+    while IFS= read -r chain; do
+        local name ip port isDefault
+        name=$(echo "${chain}" | jq -r '.name')
+        ip=$(echo "${chain}" | jq -r '.ip')
+        port=$(echo "${chain}" | jq -r '.port')
+        isDefault=$(echo "${chain}" | jq -r '.is_default')
+
+        # 获取此链路的规则
+        local ruleDesc="待配置"
+        local rules
+        rules=$(jq -r ".rules[] | select(.chain == \"${name}\") | .type + \":\" + .value" "${infoFile}" 2>/dev/null)
+
+        if [[ -n "${rules}" ]]; then
+            local firstRule
+            firstRule=$(echo "${rules}" | head -1)
+            local ruleType ruleValue
+            ruleType=$(echo "${firstRule}" | cut -d: -f1)
+            ruleValue=$(echo "${firstRule}" | cut -d: -f2-)
+
+            if [[ "${ruleType}" == "preset" ]]; then
+                ruleDesc=$(getPresetDisplayName "${ruleValue}")
+            elif [[ "${ruleType}" == "custom" ]]; then
+                ruleDesc="自定义域名"
+            fi
+        fi
+
+        if [[ "${isDefault}" == "true" ]]; then
+            ruleDesc="默认 (所有其他流量)"
+        fi
+
+        printf "  %-15s %-20s %-20s\n" "${name}" "${ip}:${port}" "${ruleDesc}"
+    done <<< "${chains}"
+
+    # 显示默认链路
+    local defaultChain
+    defaultChain=$(jq -r '.default_chain' "${infoFile}")
+
+    if [[ "${defaultChain}" == "direct" ]]; then
+        echoContent yellow "\n默认出站: 直连 (未匹配规则的流量直连访问)"
+    else
+        echoContent yellow "\n默认出站: ${defaultChain}"
+    fi
+}
+
+# 并行测试多链路连通性
+testMultiChainConnection() {
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+
+    if [[ ! -f "${infoFile}" ]]; then
+        # 如果不是多链路模式，使用原有测试函数
+        testChainConnection
+        return $?
+    fi
+
+    echoContent skyBlue "\n测试多链路连通性"
+    echoContent red "=============================================================="
+
+    local chains
+    chains=$(jq -c '.chains[]' "${infoFile}")
+    local chainCount
+    chainCount=$(jq '.chains | length' "${infoFile}")
+
+    echoContent yellow "正在并行测试 ${chainCount} 条链路...\n"
+
+    # 创建临时目录存放测试结果
+    local tmpDir
+    tmpDir=$(mktemp -d)
+
+    # 并行测试每条链路
+    local pids=""
+    local index=0
+
+    while IFS= read -r chain; do
+        local name ip port
+        name=$(echo "${chain}" | jq -r '.name')
+        ip=$(echo "${chain}" | jq -r '.ip')
+        port=$(echo "${chain}" | jq -r '.port')
+
+        # 后台执行测试
+        (
+            local result="fail"
+            local latency="N/A"
+
+            # TCP 连接测试
+            if nc -zv -w 5 "${ip}" "${port}" >/dev/null 2>&1; then
+                result="pass"
+
+                # 测量延迟
+                local startTime endTime
+                startTime=$(date +%s%N)
+                nc -zv -w 3 "${ip}" "${port}" >/dev/null 2>&1
+                endTime=$(date +%s%N)
+                latency=$(( (endTime - startTime) / 1000000 ))
+            fi
+
+            echo "${name}|${ip}:${port}|${result}|${latency}" > "${tmpDir}/result_${index}"
+        ) &
+
+        pids="${pids} $!"
+        ((index++))
+    done <<< "${chains}"
+
+    # 等待所有测试完成
+    for pid in ${pids}; do
+        wait "${pid}" 2>/dev/null
+    done
+
+    # 读取并显示结果
+    local passCount=0
+    local failCount=0
+
+    for resultFile in "${tmpDir}"/result_*; do
+        if [[ -f "${resultFile}" ]]; then
+            local result
+            result=$(cat "${resultFile}")
+            local name target status latency
+            name=$(echo "${result}" | cut -d'|' -f1)
+            target=$(echo "${result}" | cut -d'|' -f2)
+            status=$(echo "${result}" | cut -d'|' -f3)
+            latency=$(echo "${result}" | cut -d'|' -f4)
+
+            if [[ "${status}" == "pass" ]]; then
+                echoContent green "  ✅ ${name} (${target}) - 延迟: ${latency}ms"
+                ((passCount++))
+            else
+                echoContent red "  ❌ ${name} (${target}) - 连接失败"
+                ((failCount++))
+            fi
+        fi
+    done
+
+    # 清理临时文件
+    rm -rf "${tmpDir}"
+
+    # 显示汇总
+    echoContent yellow "\n测试完成: ${passCount} 通过, ${failCount} 失败"
+
+    if [[ ${failCount} -gt 0 ]]; then
+        echoContent yellow "\n请检查失败链路的:"
+        echoContent yellow "  1. 出口节点防火墙是否开放端口"
+        echoContent yellow "  2. 出口节点 sing-box 是否运行"
+        echoContent yellow "  3. IP地址和端口是否正确"
+    fi
+}
+
+# 显示多链路状态
+showMultiChainStatus() {
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+
+    if [[ ! -f "${infoFile}" ]]; then
+        return 1
+    fi
+
+    local status="❌ 未运行"
+    if pgrep -x "sing-box" >/dev/null 2>&1; then
+        status="✅ 运行中"
+    fi
+
+    local chainCount
+    chainCount=$(jq '.chains | length' "${infoFile}")
+    local defaultChain
+    defaultChain=$(jq -r '.default_chain' "${infoFile}")
+
+    echoContent green "╔══════════════════════════════════════════════════════════════╗"
+    echoContent green "║                      链式代理状态                              ║"
+    echoContent green "╠══════════════════════════════════════════════════════════════╣"
+    echoContent yellow "  当前角色: 入口节点 (Entry) - 多链路分流模式"
+    echoContent yellow "  运行状态: ${status}"
+    echoContent yellow "  链路数量: ${chainCount}"
+    echoContent yellow "  默认出站: ${defaultChain}"
+    echoContent green "╠══════════════════════════════════════════════════════════════╣"
+    echoContent yellow "  链路详情:"
+
+    local chains
+    chains=$(jq -c '.chains[]' "${infoFile}")
+
+    while IFS= read -r chain; do
+        local name ip port isDefault
+        name=$(echo "${chain}" | jq -r '.name')
+        ip=$(echo "${chain}" | jq -r '.ip')
+        port=$(echo "${chain}" | jq -r '.port')
+        isDefault=$(echo "${chain}" | jq -r '.is_default')
+
+        local defaultMark=""
+        if [[ "${isDefault}" == "true" ]]; then
+            defaultMark=" [默认]"
+        fi
+
+        echoContent yellow "    • ${name}: ${ip}:${port}${defaultMark}"
+    done <<< "${chains}"
+
+    echoContent green "╚══════════════════════════════════════════════════════════════╝"
+
+    return 0
+}
+
+# 多链路高级管理菜单
+multiChainAdvancedMenu() {
+    echoContent skyBlue "\n多链路高级管理"
+    echoContent red "=============================================================="
+
+    echoContent yellow "1.添加链式出站"
+    echoContent yellow "2.删除链式出站"
+    echoContent yellow "3.配置分流规则"
+    echoContent yellow "4.设置默认链路"
+    echoContent yellow "5.查看详细配置"
+
+    read -r -p "请选择:" selectType
+
+    case ${selectType} in
+    1)
+        addSingleChainOutbound
+        if [[ $? -eq 0 ]]; then
+            generateMultiChainRouteConfig
+            mergeSingBoxConfig
+            reloadCore
+            echoContent green " ---> 配置已更新"
+        fi
+        ;;
+    2)
+        removeMultiChainOutbound
+        ;;
+    3)
+        configureMultiChainRules
+        generateMultiChainRouteConfig
+        mergeSingBoxConfig
+        reloadCore
+        echoContent green " ---> 配置已更新"
+        ;;
+    4)
+        setDefaultChain
+        ;;
+    5)
+        showMultiChainDetailConfig
+        ;;
+    esac
+}
+
+# 删除链路
+removeMultiChainOutbound() {
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+
+    if [[ ! -f "${infoFile}" ]]; then
+        echoContent red " ---> 未找到多链路配置"
+        return 1
+    fi
+
+    echoContent yellow "\n当前链路:\n"
+
+    local chains
+    chains=$(jq -r '.chains[].name' "${infoFile}")
+    local chainCount
+    chainCount=$(jq '.chains | length' "${infoFile}")
+
+    if [[ ${chainCount} -lt 1 ]]; then
+        echoContent red " ---> 没有可删除的链路"
+        return 1
+    fi
+
+    local index=1
+    while IFS= read -r chain; do
+        local chainIP chainPort isDefault
+        chainIP=$(jq -r ".chains[] | select(.name == \"${chain}\") | .ip" "${infoFile}")
+        chainPort=$(jq -r ".chains[] | select(.name == \"${chain}\") | .port" "${infoFile}")
+        isDefault=$(jq -r ".chains[] | select(.name == \"${chain}\") | .is_default" "${infoFile}")
+
+        local defaultMark=""
+        if [[ "${isDefault}" == "true" ]]; then
+            defaultMark=" [默认]"
+        fi
+
+        echoContent yellow "  ${index}. ${chain} (${chainIP}:${chainPort})${defaultMark}"
+        ((index++))
+    done <<< "${chains}"
+
+    read -r -p "请选择要删除的链路编号: " deleteIndex
+
+    local selectedChain
+    selectedChain=$(echo "${chains}" | sed -n "${deleteIndex}p")
+
+    if [[ -z "${selectedChain}" ]]; then
+        echoContent red " ---> 无效的选择"
+        return 1
+    fi
+
+    echoContent yellow "\n确认删除链路 [${selectedChain}]？[y/n]"
+    read -r -p "确认: " confirmDelete
+
+    if [[ "${confirmDelete}" != "y" ]]; then
+        return 0
+    fi
+
+    # 删除链路配置文件
+    rm -f "/etc/Proxy-agent/sing-box/conf/config/chain_outbound_${selectedChain}.json"
+
+    # 从 info 文件中删除
+    local tmpFile
+    tmpFile=$(mktemp)
+    chmod 600 "${tmpFile}"
+
+    jq --arg name "${selectedChain}" '
+        .chains = [.chains[] | select(.name != $name)] |
+        .rules = [.rules[] | select(.chain != $name)]
+    ' "${infoFile}" > "${tmpFile}"
+    mv "${tmpFile}" "${infoFile}"
+
+    # 如果删除的是默认链路，重置为 direct
+    local wasDefault
+    wasDefault=$(jq -r ".default_chain" "${infoFile}")
+    if [[ "${wasDefault}" == "${selectedChain}" ]]; then
+        tmpFile=$(mktemp)
+        chmod 600 "${tmpFile}"
+        jq '.default_chain = "direct"' "${infoFile}" > "${tmpFile}"
+        mv "${tmpFile}" "${infoFile}"
+        echoContent yellow " ---> 已重置默认链路为直连"
+    fi
+
+    # 重新生成路由配置
+    generateMultiChainRouteConfig
+    mergeSingBoxConfig
+    reloadCore
+
+    echoContent green " ---> 链路 [${selectedChain}] 已删除"
+}
+
+# 设置默认链路
+setDefaultChain() {
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+
+    if [[ ! -f "${infoFile}" ]]; then
+        echoContent red " ---> 未找到多链路配置"
+        return 1
+    fi
+
+    echoContent yellow "\n选择默认链路:\n"
+
+    local chains
+    chains=$(jq -r '.chains[].name' "${infoFile}")
+
+    local index=1
+    while IFS= read -r chain; do
+        echoContent yellow "  ${index}. ${chain}"
+        ((index++))
+    done <<< "${chains}"
+    echoContent yellow "  ${index}. 直连 (未匹配流量直连访问)"
+
+    read -r -p "请选择: " defaultChoice
+
+    local newDefault
+    if [[ "${defaultChoice}" == "${index}" ]]; then
+        newDefault="direct"
+    else
+        newDefault=$(echo "${chains}" | sed -n "${defaultChoice}p")
+    fi
+
+    if [[ -z "${newDefault}" ]]; then
+        echoContent red " ---> 无效的选择"
+        return 1
+    fi
+
+    local tmpFile
+    tmpFile=$(mktemp)
+    chmod 600 "${tmpFile}"
+    jq --arg name "${newDefault}" '.default_chain = $name' "${infoFile}" > "${tmpFile}"
+    mv "${tmpFile}" "${infoFile}"
+
+    # 更新 is_default 标志
+    tmpFile=$(mktemp)
+    chmod 600 "${tmpFile}"
+    if [[ "${newDefault}" == "direct" ]]; then
+        jq '.chains = [.chains[] | .is_default = false]' "${infoFile}" > "${tmpFile}"
+    else
+        jq --arg name "${newDefault}" '
+            .chains = [.chains[] | if .name == $name then .is_default = true else .is_default = false end]
+        ' "${infoFile}" > "${tmpFile}"
+    fi
+    mv "${tmpFile}" "${infoFile}"
+
+    # 重新生成路由配置
+    generateMultiChainRouteConfig
+    mergeSingBoxConfig
+    reloadCore
+
+    echoContent green " ---> 默认链路已设置为: ${newDefault}"
+}
+
+# 显示多链路详细配置
+showMultiChainDetailConfig() {
+    echoContent skyBlue "\n多链路详细配置"
+    echoContent red "=============================================================="
+
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" ]]; then
+        echoContent yellow "\n元数据 (chain_multi_info.json):"
+        jq . /etc/Proxy-agent/sing-box/conf/chain_multi_info.json
+    fi
+
+    echoContent yellow "\n链路出站配置:"
+    for f in /etc/Proxy-agent/sing-box/conf/config/chain_outbound_*.json; do
+        if [[ -f "${f}" ]]; then
+            echoContent yellow "\n$(basename "${f}"):"
+            jq . "${f}"
+        fi
+    done
+
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/config/chain_route.json" ]]; then
+        echoContent yellow "\n路由配置 (chain_route.json):"
+        jq . /etc/Proxy-agent/sing-box/conf/config/chain_route.json
+    fi
+}
+
+# ======================= 多链路分流功能结束 =======================
 
 # ======================= 链式代理功能结束 =======================
 
@@ -12217,6 +13996,7 @@ menu() {
     echoContent skyBlue "-------------------------$(t MENU_SCRIPT_MGMT)-----------------------------"
     echoContent yellow "20.$(t MENU_UNINSTALL)"
     echoContent yellow "21.切换语言 / Switch Language"
+    echoContent yellow "22.$(t MENU_SCRIPT_VERSION)"
     echoContent red "=============================================================="
     mkdirTools
     aliasInstall
@@ -12281,6 +14061,9 @@ menu() {
         ;;
     21)
         switchLanguage
+        ;;
+    22)
+        scriptVersionMenu
         ;;
     esac
 }
