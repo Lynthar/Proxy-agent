@@ -5470,6 +5470,18 @@ EOF
         removeSingBoxConfig socks5_outbound.json
         removeSingBoxConfig block_domain_outbound
         removeSingBoxConfig dns
+
+        # 确保基础 direct 出站存在，sing-box 需要至少一个默认出站
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
+{
+    "outbounds": [
+        {
+            "type": "direct",
+            "tag": "direct"
+        }
+    ]
+}
+EOF
     fi
 }
 # 初始化 sing-box订阅配置
