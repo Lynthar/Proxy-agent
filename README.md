@@ -15,9 +15,9 @@ wget -P /root -N https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/in
 
 **安装后使用 `pasly` 命令打开管理菜单**
 
-更详细的[使用指南](documents/developer-guide.md)；
+更详细的[使用指南](documents/user-guide.md)；
 
-如果你想自定义修改或开发，可以参考[开发指南](documents/user-guide.md)，它可以帮助你更快的理解该项目；
+如果你想自定义修改或开发，可以参考[开发指南](documents/developer-guide.md)，它可以帮助你更快的理解该项目；
 
 
 ## 支持协议
