@@ -6137,8 +6137,11 @@ showAccounts() {
     # naive
     if echo ${currentInstallProtocolType} | grep -q ",10," || [[ -n "${singBoxNaivePort}" ]]; then
         echoContent skyBlue "\n================================  naive TLS [推荐，不支持ClashMeta]  ================================\n"
-
-        jq -r -c '.inbounds[]|.users[]' "${configPath}10_naive_inbounds.json" | while read -r user; do
+        local path="${configPath}"
+        if [[ "${coreInstallType}" == "1" ]]; then
+            path="${singBoxConfigPath}"
+        fi
+        jq -r -c '.inbounds[]|.users[]' "${path}10_naive_inbounds.json" | while read -r user; do
             echoContent skyBlue "\n ---> 账号:$(echo "${user}" | jq -r .username)"
             echo
             defaultBase64Code naive "${singBoxNaivePort}" "$(echo "${user}" | jq -r .username)" "$(echo "${user}" | jq -r .password)"
