@@ -2650,8 +2650,8 @@ nginxBlog() {
     # 伪装站模板列表 (来自 Lynthar/website-examples)
     local templates=("cloud-drive" "game-zone" "net-disk" "play-hub" "stream-box" "video-portal" "music-flow" "podcast-hub" "ai-forge")
     local templateCount=${#templates[@]}
-    local repoUrl="https://github.com/Lynthar/website-examples/releases/download/v1.0/website-templates.zip"
-    local tempDir="/tmp/website-templates-$$"
+    local repoUrl="https://github.com/Lynthar/website-examples/archive/refs/heads/main.zip"
+    local tempDir="/tmp/website-examples-$$"
 
     if [[ -d "${nginxStaticPath}" && -f "${nginxStaticPath}/check" ]]; then
         echo
@@ -2679,7 +2679,7 @@ nginxBlog() {
 
             # 复制模板到目标目录
             mkdir -p "${nginxStaticPath}"
-            cp -rf "${tempDir}/website-templates/${selectedTemplate}/"* "${nginxStaticPath}"
+            cp -rf "${tempDir}/website-examples-main/${selectedTemplate}/"* "${nginxStaticPath}"
 
             # 创建 check 标记文件
             echo "${selectedTemplate}" > "${nginxStaticPath}/check"
@@ -2707,7 +2707,7 @@ nginxBlog() {
 
         # 复制模板到目标目录
         mkdir -p "${nginxStaticPath}"
-        cp -rf "${tempDir}/website-templates/${selectedTemplate}/"* "${nginxStaticPath}"
+        cp -rf "${tempDir}/website-examples-main/${selectedTemplate}/"* "${nginxStaticPath}"
 
         # 创建 check 标记文件
         echo "${selectedTemplate}" > "${nginxStaticPath}/check"
@@ -6324,8 +6324,8 @@ updateNginxBlog() {
     local templates=("cloud-drive" "game-zone" "net-disk" "play-hub" "stream-box" "video-portal" "music-flow" "podcast-hub" "ai-forge")
     local templateNames=("云存储网站" "游戏平台" "网盘系统" "游戏中心" "流媒体平台" "视频门户" "音乐平台" "播客平台" "AI平台")
     local templateCount=${#templates[@]}
-    local repoUrl="https://github.com/Lynthar/website-examples/releases/download/v1.0/website-templates.zip"
-    local tempDir="/tmp/website-templates-$$"
+    local repoUrl="https://github.com/Lynthar/website-examples/archive/refs/heads/main.zip"
+    local tempDir="/tmp/website-examples-$$"
 
     # 显示当前模板
     local currentTemplate=""
@@ -6418,7 +6418,7 @@ updateNginxBlog() {
 
         # 复制模板到目标目录
         mkdir -p "${nginxStaticPath}"
-        cp -rf "${tempDir}/website-templates/${selectedTemplate}/"* "${nginxStaticPath}"
+        cp -rf "${tempDir}/website-examples-main/${selectedTemplate}/"* "${nginxStaticPath}"
 
         # 创建 check 标记文件
         echo "${selectedTemplate}" > "${nginxStaticPath}/check"
