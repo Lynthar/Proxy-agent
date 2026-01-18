@@ -217,6 +217,14 @@ if ! type t &>/dev/null; then
     MSG_PROG_INSTALL_TOOLS="安装工具"
     MSG_INSTALL_CHECKING="检查、安装更新【新机器会很慢，如长时间无反应，请手动停止后重新执行】"
     MSG_INSTALL_TOOL="安装 %s"
+    # 链式代理菜单
+    MSG_CHAIN_MENU_WIZARD="快速配置向导"
+    MSG_CHAIN_MENU_STATUS="查看链路状态"
+    MSG_CHAIN_MENU_TEST="测试链路连通性"
+    MSG_CHAIN_MENU_ADVANCED="高级设置"
+    MSG_CHAIN_MENU_UNINSTALL="卸载链式代理"
+    MSG_EXT_MENU_TITLE="外部节点管理"
+    MSG_RECOMMENDED="推荐"
 
     # 后备 t() 函数
     t() {
