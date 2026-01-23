@@ -226,6 +226,85 @@ if ! type t &>/dev/null; then
     MSG_EXT_MENU_TITLE="外部节点管理"
     MSG_RECOMMENDED="推荐"
 
+    # === IP CIDR 和 GeoIP 相关 ===
+    MSG_CHAIN_RULE_IP_CIDR="IP CIDR 规则"
+    MSG_CHAIN_RULE_GEOIP="GeoIP 规则"
+    MSG_CHAIN_IP_CIDR_HINT="请输入 IP CIDR (逗号分隔)"
+    MSG_CHAIN_IP_CIDR_EXAMPLE="格式示例: 192.168.0.0/16,10.0.0.0/8,172.16.0.0/12"
+    MSG_CHAIN_IP_CIDR_INVALID="IP CIDR 格式无效"
+    MSG_IP_CIDR="IP CIDR"
+    MSG_CHAIN_GEOIP_SELECT="选择 GeoIP 规则"
+    MSG_CHAIN_GEOIP_CN="中国大陆"
+    MSG_CHAIN_GEOIP_US="美国"
+    MSG_CHAIN_GEOIP_JP="日本"
+    MSG_CHAIN_GEOIP_HK="香港"
+    MSG_CHAIN_GEOIP_TW="台湾"
+    MSG_CHAIN_GEOIP_SG="新加坡"
+    MSG_CHAIN_GEOIP_PRIVATE="私有 IP"
+    MSG_CHAIN_GEOIP_CUSTOM="自定义 GeoIP"
+    MSG_CHAIN_GEOIP_CUSTOM_HINT="请输入 GeoIP 代码 (如: kr, de, fr)"
+
+    # === 多链路配置相关 ===
+    MSG_CHAIN_MULTI_TITLE="配置入口节点 (多链路分流模式)"
+    MSG_CHAIN_MULTI_DESC="此模式允许将不同流量分流到不同的出口节点"
+    MSG_CHAIN_MULTI_EXAMPLE="例如: Netflix → 美国出口, OpenAI → 香港出口"
+    MSG_CHAIN_SINGLE_EXISTS="检测到已存在单链路配置"
+    MSG_CHAIN_SINGLE_UNINSTALL_HINT="如需使用多链路分流模式，请先卸载现有链式代理配置"
+    MSG_CHAIN_MENU_PATH="菜单路径: 链式代理管理 → 卸载链式代理"
+    MSG_CHAIN_MULTI_EXISTS="检测到已存在多链路配置"
+    MSG_CHAIN_CONTINUE_ADD_NEW="继续添加新链路"
+    MSG_CHAIN_RECONFIGURE="重新配置 (将清除现有配置)"
+    MSG_CHAIN_CONFIRM_CLEAR="确认清除现有多链路配置？"
+    MSG_CHAIN_SELECT_CONFIG_MODE="请选择配置方式"
+    MSG_CHAIN_ADD_INTERACTIVE="逐个添加链路"
+    MSG_CHAIN_BATCH_IMPORT="批量导入配置码"
+    MSG_CHAIN_BATCH_TITLE="批量导入配置码"
+    MSG_CHAIN_BATCH_HINT="请逐行粘贴配置码，每行一个"
+    MSG_CHAIN_BATCH_END_HINT="输入完成后输入空行结束"
+    MSG_CHAIN_CODE_PROMPT="配置码"
+    MSG_CHAIN_CODE_PARSE_FAILED="配置码解析失败，已跳过"
+    MSG_CHAIN_NO_CHAINS_ADDED="未添加任何链路，配置已取消"
+    MSG_CHAIN_IMPORT_SUCCESS="成功导入 %s 条链路"
+    MSG_CHAIN_IMPORT_NONE="未导入任何链路，配置已取消"
+    MSG_CHAIN_CONFIG_RULES_NOW="是否现在配置分流规则？"
+
+    # === 规则配置相关 ===
+    MSG_CHAIN_STEP_IMPORT="步骤 1/3: 导入配置"
+    MSG_CHAIN_STEP_RULES="步骤 3/3: 设置分流规则"
+    MSG_CHAIN_RULES_SELECT="选择此链路的分流规则"
+    MSG_CHAIN_RULE_CUSTOM_DOMAIN="自定义域名"
+    MSG_CHAIN_RULE_SET_DEFAULT="设为默认链路"
+    MSG_CHAIN_DEFAULT_HINT="提示: 如果不设置默认链路，未匹配规则的流量将从入口节点直连访问"
+    MSG_CHAIN_PASTE_CODE="请粘贴出口/中继节点的配置码"
+    MSG_CHAIN_CODE_EMPTY="配置码不能为空"
+    MSG_CHAIN_PARSE_SUCCESS="解析成功"
+    MSG_CHAIN_NODE_IP="节点IP"
+    MSG_CHAIN_PORT="端口"
+    MSG_CHAIN_PROTOCOL="协议"
+    MSG_CHAIN_DOMAIN_HINT="请输入域名 (逗号分隔，如: example.com,test.org)"
+    MSG_CHAIN_DOMAIN="域名"
+    MSG_CHAIN_DOMAIN_EMPTY="域名不能为空"
+    MSG_CHAIN_RULES_TITLE="配置分流规则"
+    MSG_CHAIN_CURRENT_CHAINS="当前链路"
+    MSG_CHAIN_SELECT_CHAIN="选择要添加规则的链路编号"
+    MSG_CHAIN_INDEX="链路编号"
+    MSG_CHAIN_INVALID_CHAIN="无效的选择"
+    MSG_CHAIN_NO_CHAINS="没有可用的链路"
+    MSG_CHAIN_NO_CONFIG="未找到多链路配置"
+    MSG_CHAIN_RULE_FOR="为链路"
+    MSG_CHAIN_RULE_TYPE_SELECT="选择规则类型"
+    MSG_CHAIN_GENERATING="正在生成配置..."
+    MSG_CHAIN_CONFIG_COMPLETE="多链路分流配置完成！"
+    MSG_CHAIN_NO_DEFAULT_SET="当前未设置默认链路，未匹配规则的流量将直连访问"
+    MSG_CHAIN_SET_DEFAULT_NOW="是否现在设置默认链路？"
+    MSG_CHAIN_NO_DEFAULT_OPTION="不设置 (未匹配流量直连)"
+    MSG_CHAIN_CONFIGURED_COUNT="已配置 %s 条链路"
+    MSG_CHAIN_SET_DEFAULT_SUCCESS="已将 [%s] 设为默认链路"
+    MSG_CHAIN_XRAY_DETECTED="检测到 Xray 代理协议，将同时配置 Xray 链式转发"
+    MSG_CHAIN_TARGET="目标"
+    MSG_CHAIN_RULE_ADDED="规则已添加"
+    MSG_CONFIRM="确认"
+
     # 后备 t() 函数
     t() {
         local key="MSG_$1"
@@ -10555,6 +10634,45 @@ validateChainName() {
     return 0
 }
 
+# 验证 IP CIDR 格式
+validateIpCidrs() {
+    local input=$1
+    IFS=',' read -ra cidrArray <<< "${input}"
+
+    for cidr in "${cidrArray[@]}"; do
+        cidr=$(echo "${cidr}" | xargs)  # trim whitespace
+
+        # IPv4 CIDR 格式: x.x.x.x/prefix
+        if [[ "${cidr}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
+            # 验证 IP 部分
+            local ip="${cidr%/*}"
+            local prefix="${cidr#*/}"
+
+            IFS='.' read -ra octets <<< "${ip}"
+            for octet in "${octets[@]}"; do
+                if [[ ${octet} -gt 255 ]]; then
+                    return 1
+                fi
+            done
+
+            # 验证前缀长度
+            if [[ ${prefix} -gt 32 ]]; then
+                return 1
+            fi
+        # IPv6 CIDR 格式: xxxx:xxxx::/prefix
+        elif [[ "${cidr}" =~ ^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}/[0-9]{1,3}$ ]]; then
+            local prefix="${cidr#*/}"
+            if [[ ${prefix} -gt 128 ]]; then
+                return 1
+            fi
+        else
+            return 1
+        fi
+    done
+
+    return 0
+}
+
 # 生成下一个可用的链路名称
 generateNextChainName() {
     local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
@@ -10589,27 +10707,27 @@ isChainNameExists() {
 
 # 多链路入口配置向导
 setupMultiChainEntry() {
-    echoContent skyBlue "\n配置入口节点 (多链路分流模式)"
+    echoContent skyBlue "\n$(t CHAIN_MULTI_TITLE)"
     echoContent red "\n=============================================================="
-    echoContent yellow "此模式允许将不同流量分流到不同的出口节点"
-    echoContent yellow "例如: Netflix → 美国出口, OpenAI → 香港出口\n"
+    echoContent yellow "$(t CHAIN_MULTI_DESC)"
+    echoContent yellow "$(t CHAIN_MULTI_EXAMPLE)\n"
 
     # 检查是否已存在单链路配置
     if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json" ]] && \
        [[ ! -f "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" ]]; then
-        echoContent yellow "检测到已存在单链路配置"
-        echoContent yellow "如需使用多链路分流模式，请先卸载现有链式代理配置"
-        echoContent yellow "菜单路径: 链式代理管理 → 卸载链式代理"
+        echoContent yellow "$(t CHAIN_SINGLE_EXISTS)"
+        echoContent yellow "$(t CHAIN_SINGLE_UNINSTALL_HINT)"
+        echoContent yellow "$(t CHAIN_MENU_PATH)"
         return 1
     fi
 
     # 检查是否已存在多链路配置
     if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" ]]; then
-        echoContent yellow "检测到已存在多链路配置"
-        echoContent yellow "1.继续添加新链路"
-        echoContent yellow "2.重新配置 (将清除现有配置)"
-        echoContent yellow "3.取消"
-        read -r -p "请选择:" existingChoice
+        echoContent yellow "$(t CHAIN_MULTI_EXISTS)"
+        echoContent yellow "1.$(t CHAIN_CONTINUE_ADD_NEW)"
+        echoContent yellow "2.$(t CHAIN_RECONFIGURE)"
+        echoContent yellow "3.$(t CANCEL)"
+        read -r -p "$(t PROMPT_SELECT):" existingChoice
 
         case "${existingChoice}" in
             1)
@@ -10617,8 +10735,8 @@ setupMultiChainEntry() {
                 return $?
                 ;;
             2)
-                echoContent yellow "确认清除现有多链路配置？[y/n]"
-                read -r -p "确认:" confirmClear
+                echoContent yellow "$(t CHAIN_CONFIRM_CLEAR)[y/n]"
+                read -r -p "$(t CONFIRM):" confirmClear
                 if [[ "${confirmClear}" != "y" ]]; then
                     return 0
                 fi
@@ -10640,10 +10758,10 @@ setupMultiChainEntry() {
         return 1
     fi
 
-    echoContent yellow "请选择配置方式:\n"
-    echoContent yellow "1.逐个添加链路 (推荐)"
-    echoContent yellow "2.批量导入配置码"
-    read -r -p "请选择:" configMode
+    echoContent yellow "$(t CHAIN_SELECT_CONFIG_MODE):\n"
+    echoContent yellow "1.$(t CHAIN_ADD_INTERACTIVE) [$(t RECOMMENDED)]"
+    echoContent yellow "2.$(t CHAIN_BATCH_IMPORT)"
+    read -r -p "$(t PROMPT_SELECT):" configMode
 
     case "${configMode}" in
         1)
@@ -10724,7 +10842,7 @@ EOF
     totalChains=$(jq '.chains | length' /etc/Proxy-agent/sing-box/conf/chain_multi_info.json)
 
     if [[ "${totalChains}" -lt 1 ]]; then
-        echoContent red "\n ---> 未添加任何链路，配置已取消"
+        echoContent red "\n ---> $(t CHAIN_NO_CHAINS_ADDED)"
         rm -f /etc/Proxy-agent/sing-box/conf/chain_multi_info.json
         return 1
     fi
@@ -10735,10 +10853,10 @@ EOF
 
 # 批量导入配置码
 setupMultiChainBatch() {
-    echoContent skyBlue "\n批量导入配置码"
+    echoContent skyBlue "\n$(t CHAIN_BATCH_TITLE)"
     echoContent red "=============================================================="
-    echoContent yellow "请逐行粘贴配置码，每行一个"
-    echoContent yellow "输入完成后输入空行结束\n"
+    echoContent yellow "$(t CHAIN_BATCH_HINT)"
+    echoContent yellow "$(t CHAIN_BATCH_END_HINT)\n"
 
     # 初始化多链路信息文件
     cat <<EOF >/etc/Proxy-agent/sing-box/conf/chain_multi_info.json
@@ -10757,7 +10875,7 @@ EOF
     local line
 
     while true; do
-        read -r -p "配置码 #$((chainIndex + 1)): " line
+        read -r -p "$(t CHAIN_CODE_PROMPT) #$((chainIndex + 1)): " line
 
         # 空行结束输入
         if [[ -z "${line}" ]]; then
@@ -10766,7 +10884,7 @@ EOF
 
         # 解析配置码
         if ! parseChainCode "${line}"; then
-            echoContent red " ---> 配置码解析失败，已跳过"
+            echoContent red " ---> $(t CHAIN_CODE_PARSE_FAILED)"
             continue
         fi
 
@@ -10776,22 +10894,22 @@ EOF
 
         # 添加链路
         if addChainToConfig "${chainName}" "${chainExitIP}" "${chainExitPort}" "${chainExitKey}" "${chainExitMethod}"; then
-            echoContent green " ---> 链路 [${chainName}] 添加成功 (${chainExitIP}:${chainExitPort})"
+            echoContent green " ---> $(t CHAIN_ADDED): [${chainName}] (${chainExitIP}:${chainExitPort})"
             ((chainIndex++))
         fi
     done
 
     if [[ ${chainIndex} -lt 1 ]]; then
-        echoContent red "\n ---> 未导入任何链路，配置已取消"
+        echoContent red "\n ---> $(t CHAIN_IMPORT_NONE)"
         rm -f /etc/Proxy-agent/sing-box/conf/chain_multi_info.json
         return 1
     fi
 
-    echoContent green "\n ---> 成功导入 ${chainIndex} 条链路"
+    echoContent green "\n ---> $(t CHAIN_IMPORT_SUCCESS "${chainIndex}")"
 
     # 配置分流规则
-    echoContent yellow "\n是否现在配置分流规则？[y/n]"
-    read -r -p "配置:" configRules
+    echoContent yellow "\n$(t CHAIN_CONFIG_RULES_NOW)[y/n]"
+    read -r -p "$(t CONFIRM):" configRules
 
     if [[ "${configRules}" == "y" ]]; then
         configureMultiChainRules
@@ -11100,39 +11218,42 @@ addSingleChainOutbound() {
 
     # 验证名称格式
     if ! validateChainName "${chainName}"; then
-        echoContent red " ---> 名称格式无效，仅允许英文字母、数字、下划线"
+        echoContent red " ---> $(t CHAIN_NAME_INVALID)"
         return 1
     fi
 
     # 检查名称是否已存在
     if isChainNameExists "${chainName}"; then
-        echoContent red " ---> 链路名称已存在"
+        echoContent red " ---> $(t CHAIN_NAME_EXISTS)"
         return 1
     fi
 
     # 步骤3: 设置分流规则
-    echoContent yellow "\n步骤 3/3: 设置分流规则"
-    echoContent yellow "选择此链路的分流规则:\n"
-    echoContent yellow "1.稍后统一配置"
-    echoContent yellow "2.使用预设规则"
-    echoContent yellow "  a) 流媒体 (Netflix/Disney+/YouTube/...)"
-    echoContent yellow "  b) AI服务 (OpenAI/Bing/...)"
-    echoContent yellow "  c) 社交媒体 (Telegram/Twitter/...)"
-    echoContent yellow "  d) 开发者 (GitHub/GitLab/...)"
-    echoContent yellow "  e) 游戏 (Steam/Epic/...)"
-    echoContent yellow "  f) 谷歌服务"
-    echoContent yellow "  g) 微软服务"
-    echoContent yellow "  h) 苹果服务"
-    echoContent yellow "3.自定义域名"
-    echoContent yellow "4.设为默认链路 (接收所有未匹配规则的流量)"
+    echoContent yellow "\n$(t CHAIN_STEP_RULES)"
+    echoContent yellow "$(t CHAIN_RULES_SELECT):\n"
+    echoContent yellow "1.$(t CHAIN_RULE_LATER)"
+    echoContent yellow "2.$(t CHAIN_RULE_PRESET)"
+    echoContent yellow "  a) $(t CHAIN_PRESET_STREAMING)"
+    echoContent yellow "  b) $(t CHAIN_PRESET_AI)"
+    echoContent yellow "  c) $(t CHAIN_PRESET_SOCIAL)"
+    echoContent yellow "  d) $(t CHAIN_PRESET_DEV)"
+    echoContent yellow "  e) $(t CHAIN_PRESET_GAMING)"
+    echoContent yellow "  f) $(t CHAIN_PRESET_GOOGLE)"
+    echoContent yellow "  g) $(t CHAIN_PRESET_MICROSOFT)"
+    echoContent yellow "  h) $(t CHAIN_PRESET_APPLE)"
+    echoContent yellow "3.$(t CHAIN_RULE_CUSTOM_DOMAIN)"
+    echoContent yellow "4.$(t CHAIN_RULE_IP_CIDR)"
+    echoContent yellow "5.$(t CHAIN_RULE_GEOIP)"
+    echoContent yellow "6.$(t CHAIN_RULE_SET_DEFAULT)"
     echoContent yellow ""
-    echoContent skyBlue "提示: 如果不设置默认链路，未匹配规则的流量将从入口节点直连访问"
+    echoContent skyBlue "$(t CHAIN_DEFAULT_HINT)"
 
-    read -r -p "请选择: " ruleChoice
+    read -r -p "$(t PROMPT_SELECT): " ruleChoice
 
     local ruleType=""
     local ruleName=""
     local customDomains=""
+    local customIpCidrs=""
     local isDefault="false"
 
     case "${ruleChoice}" in
@@ -11173,13 +11294,56 @@ addSingleChainOutbound() {
             ;;
         3)
             ruleType="custom"
-            echoContent yellow "请输入域名 (逗号分隔，如: example.com,test.org):"
-            read -r -p "域名: " customDomains
+            echoContent yellow "$(t CHAIN_DOMAIN_HINT):"
+            read -r -p "$(t CHAIN_DOMAIN): " customDomains
             if [[ -z "${customDomains}" ]]; then
                 ruleType="none"
             fi
             ;;
         4)
+            ruleType="ip_cidr"
+            echoContent yellow "$(t CHAIN_IP_CIDR_HINT):"
+            echoContent yellow "$(t CHAIN_IP_CIDR_EXAMPLE)"
+            read -r -p "$(t IP_CIDR): " customIpCidrs
+            if [[ -z "${customIpCidrs}" ]]; then
+                ruleType="none"
+            elif ! validateIpCidrs "${customIpCidrs}"; then
+                echoContent red " ---> $(t CHAIN_IP_CIDR_INVALID)"
+                return 1
+            fi
+            ;;
+        5)
+            ruleType="geoip"
+            echoContent yellow "\n$(t CHAIN_GEOIP_SELECT):\n"
+            echoContent yellow "1.$(t CHAIN_GEOIP_CN) (geoip-cn)"
+            echoContent yellow "2.$(t CHAIN_GEOIP_US) (geoip-us)"
+            echoContent yellow "3.$(t CHAIN_GEOIP_JP) (geoip-jp)"
+            echoContent yellow "4.$(t CHAIN_GEOIP_HK) (geoip-hk)"
+            echoContent yellow "5.$(t CHAIN_GEOIP_TW) (geoip-tw)"
+            echoContent yellow "6.$(t CHAIN_GEOIP_SG) (geoip-sg)"
+            echoContent yellow "7.$(t CHAIN_GEOIP_PRIVATE) (geoip-private)"
+            echoContent yellow "8.$(t CHAIN_GEOIP_CUSTOM)"
+            read -r -p "$(t PROMPT_SELECT): " geoipChoice
+
+            case "${geoipChoice}" in
+                1) ruleName="cn" ;;
+                2) ruleName="us" ;;
+                3) ruleName="jp" ;;
+                4) ruleName="hk" ;;
+                5) ruleName="tw" ;;
+                6) ruleName="sg" ;;
+                7) ruleName="private" ;;
+                8)
+                    echoContent yellow "$(t CHAIN_GEOIP_CUSTOM_HINT):"
+                    read -r -p "GeoIP: " ruleName
+                    ;;
+                *)
+                    echoContent red " ---> $(t INVALID_SELECTION)"
+                    return 1
+                    ;;
+            esac
+            ;;
+        6)
             ruleType="default"
             isDefault="true"
             ;;
@@ -11196,22 +11360,32 @@ addSingleChainOutbound() {
     # 添加规则
     if [[ "${ruleType}" == "preset" ]]; then
         addRuleToConfig "preset" "${ruleName}" "${chainName}"
-        echoContent green "\n ---> 链路 [${chainName}] 添加成功"
-        echoContent green "   目标: ${chainExitIP}:${chainExitPort}"
-        echoContent green "   规则: $(getPresetDisplayName "${ruleName}")"
+        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
+        echoContent green "   $(t CHAIN_TARGET): ${chainExitIP}:${chainExitPort}"
+        echoContent green "   $(t RULES): $(getPresetDisplayName "${ruleName}")"
     elif [[ "${ruleType}" == "custom" ]]; then
         addRuleToConfig "custom" "${customDomains}" "${chainName}"
-        echoContent green "\n ---> 链路 [${chainName}] 添加成功"
-        echoContent green "   目标: ${chainExitIP}:${chainExitPort}"
-        echoContent green "   规则: 自定义域名"
+        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
+        echoContent green "   $(t CHAIN_TARGET): ${chainExitIP}:${chainExitPort}"
+        echoContent green "   $(t RULES): $(t CUSTOM_DOMAIN)"
+    elif [[ "${ruleType}" == "ip_cidr" ]]; then
+        addRuleToConfig "ip_cidr" "${customIpCidrs}" "${chainName}"
+        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
+        echoContent green "   $(t CHAIN_TARGET): ${chainExitIP}:${chainExitPort}"
+        echoContent green "   $(t RULES): IP CIDR"
+    elif [[ "${ruleType}" == "geoip" ]]; then
+        addRuleToConfig "geoip" "${ruleName}" "${chainName}"
+        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
+        echoContent green "   $(t CHAIN_TARGET): ${chainExitIP}:${chainExitPort}"
+        echoContent green "   $(t RULES): geoip-${ruleName}"
     elif [[ "${ruleType}" == "default" ]]; then
-        echoContent green "\n ---> 链路 [${chainName}] 添加成功 (默认链路)"
-        echoContent green "   目标: ${chainExitIP}:${chainExitPort}"
-        echoContent green "   规则: 所有未匹配流量"
+        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}] ($(t DEFAULT_CHAIN))"
+        echoContent green "   $(t CHAIN_TARGET): ${chainExitIP}:${chainExitPort}"
+        echoContent green "   $(t RULES): $(t ALL_UNMATCHED)"
     else
-        echoContent green "\n ---> 链路 [${chainName}] 添加成功"
-        echoContent green "   目标: ${chainExitIP}:${chainExitPort}"
-        echoContent green "   规则: 待配置"
+        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
+        echoContent green "   $(t CHAIN_TARGET): ${chainExitIP}:${chainExitPort}"
+        echoContent green "   $(t RULES): $(t PENDING_CONFIG)"
     fi
 
     return 0
@@ -11311,7 +11485,7 @@ configureMultiChainRules() {
     local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
 
     if [[ ! -f "${infoFile}" ]]; then
-        echoContent red " ---> 未找到多链路配置"
+        echoContent red " ---> $(t CHAIN_NO_CONFIG)"
         return 1
     fi
 
@@ -11320,13 +11494,13 @@ configureMultiChainRules() {
     chains=$(jq -r '.chains[].name' "${infoFile}")
 
     if [[ -z "${chains}" ]]; then
-        echoContent red " ---> 没有可用的链路"
+        echoContent red " ---> $(t CHAIN_NO_CHAINS)"
         return 1
     fi
 
-    echoContent skyBlue "\n配置分流规则"
+    echoContent skyBlue "\n$(t CHAIN_RULES_TITLE)"
     echoContent red "=============================================================="
-    echoContent yellow "当前链路:\n"
+    echoContent yellow "$(t CHAIN_CURRENT_CHAINS):\n"
 
     local index=1
     while IFS= read -r chain; do
@@ -11337,38 +11511,40 @@ configureMultiChainRules() {
         ((index++))
     done <<< "${chains}"
 
-    echoContent yellow "\n选择要添加规则的链路编号:"
-    read -r -p "链路编号: " chainIndex
+    echoContent yellow "\n$(t CHAIN_SELECT_CHAIN):"
+    read -r -p "$(t CHAIN_INDEX): " chainIndex
 
     # 获取选中的链路名称
     local selectedChain
     selectedChain=$(echo "${chains}" | sed -n "${chainIndex}p")
 
     if [[ -z "${selectedChain}" ]]; then
-        echoContent red " ---> 无效的选择"
+        echoContent red " ---> $(t CHAIN_INVALID_CHAIN)"
         return 1
     fi
 
-    echoContent yellow "\n为链路 [${selectedChain}] 选择规则类型:\n"
-    echoContent yellow "1.预设规则"
-    echoContent yellow "2.自定义域名"
-    echoContent yellow "3.设为默认链路"
+    echoContent yellow "\n$(t CHAIN_RULE_FOR) [${selectedChain}] $(t CHAIN_RULE_TYPE_SELECT):\n"
+    echoContent yellow "1.$(t CHAIN_RULE_PRESET)"
+    echoContent yellow "2.$(t CHAIN_RULE_CUSTOM_DOMAIN)"
+    echoContent yellow "3.$(t CHAIN_RULE_IP_CIDR)"
+    echoContent yellow "4.$(t CHAIN_RULE_GEOIP)"
+    echoContent yellow "5.$(t CHAIN_RULE_SET_DEFAULT)"
 
-    read -r -p "请选择: " ruleTypeChoice
+    read -r -p "$(t PROMPT_SELECT): " ruleTypeChoice
 
     case "${ruleTypeChoice}" in
         1)
-            echoContent yellow "\n选择预设规则:\n"
-            echoContent yellow "1.流媒体 (Netflix/Disney+/YouTube/...)"
-            echoContent yellow "2.AI服务 (OpenAI/Bing/...)"
-            echoContent yellow "3.社交媒体 (Telegram/Twitter/...)"
-            echoContent yellow "4.开发者 (GitHub/GitLab/...)"
-            echoContent yellow "5.游戏 (Steam/Epic/...)"
-            echoContent yellow "6.谷歌服务"
-            echoContent yellow "7.微软服务"
-            echoContent yellow "8.苹果服务"
+            echoContent yellow "\n$(t CHAIN_RULE_PRESET):\n"
+            echoContent yellow "1.$(t CHAIN_PRESET_STREAMING)"
+            echoContent yellow "2.$(t CHAIN_PRESET_AI)"
+            echoContent yellow "3.$(t CHAIN_PRESET_SOCIAL)"
+            echoContent yellow "4.$(t CHAIN_PRESET_DEV)"
+            echoContent yellow "5.$(t CHAIN_PRESET_GAMING)"
+            echoContent yellow "6.$(t CHAIN_PRESET_GOOGLE)"
+            echoContent yellow "7.$(t CHAIN_PRESET_MICROSOFT)"
+            echoContent yellow "8.$(t CHAIN_PRESET_APPLE)"
 
-            read -r -p "请选择: " presetChoice
+            read -r -p "$(t PROMPT_SELECT): " presetChoice
 
             local presetName
             case "${presetChoice}" in
@@ -11381,27 +11557,79 @@ configureMultiChainRules() {
                 7) presetName="microsoft" ;;
                 8) presetName="apple" ;;
                 *)
-                    echoContent red " ---> 无效的选择"
+                    echoContent red " ---> $(t INVALID_SELECTION)"
                     return 1
                     ;;
             esac
 
             addRuleToConfig "preset" "${presetName}" "${selectedChain}"
-            echoContent green " ---> 规则已添加: $(getPresetDisplayName "${presetName}") → ${selectedChain}"
+            echoContent green " ---> $(t CHAIN_RULE_ADDED): $(getPresetDisplayName "${presetName}") → ${selectedChain}"
             ;;
         2)
-            echoContent yellow "请输入域名 (逗号分隔，如: example.com,test.org):"
-            read -r -p "域名: " customDomains
+            echoContent yellow "$(t CHAIN_DOMAIN_HINT):"
+            read -r -p "$(t CHAIN_DOMAIN): " customDomains
 
             if [[ -z "${customDomains}" ]]; then
-                echoContent red " ---> 域名不能为空"
+                echoContent red " ---> $(t CHAIN_DOMAIN_EMPTY)"
                 return 1
             fi
 
             addRuleToConfig "custom" "${customDomains}" "${selectedChain}"
-            echoContent green " ---> 自定义域名规则已添加 → ${selectedChain}"
+            echoContent green " ---> $(t CHAIN_CUSTOM_RULE_ADDED) → ${selectedChain}"
             ;;
         3)
+            echoContent yellow "$(t CHAIN_IP_CIDR_HINT):"
+            echoContent yellow "$(t CHAIN_IP_CIDR_EXAMPLE)"
+            read -r -p "$(t IP_CIDR): " customIpCidrs
+
+            if [[ -z "${customIpCidrs}" ]]; then
+                echoContent red " ---> $(t IP_CIDR_EMPTY)"
+                return 1
+            fi
+
+            if ! validateIpCidrs "${customIpCidrs}"; then
+                echoContent red " ---> $(t CHAIN_IP_CIDR_INVALID)"
+                return 1
+            fi
+
+            addRuleToConfig "ip_cidr" "${customIpCidrs}" "${selectedChain}"
+            echoContent green " ---> $(t CHAIN_IP_CIDR_RULE_ADDED) → ${selectedChain}"
+            ;;
+        4)
+            echoContent yellow "\n$(t CHAIN_GEOIP_SELECT):\n"
+            echoContent yellow "1.$(t CHAIN_GEOIP_CN) (geoip-cn)"
+            echoContent yellow "2.$(t CHAIN_GEOIP_US) (geoip-us)"
+            echoContent yellow "3.$(t CHAIN_GEOIP_JP) (geoip-jp)"
+            echoContent yellow "4.$(t CHAIN_GEOIP_HK) (geoip-hk)"
+            echoContent yellow "5.$(t CHAIN_GEOIP_TW) (geoip-tw)"
+            echoContent yellow "6.$(t CHAIN_GEOIP_SG) (geoip-sg)"
+            echoContent yellow "7.$(t CHAIN_GEOIP_PRIVATE) (geoip-private)"
+            echoContent yellow "8.$(t CHAIN_GEOIP_CUSTOM)"
+            read -r -p "$(t PROMPT_SELECT): " geoipChoice
+
+            local geoipName
+            case "${geoipChoice}" in
+                1) geoipName="cn" ;;
+                2) geoipName="us" ;;
+                3) geoipName="jp" ;;
+                4) geoipName="hk" ;;
+                5) geoipName="tw" ;;
+                6) geoipName="sg" ;;
+                7) geoipName="private" ;;
+                8)
+                    echoContent yellow "$(t CHAIN_GEOIP_CUSTOM_HINT):"
+                    read -r -p "GeoIP: " geoipName
+                    ;;
+                *)
+                    echoContent red " ---> $(t INVALID_SELECTION)"
+                    return 1
+                    ;;
+            esac
+
+            addRuleToConfig "geoip" "${geoipName}" "${selectedChain}"
+            echoContent green " ---> $(t CHAIN_GEOIP_RULE_ADDED): geoip-${geoipName} → ${selectedChain}"
+            ;;
+        5)
             local tmpFile
             tmpFile=$(mktemp)
             chmod 600 "${tmpFile}"
@@ -11416,10 +11644,10 @@ configureMultiChainRules() {
             ' "${infoFile}" > "${tmpFile}"
             mv "${tmpFile}" "${infoFile}"
 
-            echoContent green " ---> 已将 [${selectedChain}] 设为默认链路"
+            echoContent green " ---> $(t CHAIN_SET_DEFAULT_SUCCESS "${selectedChain}")"
             ;;
         *)
-            echoContent red " ---> 无效的选择"
+            echoContent red " ---> $(t INVALID_SELECTION)"
             return 1
             ;;
     esac
@@ -11431,15 +11659,15 @@ configureMultiChainRules() {
 finalizeMultiChainConfig() {
     local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
 
-    echoContent yellow "\n正在生成配置..."
+    echoContent yellow "\n$(t CHAIN_GENERATING)"
 
     # 检查是否设置了默认链路
     local defaultChain
     defaultChain=$(jq -r '.default_chain' "${infoFile}")
 
     if [[ "${defaultChain}" == "direct" ]]; then
-        echoContent yellow "\n当前未设置默认链路，未匹配规则的流量将直连访问"
-        echoContent yellow "是否现在设置默认链路？\n"
+        echoContent yellow "\n$(t CHAIN_NO_DEFAULT_SET)"
+        echoContent yellow "$(t CHAIN_SET_DEFAULT_NOW)\n"
 
         local chains
         chains=$(jq -r '.chains[].name' "${infoFile}")
@@ -11449,9 +11677,9 @@ finalizeMultiChainConfig() {
             echoContent yellow "  ${index}. ${chain}"
             ((index++))
         done <<< "${chains}"
-        echoContent yellow "  ${index}. 不设置 (未匹配流量直连)"
+        echoContent yellow "  ${index}. $(t CHAIN_NO_DEFAULT_OPTION)"
 
-        read -r -p "请选择 [默认: ${index}]: " defaultChoice
+        read -r -p "$(t PROMPT_SELECT) [${index}]: " defaultChoice
 
         if [[ -n "${defaultChoice}" ]] && [[ "${defaultChoice}" != "${index}" ]]; then
             local selectedDefault
@@ -11465,7 +11693,7 @@ finalizeMultiChainConfig() {
                 mv "${tmpFile}" "${infoFile}"
 
                 defaultChain="${selectedDefault}"
-                echoContent green " ---> 已将 [${selectedDefault}] 设为默认链路"
+                echoContent green " ---> $(t CHAIN_SET_DEFAULT_SUCCESS "${selectedDefault}")"
             fi
         fi
     fi
@@ -11476,7 +11704,7 @@ finalizeMultiChainConfig() {
        [[ -f "/etc/Proxy-agent/xray/conf/07_VLESS_vision_reality_inbounds.json" ]] || \
        [[ -f "/etc/Proxy-agent/xray/conf/04_trojan_TCP_inbounds.json" ]]; then
         hasXrayProtocols=true
-        echoContent green " ---> 检测到 Xray 代理协议，将同时配置 Xray 链式转发"
+        echoContent green " ---> $(t CHAIN_XRAY_DETECTED)"
     fi
 
     # 更新 has_xray 标志
@@ -11623,6 +11851,46 @@ generateMultiChainRouteConfig() {
 
             routeRules=$(echo "${routeRules}" | jq --argjson ds "${domains}" --arg chain "${ruleChain}" '. + [{
                 "domain_suffix": $ds,
+                "outbound": $chain
+            }]')
+
+        elif [[ "${ruleType}" == "ip_cidr" ]]; then
+            # IP CIDR 规则
+            local ipCidrs="[]"
+            IFS=',' read -ra cidrArray <<< "${ruleValue}"
+            for cidr in "${cidrArray[@]}"; do
+                cidr=$(echo "${cidr}" | xargs)  # trim
+                ipCidrs=$(echo "${ipCidrs}" | jq --arg c "${cidr}" '. + [$c]')
+            done
+
+            routeRules=$(echo "${routeRules}" | jq --argjson ips "${ipCidrs}" --arg chain "${ruleChain}" '. + [{
+                "ip_cidr": $ips,
+                "outbound": $chain
+            }]')
+
+        elif [[ "${ruleType}" == "geoip" ]]; then
+            # GeoIP 规则
+            local geoipTag="geoip-${ruleValue}"
+
+            # 如果规则集未添加，添加定义
+            if [[ ! "${usedRuleSets}" =~ "${geoipTag}" ]]; then
+                usedRuleSets="${usedRuleSets},${geoipTag}"
+
+                local geoipUrl="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/${ruleValue}.srs"
+
+                ruleSetDefs=$(echo "${ruleSetDefs}" | jq --arg tag "${geoipTag}" --arg url "${geoipUrl}" '. + [{
+                    "tag": $tag,
+                    "type": "remote",
+                    "format": "binary",
+                    "url": $url,
+                    "download_detour": "direct",
+                    "update_interval": "1d"
+                }]')
+            fi
+
+            # 添加路由规则
+            routeRules=$(echo "${routeRules}" | jq --arg rs "${geoipTag}" --arg chain "${ruleChain}" '. + [{
+                "rule_set": [$rs],
                 "outbound": $chain
             }]')
         fi
