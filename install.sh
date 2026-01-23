@@ -270,6 +270,7 @@ if ! type t &>/dev/null; then
 
     # === 规则配置相关 ===
     MSG_CHAIN_STEP_IMPORT="步骤 1/3: 导入配置"
+    MSG_CHAIN_STEP_NAME="步骤: 命名此链路"
     MSG_CHAIN_STEP_RULES="步骤 3/3: 设置分流规则"
     MSG_CHAIN_RULES_SELECT="选择此链路的分流规则"
     MSG_CHAIN_RULE_CUSTOM_DOMAIN="自定义域名"
@@ -304,6 +305,43 @@ if ! type t &>/dev/null; then
     MSG_CHAIN_TARGET="目标"
     MSG_CHAIN_RULE_ADDED="规则已添加"
     MSG_CONFIRM="确认"
+    MSG_CHAIN_MERGING_SINGBOX="正在合并 sing-box 配置..."
+    MSG_CHAIN_STARTING_SINGBOX="正在启动 sing-box..."
+    MSG_CHAIN_SINGBOX_START_FAILED="sing-box 启动失败"
+    MSG_CHAIN_SINGBOX_START_SUCCESS="sing-box 启动成功"
+    MSG_CHAIN_SINGBOX_DEBUG="请手动执行:"
+    MSG_CHAIN_CONFIGURING_XRAY="正在配置 Xray 链式转发..."
+    MSG_CHAIN_RESTARTING_XRAY="正在重启 Xray..."
+    MSG_CHAIN_TESTING_CONNECTIVITY="正在测试链路连通性..."
+    MSG_CHAIN_TESTING_PARALLEL="正在并行测试 %s 条链路..."
+    MSG_CHAIN_XRAY_RESTART_SUCCESS="Xray 重启成功，链式转发已启用"
+    MSG_CHAIN_XRAY_RESTART_FAILED="Xray 重启失败"
+    MSG_CHAIN_XRAY_CHECK_CONFIG="请检查配置:"
+    MSG_CHAIN_SUMMARY_NAME="链路名称"
+    MSG_CHAIN_SUMMARY_TARGET="目标节点"
+    MSG_CHAIN_SUMMARY_RULES="分流规则"
+    MSG_CHAIN_RULE_PENDING="待配置"
+    MSG_CHAIN_DEFAULT_ALL_TRAFFIC="默认 (所有其他流量)"
+    MSG_CHAIN_DEFAULT_OUTBOUND="默认出站"
+    MSG_CHAIN_DEFAULT_OUTBOUND_DIRECT="默认出站: 直连 (未匹配规则的流量直连访问)"
+    MSG_CHAIN_TEST_MULTI_TITLE="测试多链路连通性"
+    MSG_CHAIN_RULE_CUSTOM_DOMAIN="自定义域名"
+    MSG_CHAIN_TEST_LATENCY="延迟"
+    MSG_CHAIN_TEST_CONN_FAIL="连接失败"
+    MSG_CHAIN_TEST_COMPLETE="测试完成: %s 通过, %s 失败"
+    MSG_CHAIN_TEST_CHECK_HINT="请检查失败链路的:"
+    MSG_CHAIN_TEST_CHECK_1="1. 出口节点防火墙是否开放端口"
+    MSG_CHAIN_TEST_CHECK_2="2. 出口节点 sing-box 是否运行"
+    MSG_CHAIN_TEST_CHECK_3="3. IP地址和端口是否正确"
+    MSG_CHAIN_STATUS_RUNNING="运行中"
+    MSG_CHAIN_STATUS_STOPPED="未运行"
+    MSG_CHAIN_STATUS_TITLE="链式代理状态"
+    MSG_CHAIN_STATUS_ROLE="当前角色"
+    MSG_CHAIN_STATUS_ROLE_ENTRY="入口节点 (Entry) - 多链路分流模式"
+    MSG_CHAIN_STATUS_RUN="运行状态"
+    MSG_CHAIN_STATUS_COUNT="链路数量"
+    MSG_CHAIN_STATUS_DETAILS="链路详情"
+    MSG_CHAIN_STATUS_DEFAULT_MARK="[默认]"
 
     # 后备 t() 函数
     t() {
@@ -11186,12 +11224,12 @@ addExternalChainToConfig() {
 
 # 添加单条链路
 addSingleChainOutbound() {
-    echoContent yellow "\n步骤 1/3: 导入配置"
-    echoContent yellow "请粘贴出口/中继节点的配置码:"
-    read -r -p "配置码:" inputCode
+    echoContent yellow "\n$(t CHAIN_STEP_IMPORT)"
+    echoContent yellow "$(t CHAIN_PASTE_CODE):"
+    read -r -p "$(t CHAIN_CODE):" inputCode
 
     if [[ -z "${inputCode}" ]]; then
-        echoContent red " ---> 配置码不能为空"
+        echoContent red " ---> $(t CHAIN_CODE_EMPTY)"
         return 1
     fi
 
@@ -11200,19 +11238,19 @@ addSingleChainOutbound() {
         return 1
     fi
 
-    echoContent green "\n ---> 解析成功:"
-    echoContent green "   节点IP: ${chainExitIP}"
-    echoContent green "   端口: ${chainExitPort}"
-    echoContent green "   协议: Shadowsocks 2022"
+    echoContent green "\n ---> $(t CHAIN_PARSE_SUCCESS):"
+    echoContent green "   $(t CHAIN_NODE_IP): ${chainExitIP}"
+    echoContent green "   $(t CHAIN_PORT): ${chainExitPort}"
+    echoContent green "   $(t CHAIN_PROTOCOL): Shadowsocks 2022"
 
     # 步骤2: 命名链路
-    echoContent yellow "\n步骤 2/3: 命名此链路"
-    echoContent yellow "请为此链路设置标识名称 (仅限英文字母、数字、下划线)"
+    echoContent yellow "\n$(t CHAIN_STEP_NAME)"
+    echoContent yellow "$(t CHAIN_NAME_HINT)"
 
     local defaultName
     defaultName=$(generateNextChainName)
 
-    read -r -p "链路名称 [回车使用默认: ${defaultName}]: " inputName
+    read -r -p "$(t CHAIN_NAME_PROMPT) [${defaultName}]: " inputName
 
     local chainName="${inputName:-${defaultName}}"
 
@@ -11738,22 +11776,22 @@ EOF
     fi
 
     # 合并配置
-    echoContent yellow "正在合并 sing-box 配置..."
+    echoContent yellow "$(t CHAIN_MERGING_SINGBOX)"
     mergeSingBoxConfig
 
     # 启动 sing-box
-    echoContent yellow "正在启动 sing-box..."
+    echoContent yellow "$(t CHAIN_STARTING_SINGBOX)"
     handleSingBox stop >/dev/null 2>&1
     handleSingBox start
 
     # 验证 sing-box 启动成功
     sleep 1
     if ! pgrep -x "sing-box" >/dev/null 2>&1; then
-        echoContent red " ---> sing-box 启动失败"
-        echoContent yellow "请手动执行: /etc/Proxy-agent/sing-box/sing-box run -c /etc/Proxy-agent/sing-box/conf/config.json"
+        echoContent red " ---> $(t CHAIN_SINGBOX_START_FAILED)"
+        echoContent yellow "$(t CHAIN_SINGBOX_DEBUG) /etc/Proxy-agent/sing-box/sing-box run -c /etc/Proxy-agent/sing-box/conf/config.json"
         return 1
     fi
-    echoContent green " ---> sing-box 启动成功"
+    echoContent green " ---> $(t CHAIN_SINGBOX_START_SUCCESS)"
 
     # 配置 Xray（如果存在）
     if [[ "${hasXrayProtocols}" == "true" ]]; then
@@ -11764,7 +11802,7 @@ EOF
     showMultiChainSummary
 
     # 测试连通性
-    echoContent yellow "\n正在测试链路连通性..."
+    echoContent yellow "\n$(t CHAIN_TESTING_CONNECTIVITY)"
     sleep 2
     testMultiChainConnection
 }
@@ -11936,7 +11974,7 @@ EOF
 configureXrayForMultiChain() {
     local bridgePort=$1
 
-    echoContent yellow "正在配置 Xray 链式转发..."
+    echoContent yellow "$(t CHAIN_CONFIGURING_XRAY)"
 
     # 创建 Xray SOCKS5 出站 (指向 sing-box 桥接)
     cat <<EOF >/etc/Proxy-agent/xray/conf/chain_outbound.json
@@ -11994,16 +12032,16 @@ EOF
 EOF
 
     # 重启 Xray
-    echoContent yellow "正在重启 Xray..."
+    echoContent yellow "$(t CHAIN_RESTARTING_XRAY)"
     handleXray stop >/dev/null 2>&1
     handleXray start
 
     sleep 1
     if pgrep -f "xray/xray" >/dev/null 2>&1; then
-        echoContent green " ---> Xray 重启成功，链式转发已启用"
+        echoContent green " ---> $(t CHAIN_XRAY_RESTART_SUCCESS)"
     else
-        echoContent red " ---> Xray 重启失败"
-        echoContent yellow "请检查配置: /etc/Proxy-agent/xray/xray run -confdir /etc/Proxy-agent/xray/conf"
+        echoContent red " ---> $(t CHAIN_XRAY_RESTART_FAILED)"
+        echoContent yellow "$(t CHAIN_XRAY_CHECK_CONFIG) /etc/Proxy-agent/xray/xray run -confdir /etc/Proxy-agent/xray/conf"
     fi
 }
 
@@ -12012,16 +12050,16 @@ showMultiChainSummary() {
     local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
 
     echoContent green "\n=============================================================="
-    echoContent green "多链路分流配置完成！"
+    echoContent green "$(t CHAIN_CONFIG_COMPLETE)"
     echoContent green "=============================================================="
 
     local chainCount
     chainCount=$(jq '.chains | length' "${infoFile}")
 
-    echoContent yellow "\n已配置 ${chainCount} 条链路:\n"
+    echoContent yellow "\n$(t CHAIN_CONFIGURED_COUNT "${chainCount}"):\n"
 
     # 表头
-    printf "  %-15s %-20s %-20s\n" "链路名称" "目标节点" "分流规则"
+    printf "  %-15s %-20s %-20s\n" "$(t CHAIN_SUMMARY_NAME)" "$(t CHAIN_SUMMARY_TARGET)" "$(t CHAIN_SUMMARY_RULES)"
     printf "  %-15s %-20s %-20s\n" "---------------" "--------------------" "--------------------"
 
     # 遍历链路
@@ -12036,7 +12074,8 @@ showMultiChainSummary() {
         isDefault=$(echo "${chain}" | jq -r '.is_default')
 
         # 获取此链路的规则
-        local ruleDesc="待配置"
+        local ruleDesc
+        ruleDesc="$(t CHAIN_RULE_PENDING)"
         local rules
         rules=$(jq -r ".rules[] | select(.chain == \"${name}\") | .type + \":\" + .value" "${infoFile}" 2>/dev/null)
 
@@ -12050,12 +12089,12 @@ showMultiChainSummary() {
             if [[ "${ruleType}" == "preset" ]]; then
                 ruleDesc=$(getPresetDisplayName "${ruleValue}")
             elif [[ "${ruleType}" == "custom" ]]; then
-                ruleDesc="自定义域名"
+                ruleDesc="$(t CHAIN_RULE_CUSTOM_DOMAIN)"
             fi
         fi
 
         if [[ "${isDefault}" == "true" ]]; then
-            ruleDesc="默认 (所有其他流量)"
+            ruleDesc="$(t CHAIN_DEFAULT_ALL_TRAFFIC)"
         fi
 
         printf "  %-15s %-20s %-20s\n" "${name}" "${ip}:${port}" "${ruleDesc}"
@@ -12066,9 +12105,9 @@ showMultiChainSummary() {
     defaultChain=$(jq -r '.default_chain' "${infoFile}")
 
     if [[ "${defaultChain}" == "direct" ]]; then
-        echoContent yellow "\n默认出站: 直连 (未匹配规则的流量直连访问)"
+        echoContent yellow "\n$(t CHAIN_DEFAULT_OUTBOUND_DIRECT)"
     else
-        echoContent yellow "\n默认出站: ${defaultChain}"
+        echoContent yellow "\n$(t CHAIN_DEFAULT_OUTBOUND): ${defaultChain}"
     fi
 }
 
@@ -12082,7 +12121,7 @@ testMultiChainConnection() {
         return $?
     fi
 
-    echoContent skyBlue "\n测试多链路连通性"
+    echoContent skyBlue "\n$(t CHAIN_TEST_MULTI_TITLE)"
     echoContent red "=============================================================="
 
     local chains
@@ -12090,7 +12129,7 @@ testMultiChainConnection() {
     local chainCount
     chainCount=$(jq '.chains | length' "${infoFile}")
 
-    echoContent yellow "正在并行测试 ${chainCount} 条链路...\n"
+    echoContent yellow "$(t CHAIN_TESTING_PARALLEL "${chainCount}")\n"
 
     # 创建临时目录存放测试结果
     local tmpDir
@@ -12150,10 +12189,10 @@ testMultiChainConnection() {
             latency=$(echo "${result}" | cut -d'|' -f4)
 
             if [[ "${status}" == "pass" ]]; then
-                echoContent green "  ✅ ${name} (${target}) - 延迟: ${latency}ms"
+                echoContent green "  ✅ ${name} (${target}) - $(t CHAIN_TEST_LATENCY): ${latency}ms"
                 ((passCount++))
             else
-                echoContent red "  ❌ ${name} (${target}) - 连接失败"
+                echoContent red "  ❌ ${name} (${target}) - $(t CHAIN_TEST_CONN_FAIL)"
                 ((failCount++))
             fi
         fi
@@ -12163,13 +12202,13 @@ testMultiChainConnection() {
     rm -rf "${tmpDir}"
 
     # 显示汇总
-    echoContent yellow "\n测试完成: ${passCount} 通过, ${failCount} 失败"
+    echoContent yellow "\n$(t CHAIN_TEST_COMPLETE "${passCount}" "${failCount}")"
 
     if [[ ${failCount} -gt 0 ]]; then
-        echoContent yellow "\n请检查失败链路的:"
-        echoContent yellow "  1. 出口节点防火墙是否开放端口"
-        echoContent yellow "  2. 出口节点 sing-box 是否运行"
-        echoContent yellow "  3. IP地址和端口是否正确"
+        echoContent yellow "\n$(t CHAIN_TEST_CHECK_HINT)"
+        echoContent yellow "  $(t CHAIN_TEST_CHECK_1)"
+        echoContent yellow "  $(t CHAIN_TEST_CHECK_2)"
+        echoContent yellow "  $(t CHAIN_TEST_CHECK_3)"
     fi
 }
 
@@ -12181,9 +12220,9 @@ showMultiChainStatus() {
         return 1
     fi
 
-    local status="❌ 未运行"
+    local status="❌ $(t CHAIN_STATUS_STOPPED)"
     if pgrep -x "sing-box" >/dev/null 2>&1; then
-        status="✅ 运行中"
+        status="✅ $(t CHAIN_STATUS_RUNNING)"
     fi
 
     local chainCount
@@ -12192,14 +12231,14 @@ showMultiChainStatus() {
     defaultChain=$(jq -r '.default_chain' "${infoFile}")
 
     echoContent green "╔══════════════════════════════════════════════════════════════╗"
-    echoContent green "║                      链式代理状态                              ║"
+    echoContent green "║                      $(t CHAIN_STATUS_TITLE)                              ║"
     echoContent green "╠══════════════════════════════════════════════════════════════╣"
-    echoContent yellow "  当前角色: 入口节点 (Entry) - 多链路分流模式"
-    echoContent yellow "  运行状态: ${status}"
-    echoContent yellow "  链路数量: ${chainCount}"
-    echoContent yellow "  默认出站: ${defaultChain}"
+    echoContent yellow "  $(t CHAIN_STATUS_ROLE): $(t CHAIN_STATUS_ROLE_ENTRY)"
+    echoContent yellow "  $(t CHAIN_STATUS_RUN): ${status}"
+    echoContent yellow "  $(t CHAIN_STATUS_COUNT): ${chainCount}"
+    echoContent yellow "  $(t CHAIN_DEFAULT_OUTBOUND): ${defaultChain}"
     echoContent green "╠══════════════════════════════════════════════════════════════╣"
-    echoContent yellow "  链路详情:"
+    echoContent yellow "  $(t CHAIN_STATUS_DETAILS):"
 
     local chains
     chains=$(jq -c '.chains[]' "${infoFile}")
@@ -12213,7 +12252,7 @@ showMultiChainStatus() {
 
         local defaultMark=""
         if [[ "${isDefault}" == "true" ]]; then
-            defaultMark=" [默认]"
+            defaultMark=" $(t CHAIN_STATUS_DEFAULT_MARK)"
         fi
 
         echoContent yellow "    • ${name}: ${ip}:${port}${defaultMark}"
@@ -12296,7 +12335,7 @@ removeMultiChainOutbound() {
 
         local defaultMark=""
         if [[ "${isDefault}" == "true" ]]; then
-            defaultMark=" [默认]"
+            defaultMark=" $(t CHAIN_STATUS_DEFAULT_MARK)"
         fi
 
         echoContent yellow "  ${index}. ${chain} (${chainIP}:${chainPort})${defaultMark}"
