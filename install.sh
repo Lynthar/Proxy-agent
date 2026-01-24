@@ -7465,7 +7465,7 @@ updateV2RayAgent() {
 
     local installDir="/etc/Proxy-agent"
     local latestVersion=""
-    local rawBase="https://raw.githubusercontent.com/Lynthar/Proxy-agent/master"
+    local rawBase=""
 
     # 检查 GitHub Release 最新版本
     echoContent yellow " ---> 检查最新版本..."
@@ -7476,7 +7476,10 @@ updateV2RayAgent() {
     fi
 
     if [[ -n "${latestVersion}" && "${latestVersion}" != "null" ]]; then
+        # 使用 Release 标签下载，确保代码与版本号一致
+        rawBase="https://raw.githubusercontent.com/Lynthar/Proxy-agent/${latestVersion}"
         echoContent green " ---> 发现最新 Release: ${latestVersion}"
+        echoContent green " ---> 从 Release ${latestVersion} 下载"
 
         # 比较版本（确保函数存在）
         if type compareVersions &>/dev/null; then
@@ -7491,7 +7494,9 @@ updateV2RayAgent() {
             fi
         fi
     else
-        echoContent yellow " ---> 使用 master 分支更新"
+        # 无法获取 Release 版本时回退到 master 分支
+        rawBase="https://raw.githubusercontent.com/Lynthar/Proxy-agent/master"
+        echoContent yellow " ---> 从 master 分支下载"
         latestVersion=""
     fi
 
@@ -7513,21 +7518,25 @@ updateV2RayAgent() {
         wget -c -q "${wgetShowProgressStatus}" -P "${installDir}/" -N "${rawBase}/install.sh"
     fi
 
+    # 如果从 Release tag 下载失败，回退到 master 分支
+    if [[ ! -f "${installDir}/install.sh" && -n "${latestVersion}" ]]; then
+        echoContent yellow " ---> Release ${latestVersion} 下载失败，尝试从 master 分支下载..."
+        rawBase="https://raw.githubusercontent.com/Lynthar/Proxy-agent/master"
+        latestVersion=""  # 清空版本号，避免版本号与代码不一致
+
+        if [[ "${release}" == "alpine" ]]; then
+            wget -c -q -P "${installDir}/" -N "${rawBase}/install.sh"
+        else
+            wget -c -q "${wgetShowProgressStatus}" -P "${installDir}/" -N "${rawBase}/install.sh"
+        fi
+    fi
+
     if [[ ! -f "${installDir}/install.sh" ]]; then
         echoContent red " ---> 下载脚本失败!"
         echoContent yellow "请手动执行: wget -P /root -N ${rawBase}/install.sh"
         exit 1
     fi
     chmod 700 "${installDir}/install.sh"
-
-    # 下载 VERSION 文件
-    echoContent yellow " ---> 下载版本文件..."
-    if [[ -n "${latestVersion}" ]]; then
-        # 从 Release tag 提取版本号保存
-        echo "${latestVersion#v}" > "${installDir}/VERSION"
-    else
-        wget -c -q -O "${installDir}/VERSION" "${rawBase}/VERSION" 2>/dev/null || true
-    fi
 
     # 下载/更新 lib 目录模块
     echoContent yellow " ---> 下载模块文件..."
@@ -7546,6 +7555,17 @@ updateV2RayAgent() {
     for langFile in zh_CN en_US loader; do
         wget -c -q -O "${installDir}/shell/lang/${langFile}.sh" "${rawBase}/shell/lang/${langFile}.sh" 2>/dev/null || true
     done
+
+    # 所有文件下载完成后，更新版本文件
+    # 确保版本号与实际下载的代码一致
+    echoContent yellow " ---> 更新版本文件..."
+    if [[ -n "${latestVersion}" ]]; then
+        # 使用 Release 版本号
+        echo "${latestVersion#v}" > "${installDir}/VERSION"
+    else
+        # 从 master 分支下载 VERSION 文件
+        wget -c -q -O "${installDir}/VERSION" "${rawBase}/VERSION" 2>/dev/null || true
+    fi
 
     # 读取新版本号
     local version=""
@@ -10534,6 +10554,11 @@ removeChainProxy() {
     rm -f /etc/Proxy-agent/sing-box/conf/chain_entry_info.json
     rm -f /etc/Proxy-agent/sing-box/conf/chain_relay_info.json
 
+    # 删除外部节点单链路配置（兼容旧配置）
+    rm -f /etc/Proxy-agent/sing-box/conf/config/external_outbound.json
+    rm -f /etc/Proxy-agent/sing-box/conf/config/external_route.json
+    rm -f /etc/Proxy-agent/sing-box/conf/external_entry_info.json
+
     # 删除 sing-box 配置文件 - 多链路模式
     if [[ "${isMultiChain}" == "true" ]]; then
         # 删除所有链路出站配置文件
@@ -13278,7 +13303,7 @@ setupExternalAsSingleExit() {
 
     # 生成出站配置
     local outboundConfig
-    outboundConfig=$(generateExternalOutboundConfig "${nodeId}" "external_outbound")
+    outboundConfig=$(generateExternalOutboundConfig "${nodeId}" "chain_external_outbound")
 
     if [[ -z "${outboundConfig}" ]]; then
         echoContent red " ---> $(t EXT_CONFIG_FAILED)"
@@ -13289,20 +13314,20 @@ setupExternalAsSingleExit() {
     local configDir="/etc/Proxy-agent/sing-box/conf/config"
     mkdir -p "${configDir}"
 
-    echo "{\"outbounds\": [${outboundConfig}]}" | jq . > "${configDir}/external_outbound.json"
+    echo "{\"outbounds\": [${outboundConfig}]}" | jq . > "${configDir}/chain_outbound.json"
 
     # 生成路由配置 - 所有流量走外部节点
-    cat <<EOF > "${configDir}/external_route.json"
+    cat <<EOF > "${configDir}/chain_route.json"
 {
     "route": {
         "rules": [],
-        "final": "external_outbound"
+        "final": "chain_external_outbound"
     }
 }
 EOF
 
     # 保存外部节点入口信息
-    cat <<EOF > "/etc/Proxy-agent/sing-box/conf/external_entry_info.json"
+    cat <<EOF > "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json"
 {
     "role": "entry",
     "mode": "external_single",
