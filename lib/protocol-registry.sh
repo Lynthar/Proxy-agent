@@ -130,6 +130,29 @@ getProtocolShortName() {
     esac
 }
 
+# 获取协议的 sing-box inbound tag
+# 参数: $1 - 协议ID
+# 输出: sing-box 入站标签名称
+getProtocolInboundTag() {
+    local protocolId="$1"
+
+    case "${protocolId}" in
+        0)  echo "VLESSTCP" ;;
+        1)  echo "VLESSWS" ;;
+        3)  echo "VMessWS" ;;
+        4)  echo "trojanTCP" ;;
+        6)  echo "hysteria2-in" ;;
+        7)  echo "VLESSReality" ;;
+        9)  echo "singbox-tuic-in" ;;
+        10) echo "singbox-naive-in" ;;
+        11) echo "VMessHTTPUpgrade" ;;
+        12) echo "VLESSRealityXHTTP" ;;
+        13) echo "anytls" ;;
+        14) echo "ss2022-in" ;;
+        *)  return 1 ;;
+    esac
+}
+
 # ============================================================================
 # 协议属性查询
 # ============================================================================

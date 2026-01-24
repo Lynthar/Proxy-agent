@@ -5368,6 +5368,7 @@ EOF
     "inbounds": [
         {
             "type": "hysteria2",
+            "tag": "hysteria2-in",
             "listen": "::",
             "listen_port": ${result[-1]},
             "users": $(initSingBoxClients 6),
@@ -8630,6 +8631,7 @@ chainProxyMenu() {
     echoContent yellow "4.$(t CHAIN_MENU_ADVANCED)"
     echoContent yellow "5.$(t CHAIN_MENU_UNINSTALL)"
     echoContent yellow "6.$(t EXT_MENU_TITLE)"
+    echoContent yellow "7.$(t CHAIN_MENU_PROTOCOL_ROUTING)"
 
     read -r -p "$(t PROMPT_SELECT):" selectType
 
@@ -8651,6 +8653,9 @@ chainProxyMenu() {
         ;;
     6)
         externalNodeMenu
+        ;;
+    7)
+        configureProtocolChainRouting
         ;;
     esac
 }
@@ -10611,6 +10616,216 @@ EOF
     reloadCore
 
     echoContent green " ---> 链式代理已卸载"
+}
+
+# ======================= 按协议分流功能 =======================
+
+# 生成协议分流路由配置
+# 参数: $@ - 要走链式代理的 inbound tag 列表
+generateProtocolChainRoute() {
+    local selectedTags=("$@")
+    local inboundArray
+    local routeConfig
+
+    # 构建 JSON 数组
+    inboundArray=$(printf '"%s",' "${selectedTags[@]}")
+    inboundArray="[${inboundArray%,}]"
+
+    # 检查是否存在 bridge inbound（Xray 桥接）
+    local hasBridge=false
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json" ]]; then
+        hasBridge=true
+    fi
+
+    if [[ "${hasBridge}" == "true" ]]; then
+        # 包含 bridge inbound 的路由配置
+        routeConfig=$(cat <<EOF
+{
+    "route": {
+        "rules": [
+            {
+                "inbound": ["chain_bridge_in"],
+                "outbound": "chain_outbound"
+            },
+            {
+                "inbound": ${inboundArray},
+                "outbound": "chain_outbound"
+            }
+        ],
+        "final": "direct"
+    }
+}
+EOF
+)
+    else
+        # 标准路由配置
+        routeConfig=$(cat <<EOF
+{
+    "route": {
+        "rules": [
+            {
+                "inbound": ${inboundArray},
+                "outbound": "chain_outbound"
+            }
+        ],
+        "final": "direct"
+    }
+}
+EOF
+)
+    fi
+
+    echo "${routeConfig}" | jq . > /etc/Proxy-agent/sing-box/conf/config/chain_route.json
+}
+
+# 保存协议分流偏好设置
+saveProtocolRoutingPreference() {
+    local selection="$1"
+    local protocolNames="$2"
+    local entryInfo="/etc/Proxy-agent/sing-box/conf/chain_entry_info.json"
+
+    if [[ -f "${entryInfo}" ]]; then
+        local updatedInfo
+        updatedInfo=$(jq --arg sel "${selection}" --arg names "${protocolNames}" \
+            '. + {protocol_routing: {enabled: true, selection: $sel, protocols: $names}}' \
+            "${entryInfo}")
+        echo "${updatedInfo}" | jq . > "${entryInfo}"
+    fi
+}
+
+# 按协议分流配置主函数
+configureProtocolChainRouting() {
+    echoContent skyBlue "\n$(t CHAIN_PROTOCOL_ROUTING_TITLE)"
+    echoContent red "\n=============================================================="
+    echoContent yellow "$(t CHAIN_PROTOCOL_ROUTING_DESC)"
+    echoContent yellow "$(t CHAIN_PROTOCOL_ROUTING_DESC2)\n"
+
+    # 检查是否为入口节点
+    if [[ ! -f "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json" ]]; then
+        echoContent red " ---> $(t CHAIN_PROTOCOL_NOT_ENTRY_NODE)"
+        return 1
+    fi
+
+    # 检查链式代理出站是否已配置
+    if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config/chain_outbound.json" ]]; then
+        echoContent red " ---> $(t CHAIN_PROTOCOL_NO_CHAIN_OUTBOUND)"
+        return 1
+    fi
+
+    # 获取已安装的协议（sing-box）
+    local cfgPath="/etc/Proxy-agent/sing-box/conf/config/"
+    local installedProtocols=""
+    local protocolCount=0
+
+    # 扫描 sing-box 配置文件
+    for configFile in "${cfgPath}"*_inbounds.json "${cfgPath}"*_inbounds_s.json; do
+        [[ ! -f "${configFile}" ]] && continue
+        local filename
+        filename=$(basename "${configFile}")
+        # 跳过链式代理相关的 inbound
+        [[ "${filename}" == *chain* ]] && continue
+
+        local protocolId
+        protocolId=$(parseProtocolIdFromFileName "${filename}")
+        [[ -z "${protocolId}" ]] && continue
+
+        installedProtocols="${installedProtocols}${protocolId}\n"
+        ((protocolCount++))
+    done
+
+    if [[ ${protocolCount} -eq 0 ]]; then
+        echoContent red " ---> $(t CHAIN_PROTOCOL_NO_PROTOCOLS)"
+        return 1
+    fi
+
+    # 显示已安装的协议列表
+    echoContent yellow "$(t CHAIN_PROTOCOL_SELECT_PROMPT)"
+    echoContent yellow "--------------------------------------------------------------"
+
+    local idx=1
+    local protocolMap=""
+    while IFS= read -r protocolId; do
+        [[ -z "${protocolId}" ]] && continue
+        local displayName
+        displayName=$(getProtocolDisplayName "${protocolId}")
+        local inboundTag
+        inboundTag=$(getProtocolInboundTag "${protocolId}")
+
+        [[ -z "${inboundTag}" ]] && continue
+
+        echoContent yellow "${idx}. ${displayName} [tag: ${inboundTag}]"
+        protocolMap="${protocolMap}${idx}:${protocolId}:${inboundTag},"
+        ((idx++))
+    done <<< "$(echo -e "${installedProtocols}" | sort -n | uniq)"
+
+    echoContent yellow "--------------------------------------------------------------"
+    echoContent yellow "$(t CHAIN_PROTOCOL_INPUT_HINT)"
+
+    # 读取用户选择
+    local userSelection
+    read -r -p "$(t PROMPT_SELECT):" userSelection
+
+    if [[ -z "${userSelection}" ]]; then
+        echoContent red " ---> $(t CHAIN_PROTOCOL_NO_SELECTION)"
+        return 1
+    fi
+
+    # 解析选择并构建 inbound tag 列表
+    local selectedTags=()
+    local selectedProtocolNames=()
+    IFS=',' read -ra selections <<< "${userSelection}"
+
+    for sel in "${selections[@]}"; do
+        sel=$(echo "${sel}" | tr -d ' ')
+        [[ -z "${sel}" ]] && continue
+
+        # 查找匹配的协议
+        local match
+        match=$(echo "${protocolMap}" | tr ',' '\n' | grep "^${sel}:" | head -1)
+        if [[ -n "${match}" ]]; then
+            local protocolId tag displayName
+            protocolId=$(echo "${match}" | cut -d':' -f2)
+            tag=$(echo "${match}" | cut -d':' -f3)
+            displayName=$(getProtocolDisplayName "${protocolId}")
+            selectedTags+=("${tag}")
+            selectedProtocolNames+=("${displayName}")
+        fi
+    done
+
+    if [[ ${#selectedTags[@]} -eq 0 ]]; then
+        echoContent red " ---> $(t CHAIN_PROTOCOL_INVALID_SELECTION)"
+        return 1
+    fi
+
+    # 显示已选择的协议
+    echoContent green "\n$(t CHAIN_PROTOCOL_SELECTED):"
+    for name in "${selectedProtocolNames[@]}"; do
+        echoContent yellow "  - ${name}"
+    done
+
+    # 确认
+    read -r -p "$(t CHAIN_PROTOCOL_CONFIRM) [y/n]:" confirmChoice
+    if [[ "${confirmChoice}" != "y" && "${confirmChoice}" != "Y" ]]; then
+        echoContent yellow " ---> $(t CANCELLED)"
+        return 0
+    fi
+
+    # 生成路由配置
+    generateProtocolChainRoute "${selectedTags[@]}"
+
+    # 保存偏好设置
+    saveProtocolRoutingPreference "${userSelection}" "${selectedProtocolNames[*]}"
+
+    # 重载 sing-box 配置
+    echoContent yellow " ---> $(t CHAIN_PROTOCOL_RELOADING)"
+    mergeSingBoxConfig
+
+    if ! reloadCore; then
+        echoContent red " ---> $(t CHAIN_PROTOCOL_RELOAD_FAILED)"
+        return 1
+    fi
+
+    echoContent green " ---> $(t CHAIN_PROTOCOL_SUCCESS)"
 }
 
 # 合并 sing-box 配置 (如果函数不存在则定义)
