@@ -204,6 +204,7 @@ if ! type t &>/dev/null; then
     MSG_MENU_TOOL_MGMT="工具管理"
     MSG_MENU_VERSION_MGMT="版本管理"
     MSG_MENU_SCRIPT_MGMT="脚本管理"
+    MSG_MENU_SCRIPT_VERSION="脚本版本管理"
     MSG_PROMPT_SELECT="请选择"
     MSG_NOTICE="注意事项"
     MSG_SYS_SELINUX_NOTICE="检测到 SELinux 已启用，请手动禁用（在 /etc/selinux/config 设置 SELINUX=disabled 并重启）"
@@ -223,6 +224,7 @@ if ! type t &>/dev/null; then
     MSG_CHAIN_MENU_TEST="测试链路连通性"
     MSG_CHAIN_MENU_ADVANCED="高级设置"
     MSG_CHAIN_MENU_UNINSTALL="卸载链式代理"
+    MSG_CHAIN_MENU_PROTOCOL_ROUTING="按协议分流设置"
     MSG_EXT_MENU_TITLE="外部节点管理"
     MSG_RECOMMENDED="推荐"
 
@@ -305,6 +307,7 @@ if ! type t &>/dev/null; then
     MSG_CHAIN_TARGET="目标"
     MSG_CHAIN_RULE_ADDED="规则已添加"
     MSG_CONFIRM="确认"
+    MSG_CANCELLED="已取消"
     MSG_CHAIN_MERGING_SINGBOX="正在合并 sing-box 配置..."
     MSG_CHAIN_STARTING_SINGBOX="正在启动 sing-box..."
     MSG_CHAIN_SINGBOX_START_FAILED="sing-box 启动失败"
@@ -342,6 +345,24 @@ if ! type t &>/dev/null; then
     MSG_CHAIN_STATUS_COUNT="链路数量"
     MSG_CHAIN_STATUS_DETAILS="链路详情"
     MSG_CHAIN_STATUS_DEFAULT_MARK="[默认]"
+
+    # 协议分流相关
+    MSG_CHAIN_PROTOCOL_ROUTING_TITLE="按协议节点分流配置"
+    MSG_CHAIN_PROTOCOL_ROUTING_DESC="选择哪些协议的流量应通过链式代理"
+    MSG_CHAIN_PROTOCOL_ROUTING_DESC2="未选中的协议将直接连接"
+    MSG_CHAIN_PROTOCOL_NOT_ENTRY_NODE="当前不是入口节点，无法配置协议分流"
+    MSG_CHAIN_PROTOCOL_NO_CHAIN_OUTBOUND="未找到链式代理出站配置"
+    MSG_CHAIN_PROTOCOL_NO_PROTOCOLS="未安装任何协议"
+    MSG_CHAIN_PROTOCOL_SELECT_PROMPT="已安装的协议列表："
+    MSG_CHAIN_PROTOCOL_INPUT_HINT="请输入要通过链式代理的协议编号 (多选用逗号分隔，如: 1,2,3)"
+    MSG_CHAIN_PROTOCOL_NO_SELECTION="未选择任何协议"
+    MSG_CHAIN_PROTOCOL_INVALID_SELECTION="无效的选择"
+    MSG_CHAIN_PROTOCOL_SELECTED="已选择的协议"
+    MSG_CHAIN_PROTOCOL_CONFIRM="确认配置？"
+    MSG_CHAIN_PROTOCOL_RELOADING="正在重载配置..."
+    MSG_CHAIN_PROTOCOL_RELOAD_FAILED="配置重载失败"
+    MSG_CHAIN_PROTOCOL_SUCCESS="协议分流配置成功！"
+    MSG_CHAIN_PROTOCOL_SINGBOX_ONLY="按协议分流仅支持 sing-box 核心"
 
     # 后备 t() 函数
     t() {
@@ -10699,6 +10720,12 @@ configureProtocolChainRouting() {
     echoContent red "\n=============================================================="
     echoContent yellow "$(t CHAIN_PROTOCOL_ROUTING_DESC)"
     echoContent yellow "$(t CHAIN_PROTOCOL_ROUTING_DESC2)\n"
+
+    # 检查是否运行 sing-box 核心
+    if [[ ! -f "/etc/Proxy-agent/sing-box/sing-box" ]]; then
+        echoContent red " ---> $(t CHAIN_PROTOCOL_SINGBOX_ONLY)"
+        return 1
+    fi
 
     # 检查是否为入口节点
     if [[ ! -f "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json" ]]; then

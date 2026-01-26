@@ -755,6 +755,8 @@ MSG_CHAIN_PROTOCOL_CONFIRM="确认配置？"
 MSG_CHAIN_PROTOCOL_RELOADING="正在重载配置..."
 MSG_CHAIN_PROTOCOL_RELOAD_FAILED="配置重载失败"
 MSG_CHAIN_PROTOCOL_SUCCESS="协议分流配置成功！"
+MSG_CHAIN_PROTOCOL_SINGBOX_ONLY="按协议分流仅支持 sing-box 核心"
+MSG_CANCELLED="已取消"
 MSG_RECOMMENDED="推荐"
 
 # =============================================================================

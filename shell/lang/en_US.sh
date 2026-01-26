@@ -755,6 +755,8 @@ MSG_CHAIN_PROTOCOL_CONFIRM="Confirm configuration?"
 MSG_CHAIN_PROTOCOL_RELOADING="Reloading configuration..."
 MSG_CHAIN_PROTOCOL_RELOAD_FAILED="Configuration reload failed"
 MSG_CHAIN_PROTOCOL_SUCCESS="Protocol routing configured successfully!"
+MSG_CHAIN_PROTOCOL_SINGBOX_ONLY="Protocol routing only supports sing-box core"
+MSG_CANCELLED="Cancelled"
 MSG_RECOMMENDED="Recommended"
 
 # =============================================================================
