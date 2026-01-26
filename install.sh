@@ -4,6 +4,568 @@
 # 检查系统
 export LANG=en_US.UTF-8
 
+# ============================================================================
+# 全局错误处理
+# 注意：不使用 set -e 因为脚本中有许多命令允许失败
+# 但启用 pipefail 确保管道错误能被检测
+# ============================================================================
+set -o pipefail
+
+# 错误处理函数
+_error_handler() {
+    local exit_code=$?
+    local line_number=$1
+    local command="$2"
+    if [[ ${exit_code} -ne 0 ]]; then
+        echo -e "\033[31m[错误] 脚本在第 ${line_number} 行发生错误\033[0m" >&2
+        echo -e "\033[31m[错误] 命令: ${command}\033[0m" >&2
+        echo -e "\033[31m[错误] 退出码: ${exit_code}\033[0m" >&2
+    fi
+}
+
+# 捕获 ERR 信号（仅用于调试，不会终止脚本）
+# trap '_error_handler ${LINENO} "${BASH_COMMAND}"' ERR
+
+# 清理函数 - 脚本退出时清理临时文件
+_cleanup() {
+    # 清理可能遗留的临时文件
+    rm -f /tmp/Proxy-agent-*.tmp 2>/dev/null
+}
+trap '_cleanup' EXIT
+
+# ============================================================================
+# 模块加载
+# 如果 lib 目录存在，加载模块化组件
+# 这允许逐步重构而保持向后兼容
+# ============================================================================
+
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_LIB_DIR="${_SCRIPT_DIR}/lib"
+
+# 加载模块（如果存在）
+if [[ -d "${_LIB_DIR}" ]]; then
+    # 加载顺序很重要：
+    # i18n (国际化，最先加载)
+    # constants -> utils -> system-detect -> service-control
+    # json-utils -> protocol-registry -> config-reader
+    for _module in i18n constants utils json-utils system-detect service-control protocol-registry config-reader; do
+        if [[ -f "${_LIB_DIR}/${_module}.sh" ]]; then
+            # shellcheck source=/dev/null
+            source "${_LIB_DIR}/${_module}.sh"
+        fi
+    done
+fi
+
+# 清理临时变量
+unset _LIB_DIR _module
+
+# ============================================================================
+# 版本号管理
+# 版本号来源优先级: VERSION文件 > GitHub Release > 硬编码默认值
+# ============================================================================
+_load_version() {
+    local versionFile="${_SCRIPT_DIR}/VERSION"
+    local installedVersionFile="/etc/Proxy-agent/VERSION"
+
+    # 优先从脚本目录读取
+    if [[ -f "${versionFile}" ]]; then
+        SCRIPT_VERSION="v$(cat "${versionFile}" 2>/dev/null | tr -d '[:space:]')"
+    # 其次从安装目录读取
+    elif [[ -f "${installedVersionFile}" ]]; then
+        SCRIPT_VERSION="v$(cat "${installedVersionFile}" 2>/dev/null | tr -d '[:space:]')"
+    else
+        # 尝试从 GitHub Releases 获取最新版本（初次安装时使用）
+        local remoteVersion
+        local apiUrl="https://api.github.com/repos/Lynthar/Proxy-agent/releases/latest"
+        remoteVersion=$(curl -s --connect-timeout 3 -m 5 "${apiUrl}" 2>/dev/null | \
+            sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+
+        if [[ -n "${remoteVersion}" ]]; then
+            # 确保版本号以 v 开头
+            [[ "${remoteVersion}" != v* ]] && remoteVersion="v${remoteVersion}"
+            SCRIPT_VERSION="${remoteVersion}"
+        else
+            # 网络不可用时显示初始版本标识
+            SCRIPT_VERSION="(initial)"
+        fi
+    fi
+    export SCRIPT_VERSION
+}
+_load_version
+
+# ============================================================================
+# GitHub Release 版本检测
+# 从 GitHub API 获取最新 Release 版本号
+# ============================================================================
+GITHUB_REPO="Lynthar/Proxy-agent"
+GITHUB_API_URL="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+
+# 获取最新 Release 版本号
+# 返回: 版本号 (如 v3.6.0) 或空字符串
+getLatestReleaseVersion() {
+    local response
+    local version
+
+    # 使用 curl 获取 GitHub API 响应
+    response=$(curl -s --connect-timeout 5 -m 10 "${GITHUB_API_URL}" 2>/dev/null)
+
+    if [[ -n "${response}" ]]; then
+        # 提取 tag_name 字段
+        version=$(echo "${response}" | grep -oP '"tag_name"\s*:\s*"\K[^"]+' 2>/dev/null)
+
+        # 如果 grep -P 不可用，尝试其他方法
+        if [[ -z "${version}" ]]; then
+            version=$(echo "${response}" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+        fi
+
+        # 确保版本号以 v 开头
+        if [[ -n "${version}" && "${version}" != v* ]]; then
+            version="v${version}"
+        fi
+
+        echo "${version}"
+    fi
+}
+
+# 比较版本号
+# 参数: $1 = 当前版本, $2 = 远程版本
+# 返回: 0 = 需要更新, 1 = 已是最新, 2 = 无法比较
+compareVersions() {
+    local current="$1"
+    local remote="$2"
+
+    # 去除 v 前缀
+    current="${current#v}"
+    remote="${remote#v}"
+
+    if [[ -z "${current}" || -z "${remote}" ]]; then
+        return 2
+    fi
+
+    if [[ "${current}" == "${remote}" ]]; then
+        return 1
+    fi
+
+    # 使用 sort -V 比较版本号
+    local higher
+    higher=$(printf '%s\n%s' "${current}" "${remote}" | sort -V | tail -1)
+
+    if [[ "${higher}" == "${remote}" ]]; then
+        return 0  # 需要更新
+    else
+        return 1  # 已是最新
+    fi
+}
+
+# 检查更新并显示提示
+checkForUpdates() {
+    local latestVersion
+    latestVersion=$(getLatestReleaseVersion)
+
+    if [[ -n "${latestVersion}" ]]; then
+        if compareVersions "${SCRIPT_VERSION}" "${latestVersion}"; then
+            export LATEST_VERSION="${latestVersion}"
+            return 0  # 有新版本
+        fi
+    fi
+    return 1  # 无新版本或检查失败
+}
+
+# ============================================================================
+# i18n 后备机制 - 当模块未加载时提供基本翻译支持
+# ============================================================================
+if ! type t &>/dev/null; then
+    # t() 函数未定义，加载内嵌的基本语言消息
+    # 基本消息定义（中文）
+    MSG_MENU_AUTHOR="作者"
+    MSG_MENU_VERSION="当前版本"
+    MSG_MENU_GITHUB="Github"
+    MSG_MENU_DESC="描述"
+    MSG_MENU_TITLE="八合一共存脚本"
+    MSG_MENU_INSTALL="安装"
+    MSG_MENU_REINSTALL="重新安装"
+    MSG_MENU_COMBO_INSTALL="任意组合安装"
+    MSG_MENU_CHAIN_PROXY="链式代理管理"
+    MSG_MENU_HYSTERIA2="Hysteria2 管理"
+    MSG_MENU_REALITY="REALITY 管理"
+    MSG_MENU_TUIC="Tuic 管理"
+    MSG_MENU_USER="用户管理"
+    MSG_MENU_DISGUISE="伪装站管理"
+    MSG_MENU_CERT="证书管理"
+    MSG_MENU_CDN="CDN 节点管理"
+    MSG_MENU_ROUTING="分流工具"
+    MSG_MENU_ADD_PORT="添加新端口"
+    MSG_MENU_BT="BT 下载管理"
+    MSG_MENU_BLACKLIST="域名黑名单"
+    MSG_MENU_CORE="Core 管理"
+    MSG_MENU_UPDATE_SCRIPT="更新脚本"
+    MSG_MENU_BBR="安装 BBR、DD 脚本"
+    MSG_MENU_UNINSTALL="卸载脚本"
+    MSG_MENU_TOOL_MGMT="工具管理"
+    MSG_MENU_VERSION_MGMT="版本管理"
+    MSG_MENU_SCRIPT_MGMT="脚本管理"
+    MSG_MENU_SCRIPT_VERSION="脚本版本管理"
+    MSG_PROMPT_SELECT="请选择"
+    MSG_NOTICE="注意事项"
+    MSG_SYS_SELINUX_NOTICE="检测到 SELinux 已启用，请手动禁用（在 /etc/selinux/config 设置 SELINUX=disabled 并重启）"
+    MSG_SYS_NOT_SUPPORTED="本脚本不支持此系统，请将下方日志反馈给开发者"
+    MSG_SYS_CPU_NOT_SUPPORTED="不支持此 CPU 架构"
+    MSG_SYS_CPU_DEFAULT_AMD64="无法识别 CPU 架构，默认使用 amd64/x86_64"
+    MSG_CORE_CURRENT_RUNNING="核心: %s [运行中]"
+    MSG_CORE_CURRENT_STOPPED="核心: %s [未运行]"
+    MSG_PROTOCOLS_INSTALLED="已安装协议"
+    MSG_PROGRESS_STEP="进度 %s/%s"
+    MSG_PROG_INSTALL_TOOLS="安装工具"
+    MSG_INSTALL_CHECKING="检查、安装更新【新机器会很慢，如长时间无反应，请手动停止后重新执行】"
+    MSG_INSTALL_TOOL="安装 %s"
+    # 链式代理菜单
+    MSG_CHAIN_MENU_WIZARD="快速配置向导"
+    MSG_CHAIN_MENU_STATUS="查看链路状态"
+    MSG_CHAIN_MENU_TEST="测试链路连通性"
+    MSG_CHAIN_MENU_ADVANCED="高级设置"
+    MSG_CHAIN_MENU_UNINSTALL="卸载链式代理"
+    MSG_CHAIN_MENU_PROTOCOL_ROUTING="按协议分流设置"
+    MSG_EXT_MENU_TITLE="外部节点管理"
+    MSG_RECOMMENDED="推荐"
+
+    # === IP CIDR 和 GeoIP 相关 ===
+    MSG_CHAIN_RULE_IP_CIDR="IP CIDR 规则"
+    MSG_CHAIN_RULE_GEOIP="GeoIP 规则"
+    MSG_CHAIN_IP_CIDR_HINT="请输入 IP CIDR (逗号分隔)"
+    MSG_CHAIN_IP_CIDR_EXAMPLE="格式示例: 192.168.0.0/16,10.0.0.0/8,172.16.0.0/12"
+    MSG_CHAIN_IP_CIDR_INVALID="IP CIDR 格式无效"
+    MSG_IP_CIDR="IP CIDR"
+    MSG_CHAIN_GEOIP_SELECT="选择 GeoIP 规则"
+    MSG_CHAIN_GEOIP_CN="中国大陆"
+    MSG_CHAIN_GEOIP_US="美国"
+    MSG_CHAIN_GEOIP_JP="日本"
+    MSG_CHAIN_GEOIP_HK="香港"
+    MSG_CHAIN_GEOIP_TW="台湾"
+    MSG_CHAIN_GEOIP_SG="新加坡"
+    MSG_CHAIN_GEOIP_PRIVATE="私有 IP"
+    MSG_CHAIN_GEOIP_CUSTOM="自定义 GeoIP"
+    MSG_CHAIN_GEOIP_CUSTOM_HINT="请输入 GeoIP 代码 (如: kr, de, fr)"
+
+    # === 多链路配置相关 ===
+    MSG_CHAIN_MULTI_TITLE="配置入口节点 (多链路分流模式)"
+    MSG_CHAIN_MULTI_DESC="此模式允许将不同流量分流到不同的出口节点"
+    MSG_CHAIN_MULTI_EXAMPLE="例如: Netflix → 美国出口, OpenAI → 香港出口"
+    MSG_CHAIN_SINGLE_EXISTS="检测到已存在单链路配置"
+    MSG_CHAIN_SINGLE_UNINSTALL_HINT="如需使用多链路分流模式，请先卸载现有链式代理配置"
+    MSG_CHAIN_MENU_PATH="菜单路径: 链式代理管理 → 卸载链式代理"
+    MSG_CHAIN_MULTI_EXISTS="检测到已存在多链路配置"
+    MSG_CHAIN_CONTINUE_ADD_NEW="继续添加新链路"
+    MSG_CHAIN_RECONFIGURE="重新配置 (将清除现有配置)"
+    MSG_CHAIN_CONFIRM_CLEAR="确认清除现有多链路配置？"
+    MSG_CHAIN_SELECT_CONFIG_MODE="请选择配置方式"
+    MSG_CHAIN_ADD_INTERACTIVE="逐个添加链路"
+    MSG_CHAIN_BATCH_IMPORT="批量导入配置码"
+    MSG_CHAIN_BATCH_TITLE="批量导入配置码"
+    MSG_CHAIN_BATCH_HINT="请逐行粘贴配置码，每行一个"
+    MSG_CHAIN_BATCH_END_HINT="输入完成后输入空行结束"
+    MSG_CHAIN_CODE_PROMPT="配置码"
+    MSG_CHAIN_CODE_PARSE_FAILED="配置码解析失败，已跳过"
+    MSG_CHAIN_NO_CHAINS_ADDED="未添加任何链路，配置已取消"
+    MSG_CHAIN_IMPORT_SUCCESS="成功导入 %s 条链路"
+    MSG_CHAIN_IMPORT_NONE="未导入任何链路，配置已取消"
+    MSG_CHAIN_CONFIG_RULES_NOW="是否现在配置分流规则？"
+
+    # === 规则配置相关 ===
+    MSG_CHAIN_STEP_IMPORT="步骤 1/3: 导入配置"
+    MSG_CHAIN_STEP_NAME="步骤: 命名此链路"
+    MSG_CHAIN_STEP_RULES="步骤 3/3: 设置分流规则"
+    MSG_CHAIN_RULES_SELECT="选择此链路的分流规则"
+    MSG_CHAIN_RULE_CUSTOM_DOMAIN="自定义域名"
+    MSG_CHAIN_RULE_SET_DEFAULT="设为默认链路"
+    MSG_CHAIN_DEFAULT_HINT="提示: 如果不设置默认链路，未匹配规则的流量将从入口节点直连访问"
+    MSG_CHAIN_PASTE_CODE="请粘贴出口/中继节点的配置码"
+    MSG_CHAIN_CODE_EMPTY="配置码不能为空"
+    MSG_CHAIN_PARSE_SUCCESS="解析成功"
+    MSG_CHAIN_NODE_IP="节点IP"
+    MSG_CHAIN_PORT="端口"
+    MSG_CHAIN_PROTOCOL="协议"
+    MSG_CHAIN_DOMAIN_HINT="请输入域名 (逗号分隔，如: example.com,test.org)"
+    MSG_CHAIN_DOMAIN="域名"
+    MSG_CHAIN_DOMAIN_EMPTY="域名不能为空"
+    MSG_CHAIN_RULES_TITLE="配置分流规则"
+    MSG_CHAIN_CURRENT_CHAINS="当前链路"
+    MSG_CHAIN_SELECT_CHAIN="选择要添加规则的链路编号"
+    MSG_CHAIN_INDEX="链路编号"
+    MSG_CHAIN_INVALID_CHAIN="无效的选择"
+    MSG_CHAIN_NO_CHAINS="没有可用的链路"
+    MSG_CHAIN_NO_CONFIG="未找到多链路配置"
+    MSG_CHAIN_RULE_FOR="为链路"
+    MSG_CHAIN_RULE_TYPE_SELECT="选择规则类型"
+    MSG_CHAIN_GENERATING="正在生成配置..."
+    MSG_CHAIN_CONFIG_COMPLETE="多链路分流配置完成！"
+    MSG_CHAIN_NO_DEFAULT_SET="当前未设置默认链路，未匹配规则的流量将直连访问"
+    MSG_CHAIN_SET_DEFAULT_NOW="是否现在设置默认链路？"
+    MSG_CHAIN_NO_DEFAULT_OPTION="不设置 (未匹配流量直连)"
+    MSG_CHAIN_CONFIGURED_COUNT="已配置 %s 条链路"
+    MSG_CHAIN_SET_DEFAULT_SUCCESS="已将 [%s] 设为默认链路"
+    MSG_CHAIN_XRAY_DETECTED="检测到 Xray 代理协议，将同时配置 Xray 链式转发"
+    MSG_CHAIN_TARGET="目标"
+    MSG_CHAIN_RULE_ADDED="规则已添加"
+    MSG_CONFIRM="确认"
+    MSG_CANCELLED="已取消"
+    MSG_CHAIN_MERGING_SINGBOX="正在合并 sing-box 配置..."
+    MSG_CHAIN_STARTING_SINGBOX="正在启动 sing-box..."
+    MSG_CHAIN_SINGBOX_START_FAILED="sing-box 启动失败"
+    MSG_CHAIN_SINGBOX_START_SUCCESS="sing-box 启动成功"
+    MSG_CHAIN_SINGBOX_DEBUG="请手动执行:"
+    MSG_CHAIN_CONFIGURING_XRAY="正在配置 Xray 链式转发..."
+    MSG_CHAIN_RESTARTING_XRAY="正在重启 Xray..."
+    MSG_CHAIN_TESTING_CONNECTIVITY="正在测试链路连通性..."
+    MSG_CHAIN_TESTING_PARALLEL="正在并行测试 %s 条链路..."
+    MSG_CHAIN_XRAY_RESTART_SUCCESS="Xray 重启成功，链式转发已启用"
+    MSG_CHAIN_XRAY_RESTART_FAILED="Xray 重启失败"
+    MSG_CHAIN_XRAY_CHECK_CONFIG="请检查配置:"
+    MSG_CHAIN_SUMMARY_NAME="链路名称"
+    MSG_CHAIN_SUMMARY_TARGET="目标节点"
+    MSG_CHAIN_SUMMARY_RULES="分流规则"
+    MSG_CHAIN_RULE_PENDING="待配置"
+    MSG_CHAIN_DEFAULT_ALL_TRAFFIC="默认 (所有其他流量)"
+    MSG_CHAIN_DEFAULT_OUTBOUND="默认出站"
+    MSG_CHAIN_DEFAULT_OUTBOUND_DIRECT="默认出站: 直连 (未匹配规则的流量直连访问)"
+    MSG_CHAIN_TEST_MULTI_TITLE="测试多链路连通性"
+    MSG_CHAIN_RULE_CUSTOM_DOMAIN="自定义域名"
+    MSG_CHAIN_TEST_LATENCY="延迟"
+    MSG_CHAIN_TEST_CONN_FAIL="连接失败"
+    MSG_CHAIN_TEST_COMPLETE="测试完成: %s 通过, %s 失败"
+    MSG_CHAIN_TEST_CHECK_HINT="请检查失败链路的:"
+    MSG_CHAIN_TEST_CHECK_1="1. 出口节点防火墙是否开放端口"
+    MSG_CHAIN_TEST_CHECK_2="2. 出口节点 sing-box 是否运行"
+    MSG_CHAIN_TEST_CHECK_3="3. IP地址和端口是否正确"
+    MSG_CHAIN_STATUS_RUNNING="运行中"
+    MSG_CHAIN_STATUS_STOPPED="未运行"
+    MSG_CHAIN_STATUS_TITLE="链式代理状态"
+    MSG_CHAIN_STATUS_ROLE="当前角色"
+    MSG_CHAIN_STATUS_ROLE_ENTRY="入口节点 (Entry) - 多链路分流模式"
+    MSG_CHAIN_STATUS_RUN="运行状态"
+    MSG_CHAIN_STATUS_COUNT="链路数量"
+    MSG_CHAIN_STATUS_DETAILS="链路详情"
+    MSG_CHAIN_STATUS_DEFAULT_MARK="[默认]"
+
+    # 协议分流相关
+    MSG_CHAIN_PROTOCOL_ROUTING_TITLE="按协议节点分流配置"
+    MSG_CHAIN_PROTOCOL_ROUTING_DESC="选择哪些协议的流量应通过链式代理"
+    MSG_CHAIN_PROTOCOL_ROUTING_DESC2="未选中的协议将直接连接"
+    MSG_CHAIN_PROTOCOL_NOT_ENTRY_NODE="当前不是入口节点，无法配置协议分流"
+    MSG_CHAIN_PROTOCOL_NO_CHAIN_OUTBOUND="未找到链式代理出站配置"
+    MSG_CHAIN_PROTOCOL_NO_PROTOCOLS="未安装任何协议"
+    MSG_CHAIN_PROTOCOL_SELECT_PROMPT="已安装的协议列表："
+    MSG_CHAIN_PROTOCOL_INPUT_HINT="请输入要通过链式代理的协议编号 (多选用逗号分隔，如: 1,2,3)"
+    MSG_CHAIN_PROTOCOL_NO_SELECTION="未选择任何协议"
+    MSG_CHAIN_PROTOCOL_INVALID_SELECTION="无效的选择"
+    MSG_CHAIN_PROTOCOL_SELECTED="已选择的协议"
+    MSG_CHAIN_PROTOCOL_CONFIRM="确认配置？"
+    MSG_CHAIN_PROTOCOL_RELOADING="正在重载配置..."
+    MSG_CHAIN_PROTOCOL_RELOAD_FAILED="配置重载失败"
+    MSG_CHAIN_PROTOCOL_SUCCESS="协议分流配置成功！"
+    MSG_CHAIN_PROTOCOL_SINGBOX_ONLY="按协议分流仅支持 sing-box 核心"
+
+    # 后备 t() 函数
+    t() {
+        local key="MSG_$1"
+        local text="${!key:-$1}"
+        shift
+        if [[ $# -gt 0 ]]; then
+            # shellcheck disable=SC2059
+            printf "${text}" "$@"
+        else
+            echo "${text}"
+        fi
+    }
+fi
+
+# ============================================================================
+
+# 域名验证函数 - 防止命令注入
+# 返回 0 表示有效，返回 1 表示无效
+isValidDomain() {
+    local domain="$1"
+    # 空值无效
+    [[ -z "${domain}" ]] && return 1
+    # 检查是否包含危险字符（命令注入防护）
+    if [[ "${domain}" =~ [\;\|\&\$\`\(\)\{\}\[\]\<\>\!\#\*\?\~\'\"] ]]; then
+        return 1
+    fi
+    # 检查是否包含空格或换行
+    if [[ "${domain}" =~ [[:space:]] ]]; then
+        return 1
+    fi
+    # 基本域名格式验证（允许子域名、顶级域名等）
+    # 格式: 允许字母、数字、连字符和点，但不能以点或连字符开头/结尾
+    if [[ ! "${domain}" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]]; then
+        return 1
+    fi
+    # 不允许连续的点
+    if [[ "${domain}" =~ \.\. ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# URL/重定向地址验证函数 - 防止命令注入
+isValidRedirectUrl() {
+    local url="$1"
+    [[ -z "${url}" ]] && return 1
+    # 检查是否包含危险字符
+    if [[ "${url}" =~ [\;\|\&\$\`\(\)\{\}\[\]\<\>\!\#\*\~\'] ]]; then
+        return 1
+    fi
+    # 必须以 http:// 或 https:// 开头
+    if [[ ! "${url}" =~ ^https?:// ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# SHA256校验和验证函数
+# 用法: verifySHA256 <文件路径> <预期的SHA256值>
+# 返回: 0=验证成功, 1=验证失败
+verifySHA256() {
+    local file="$1"
+    local expectedHash="$2"
+
+    if [[ ! -f "${file}" ]]; then
+        echoContent red " ---> 校验失败: 文件不存在"
+        return 1
+    fi
+
+    local actualHash
+    if command -v sha256sum &>/dev/null; then
+        actualHash=$(sha256sum "${file}" | awk '{print $1}')
+    elif command -v shasum &>/dev/null; then
+        actualHash=$(shasum -a 256 "${file}" | awk '{print $1}')
+    else
+        echoContent yellow " ---> 警告: 未找到sha256sum工具，跳过校验"
+        return 0
+    fi
+
+    if [[ "${actualHash,,}" == "${expectedHash,,}" ]]; then
+        return 0
+    else
+        echoContent red " ---> 校验失败: SHA256不匹配"
+        echoContent red "     预期: ${expectedHash}"
+        echoContent red "     实际: ${actualHash}"
+        return 1
+    fi
+}
+
+# 从Xray .dgst文件中提取SHA256值
+# 用法: extractXrayHash <dgst文件路径>
+extractXrayHash() {
+    local dgstFile="$1"
+    if [[ -f "${dgstFile}" ]]; then
+        grep "SHA2-256" "${dgstFile}" | awk '{print $2}' | head -1
+    fi
+}
+
+# 从sing-box校验文件中提取SHA256值
+# 用法: extractSingBoxHash <校验文件路径> <目标文件名>
+extractSingBoxHash() {
+    local checksumFile="$1"
+    local targetFile="$2"
+    if [[ -f "${checksumFile}" ]]; then
+        grep "${targetFile}" "${checksumFile}" | awk '{print $1}' | head -1
+    fi
+}
+
+# TLS证书与私钥匹配验证函数
+# 用法: verifyCertKeyMatch <证书文件路径> <私钥文件路径>
+# 返回: 0=匹配成功, 1=匹配失败或文件不存在
+verifyCertKeyMatch() {
+    local certFile="$1"
+    local keyFile="$2"
+
+    # 检查文件是否存在
+    if [[ ! -f "${certFile}" ]]; then
+        echoContent red " ---> 证书验证失败: 证书文件不存在 ${certFile}"
+        return 1
+    fi
+    if [[ ! -f "${keyFile}" ]]; then
+        echoContent red " ---> 证书验证失败: 私钥文件不存在 ${keyFile}"
+        return 1
+    fi
+
+    # 检查文件是否为空
+    if [[ ! -s "${certFile}" ]]; then
+        echoContent red " ---> 证书验证失败: 证书文件为空"
+        return 1
+    fi
+    if [[ ! -s "${keyFile}" ]]; then
+        echoContent red " ---> 证书验证失败: 私钥文件为空"
+        return 1
+    fi
+
+    # 提取证书和私钥的公钥哈希进行比对
+    local certHash keyHash
+
+    # 检测密钥类型（ECC或RSA）
+    if openssl x509 -in "${certFile}" -noout -text 2>/dev/null | grep -q "EC Public Key\|id-ecPublicKey"; then
+        # ECC证书
+        certHash=$(openssl x509 -in "${certFile}" -pubkey -noout 2>/dev/null | openssl ec -pubin -outform DER 2>/dev/null | sha256sum | awk '{print $1}')
+        keyHash=$(openssl ec -in "${keyFile}" -pubout -outform DER 2>/dev/null | sha256sum | awk '{print $1}')
+    else
+        # RSA证书
+        certHash=$(openssl x509 -in "${certFile}" -noout -modulus 2>/dev/null | sha256sum | awk '{print $1}')
+        keyHash=$(openssl rsa -in "${keyFile}" -noout -modulus 2>/dev/null | sha256sum | awk '{print $1}')
+    fi
+
+    if [[ -z "${certHash}" || -z "${keyHash}" ]]; then
+        echoContent yellow " ---> 证书验证警告: 无法提取证书/私钥信息进行匹配验证"
+        return 0
+    fi
+
+    if [[ "${certHash}" == "${keyHash}" ]]; then
+        return 0
+    else
+        echoContent red " ---> 证书验证失败: 证书与私钥不匹配"
+        echoContent red "     证书公钥哈希: ${certHash:0:16}..."
+        echoContent red "     私钥公钥哈希: ${keyHash:0:16}..."
+        return 1
+    fi
+}
+
+# 验证证书有效期
+# 用法: verifyCertExpiry <证书文件路径>
+# 返回: 0=有效, 1=已过期或即将过期(7天内)
+verifyCertExpiry() {
+    local certFile="$1"
+
+    if [[ ! -f "${certFile}" ]]; then
+        return 1
+    fi
+
+    local expiryDate expiryTimestamp currentTimestamp daysLeft
+    expiryDate=$(openssl x509 -in "${certFile}" -noout -enddate 2>/dev/null | cut -d= -f2)
+
+    if [[ -z "${expiryDate}" ]]; then
+        echoContent yellow " ---> 无法读取证书过期时间"
+        return 0
+    fi
+
+    expiryTimestamp=$(date -d "${expiryDate}" +%s 2>/dev/null)
+    currentTimestamp=$(date +%s)
+
+    if [[ -z "${expiryTimestamp}" ]]; then
+        return 0
+    fi
+
+    ((daysLeft = (expiryTimestamp - currentTimestamp) / 86400))
+
+    if [[ ${daysLeft} -lt 0 ]]; then
+        echoContent red " ---> 证书已过期 ${daysLeft#-} 天"
+        return 1
+    elif [[ ${daysLeft} -lt 7 ]]; then
+        echoContent yellow " ---> 警告: 证书将在 ${daysLeft} 天后过期"
+        return 0
+    fi
+
+    return 0
+}
+
 echoContent() {
     case $1 in
     # 红色
@@ -32,13 +594,40 @@ echoContent() {
         ;;
     esac
 }
-# 检查SELinux状态
+
+# 验证IP地址格式
+# 参数1: IP地址字符串
+# 返回: 0=有效, 1=无效
+isValidIP() {
+    local ip=$1
+    # IPv4 验证
+    if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        local IFS='.'
+        read -ra octets <<< "$ip"
+        for octet in "${octets[@]}"; do
+            if [[ $octet -gt 255 ]]; then
+                return 1
+            fi
+        done
+        return 0
+    fi
+    # IPv6 验证 (简化版，支持完整格式和压缩格式)
+    if [[ "$ip" =~ ^([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}$ ]] || \
+       [[ "$ip" =~ ^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$ ]] || \
+       [[ "$ip" =~ ^::([0-9a-fA-F]{1,4}:){0,5}[0-9a-fA-F]{1,4}$ ]] || \
+       [[ "$ip" =~ ^([0-9a-fA-F]{1,4}:){1,6}:$ ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# 检查SELinux状态（使用运行时检测）
 checkCentosSELinux() {
-    if [[ -f "/etc/selinux/config" ]] && ! grep -q "SELINUX=disabled" <"/etc/selinux/config"; then
-        echoContent yellow "# 注意事项"
-        echoContent yellow "检测到SELinux已开启，请手动关闭，教程如下"
-        echoContent yellow "https://www.v2ray-agent.com/archives/1684115970026#centos7-%E5%85%B3%E9%97%ADselinux"
-        exit 0
+    if command -v getenforce >/dev/null 2>&1 && [[ "$(getenforce)" == "Enforcing" ]]; then
+        echoContent yellow "# $(t NOTICE)"
+        echoContent yellow "$(t SYS_SELINUX_NOTICE)"
+        echoContent yellow "https://github.com/Lynthar/Proxy-agent/blob/master/documents/selinux.md"
+        exit 1
     fi
 }
 checkSystem() {
@@ -83,10 +672,10 @@ checkSystem() {
     fi
 
     if [[ -z ${release} ]]; then
-        echoContent red "\n本脚本不支持此系统，请将下方日志反馈给开发者\n"
+        echoContent red "\n$(t SYS_NOT_SUPPORTED)\n"
         echoContent yellow "$(cat /etc/issue)"
         echoContent yellow "$(cat /proc/version)"
-        exit 0
+        exit 1
     fi
 }
 
@@ -109,13 +698,13 @@ checkCPUVendor() {
                 singBoxCoreCPUVendor="-linux-arm64"
                 ;;
             *)
-                echo "  不支持此CPU架构--->"
+                echo "  $(t SYS_CPU_NOT_SUPPORTED)--->"
                 exit 1
                 ;;
             esac
         fi
     else
-        echoContent red "  无法识别此CPU架构，默认amd64、x86_64--->"
+        echoContent red "  $(t SYS_CPU_DEFAULT_AMD64)--->"
         xrayCoreCPUVendor="Xray-linux-64"
         #        v2rayCoreCPUVendor="v2ray-linux-64"
     fi
@@ -334,8 +923,72 @@ initVar() {
 
 }
 
+stripAnsi() {
+    echo -e "$1" | sed $'s/\x1b\[[0-9;]*[a-zA-Z]//g'
+}
+
+validateJsonFile() {
+
+    local jsonPath=$1
+    if ! jq -e . "${jsonPath}" >/dev/null 2>&1; then
+        echoContent red " ---> ${jsonPath} 解析失败，已移除，请检查上方录入并重试"
+        rm -f "${jsonPath}"
+        exit 1
+    fi
+}
+
+readCredentialBySource() {
+
+    local tips=$1
+    local defaultValue=$2
+    echoContent skyBlue "\n${tips}用于配置双方握手的凭据，可手动/文件/环境变量方式录入" >&2
+    echoContent yellow "请选择${tips}录入方式（自动化部署可用文件或环境变量）" >&2
+    echoContent yellow "1.直接输入${defaultValue:+[回车默认] }" >&2
+    echoContent yellow "2.从文件读取" >&2
+    echoContent yellow "3.从环境变量读取" >&2
+    echo -n "请选择:" >&2
+    read -r credentialSource
+    local credentialValue=
+    case ${credentialSource} in
+    2)
+        echo -n "请输入文件路径:" >&2
+        read -r credentialPath
+        if [[ -z "${credentialPath}" || ! -f "${credentialPath}" ]]; then
+            echoContent red " ---> 文件路径无效"
+            exit 1
+        fi
+        credentialValue=$(tr -d '\n' <"${credentialPath}")
+        ;;
+    3)
+        echo -n "请输入环境变量名称:" >&2
+        read -r credentialEnv
+        credentialValue=${!credentialEnv}
+        ;;
+    *)
+        echo -n "${tips}:" >&2
+        read -r credentialValue
+        if [[ -z "${credentialValue}" && -n "${defaultValue}" ]]; then
+            credentialValue=${defaultValue}
+        fi
+        ;;
+    esac
+
+    # 去除可能的ANSI控制符，防止写入配置文件后产生\x1b错误
+    credentialValue=$(stripAnsi "${credentialValue}")
+
+    if [[ -z "${credentialValue}" ]]; then
+        echoContent red " ---> ${tips}不可为空"
+        exit 1
+    fi
+
+    echo "${credentialValue}"
+}
+
 # 读取tls证书详情
 readAcmeTLS() {
+    # 重置 DNS API 状态，避免上次调用的残留值
+    installedDNSAPIStatus=""
+
     local readAcmeDomain=
     if [[ -n "${currentHost}" ]]; then
         readAcmeDomain="${currentHost}"
@@ -345,9 +998,25 @@ readAcmeTLS() {
         readAcmeDomain="${domain}"
     fi
 
+    # 如果没有域名，直接返回
+    if [[ -z "${readAcmeDomain}" ]]; then
+        return
+    fi
+
     dnsTLSDomain=$(echo "${readAcmeDomain}" | awk -F "." '{$1="";print $0}' | sed 's/^[[:space:]]*//' | sed 's/ /./g')
-    if [[ -d "$HOME/.acme.sh/*.${dnsTLSDomain}_ecc" && -f "$HOME/.acme.sh/*.${dnsTLSDomain}_ecc/*.${dnsTLSDomain}.key" && -f "$HOME/.acme.sh/*.${dnsTLSDomain}_ecc/*.${dnsTLSDomain}.cer" ]]; then
-        installedDNSAPIStatus=true
+    # 检查通配符证书目录是否存在
+    # 注意：通配符证书目录名以字面 "*." 开头，如 *.example.com_ecc
+    # 使用 \* 匹配字面星号，避免匹配普通证书目录如 sub.example.com_ecc
+    local acmeEccDir
+    acmeEccDir=$(find "$HOME/.acme.sh" -maxdepth 1 -type d -name '\*.'"${dnsTLSDomain}_ecc" 2>/dev/null | head -1)
+    if [[ -n "${acmeEccDir}" ]]; then
+        local keyFile certFile
+        # 通配符证书文件名也以字面 "*." 开头
+        keyFile=$(find "${acmeEccDir}" -maxdepth 1 -type f -name '\*.'"${dnsTLSDomain}.key" 2>/dev/null | head -1)
+        certFile=$(find "${acmeEccDir}" -maxdepth 1 -type f -name '\*.'"${dnsTLSDomain}.cer" 2>/dev/null | head -1)
+        if [[ -n "${keyFile}" && -n "${certFile}" ]]; then
+            installedDNSAPIStatus=true
+        fi
     fi
 }
 
@@ -390,27 +1059,27 @@ readInstallType() {
     singBoxConfigPath=
 
     # 1.检测安装目录
-    if [[ -d "/etc/v2ray-agent" ]]; then
-        if [[ -f "/etc/v2ray-agent/xray/xray" ]]; then
+    if [[ -d "/etc/Proxy-agent" ]]; then
+        if [[ -f "/etc/Proxy-agent/xray/xray" ]]; then
             # 检测xray-core
-            if [[ -d "/etc/v2ray-agent/xray/conf" ]] && [[ -f "/etc/v2ray-agent/xray/conf/02_VLESS_TCP_inbounds.json" || -f "/etc/v2ray-agent/xray/conf/02_trojan_TCP_inbounds.json" || -f "/etc/v2ray-agent/xray/conf/07_VLESS_vision_reality_inbounds.json" ]]; then
+            if [[ -d "/etc/Proxy-agent/xray/conf" ]] && [[ -f "/etc/Proxy-agent/xray/conf/02_VLESS_TCP_inbounds.json" || -f "/etc/Proxy-agent/xray/conf/02_trojan_TCP_inbounds.json" || -f "/etc/Proxy-agent/xray/conf/07_VLESS_vision_reality_inbounds.json" ]]; then
                 # xray-core
-                configPath=/etc/v2ray-agent/xray/conf/
-                ctlPath=/etc/v2ray-agent/xray/xray
+                configPath=/etc/Proxy-agent/xray/conf/
+                ctlPath=/etc/Proxy-agent/xray/xray
                 coreInstallType=1
                 if [[ -f "${configPath}07_VLESS_vision_reality_inbounds.json" ]]; then
                     realityStatus=1
                 fi
-                if [[ -f "/etc/v2ray-agent/sing-box/sing-box" ]] && [[ -f "/etc/v2ray-agent/sing-box/conf/config/06_hysteria2_inbounds.json" || -f "/etc/v2ray-agent/sing-box/conf/config/09_tuic_inbounds.json" || -f "/etc/v2ray-agent/sing-box/conf/config/20_socks5_inbounds.json" ]]; then
-                    singBoxConfigPath=/etc/v2ray-agent/sing-box/conf/config/
+                if [[ -f "/etc/Proxy-agent/sing-box/sing-box" ]] && [[ -f "/etc/Proxy-agent/sing-box/conf/config/06_hysteria2_inbounds.json" || -f "/etc/Proxy-agent/sing-box/conf/config/09_tuic_inbounds.json" ]]; then
+                    singBoxConfigPath=/etc/Proxy-agent/sing-box/conf/config/
                 fi
             fi
-        elif [[ -f "/etc/v2ray-agent/sing-box/sing-box" && -f "/etc/v2ray-agent/sing-box/conf/config.json" ]]; then
+        elif [[ -f "/etc/Proxy-agent/sing-box/sing-box" && -f "/etc/Proxy-agent/sing-box/conf/config.json" ]]; then
             # 检测sing-box
-            ctlPath=/etc/v2ray-agent/sing-box/sing-box
+            ctlPath=/etc/Proxy-agent/sing-box/sing-box
             coreInstallType=2
-            configPath=/etc/v2ray-agent/sing-box/conf/config/
-            singBoxConfigPath=/etc/v2ray-agent/sing-box/conf/config/
+            configPath=/etc/Proxy-agent/sing-box/conf/config/
+            singBoxConfigPath=/etc/Proxy-agent/sing-box/conf/config/
         fi
     fi
 }
@@ -428,9 +1097,11 @@ readInstallProtocolType() {
 
     #    currentRealityXHTTPPrivateKey=
     currentRealityXHTTPPublicKey=
+    currentRealityXHTTPShortId=
 
     currentRealityPrivateKey=
     currentRealityPublicKey=
+    currentRealityShortId=
 
     currentRealityMldsa65Seed=
     currentRealityMldsa65Verify=
@@ -448,7 +1119,6 @@ readInstallProtocolType() {
     singBoxTuicPort=
     singBoxNaivePort=
     singBoxVMessWSPort=
-    singBoxSocks5Port=
 
     while read -r row; do
         if echo "${row}" | grep -q VLESS_TCP_inbounds; then
@@ -472,6 +1142,7 @@ readInstallProtocolType() {
             xrayVLESSRealityXHTTPServerName=$(jq -r .inbounds[0].streamSettings.realitySettings.serverNames[0] "${row}.json")
 
             currentRealityXHTTPPublicKey=$(jq -r .inbounds[0].streamSettings.realitySettings.publicKey "${row}.json")
+            currentRealityXHTTPShortId=$(jq -r .inbounds[0].streamSettings.realitySettings.shortIds[0] "${row}.json")
             #            currentRealityXHTTPPrivateKey=$(jq -r .inbounds[0].streamSettings.realitySettings.privateKey "${row}.json")
 
             #            if [[ "${coreInstallType}" == "2" ]]; then
@@ -518,6 +1189,7 @@ readInstallProtocolType() {
 
                 currentRealityPublicKey=$(jq -r .inbounds[1].streamSettings.realitySettings.publicKey "${row}.json")
                 currentRealityPrivateKey=$(jq -r .inbounds[1].streamSettings.realitySettings.privateKey "${row}.json")
+                currentRealityShortId=$(jq -r .inbounds[1].streamSettings.realitySettings.shortIds[0] "${row}.json")
 
                 currentRealityMldsa65Seed=$(jq -r .inbounds[1].streamSettings.realitySettings.mldsa65Seed "${row}.json")
                 currentRealityMldsa65Verify=$(jq -r .inbounds[1].streamSettings.realitySettings.mldsa65Verify "${row}.json")
@@ -571,16 +1243,19 @@ readInstallProtocolType() {
                 singBoxAnyTLSPort=$(jq .inbounds[0].listen_port "${row}.json")
             fi
         fi
+        if echo "${row}" | grep -q ss2022_inbounds; then
+            currentInstallProtocolType="${currentInstallProtocolType}14,"
+            if [[ "${coreInstallType}" == "2" ]]; then
+                frontingType=14_ss2022_inbounds
+                ss2022Port=$(jq .inbounds[0].listen_port "${row}.json")
+            fi
+        fi
         if echo "${row}" | grep -q VMess_HTTPUpgrade_inbounds; then
             currentInstallProtocolType="${currentInstallProtocolType}11,"
             if [[ "${coreInstallType}" == "2" ]]; then
                 frontingType=11_VMess_HTTPUpgrade_inbounds
                 singBoxVMessHTTPUpgradePort=$(grep 'listen' <${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf | awk '{print $2}')
             fi
-        fi
-        if echo "${row}" | grep -q socks5_inbounds; then
-            currentInstallProtocolType="${currentInstallProtocolType}20,"
-            singBoxSocks5Port=$(jq .inbounds[0].listen_port "${row}.json")
         fi
 
     done < <(find ${configPath} -name "*inbounds.json" | sort | awk -F "[.]" '{print $1}')
@@ -623,9 +1298,9 @@ checkBTPanel() {
                     checkBTPanel
                 else
                     domain=${btDomain}
-                    if [[ ! -f "/etc/v2ray-agent/tls/${btDomain}.crt" && ! -f "/etc/v2ray-agent/tls/${btDomain}.key" ]]; then
-                        ln -s "/www/server/panel/vhost/cert/${btDomain}/fullchain.pem" "/etc/v2ray-agent/tls/${btDomain}.crt"
-                        ln -s "/www/server/panel/vhost/cert/${btDomain}/privkey.pem" "/etc/v2ray-agent/tls/${btDomain}.key"
+                    if [[ ! -f "/etc/Proxy-agent/tls/${btDomain}.crt" && ! -f "/etc/Proxy-agent/tls/${btDomain}.key" ]]; then
+                        ln -s "/www/server/panel/vhost/cert/${btDomain}/fullchain.pem" "/etc/Proxy-agent/tls/${btDomain}.crt"
+                        ln -s "/www/server/panel/vhost/cert/${btDomain}/privkey.pem" "/etc/Proxy-agent/tls/${btDomain}.key"
                     fi
 
                     nginxStaticPath="/www/wwwroot/${btDomain}/html/"
@@ -666,9 +1341,9 @@ check1Panel() {
                     check1Panel
                 else
                     domain=${btDomain}
-                    if [[ ! -f "/etc/v2ray-agent/tls/${btDomain}.crt" && ! -f "/etc/v2ray-agent/tls/${btDomain}.key" ]]; then
-                        ln -s "/opt/1panel/apps/openresty/openresty/www/sites/${btDomain}/ssl/fullchain.pem" "/etc/v2ray-agent/tls/${btDomain}.crt"
-                        ln -s "/opt/1panel/apps/openresty/openresty/www/sites/${btDomain}/ssl/privkey.pem" "/etc/v2ray-agent/tls/${btDomain}.key"
+                    if [[ ! -f "/etc/Proxy-agent/tls/${btDomain}.crt" && ! -f "/etc/Proxy-agent/tls/${btDomain}.key" ]]; then
+                        ln -s "/opt/1panel/apps/openresty/openresty/www/sites/${btDomain}/ssl/fullchain.pem" "/etc/Proxy-agent/tls/${btDomain}.crt"
+                        ln -s "/opt/1panel/apps/openresty/openresty/www/sites/${btDomain}/ssl/privkey.pem" "/etc/Proxy-agent/tls/${btDomain}.key"
                     fi
 
                     nginxStaticPath="/opt/1panel/apps/openresty/openresty/www/sites/${btDomain}/index/"
@@ -694,20 +1369,31 @@ readInstallAlpn() {
 # 检查防火墙
 allowPort() {
     local type=$2
+    local sourceRange=$3
     if [[ -z "${type}" ]]; then
         type=tcp
     fi
     # 如果防火墙启动状态则添加相应的开放端口
-    if dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+ufw"; then
+    if command -v dpkg >/dev/null 2>&1 && dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+ufw"; then
         if ufw status | grep -q "Status: active"; then
-            if ! ufw status | grep -q "$1/${type}"; then
+            if [[ -n "${sourceRange}" && "${sourceRange}" != "0.0.0.0/0" ]]; then
+                sudo ufw allow from "${sourceRange}" to any port "$1" proto "${type}"
+                checkUFWAllowPort "$1"
+            elif ! ufw status | grep -q "$1/${type}"; then
                 sudo ufw allow "$1/${type}"
                 checkUFWAllowPort "$1"
             fi
         fi
     elif systemctl status firewalld 2>/dev/null | grep -q "active (running)"; then
         local updateFirewalldStatus=
-        if ! firewall-cmd --list-ports --permanent | grep -qw "$1/${type}"; then
+        if [[ -n "${sourceRange}" && "${sourceRange}" != "0.0.0.0/0" ]]; then
+            local richRule="rule family=\"ipv4\" source address=\"${sourceRange}\" port protocol=\"${type}\" port=\"$1\" accept"
+            if ! firewall-cmd --permanent --query-rich-rule="${richRule}" >/dev/null 2>&1; then
+                updateFirewalldStatus=true
+                firewall-cmd --permanent --zone=public --add-rich-rule="${richRule}"
+                checkFirewalldAllowPort "$1"
+            fi
+        elif ! firewall-cmd --list-ports --permanent | grep -qw "$1/${type}"; then
             updateFirewalldStatus=true
             local firewallPort=$1
             if echo "${firewallPort}" | grep -q ":"; then
@@ -727,11 +1413,33 @@ allowPort() {
                 checkUFWAllowPort "$1"
             fi
         fi
-    elif dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+netfilter-persistent" && systemctl status netfilter-persistent 2>/dev/null | grep -q "active (exited)"; then
+    elif command -v nft >/dev/null 2>&1 && systemctl status nftables 2>/dev/null | grep -q "active"; then
+        if nft list chain inet filter input >/dev/null 2>&1; then
+            local nftComment="allow $1/${type}(Proxy-agent)"
+            local nftSourceRange="${sourceRange:-0.0.0.0/0}"
+            local nftRules
+            local updateNftablesStatus=
+            nftRules=$(nft list chain inet filter input)
+            if ! echo "${nftRules}" | grep -q "${nftComment}" || ! echo "${nftRules}" | grep -q "${nftSourceRange}"; then
+                updateNftablesStatus=true
+                nft add rule inet filter input ip saddr "${nftSourceRange}" ${type} dport "$1" counter accept comment "${nftComment}"
+            fi
+
+            if echo "${updateNftablesStatus}" | grep -q "true"; then
+                nft list ruleset >/etc/nftables.conf
+                systemctl reload nftables >/dev/null 2>&1 || nft -f /etc/nftables.conf
+            fi
+        fi
+    elif command -v dpkg >/dev/null 2>&1 && dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+netfilter-persistent" && systemctl status netfilter-persistent 2>/dev/null | grep -q "active (exited)"; then
         local updateFirewalldStatus=
-        if ! iptables -L | grep -q "$1/${type}(mack-a)"; then
+        if [[ -n "${sourceRange}" && "${sourceRange}" != "0.0.0.0/0" ]]; then
+            if ! iptables -C INPUT -p ${type} -s "${sourceRange}" --dport "$1" -m comment --comment "allow $1/${type}(Proxy-agent)" -j ACCEPT 2>/dev/null; then
+                updateFirewalldStatus=true
+                iptables -I INPUT -p ${type} -s "${sourceRange}" --dport "$1" -m comment --comment "allow $1/${type}(Proxy-agent)" -j ACCEPT
+            fi
+        elif ! iptables -L | grep -q "$1/${type}(Proxy-agent)"; then
             updateFirewalldStatus=true
-            iptables -I INPUT -p ${type} --dport "$1" -m comment --comment "allow $1/${type}(mack-a)" -j ACCEPT
+            iptables -I INPUT -p ${type} --dport "$1" -m comment --comment "allow $1/${type}(Proxy-agent)" -j ACCEPT
         fi
 
         if echo "${updateFirewalldStatus}" | grep -q "true"; then
@@ -749,9 +1457,9 @@ getPublicIP() {
         echo "${currentHost}"
     else
         local currentIP=
-        currentIP=$(curl -s "-${type}" http://www.cloudflare.com/cdn-cgi/trace | grep "ip" | awk -F "[=]" '{print $2}')
+        currentIP=$(curl -s "-${type}" https://www.cloudflare.com/cdn-cgi/trace | grep "ip" | awk -F "[=]" '{print $2}')
         if [[ -z "${currentIP}" && -z "$1" ]]; then
-            currentIP=$(curl -s "-6" http://www.cloudflare.com/cdn-cgi/trace | grep "ip" | awk -F "[=]" '{print $2}')
+            currentIP=$(curl -s "-6" https://www.cloudflare.com/cdn-cgi/trace | grep "ip" | awk -F "[=]" '{print $2}')
         fi
         echo "${currentIP}"
     fi
@@ -764,17 +1472,17 @@ checkUFWAllowPort() {
         echoContent green " ---> $1端口开放成功"
     else
         echoContent red " ---> $1端口开放失败"
-        exit 0
+        exit 1
     fi
 }
 
 # 输出firewall-cmd端口开放状态
 checkFirewalldAllowPort() {
-    if firewall-cmd --list-ports --permanent | grep -q "$1"; then
+    if firewall-cmd --list-ports --permanent | grep -q "$1" || firewall-cmd --list-rich-rules --permanent | grep -q "$1"; then
         echoContent green " ---> $1端口开放成功"
     else
         echoContent red " ---> $1端口开放失败"
-        exit 0
+        exit 1
     fi
 }
 
@@ -790,8 +1498,9 @@ readSingBoxConfig() {
         fi
         if [[ -f "${singBoxConfigPath}06_hysteria2_inbounds.json" ]]; then
             hysteriaPort=$(jq -r '.inbounds[0].listen_port' "${singBoxConfigPath}06_hysteria2_inbounds.json")
-            hysteria2ClientUploadSpeed=$(jq -r '.inbounds[0].down_mbps' "${singBoxConfigPath}06_hysteria2_inbounds.json")
-            hysteria2ClientDownloadSpeed=$(jq -r '.inbounds[0].up_mbps' "${singBoxConfigPath}06_hysteria2_inbounds.json")
+            hysteria2ClientUploadSpeed=$(jq -r '.inbounds[0].up_mbps' "${singBoxConfigPath}06_hysteria2_inbounds.json")
+            hysteria2ClientDownloadSpeed=$(jq -r '.inbounds[0].down_mbps' "${singBoxConfigPath}06_hysteria2_inbounds.json")
+            hysteria2ObfsPassword=$(jq -r '.inbounds[0].obfs.password // empty' "${singBoxConfigPath}06_hysteria2_inbounds.json")
         fi
     fi
 }
@@ -809,12 +1518,12 @@ readLastInstallationConfig() {
 unInstallSingBox() {
     local type=$1
     if [[ -n "${singBoxConfigPath}" ]]; then
-        if grep -q 'tuic' </etc/v2ray-agent/sing-box/conf/config.json && [[ "${type}" == "tuic" ]]; then
+        if grep -q 'tuic' </etc/Proxy-agent/sing-box/conf/config.json && [[ "${type}" == "tuic" ]]; then
             rm "${singBoxConfigPath}09_tuic_inbounds.json"
             echoContent green " ---> 删除sing-box tuic配置成功"
         fi
 
-        if grep -q 'hysteria2' </etc/v2ray-agent/sing-box/conf/config.json && [[ "${type}" == "hysteria2" ]]; then
+        if grep -q 'hysteria2' </etc/Proxy-agent/sing-box/conf/config.json && [[ "${type}" == "hysteria2" ]]; then
             rm "${singBoxConfigPath}06_hysteria2_inbounds.json"
             echoContent green " ---> 删除sing-box hysteria2配置成功"
         fi
@@ -830,7 +1539,7 @@ unInstallSingBox() {
     else
         handleSingBox stop
         rm /etc/systemd/system/sing-box.service
-        rm -rf /etc/v2ray-agent/sing-box/*
+        rm -rf /etc/Proxy-agent/sing-box/*
         echoContent green " ---> sing-box 卸载完成"
     fi
 }
@@ -939,8 +1648,8 @@ readConfigHostPathUUID() {
             # currentPath=${currentPath::-2}
         fi
     fi
-    if [[ -f "/etc/v2ray-agent/cdn" ]] && [[ -n "$(head -1 /etc/v2ray-agent/cdn)" ]]; then
-        currentCDNAddress=$(head -1 /etc/v2ray-agent/cdn)
+    if [[ -f "/etc/Proxy-agent/cdn" ]] && [[ -n "$(head -1 /etc/Proxy-agent/cdn)" ]]; then
+        currentCDNAddress=$(head -1 /etc/Proxy-agent/cdn)
     else
         currentCDNAddress="${currentHost}"
     fi
@@ -951,23 +1660,23 @@ showInstallStatus() {
     if [[ -n "${coreInstallType}" ]]; then
         if [[ "${coreInstallType}" == 1 ]]; then
             if [[ -n $(pgrep -f "xray/xray") ]]; then
-                echoContent yellow "\n核心: Xray-core[运行中]"
+                echoContent yellow "\n$(t CORE_CURRENT_RUNNING "Xray-core")"
             else
-                echoContent yellow "\n核心: Xray-core[未运行]"
+                echoContent yellow "\n$(t CORE_CURRENT_STOPPED "Xray-core")"
             fi
 
         elif [[ "${coreInstallType}" == 2 ]]; then
             if [[ -n $(pgrep -f "sing-box/sing-box") ]]; then
-                echoContent yellow "\n核心: sing-box[运行中]"
+                echoContent yellow "\n$(t CORE_CURRENT_RUNNING "sing-box")"
             else
-                echoContent yellow "\n核心: sing-box[未运行]"
+                echoContent yellow "\n$(t CORE_CURRENT_STOPPED "sing-box")"
             fi
         fi
         # 读取协议类型
         readInstallProtocolType
 
         if [[ -n ${currentInstallProtocolType} ]]; then
-            echoContent yellow "已安装协议: \c"
+            echoContent yellow "$(t PROTOCOLS_INSTALLED): \c"
         fi
         if echo ${currentInstallProtocolType} | grep -q ",0,"; then
             echoContent yellow "VLESS+TCP[TLS_Vision] \c"
@@ -1016,6 +1725,9 @@ showInstallStatus() {
         if echo ${currentInstallProtocolType} | grep -q ",13,"; then
             echoContent yellow "AnyTLS \c"
         fi
+        if echo ${currentInstallProtocolType} | grep -q ",14,"; then
+            echoContent yellow "SS2022 \c"
+        fi
     fi
 }
 
@@ -1023,11 +1735,11 @@ showInstallStatus() {
 cleanUp() {
     if [[ "$1" == "xrayDel" ]]; then
         handleXray stop
-        rm -rf /etc/v2ray-agent/xray/*
+        rm -rf /etc/Proxy-agent/xray/*
     elif [[ "$1" == "singBoxDel" ]]; then
         handleSingBox stop
-        rm -rf /etc/v2ray-agent/sing-box/conf/config.json >/dev/null 2>&1
-        rm -rf /etc/v2ray-agent/sing-box/conf/config/* >/dev/null 2>&1
+        rm -rf /etc/Proxy-agent/sing-box/conf/config.json >/dev/null 2>&1
+        rm -rf /etc/Proxy-agent/sing-box/conf/config/* >/dev/null 2>&1
     fi
 }
 initVar "$1"
@@ -1043,30 +1755,39 @@ readSingBoxConfig
 
 # 初始化安装目录
 mkdirTools() {
-    mkdir -p /etc/v2ray-agent/tls
-    mkdir -p /etc/v2ray-agent/subscribe_local/default
-    mkdir -p /etc/v2ray-agent/subscribe_local/clashMeta
+    # TLS证书目录 - 设置严格权限保护私钥
+    mkdir -p /etc/Proxy-agent/tls
+    chmod 700 /etc/Proxy-agent/tls
 
-    mkdir -p /etc/v2ray-agent/subscribe_remote/default
-    mkdir -p /etc/v2ray-agent/subscribe_remote/clashMeta
+    mkdir -p /etc/Proxy-agent/subscribe_local/default
+    mkdir -p /etc/Proxy-agent/subscribe_local/clashMeta
 
-    mkdir -p /etc/v2ray-agent/subscribe/default
-    mkdir -p /etc/v2ray-agent/subscribe/clashMetaProfiles
-    mkdir -p /etc/v2ray-agent/subscribe/clashMeta
+    mkdir -p /etc/Proxy-agent/subscribe_remote/default
+    mkdir -p /etc/Proxy-agent/subscribe_remote/clashMeta
 
-    mkdir -p /etc/v2ray-agent/subscribe/sing-box
-    mkdir -p /etc/v2ray-agent/subscribe/sing-box_profiles
-    mkdir -p /etc/v2ray-agent/subscribe_local/sing-box
+    mkdir -p /etc/Proxy-agent/subscribe/default
+    mkdir -p /etc/Proxy-agent/subscribe/clashMetaProfiles
+    mkdir -p /etc/Proxy-agent/subscribe/clashMeta
 
-    mkdir -p /etc/v2ray-agent/xray/conf
-    mkdir -p /etc/v2ray-agent/xray/reality_scan
-    mkdir -p /etc/v2ray-agent/xray/tmp
+    mkdir -p /etc/Proxy-agent/subscribe/sing-box
+    mkdir -p /etc/Proxy-agent/subscribe/sing-box_profiles
+    mkdir -p /etc/Proxy-agent/subscribe_local/sing-box
+
+    # Xray配置目录 - 设置适当权限
+    mkdir -p /etc/Proxy-agent/xray/conf
+    chmod 700 /etc/Proxy-agent/xray/conf
+    mkdir -p /etc/Proxy-agent/xray/reality_scan
+    mkdir -p /etc/Proxy-agent/xray/tmp
     mkdir -p /etc/systemd/system/
-    mkdir -p /tmp/v2ray-agent-tls/
+    mkdir -p /tmp/Proxy-agent-tls/
 
-    mkdir -p /etc/v2ray-agent/warp
+    # WARP配置目录 - 包含私钥
+    mkdir -p /etc/Proxy-agent/warp
+    chmod 700 /etc/Proxy-agent/warp
 
-    mkdir -p /etc/v2ray-agent/sing-box/conf/config
+    # sing-box配置目录 - 设置适当权限
+    mkdir -p /etc/Proxy-agent/sing-box/conf/config
+    chmod 700 /etc/Proxy-agent/sing-box/conf
 
     mkdir -p /usr/share/nginx/html/
 }
@@ -1079,7 +1800,7 @@ checkRoot() {
 }
 # 安装工具包
 installTools() {
-    echoContent skyBlue "\n进度  $1/${totalProgress} : 安装工具"
+    echoContent skyBlue "\n$(t PROGRESS_STEP "$1" "${totalProgress}") : $(t PROG_INSTALL_TOOLS)"
     # 修复ubuntu个别系统问题
     if [[ "${release}" == "ubuntu" ]]; then
         dpkg --configure -a
@@ -1089,10 +1810,10 @@ installTools() {
         pgrep -f apt | xargs kill -9
     fi
 
-    echoContent green " ---> 检查、安装更新【新机器会很慢，如长时间无反应，请手动停止后重新执行】"
+    echoContent green " ---> $(t INSTALL_CHECKING)"
 
-    ${upgrade} >/etc/v2ray-agent/install.log 2>&1
-    if grep <"/etc/v2ray-agent/install.log" -q "changed"; then
+    ${upgrade} >/etc/Proxy-agent/install.log 2>&1
+    if grep <"/etc/Proxy-agent/install.log" -q "changed"; then
         ${updateReleaseInfoChange} >/dev/null 2>&1
     fi
 
@@ -1102,18 +1823,18 @@ installTools() {
     fi
 
     if ! sudo --version >/dev/null 2>&1; then
-        echoContent green " ---> 安装sudo"
+        echoContent green " ---> $(t INSTALL_TOOL "sudo")"
         ${installType} sudo >/dev/null 2>&1
     fi
 
     if ! wget --help >/dev/null 2>&1; then
-        echoContent green " ---> 安装wget"
+        echoContent green " ---> $(t INSTALL_TOOL "wget")"
         ${installType} wget >/dev/null 2>&1
     fi
 
     if ! command -v netfilter-persistent >/dev/null 2>&1; then
         if [[ "${release}" != "centos" ]]; then
-            echoContent green " ---> 安装iptables"
+            echoContent green " ---> $(t INSTALL_TOOL "iptables")"
             echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | sudo debconf-set-selections
             echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | sudo debconf-set-selections
             ${installType} iptables-persistent >/dev/null 2>&1
@@ -1121,27 +1842,27 @@ installTools() {
     fi
 
     if ! curl --help >/dev/null 2>&1; then
-        echoContent green " ---> 安装curl"
+        echoContent green " ---> $(t INSTALL_TOOL "curl")"
         ${installType} curl >/dev/null 2>&1
     fi
 
     if ! unzip >/dev/null 2>&1; then
-        echoContent green " ---> 安装unzip"
+        echoContent green " ---> $(t INSTALL_TOOL "unzip")"
         ${installType} unzip >/dev/null 2>&1
     fi
 
     if ! socat -h >/dev/null 2>&1; then
-        echoContent green " ---> 安装socat"
+        echoContent green " ---> $(t INSTALL_TOOL "socat")"
         ${installType} socat >/dev/null 2>&1
     fi
 
     if ! tar --help >/dev/null 2>&1; then
-        echoContent green " ---> 安装tar"
+        echoContent green " ---> $(t INSTALL_TOOL "tar")"
         ${installType} tar >/dev/null 2>&1
     fi
 
     if ! crontab -l >/dev/null 2>&1; then
-        echoContent green " ---> 安装crontabs"
+        echoContent green " ---> $(t INSTALL_TOOL "crontabs")"
         if [[ "${release}" == "ubuntu" || "${release}" == "debian" ]]; then
             ${installType} cron >/dev/null 2>&1
         else
@@ -1149,12 +1870,12 @@ installTools() {
         fi
     fi
     if ! jq --help >/dev/null 2>&1; then
-        echoContent green " ---> 安装jq"
+        echoContent green " ---> $(t INSTALL_TOOL "jq")"
         ${installType} jq >/dev/null 2>&1
     fi
 
     if ! command -v ld >/dev/null 2>&1; then
-        echoContent green " ---> 安装binutils"
+        echoContent green " ---> $(t INSTALL_TOOL "binutils")"
         ${installType} binutils >/dev/null 2>&1
     fi
 
@@ -1223,45 +1944,26 @@ installTools() {
         fi
     fi
 
-    if ! command -v semanage >/dev/null 2>&1; then
-        echoContent green " ---> 安装semanage"
-        ${installType} bash-completion >/dev/null 2>&1
-
-        if [[ "${centosVersion}" == "7" ]]; then
-            policyCoreUtils="policycoreutils-python"
-        elif [[ "${centosVersion}" == "8" || "${release}" == "ubuntu" || "${release}" == "debian" ]]; then
-            policyCoreUtils="policycoreutils-python-utils"
-        fi
-
-        if [[ -n "${policyCoreUtils}" ]]; then
-            ${installType} ${policyCoreUtils} >/dev/null 2>&1
-        fi
-        if [[ -n $(which semanage) ]]; then
-            if command -v getenforce >/dev/null 2>&1; then
-                selinux_status=$(getenforce)
-                if [ "$selinux_status" != "Disabled" ]; then
-                    semanage port -a -t http_port_t -p tcp 31300
-                fi
-            fi
-        fi
-    fi
+    # 注意：已移除 semanage 自动安装代码（参考 v2ray-agent v3.5.3）
+    # 如果 SELinux 导致问题，updateSELinuxHTTPPortT() 函数会在 Nginx 启动失败时尝试修复
+    # 用户也可以手动关闭 SELinux，参考: documents/selinux.md
 
     if [[ "${selectCustomInstallType}" == "7" ]]; then
         echoContent green " ---> 检测到无需依赖证书的服务，跳过安装"
     else
         if [[ ! -d "$HOME/.acme.sh" ]] || [[ -d "$HOME/.acme.sh" && -z $(find "$HOME/.acme.sh/acme.sh") ]]; then
             echoContent green " ---> 安装acme.sh"
-            curl -s https://get.acme.sh | sh >/etc/v2ray-agent/tls/acme.log 2>&1
+            curl -s https://get.acme.sh | sh >/etc/Proxy-agent/tls/acme.log 2>&1
 
             if [[ ! -d "$HOME/.acme.sh" ]] || [[ -z $(find "$HOME/.acme.sh/acme.sh") ]]; then
                 echoContent red "  acme安装失败--->"
-                tail -n 100 /etc/v2ray-agent/tls/acme.log
+                tail -n 100 /etc/Proxy-agent/tls/acme.log
                 echoContent yellow "错误排查:"
                 echoContent red "  1.获取Github文件失败，请等待Github恢复后尝试，恢复进度可查看 [https://www.githubstatus.com/]"
                 echoContent red "  2.acme.sh脚本出现bug，可查看[https://github.com/acmesh-official/acme.sh] issues"
                 echoContent red "  3.如纯IPv6机器，请设置NAT64,可执行下方命令，如果添加下方命令还是不可用，请尝试更换其他NAT64"
                 echoContent skyBlue "  sed -i \"1i\\\nameserver 2a00:1098:2b::1\\\nnameserver 2a00:1098:2c::1\\\nnameserver 2a01:4f8:c2c:123f::1\\\nnameserver 2a01:4f9:c010:3f02::1\" /etc/resolv.conf"
-                exit 0
+                exit 1
             fi
         fi
     fi
@@ -1282,7 +1984,7 @@ installNginxTools() {
 
     if [[ "${release}" == "debian" ]]; then
         sudo apt install gnupg2 ca-certificates lsb-release -y >/dev/null 2>&1
-        echo "deb http://nginx.org/packages/mainline/debian $(lsb_release -cs) nginx" | sudo tee /etc/apt/sources.list.d/nginx.list >/dev/null 2>&1
+        echo "deb https://nginx.org/packages/mainline/debian $(lsb_release -cs) nginx" | sudo tee /etc/apt/sources.list.d/nginx.list >/dev/null 2>&1
         echo -e "Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900\n" | sudo tee /etc/apt/preferences.d/99nginx >/dev/null 2>&1
         curl -o /tmp/nginx_signing.key https://nginx.org/keys/nginx_signing.key >/dev/null 2>&1
         # gpg --dry-run --quiet --import --import-options import-show /tmp/nginx_signing.key
@@ -1291,7 +1993,7 @@ installNginxTools() {
 
     elif [[ "${release}" == "ubuntu" ]]; then
         sudo apt install gnupg2 ca-certificates lsb-release -y >/dev/null 2>&1
-        echo "deb http://nginx.org/packages/mainline/ubuntu $(lsb_release -cs) nginx" | sudo tee /etc/apt/sources.list.d/nginx.list >/dev/null 2>&1
+        echo "deb https://nginx.org/packages/mainline/ubuntu $(lsb_release -cs) nginx" | sudo tee /etc/apt/sources.list.d/nginx.list >/dev/null 2>&1
         echo -e "Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900\n" | sudo tee /etc/apt/preferences.d/99nginx >/dev/null 2>&1
         curl -o /tmp/nginx_signing.key https://nginx.org/keys/nginx_signing.key >/dev/null 2>&1
         # gpg --dry-run --quiet --import --import-options import-show /tmp/nginx_signing.key
@@ -1303,7 +2005,7 @@ installNginxTools() {
         cat <<EOF >/etc/yum.repos.d/nginx.repo
 [nginx-stable]
 name=nginx stable repo
-baseurl=http://nginx.org/packages/centos/\$releasever/\$basearch/
+baseurl=https://nginx.org/packages/centos/\$releasever/\$basearch/
 gpgcheck=1
 enabled=1
 gpgkey=https://nginx.org/keys/nginx_signing.key
@@ -1311,7 +2013,7 @@ module_hotfixes=true
 
 [nginx-mainline]
 name=nginx mainline repo
-baseurl=http://nginx.org/packages/mainline/centos/\$releasever/\$basearch/
+baseurl=https://nginx.org/packages/mainline/centos/\$releasever/\$basearch/
 gpgcheck=1
 enabled=0
 gpgkey=https://nginx.org/keys/nginx_signing.key
@@ -1329,30 +2031,30 @@ EOF
 installWarp() {
     if [[ "${cpuVendor}" == "arm" ]]; then
         echoContent red " ---> 官方WARP客户端不支持ARM架构"
-        exit 0
+        exit 1
     fi
 
     ${installType} gnupg2 -y >/dev/null 2>&1
     if [[ "${release}" == "debian" ]]; then
         curl -s https://pkg.cloudflareclient.com/pubkey.gpg | sudo apt-key add - >/dev/null 2>&1
-        echo "deb http://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null 2>&1
+        echo "deb https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null 2>&1
         sudo apt update >/dev/null 2>&1
 
     elif [[ "${release}" == "ubuntu" ]]; then
         curl -s https://pkg.cloudflareclient.com/pubkey.gpg | sudo apt-key add - >/dev/null 2>&1
-        echo "deb http://pkg.cloudflareclient.com/ focal main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null 2>&1
+        echo "deb https://pkg.cloudflareclient.com/ focal main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null 2>&1
         sudo apt update >/dev/null 2>&1
 
     elif [[ "${release}" == "centos" ]]; then
         ${installType} yum-utils >/dev/null 2>&1
-        sudo rpm -ivh "http://pkg.cloudflareclient.com/cloudflare-release-el${centosVersion}.rpm" >/dev/null 2>&1
+        sudo rpm -ivh "https://pkg.cloudflareclient.com/cloudflare-release-el${centosVersion}.rpm" >/dev/null 2>&1
     fi
 
     echoContent green " ---> 安装WARP"
     ${installType} cloudflare-warp >/dev/null 2>&1
     if [[ -z $(which warp-cli) ]]; then
         echoContent red " ---> 安装WARP失败"
-        exit 0
+        exit 1
     fi
     systemctl enable warp-svc
     warp-cli --accept-tos register
@@ -1386,7 +2088,7 @@ checkDNSIP() {
         ipType=6
         if echo "${dnsIP}" | grep -q "network unreachable" || [[ -z "${dnsIP}" ]]; then
             echoContent red " ---> 无法通过DNS获取域名IPv6地址，退出安装"
-            exit 0
+            exit 1
         fi
     fi
     local publicIP=
@@ -1419,7 +2121,7 @@ checkPortOpen() {
         touch ${nginxConfigPath}checkPortOpen.conf
         local listenIPv6PortConfig=
 
-        if [[ -n $(curl -s -6 -m 4 http://www.cloudflare.com/cdn-cgi/trace | grep "ip" | cut -d "=" -f 2) ]]; then
+        if [[ -n $(curl -s -6 -m 4 https://www.cloudflare.com/cdn-cgi/trace | grep "ip" | cut -d "=" -f 2) ]]; then
             listenIPv6PortConfig="listen [::]:${port};"
         fi
         cat <<EOF >${nginxConfigPath}checkPortOpen.conf
@@ -1460,7 +2162,7 @@ EOF
                     echoContent red " ---> 错误日志：${checkPortOpenResult}，请将此错误日志通过issues提交反馈"
                 fi
             fi
-            exit 0
+            exit 1
         fi
         checkIP "${localIP}"
     fi
@@ -1478,19 +2180,23 @@ initTLSNginxConfig() {
             echoContent yellow "\n ---> 域名: ${domain}"
         else
             echo
-            echoContent yellow "请输入要配置的域名 例: www.v2ray-agent.com --->"
+            echoContent yellow "请输入要配置的域名 例: example.com --->"
             read -r -p "域名:" domain
         fi
     elif [[ -n "${currentHost}" && -n "${lastInstallationConfig}" ]]; then
         domain=${currentHost}
     else
         echo
-        echoContent yellow "请输入要配置的域名 例: www.v2ray-agent.com --->"
+        echoContent yellow "请输入要配置的域名 例: example.com --->"
         read -r -p "域名:" domain
     fi
 
     if [[ -z ${domain} ]]; then
         echoContent red "  域名不可为空--->"
+        initTLSNginxConfig 3
+    elif ! isValidDomain "${domain}"; then
+        echoContent red "  域名格式无效或包含不安全字符--->"
+        echoContent yellow "  域名只能包含字母、数字、连字符和点"
         initTLSNginxConfig 3
     else
         dnsTLSDomain=$(echo "${domain}" | awk -F "." '{$1="";print $0}' | sed 's/^[[:space:]]*//' | sed 's/ /./g')
@@ -1504,10 +2210,10 @@ initTLSNginxConfig() {
 
 # 删除nginx默认的配置
 removeNginxDefaultConf() {
-    if [[ -f ${nginxConfigPath}default.conf ]]; then
-        if [[ "$(grep -c "server_name" <${nginxConfigPath}default.conf)" == "1" ]] && [[ "$(grep -c "server_name  localhost;" <${nginxConfigPath}default.conf)" == "1" ]]; then
+    if [[ -f "${nginxConfigPath}default.conf" ]]; then
+        if [[ "$(grep -c "server_name" <"${nginxConfigPath}default.conf")" == "1" ]] && [[ "$(grep -c "server_name  localhost;" <"${nginxConfigPath}default.conf")" == "1" ]]; then
             echoContent green " ---> 删除Nginx默认配置"
-            rm -rf ${nginxConfigPath}default.conf >/dev/null 2>&1
+            rm -rf "${nginxConfigPath}default.conf" >/dev/null 2>&1
         fi
     fi
 }
@@ -1532,114 +2238,30 @@ updateRedirectNginxConf() {
     }
 EOF
 
-    if echo "${selectCustomInstallType}" | grep -qE ",2,|,5," || [[ -z "${selectCustomInstallType}" ]]; then
-
-        cat <<EOF >>${nginxConfigPath}alone.conf
-server {
-	${nginxH2Conf}
-	server_name ${domain};
-	root ${nginxStaticPath};
-
-    set_real_ip_from 127.0.0.1;
-    real_ip_header proxy_protocol;
-
-	client_header_timeout 1071906480m;
-    keepalive_timeout 1071906480m;
-
-    location /${currentPath}grpc {
-    	if (\$content_type !~ "application/grpc") {
-    		return 404;
-    	}
- 		client_max_body_size 0;
-		grpc_set_header X-Real-IP \$proxy_add_x_forwarded_for;
-		client_body_timeout 1071906480m;
-		grpc_read_timeout 1071906480m;
-		grpc_pass grpc://127.0.0.1:31301;
-	}
-
-	location /${currentPath}trojangrpc {
-		if (\$content_type !~ "application/grpc") {
-            		return 404;
-		}
- 		client_max_body_size 0;
-		grpc_set_header X-Real-IP \$proxy_add_x_forwarded_for;
-		client_body_timeout 1071906480m;
-		grpc_read_timeout 1071906480m;
-		grpc_pass grpc://127.0.0.1:31304;
-	}
-	location / {
-    }
-}
-EOF
-    elif echo "${selectCustomInstallType}" | grep -q ",5," || [[ -z "${selectCustomInstallType}" ]]; then
-        cat <<EOF >>${nginxConfigPath}alone.conf
+    # gRPC nginx配置块已移除（协议2和5已废弃）
+    cat <<EOF >>${nginxConfigPath}alone.conf
 server {
 	${nginxH2Conf}
 
 	set_real_ip_from 127.0.0.1;
-    real_ip_header proxy_protocol;
+	real_ip_header proxy_protocol;
 
 	server_name ${domain};
 	root ${nginxStaticPath};
 
-	location /${currentPath}grpc {
-		client_max_body_size 0;
-		keepalive_requests 4294967296;
-		client_body_timeout 1071906480m;
- 		send_timeout 1071906480m;
- 		lingering_close always;
- 		grpc_read_timeout 1071906480m;
- 		grpc_send_timeout 1071906480m;
-		grpc_pass grpc://127.0.0.1:31301;
-	}
-	location / {
-    }
-}
-EOF
-
-    elif echo "${selectCustomInstallType}" | grep -q ",2," || [[ -z "${selectCustomInstallType}" ]]; then
-        cat <<EOF >>${nginxConfigPath}alone.conf
-server {
-	${nginxH2Conf}
-
-	set_real_ip_from 127.0.0.1;
-    real_ip_header proxy_protocol;
-
-    server_name ${domain};
-	root ${nginxStaticPath};
-
-	location /${currentPath}trojangrpc {
-		client_max_body_size 0;
-		# keepalive_time 1071906480m;
-		keepalive_requests 4294967296;
-		client_body_timeout 1071906480m;
- 		send_timeout 1071906480m;
- 		lingering_close always;
- 		grpc_read_timeout 1071906480m;
- 		grpc_send_timeout 1071906480m;
-		grpc_pass grpc://127.0.0.1:31301;
-	}
-	location / {
-    }
-}
-EOF
-    else
-
-        cat <<EOF >>${nginxConfigPath}alone.conf
-server {
-	${nginxH2Conf}
-
-	set_real_ip_from 127.0.0.1;
-    real_ip_header proxy_protocol;
-
-	server_name ${domain};
-	root ${nginxStaticPath};
+	# 安全头部
+	server_tokens off;
+	add_header X-Content-Type-Options "nosniff" always;
+	add_header X-Frame-Options "SAMEORIGIN" always;
 
 	location / {
+		try_files \$uri \$uri/ =404;
 	}
+
+	location = /favicon.ico { log_not_found off; access_log off; }
+	location = /robots.txt { log_not_found off; access_log off; }
 }
 EOF
-    fi
 
     cat <<EOF >>${nginxConfigPath}alone.conf
 server {
@@ -1650,8 +2272,16 @@ server {
 	real_ip_header proxy_protocol;
 
 	root ${nginxStaticPath};
+
+	# 安全头部
+	server_tokens off;
+
 	location / {
+		try_files \$uri \$uri/ =404;
 	}
+
+	location = /favicon.ico { log_not_found off; access_log off; }
+	location = /robots.txt { log_not_found off; access_log off; }
 }
 EOF
     handleNginx stop
@@ -1666,7 +2296,7 @@ singBoxNginxConfig() {
     nginxVersion=$(nginx -v 2>&1)
 
     local singBoxNginxSSL=
-    singBoxNginxSSL="ssl_certificate /etc/v2ray-agent/tls/${domain}.crt;ssl_certificate_key /etc/v2ray-agent/tls/${domain}.key;"
+    singBoxNginxSSL="ssl_certificate /etc/Proxy-agent/tls/${domain}.crt;ssl_certificate_key /etc/Proxy-agent/tls/${domain}.key;"
 
     if echo "${nginxVersion}" | grep -q "1.25" && [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $3}') -gt 0 ]] || [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $2}') -gt 25 ]]; then
         nginxH2Conf="listen ${port} so_keepalive=on ssl;http2 on;"
@@ -1727,13 +2357,13 @@ checkIP() {
             echoContent yellow " ---> 检测返回值异常，建议手动卸载nginx后重新执行脚本"
             echoContent red " ---> 异常结果：${localIP}"
         fi
-        exit 0
+        exit 1
     else
         if echo "${localIP}" | awk -F "[,]" '{print $2}' | grep -q "." || echo "${localIP}" | awk -F "[,]" '{print $2}' | grep -q ":"; then
             echoContent red "\n ---> 检测到多个ip，请确认是否关闭cloudflare的云朵"
             echoContent yellow " ---> 关闭云朵后等待三分钟后重试"
             echoContent yellow " ---> 检测到的ip如下:[${localIP}]"
-            exit 0
+            exit 1
         fi
         echoContent green " ---> 检查当前域名IP正确"
     fi
@@ -1789,7 +2419,7 @@ switchDNSAPI() {
 # 初始化dns配置
 initDNSAPIConfig() {
     if [[ "$1" == "cloudflare" ]]; then
-        echoContent yellow "\n CF_Token参考配置教程：https://www.v2ray-agent.com/archives/1701160377972\n"
+        echoContent yellow "\n 请在 Cloudflare 控制台为 DNS 编辑权限创建 API Token 并填入 CF_Token/CF_Account_ID。\n"
         read -r -p "请输入API Token:" cfAPIToken
         if [[ -z "${cfAPIToken}" ]]; then
             echoContent red " ---> 输入为空，请重新输入"
@@ -1843,9 +2473,9 @@ switchSSLType() {
         esac
         if [[ -n "${dnsAPIType}" && "${sslType}" == "buypass" ]]; then
             echoContent red " ---> buypass不支持API申请证书"
-            exit 0
+            exit 1
         fi
-        echo "${sslType}" >/etc/v2ray-agent/tls/ssl_type
+        echo "${sslType}" >/etc/Proxy-agent/tls/ssl_type
     fi
 }
 
@@ -1879,13 +2509,32 @@ acmeInstallSSL() {
 
     if [[ "${dnsAPIType}" == "cloudflare" ]]; then
         echoContent green " ---> DNS API 生成证书中"
-        sudo CF_Token="${cfAPIToken}" "$HOME/.acme.sh/acme.sh" --issue -d "${dnsAPIDomain}" -d "${dnsTLSDomain}" --dns dns_cf -k ec-256 --server "${sslType}" ${sslIPv6} 2>&1 | tee -a /etc/v2ray-agent/tls/acme.log >/dev/null
+        # 使用临时环境文件避免在进程列表中暴露API Token
+        local acmeEnvFile
+        acmeEnvFile=$(mktemp)
+        chmod 600 "${acmeEnvFile}"
+        cat > "${acmeEnvFile}" << ACME_ENV_EOF
+export CF_Token="${cfAPIToken}"
+ACME_ENV_EOF
+        # shellcheck source=/dev/null
+        sudo bash -c "source '${acmeEnvFile}' && '$HOME/.acme.sh/acme.sh' --issue -d '${dnsAPIDomain}' -d '${dnsTLSDomain}' --dns dns_cf -k ec-256 --server '${sslType}' ${sslIPv6}" 2>&1 | tee -a /etc/Proxy-agent/tls/acme.log >/dev/null
+        rm -f "${acmeEnvFile}"
     elif [[ "${dnsAPIType}" == "aliyun" ]]; then
         echoContent green " --->  DNS API 生成证书中"
-        sudo Ali_Key="${aliKey}" Ali_Secret="${aliSecret}" "$HOME/.acme.sh/acme.sh" --issue -d "${dnsAPIDomain}" -d "${dnsTLSDomain}" --dns dns_ali -k ec-256 --server "${sslType}" ${sslIPv6} 2>&1 | tee -a /etc/v2ray-agent/tls/acme.log >/dev/null
+        # 使用临时环境文件避免在进程列表中暴露API Key/Secret
+        local acmeEnvFile
+        acmeEnvFile=$(mktemp)
+        chmod 600 "${acmeEnvFile}"
+        cat > "${acmeEnvFile}" << ACME_ENV_EOF
+export Ali_Key="${aliKey}"
+export Ali_Secret="${aliSecret}"
+ACME_ENV_EOF
+        # shellcheck source=/dev/null
+        sudo bash -c "source '${acmeEnvFile}' && '$HOME/.acme.sh/acme.sh' --issue -d '${dnsAPIDomain}' -d '${dnsTLSDomain}' --dns dns_ali -k ec-256 --server '${sslType}' ${sslIPv6}" 2>&1 | tee -a /etc/Proxy-agent/tls/acme.log >/dev/null
+        rm -f "${acmeEnvFile}"
     else
         echoContent green " ---> 生成证书中"
-        sudo "$HOME/.acme.sh/acme.sh" --issue -d "${tlsDomain}" --standalone -k ec-256 --server "${sslType}" ${sslIPv6} 2>&1 | tee -a /etc/v2ray-agent/tls/acme.log >/dev/null
+        sudo "$HOME/.acme.sh/acme.sh" --issue -d "${tlsDomain}" --standalone -k ec-256 --server "${sslType}" ${sslIPv6} 2>&1 | tee -a /etc/Proxy-agent/tls/acme.log >/dev/null
     fi
 }
 # 自定义端口
@@ -1910,7 +2559,7 @@ customPortFunction() {
             echoContent yellow "请输入端口[不可与BT Panel/1Panel端口相同，回车随机]"
             read -r -p "端口:" port
             if [[ -z "${port}" ]]; then
-                port=$((RANDOM % 20001 + 10000))
+                port=$(randomNum 10000 30000)
             fi
         else
             echo
@@ -1935,11 +2584,11 @@ customPortFunction() {
                 fi
             else
                 echoContent red " ---> 端口输入错误"
-                exit 0
+                exit 1
             fi
         else
             echoContent red " ---> 端口不可为空"
-            exit 0
+            exit 1
         fi
     fi
 }
@@ -1949,7 +2598,7 @@ checkPort() {
     if [[ -n "$1" ]] && lsof -i "tcp:$1" | grep -q LISTEN; then
         echoContent red "\n ---> $1端口被占用，请手动关闭后安装\n"
         lsof -i "tcp:$1" | grep LISTEN
-        exit 0
+        exit 1
     fi
 }
 
@@ -1960,15 +2609,31 @@ installTLS() {
     local tlsDomain=${domain}
 
     # 安装tls
-    if [[ -f "/etc/v2ray-agent/tls/${tlsDomain}.crt" && -f "/etc/v2ray-agent/tls/${tlsDomain}.key" && -n $(cat "/etc/v2ray-agent/tls/${tlsDomain}.crt") ]] || [[ -d "$HOME/.acme.sh/${tlsDomain}_ecc" && -f "$HOME/.acme.sh/${tlsDomain}_ecc/${tlsDomain}.key" && -f "$HOME/.acme.sh/${tlsDomain}_ecc/${tlsDomain}.cer" ]] || [[ "${installedDNSAPIStatus}" == "true" ]]; then
+    if [[ -f "/etc/Proxy-agent/tls/${tlsDomain}.crt" && -f "/etc/Proxy-agent/tls/${tlsDomain}.key" && -n $(cat "/etc/Proxy-agent/tls/${tlsDomain}.crt") ]] || [[ -d "$HOME/.acme.sh/${tlsDomain}_ecc" && -f "$HOME/.acme.sh/${tlsDomain}_ecc/${tlsDomain}.key" && -f "$HOME/.acme.sh/${tlsDomain}_ecc/${tlsDomain}.cer" ]] || [[ "${installedDNSAPIStatus}" == "true" ]]; then
         echoContent green " ---> 检测到证书"
         renewalTLS
 
-        if [[ -z $(find /etc/v2ray-agent/tls/ -name "${tlsDomain}.crt") ]] || [[ -z $(find /etc/v2ray-agent/tls/ -name "${tlsDomain}.key") ]] || [[ -z $(cat "/etc/v2ray-agent/tls/${tlsDomain}.crt") ]]; then
+        if [[ -z $(find /etc/Proxy-agent/tls/ -name "${tlsDomain}.crt") ]] || [[ -z $(find /etc/Proxy-agent/tls/ -name "${tlsDomain}.key") ]] || [[ -z $(cat "/etc/Proxy-agent/tls/${tlsDomain}.crt") ]]; then
             if [[ "${installedDNSAPIStatus}" == "true" ]]; then
-                sudo "$HOME/.acme.sh/acme.sh" --installcert -d "*.${dnsTLSDomain}" --fullchainpath "/etc/v2ray-agent/tls/${tlsDomain}.crt" --keypath "/etc/v2ray-agent/tls/${tlsDomain}.key" --ecc >/dev/null
+                # 验证通配符证书确实存在于 acme.sh 中（目录名以字面 *. 开头）
+                local wildcardCertDir wildcardCertFile
+                wildcardCertDir=$(find "$HOME/.acme.sh" -maxdepth 1 -type d -name '\*.'"${dnsTLSDomain}_ecc" 2>/dev/null | head -1)
+                if [[ -n "${wildcardCertDir}" ]]; then
+                    wildcardCertFile=$(find "${wildcardCertDir}" -maxdepth 1 -type f -name '\*.'"${dnsTLSDomain}.cer" 2>/dev/null | head -1)
+                fi
+                if [[ -n "${wildcardCertFile}" ]]; then
+                    local wildcardDomain
+                    wildcardDomain=$(basename "${wildcardCertDir}" | sed 's/_ecc$//')
+                    sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${wildcardDomain}" --fullchainpath "/etc/Proxy-agent/tls/${tlsDomain}.crt" --keypath "/etc/Proxy-agent/tls/${tlsDomain}.key" --ecc >/dev/null
+                else
+                    echoContent red " ---> 未找到有效的通配符证书，将尝试申请新证书"
+                    installedDNSAPIStatus=""
+                    rm -rf /etc/Proxy-agent/tls/*
+                    installTLS "$1"
+                    return
+                fi
             else
-                sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${tlsDomain}" --fullchainpath "/etc/v2ray-agent/tls/${tlsDomain}.crt" --keypath "/etc/v2ray-agent/tls/${tlsDomain}.key" --ecc >/dev/null
+                sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${tlsDomain}" --fullchainpath "/etc/Proxy-agent/tls/${tlsDomain}.crt" --keypath "/etc/Proxy-agent/tls/${tlsDomain}.key" --ecc >/dev/null
             fi
 
         else
@@ -1977,7 +2642,7 @@ installTLS() {
                     echoContent yellow " ---> 如未过期或者自定义证书请选择[n]\n"
                     read -r -p "是否重新安装？[y/n]:" reInstallStatus
                     if [[ "${reInstallStatus}" == "y" ]]; then
-                        rm -rf /etc/v2ray-agent/tls/*
+                        rm -rf /etc/Proxy-agent/tls/*
                         installTLS "$1"
                     fi
                 fi
@@ -1997,22 +2662,32 @@ installTLS() {
         selectAcmeInstallSSL
 
         if [[ "${installedDNSAPIStatus}" == "true" ]]; then
-            sudo "$HOME/.acme.sh/acme.sh" --installcert -d "*.${dnsTLSDomain}" --fullchainpath "/etc/v2ray-agent/tls/${tlsDomain}.crt" --keypath "/etc/v2ray-agent/tls/${tlsDomain}.key" --ecc >/dev/null
+            # 从实际目录名获取正确的证书域名
+            local wildcardCertDir
+            wildcardCertDir=$(find "$HOME/.acme.sh" -maxdepth 1 -type d -name '\*.'"${dnsTLSDomain}_ecc" 2>/dev/null | head -1)
+            if [[ -n "${wildcardCertDir}" ]]; then
+                local wildcardDomain
+                wildcardDomain=$(basename "${wildcardCertDir}" | sed 's/_ecc$//')
+                sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${wildcardDomain}" --fullchainpath "/etc/Proxy-agent/tls/${tlsDomain}.crt" --keypath "/etc/Proxy-agent/tls/${tlsDomain}.key" --ecc >/dev/null
+            else
+                echoContent red " ---> 通配符证书目录不存在"
+            fi
         else
-            sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${tlsDomain}" --fullchainpath "/etc/v2ray-agent/tls/${tlsDomain}.crt" --keypath "/etc/v2ray-agent/tls/${tlsDomain}.key" --ecc >/dev/null
+            sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${tlsDomain}" --fullchainpath "/etc/Proxy-agent/tls/${tlsDomain}.crt" --keypath "/etc/Proxy-agent/tls/${tlsDomain}.key" --ecc >/dev/null
         fi
 
-        if [[ ! -f "/etc/v2ray-agent/tls/${tlsDomain}.crt" || ! -f "/etc/v2ray-agent/tls/${tlsDomain}.key" ]] || [[ -z $(cat "/etc/v2ray-agent/tls/${tlsDomain}.key") || -z $(cat "/etc/v2ray-agent/tls/${tlsDomain}.crt") ]]; then
-            tail -n 10 /etc/v2ray-agent/tls/acme.log
+        if [[ ! -f "/etc/Proxy-agent/tls/${tlsDomain}.crt" || ! -f "/etc/Proxy-agent/tls/${tlsDomain}.key" ]] || [[ -z $(cat "/etc/Proxy-agent/tls/${tlsDomain}.key") || -z $(cat "/etc/Proxy-agent/tls/${tlsDomain}.crt") ]]; then
+            tail -n 10 /etc/Proxy-agent/tls/acme.log
             if [[ ${installTLSCount} == "1" ]]; then
                 echoContent red " ---> TLS安装失败，请检查acme日志"
-                exit 0
+                echoContent yellow "     日志文件: /etc/Proxy-agent/tls/acme.log"
+                exit 1
             fi
 
             installTLSCount=1
             echo
 
-            if tail -n 10 /etc/v2ray-agent/tls/acme.log | grep -q "Could not validate email address as valid"; then
+            if tail -n 10 /etc/Proxy-agent/tls/acme.log | grep -q "Could not validate email address as valid"; then
                 echoContent red " ---> 邮箱无法通过SSL厂商验证，请重新输入"
                 echo
                 customSSLEmail "validate email"
@@ -2022,20 +2697,32 @@ installTLS() {
             fi
         fi
 
+        # 验证证书与私钥匹配
+        echoContent green " ---> 验证证书与私钥..."
+        if ! verifyCertKeyMatch "/etc/Proxy-agent/tls/${tlsDomain}.crt" "/etc/Proxy-agent/tls/${tlsDomain}.key"; then
+            echoContent red " ---> 证书验证失败，请检查证书文件"
+            exit 1
+        fi
+
+        # 验证证书有效期
+        verifyCertExpiry "/etc/Proxy-agent/tls/${tlsDomain}.crt"
+
         echoContent green " ---> TLS生成成功"
     else
         echoContent yellow " ---> 未安装acme.sh"
-        exit 0
+        exit 1
     fi
 }
 
-# 初始化随机字符串
+# 初始化随机字符串 - 使用更安全的随机源
 initRandomPath() {
     local chars="abcdefghijklmnopqrtuxyz"
     local initCustomPath=
+    local charLen=${#chars}
     for i in {1..4}; do
-        echo "${i}" >/dev/null
-        initCustomPath+="${chars:RANDOM%${#chars}:1}"
+        local idx
+        idx=$(randomNum 0 $((charLen - 1)))
+        initCustomPath+="${chars:idx:1}"
     done
     customPath=${initCustomPath}
 }
@@ -2078,14 +2765,24 @@ randomPathFunction() {
     echoContent yellow "\n path:${currentPath}"
     echoContent skyBlue "\n----------------------------"
 }
-# 随机数
+# 随机数 - 使用更安全的随机源
+# 用法: randomNum min max
 randomNum() {
-    if [[ "${release}" == "alpine" ]]; then
-        local ranNum=
-        ranNum="$(shuf -i "$1"-"$2" -n 1)"
-        echo "${ranNum}"
+    local min="${1:-0}"
+    local max="${2:-65535}"
+    local range=$((max - min + 1))
+
+    # 优先使用 /dev/urandom（更安全）
+    if [[ -r /dev/urandom ]]; then
+        local random_bytes
+        random_bytes=$(od -An -tu4 -N4 /dev/urandom | tr -d ' ')
+        echo $((random_bytes % range + min))
+    # 回退到 shuf（如果可用，常见于 Alpine）
+    elif command -v shuf &>/dev/null; then
+        shuf -i "${min}-${max}" -n 1
+    # 最后回退到 $RANDOM
     else
-        echo $((RANDOM % $2 + $1))
+        echo $((RANDOM % range + min))
     fi
 }
 # Nginx伪装博客
@@ -2096,6 +2793,12 @@ nginxBlog() {
         echoContent yellow "\n开始添加伪装站点"
     fi
 
+    # 伪装站模板列表 (来自 Lynthar/website-examples)
+    local templates=("cloud-drive" "game-zone" "net-disk" "play-hub" "stream-box" "video-portal" "music-flow" "podcast-hub" "ai-forge")
+    local templateCount=${#templates[@]}
+    local repoUrl="https://github.com/Lynthar/website-examples/archive/refs/heads/main.zip"
+    local tempDir="/tmp/website-examples-$$"
+
     if [[ -d "${nginxStaticPath}" && -f "${nginxStaticPath}/check" ]]; then
         echo
         if [[ -z "${lastInstallationConfig}" ]]; then
@@ -2105,33 +2808,59 @@ nginxBlog() {
         fi
 
         if [[ "${nginxBlogInstallStatus}" == "y" ]]; then
-            rm -rf "${nginxStaticPath}*"
-            #  randomNum=$((RANDOM % 6 + 1))
-            randomNum=$(randomNum 1 9)
+            rm -rf "${nginxStaticPath}"*
+            # 随机选择模板
+            randomNum=$(randomNum 0 $((templateCount - 1)))
+            local selectedTemplate="${templates[$randomNum]}"
+
+            # 下载并解压仓库
+            mkdir -p "${tempDir}"
             if [[ "${release}" == "alpine" ]]; then
-                wget -q -P "${nginxStaticPath}" "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/fodder/blog/unable/html${randomNum}.zip"
+                wget -q -O "${tempDir}/repo.zip" "${repoUrl}"
             else
-                wget -q "${wgetShowProgressStatus}" -P "${nginxStaticPath}" "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/fodder/blog/unable/html${randomNum}.zip"
+                wget -q ${wgetShowProgressStatus} -O "${tempDir}/repo.zip" "${repoUrl}"
             fi
 
-            unzip -o "${nginxStaticPath}html${randomNum}.zip" -d "${nginxStaticPath}" >/dev/null
-            rm -f "${nginxStaticPath}html${randomNum}.zip*"
-            echoContent green " ---> 添加伪装站点成功"
+            unzip -q -o "${tempDir}/repo.zip" -d "${tempDir}"
+
+            # 复制模板到目标目录
+            mkdir -p "${nginxStaticPath}"
+            cp -rf "${tempDir}/website-examples-main/${selectedTemplate}/"* "${nginxStaticPath}"
+
+            # 创建 check 标记文件
+            echo "${selectedTemplate}" > "${nginxStaticPath}/check"
+
+            # 清理临时文件
+            rm -rf "${tempDir}"
+            echoContent green " ---> 添加伪装站点成功 [${selectedTemplate}]"
         fi
     else
-        randomNum=$(randomNum 1 9)
-        #        randomNum=$((RANDOM % 6 + 1))
-        rm -rf "${nginxStaticPath}*"
+        # 随机选择模板
+        randomNum=$(randomNum 0 $((templateCount - 1)))
+        local selectedTemplate="${templates[$randomNum]}"
 
+        rm -rf "${nginxStaticPath}"*
+        mkdir -p "${tempDir}"
+
+        # 下载并解压仓库
         if [[ "${release}" == "alpine" ]]; then
-            wget -q -P "${nginxStaticPath}" "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/fodder/blog/unable/html${randomNum}.zip"
+            wget -q -O "${tempDir}/repo.zip" "${repoUrl}"
         else
-            wget -q "${wgetShowProgressStatus}" -P "${nginxStaticPath}" "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/fodder/blog/unable/html${randomNum}.zip"
+            wget -q ${wgetShowProgressStatus} -O "${tempDir}/repo.zip" "${repoUrl}"
         fi
 
-        unzip -o "${nginxStaticPath}html${randomNum}.zip" -d "${nginxStaticPath}" >/dev/null
-        rm -f "${nginxStaticPath}html${randomNum}.zip*"
-        echoContent green " ---> 添加伪装站点成功"
+        unzip -q -o "${tempDir}/repo.zip" -d "${tempDir}"
+
+        # 复制模板到目标目录
+        mkdir -p "${nginxStaticPath}"
+        cp -rf "${tempDir}/website-examples-main/${selectedTemplate}/"* "${nginxStaticPath}"
+
+        # 创建 check 标记文件
+        echo "${selectedTemplate}" > "${nginxStaticPath}/check"
+
+        # 清理临时文件
+        rm -rf "${tempDir}"
+        echoContent green " ---> 添加伪装站点成功 [${selectedTemplate}]"
     fi
 
 }
@@ -2139,9 +2868,9 @@ nginxBlog() {
 # 修改http_port_t端口
 updateSELinuxHTTPPortT() {
 
-    $(find /usr/bin /usr/sbin | grep -w journalctl) -xe >/etc/v2ray-agent/nginx_error.log 2>&1
+    $(find /usr/bin /usr/sbin | grep -w journalctl) -xe >/etc/Proxy-agent/nginx_error.log 2>&1
 
-    if find /usr/bin /usr/sbin | grep -q -w semanage && find /usr/bin /usr/sbin | grep -q -w getenforce && grep -E "31300|31302" </etc/v2ray-agent/nginx_error.log | grep -q "Permission denied"; then
+    if find /usr/bin /usr/sbin | grep -q -w semanage && find /usr/bin /usr/sbin | grep -q -w getenforce && grep -E "31300|31302" </etc/Proxy-agent/nginx_error.log | grep -q "Permission denied"; then
         echoContent red " ---> 检查SELinux端口是否开放"
         if ! $(find /usr/bin /usr/sbin | grep -w semanage) port -l | grep http_port | grep -q 31300; then
             $(find /usr/bin /usr/sbin | grep -w semanage) port -a -t http_port_t -p tcp 31300
@@ -2164,9 +2893,9 @@ handleNginx() {
 
     if ! echo "${selectCustomInstallType}" | grep -qwE ",7,|,8,|,7,8," && [[ -z $(pgrep -f "nginx") ]] && [[ "$1" == "start" ]]; then
         if [[ "${release}" == "alpine" ]]; then
-            rc-service nginx start 2>/etc/v2ray-agent/nginx_error.log
+            rc-service nginx start 2>/etc/Proxy-agent/nginx_error.log
         else
-            systemctl start nginx 2>/etc/v2ray-agent/nginx_error.log
+            systemctl start nginx 2>/etc/Proxy-agent/nginx_error.log
         fi
 
         sleep 0.5
@@ -2175,7 +2904,7 @@ handleNginx() {
             echoContent red " ---> Nginx启动失败"
             echoContent red " ---> 请将下方日志反馈给开发者"
             nginx
-            if grep -q "journalctl -xe" </etc/v2ray-agent/nginx_error.log; then
+            if grep -q "journalctl -xe" </etc/Proxy-agent/nginx_error.log; then
                 updateSELinuxHTTPPortT
             fi
         else
@@ -2202,12 +2931,12 @@ handleNginx() {
 installCronTLS() {
     if [[ -z "${btDomain}" ]]; then
         echoContent skyBlue "\n进度 $1/${totalProgress} : 添加定时维护证书"
-        crontab -l >/etc/v2ray-agent/backup_crontab.cron
+        crontab -l >/etc/Proxy-agent/backup_crontab.cron
         local historyCrontab
-        historyCrontab=$(sed '/v2ray-agent/d;/acme.sh/d' /etc/v2ray-agent/backup_crontab.cron)
-        echo "${historyCrontab}" >/etc/v2ray-agent/backup_crontab.cron
-        echo "30 1 * * * /bin/bash /etc/v2ray-agent/install.sh RenewTLS >> /etc/v2ray-agent/crontab_tls.log 2>&1" >>/etc/v2ray-agent/backup_crontab.cron
-        crontab /etc/v2ray-agent/backup_crontab.cron
+        historyCrontab=$(sed '/v2ray-agent/d;/Proxy-agent/d;/acme.sh/d' /etc/Proxy-agent/backup_crontab.cron)
+        echo "${historyCrontab}" >/etc/Proxy-agent/backup_crontab.cron
+        echo "30 1 * * * /bin/bash /etc/Proxy-agent/install.sh RenewTLS >> /etc/Proxy-agent/crontab_tls.log 2>&1" >>/etc/Proxy-agent/backup_crontab.cron
+        crontab /etc/Proxy-agent/backup_crontab.cron
         echoContent green "\n ---> 添加定时维护证书成功"
     fi
 }
@@ -2216,12 +2945,12 @@ installCronUpdateGeo() {
     if [[ "${coreInstallType}" == "1" ]]; then
         if crontab -l | grep -q "UpdateGeo"; then
             echoContent red "\n ---> 已添加自动更新定时任务，请不要重复添加"
-            exit 0
+            exit 1
         fi
         echoContent skyBlue "\n进度 1/1 : 添加定时更新geo文件"
-        crontab -l >/etc/v2ray-agent/backup_crontab.cron
-        echo "35 1 * * * /bin/bash /etc/v2ray-agent/install.sh UpdateGeo >> /etc/v2ray-agent/crontab_tls.log 2>&1" >>/etc/v2ray-agent/backup_crontab.cron
-        crontab /etc/v2ray-agent/backup_crontab.cron
+        crontab -l >/etc/Proxy-agent/backup_crontab.cron
+        echo "35 1 * * * /bin/bash /etc/Proxy-agent/install.sh UpdateGeo >> /etc/Proxy-agent/crontab_tls.log 2>&1" >>/etc/Proxy-agent/backup_crontab.cron
+        crontab /etc/Proxy-agent/backup_crontab.cron
         echoContent green "\n ---> 添加定时更新geo文件成功"
     fi
 }
@@ -2238,8 +2967,8 @@ renewalTLS() {
         domain=${tlsDomain}
     fi
 
-    if [[ -f "/etc/v2ray-agent/tls/ssl_type" ]]; then
-        if grep -q "buypass" <"/etc/v2ray-agent/tls/ssl_type"; then
+    if [[ -f "/etc/Proxy-agent/tls/ssl_type" ]]; then
+        if grep -q "buypass" <"/etc/Proxy-agent/tls/ssl_type"; then
             sslRenewalDays=180
         fi
     fi
@@ -2247,7 +2976,15 @@ renewalTLS() {
         modifyTime=
 
         if [[ "${installedDNSAPIStatus}" == "true" ]]; then
-            modifyTime=$(stat --format=%z "$HOME/.acme.sh/*.${dnsTLSDomain}_ecc/*.${dnsTLSDomain}.cer")
+            # 使用 find 获取通配符证书文件路径，避免 glob 在引号中不展开的问题
+            local wildcardCertFile
+            wildcardCertFile=$(find "$HOME/.acme.sh" -path '*/\*.'"${dnsTLSDomain}_ecc"'/\*.'"${dnsTLSDomain}.cer" -type f 2>/dev/null | head -1)
+            if [[ -n "${wildcardCertFile}" ]]; then
+                modifyTime=$(stat --format=%z "${wildcardCertFile}")
+            else
+                echoContent red " ---> 未找到通配符证书文件"
+                return 1
+            fi
         else
             modifyTime=$(stat --format=%z "$HOME/.acme.sh/${domain}_ecc/${domain}.cer")
         fi
@@ -2280,13 +3017,13 @@ renewalTLS() {
             fi
 
             sudo "$HOME/.acme.sh/acme.sh" --cron --home "$HOME/.acme.sh"
-            sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${domain}" --fullchainpath /etc/v2ray-agent/tls/"${domain}.crt" --keypath /etc/v2ray-agent/tls/"${domain}.key" --ecc
+            sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${domain}" --fullchainpath /etc/Proxy-agent/tls/"${domain}.crt" --keypath /etc/Proxy-agent/tls/"${domain}.key" --ecc
             reloadCore
             handleNginx start
         else
             echoContent green " ---> 证书有效"
         fi
-    elif [[ -f "/etc/v2ray-agent/tls/${tlsDomain}.crt" && -f "/etc/v2ray-agent/tls/${tlsDomain}.key" && -n $(cat "/etc/v2ray-agent/tls/${tlsDomain}.crt") ]]; then
+    elif [[ -f "/etc/Proxy-agent/tls/${tlsDomain}.crt" && -f "/etc/Proxy-agent/tls/${tlsDomain}.key" && -n $(cat "/etc/Proxy-agent/tls/${tlsDomain}.crt") ]]; then
         echoContent yellow " ---> 检测到使用自定义证书，无法执行renew操作。"
     else
         echoContent red " ---> 未安装"
@@ -2298,41 +3035,81 @@ installSingBox() {
     readInstallType
     echoContent skyBlue "\n进度  $1/${totalProgress} : 安装sing-box"
 
-    if [[ ! -f "/etc/v2ray-agent/sing-box/sing-box" ]]; then
+    if [[ ! -f "/etc/Proxy-agent/sing-box/sing-box" ]]; then
 
-        version=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=20" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
+        version=$(curl -s --connect-timeout 10 "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=20" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
+
+        # 检查版本获取是否成功
+        if [[ -z "${version}" ]]; then
+            echoContent red " ---> 获取 sing-box 版本失败，请检查网络连接或 GitHub API 访问"
+            echoContent yellow "     可能原因: 网络超时、GitHub API 限流、DNS 解析失败"
+            read -r -p "是否重新尝试？[y/n]" retryStatus
+            if [[ "${retryStatus}" == "y" ]]; then
+                installSingBox "$1"
+            fi
+            return 1
+        fi
 
         echoContent green " ---> 最新版本:${version}"
 
+        local singBoxTarFile="/etc/Proxy-agent/sing-box/sing-box-${version/v/}${singBoxCoreCPUVendor}.tar.gz"
+        local singBoxChecksumFile="/etc/Proxy-agent/sing-box/sing-box_${version/v/}_checksums.txt"
+        local singBoxTarFileName="sing-box-${version/v/}${singBoxCoreCPUVendor}.tar.gz"
+
+        # 下载sing-box核心文件和校验和文件
         if [[ "${release}" == "alpine" ]]; then
-            wget -c -q -P /etc/v2ray-agent/sing-box/ "https://github.com/SagerNet/sing-box/releases/download/${version}/sing-box-${version/v/}${singBoxCoreCPUVendor}.tar.gz"
+            wget -c -q -P /etc/Proxy-agent/sing-box/ "https://github.com/SagerNet/sing-box/releases/download/${version}/${singBoxTarFileName}"
+            wget -c -q -P /etc/Proxy-agent/sing-box/ "https://github.com/SagerNet/sing-box/releases/download/${version}/sing-box_${version/v/}_checksums.txt"
         else
-            wget -c -q "${wgetShowProgressStatus}" -P /etc/v2ray-agent/sing-box/ "https://github.com/SagerNet/sing-box/releases/download/${version}/sing-box-${version/v/}${singBoxCoreCPUVendor}.tar.gz"
+            wget -c -q ${wgetShowProgressStatus} -P /etc/Proxy-agent/sing-box/ "https://github.com/SagerNet/sing-box/releases/download/${version}/${singBoxTarFileName}"
+            wget -c -q ${wgetShowProgressStatus} -P /etc/Proxy-agent/sing-box/ "https://github.com/SagerNet/sing-box/releases/download/${version}/sing-box_${version/v/}_checksums.txt"
         fi
 
-        if [[ ! -f "/etc/v2ray-agent/sing-box/sing-box-${version/v/}${singBoxCoreCPUVendor}.tar.gz" ]]; then
+        if [[ ! -f "${singBoxTarFile}" ]]; then
             read -r -p "核心下载失败，请重新尝试安装，是否重新尝试？[y/n]" downloadStatus
             if [[ "${downloadStatus}" == "y" ]]; then
                 installSingBox "$1"
             fi
         else
+            # 校验SHA256
+            local expectedHash
+            expectedHash=$(extractSingBoxHash "${singBoxChecksumFile}" "${singBoxTarFileName}")
+            if [[ -n "${expectedHash}" ]]; then
+                echoContent green " ---> 验证文件完整性..."
+                if ! verifySHA256 "${singBoxTarFile}" "${expectedHash}"; then
+                    echoContent red " ---> 文件校验失败，可能已被篡改，请重新下载"
+                    rm -f "${singBoxTarFile}" "${singBoxChecksumFile}"
+                    read -r -p "是否重新尝试？[y/n]" retryStatus
+                    if [[ "${retryStatus}" == "y" ]]; then
+                        installSingBox "$1"
+                    fi
+                    return 1
+                fi
+                echoContent green " ---> 文件校验通过"
+            else
+                echoContent yellow " ---> 警告: 未能获取校验信息，跳过完整性验证"
+            fi
 
-            tar zxvf "/etc/v2ray-agent/sing-box/sing-box-${version/v/}${singBoxCoreCPUVendor}.tar.gz" -C "/etc/v2ray-agent/sing-box/" >/dev/null 2>&1
+            tar zxvf "${singBoxTarFile}" -C "/etc/Proxy-agent/sing-box/" >/dev/null 2>&1
 
-            mv "/etc/v2ray-agent/sing-box/sing-box-${version/v/}${singBoxCoreCPUVendor}/sing-box" /etc/v2ray-agent/sing-box/sing-box
-            rm -rf /etc/v2ray-agent/sing-box/sing-box-*
-            chmod 655 /etc/v2ray-agent/sing-box/sing-box
+            mv "/etc/Proxy-agent/sing-box/sing-box-${version/v/}${singBoxCoreCPUVendor}/sing-box" /etc/Proxy-agent/sing-box/sing-box
+            rm -rf /etc/Proxy-agent/sing-box/sing-box-*
+            chmod 655 /etc/Proxy-agent/sing-box/sing-box
         fi
     else
-        echoContent green " ---> 当前版本:v$(/etc/v2ray-agent/sing-box/sing-box version | grep "sing-box version" | awk '{print $3}')"
+        echoContent green " ---> 当前版本:v$(/etc/Proxy-agent/sing-box/sing-box version | grep "sing-box version" | awk '{print $3}')"
 
-        version=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=20" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
-        echoContent green " ---> 最新版本:${version}"
+        version=$(curl -s --connect-timeout 10 "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=20" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
+        if [[ -n "${version}" ]]; then
+            echoContent green " ---> 最新版本:${version}"
+        else
+            echoContent yellow " ---> 无法获取最新版本信息"
+        fi
 
         if [[ -z "${lastInstallationConfig}" ]]; then
             read -r -p "是否更新、升级？[y/n]:" reInstallSingBoxStatus
             if [[ "${reInstallSingBoxStatus}" == "y" ]]; then
-                rm -f /etc/v2ray-agent/sing-box/sing-box
+                rm -f /etc/Proxy-agent/sing-box/sing-box
                 installSingBox "$1"
             fi
         fi
@@ -2358,46 +3135,84 @@ installXray() {
 
     echoContent skyBlue "\n进度  $1/${totalProgress} : 安装Xray"
 
-    if [[ ! -f "/etc/v2ray-agent/xray/xray" ]]; then
+    if [[ ! -f "/etc/Proxy-agent/xray/xray" ]]; then
 
-        version=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=5" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
-        echoContent green " ---> Xray-core版本:${version}"
-        if [[ "${release}" == "alpine" ]]; then
-            wget -c -q -P /etc/v2ray-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip"
-        else
-            wget -c -q "${wgetShowProgressStatus}" -P /etc/v2ray-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip"
+        version=$(curl -s --connect-timeout 10 "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=5" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
+
+        # 检查版本获取是否成功
+        if [[ -z "${version}" ]]; then
+            echoContent red " ---> 获取 Xray-core 版本失败，请检查网络连接或 GitHub API 访问"
+            echoContent yellow "     可能原因: 网络超时、GitHub API 限流、DNS 解析失败"
+            read -r -p "是否重新尝试？[y/n]" retryStatus
+            if [[ "${retryStatus}" == "y" ]]; then
+                installXray "$1" "$2"
+            fi
+            return 1
         fi
 
-        if [[ ! -f "/etc/v2ray-agent/xray/${xrayCoreCPUVendor}.zip" ]]; then
+        echoContent green " ---> Xray-core版本:${version}"
+
+        local xrayZipFile="/etc/Proxy-agent/xray/${xrayCoreCPUVendor}.zip"
+        local xrayDgstFile="/etc/Proxy-agent/xray/${xrayCoreCPUVendor}.zip.dgst"
+
+        # 下载Xray核心文件
+        if [[ "${release}" == "alpine" ]]; then
+            wget -c -q -P /etc/Proxy-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip"
+            wget -c -q -P /etc/Proxy-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip.dgst"
+        else
+            wget -c -q ${wgetShowProgressStatus} -P /etc/Proxy-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip"
+            wget -c -q ${wgetShowProgressStatus} -P /etc/Proxy-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip.dgst"
+        fi
+
+        if [[ ! -f "${xrayZipFile}" ]]; then
             read -r -p "核心下载失败，请重新尝试安装，是否重新尝试？[y/n]" downloadStatus
             if [[ "${downloadStatus}" == "y" ]]; then
                 installXray "$1"
             fi
         else
-            unzip -o "/etc/v2ray-agent/xray/${xrayCoreCPUVendor}.zip" -d /etc/v2ray-agent/xray >/dev/null
-            rm -rf "/etc/v2ray-agent/xray/${xrayCoreCPUVendor}.zip"
+            # 校验SHA256
+            local expectedHash
+            expectedHash=$(extractXrayHash "${xrayDgstFile}")
+            if [[ -n "${expectedHash}" ]]; then
+                echoContent green " ---> 验证文件完整性..."
+                if ! verifySHA256 "${xrayZipFile}" "${expectedHash}"; then
+                    echoContent red " ---> 文件校验失败，可能已被篡改，请重新下载"
+                    rm -f "${xrayZipFile}" "${xrayDgstFile}"
+                    read -r -p "是否重新尝试？[y/n]" retryStatus
+                    if [[ "${retryStatus}" == "y" ]]; then
+                        installXray "$1" "$2"
+                    fi
+                    return 1
+                fi
+                echoContent green " ---> 文件校验通过"
+            else
+                echoContent yellow " ---> 警告: 未能获取校验信息，跳过完整性验证"
+            fi
+
+            unzip -o "${xrayZipFile}" -d /etc/Proxy-agent/xray >/dev/null
+            rm -f "${xrayZipFile}" "${xrayDgstFile}"
 
             version=$(curl -s https://api.github.com/repos/Loyalsoldier/v2ray-rules-dat/releases?per_page=1 | jq -r '.[]|.tag_name')
             echoContent skyBlue "------------------------Version-------------------------------"
             echo "version:${version}"
-            rm /etc/v2ray-agent/xray/geo* >/dev/null 2>&1
+            rm /etc/Proxy-agent/xray/geo* >/dev/null 2>&1
 
             if [[ "${release}" == "alpine" ]]; then
-                wget -c -q -P /etc/v2ray-agent/xray/ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geosite.dat"
-                wget -c -q -P /etc/v2ray-agent/xray/ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geoip.dat"
+                wget -c -q -P /etc/Proxy-agent/xray/ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geosite.dat"
+                wget -c -q -P /etc/Proxy-agent/xray/ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geoip.dat"
             else
-                wget -c -q "${wgetShowProgressStatus}" -P /etc/v2ray-agent/xray/ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geosite.dat"
-                wget -c -q "${wgetShowProgressStatus}" -P /etc/v2ray-agent/xray/ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geoip.dat"
+                wget -c -q ${wgetShowProgressStatus} -P /etc/Proxy-agent/xray/ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geosite.dat"
+                wget -c -q ${wgetShowProgressStatus} -P /etc/Proxy-agent/xray/ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geoip.dat"
             fi
 
-            chmod 655 /etc/v2ray-agent/xray/xray
+            chmod 655 /etc/Proxy-agent/xray/xray
         fi
     else
         if [[ -z "${lastInstallationConfig}" ]]; then
-            echoContent green " ---> Xray-core版本:$(/etc/v2ray-agent/xray/xray --version | awk '{print $2}' | head -1)"
+            echoContent green " ---> Xray-core版本:$(/etc/Proxy-agent/xray/xray --version | awk '{print $2}' | head -1)"
             read -r -p "是否更新、升级？[y/n]:" reInstallXrayStatus
             if [[ "${reInstallXrayStatus}" == "y" ]]; then
-                rm -f /etc/v2ray-agent/xray/xray
+                rm -f /etc/Proxy-agent/xray/xray
                 installXray "$1" "$2"
             fi
         fi
@@ -2409,7 +3224,7 @@ xrayVersionManageMenu() {
     echoContent skyBlue "\n进度  $1/${totalProgress} : Xray版本管理"
     if [[ "${coreInstallType}" != "1" ]]; then
         echoContent red " ---> 没有检测到安装目录，请执行脚本安装内容"
-        exit 0
+        exit 1
     fi
     echoContent red "\n=============================================================="
     echoContent yellow "1.升级Xray-core"
@@ -2472,8 +3287,8 @@ updateGeoSite() {
         wget -c -q -P ${configPath}../ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geosite.dat"
         wget -c -q -P ${configPath}../ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geoip.dat"
     else
-        wget -c -q "${wgetShowProgressStatus}" -P ${configPath}../ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geosite.dat"
-        wget -c -q "${wgetShowProgressStatus}" -P ${configPath}../ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geoip.dat"
+        wget -c -q ${wgetShowProgressStatus} -P ${configPath}../ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geosite.dat"
+        wget -c -q ${wgetShowProgressStatus} -P ${configPath}../ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geoip.dat"
     fi
 
     reloadCore
@@ -2495,18 +3310,18 @@ updateXray() {
         echoContent green " ---> Xray-core版本:${version}"
 
         if [[ "${release}" == "alpine" ]]; then
-            wget -c -q -P /etc/v2ray-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip"
+            wget -c -q -P /etc/Proxy-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip"
         else
-            wget -c -q "${wgetShowProgressStatus}" -P /etc/v2ray-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip"
+            wget -c -q ${wgetShowProgressStatus} -P /etc/Proxy-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip"
         fi
 
-        unzip -o "/etc/v2ray-agent/xray/${xrayCoreCPUVendor}.zip" -d /etc/v2ray-agent/xray >/dev/null
-        rm -rf "/etc/v2ray-agent/xray/${xrayCoreCPUVendor}.zip"
-        chmod 655 /etc/v2ray-agent/xray/xray
+        unzip -o "/etc/Proxy-agent/xray/${xrayCoreCPUVendor}.zip" -d /etc/Proxy-agent/xray >/dev/null
+        rm -rf "/etc/Proxy-agent/xray/${xrayCoreCPUVendor}.zip"
+        chmod 655 /etc/Proxy-agent/xray/xray
         handleXray stop
         handleXray start
     else
-        echoContent green " ---> 当前版本:v$(/etc/v2ray-agent/xray/xray --version | awk '{print $2}' | head -1)"
+        echoContent green " ---> 当前版本:v$(/etc/Proxy-agent/xray/xray --version | awk '{print $2}' | head -1)"
         remoteVersion=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=5" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
 
         echoContent green " ---> 最新版本:${remoteVersion}"
@@ -2520,19 +3335,19 @@ updateXray() {
         if [[ -n "$1" ]]; then
             read -r -p "回退版本为${version}，是否继续？[y/n]:" rollbackXrayStatus
             if [[ "${rollbackXrayStatus}" == "y" ]]; then
-                echoContent green " ---> 当前Xray-core版本:$(/etc/v2ray-agent/xray/xray --version | awk '{print $2}' | head -1)"
+                echoContent green " ---> 当前Xray-core版本:$(/etc/Proxy-agent/xray/xray --version | awk '{print $2}' | head -1)"
 
                 handleXray stop
-                rm -f /etc/v2ray-agent/xray/xray
+                rm -f /etc/Proxy-agent/xray/xray
                 updateXray "${version}"
             else
                 echoContent green " ---> 放弃回退版本"
             fi
-        elif [[ "${version}" == "v$(/etc/v2ray-agent/xray/xray --version | awk '{print $2}' | head -1)" ]]; then
+        elif [[ "${version}" == "v$(/etc/Proxy-agent/xray/xray --version | awk '{print $2}' | head -1)" ]]; then
             read -r -p "当前版本与最新版相同，是否重新安装？[y/n]:" reInstallXrayStatus
             if [[ "${reInstallXrayStatus}" == "y" ]]; then
                 handleXray stop
-                rm -f /etc/v2ray-agent/xray/xray
+                rm -f /etc/Proxy-agent/xray/xray
                 updateXray
             else
                 echoContent green " ---> 放弃重新安装"
@@ -2540,7 +3355,7 @@ updateXray() {
         else
             read -r -p "最新版本为:${version}，是否更新？[y/n]:" installXrayStatus
             if [[ "${installXrayStatus}" == "y" ]]; then
-                rm /etc/v2ray-agent/xray/xray
+                rm /etc/Proxy-agent/xray/xray
                 updateXray
             else
                 echoContent green " ---> 放弃更新"
@@ -2560,7 +3375,7 @@ checkGFWStatue() {
         echoContent green " ---> 服务启动成功"
     else
         echoContent red " ---> 服务启动失败，请检查终端是否有日志打印"
-        exit 0
+        exit 1
     fi
 }
 
@@ -2572,8 +3387,8 @@ installAlpineStartup() {
 #!/sbin/openrc-run
 
 description="sing-box service"
-command="/etc/v2ray-agent/sing-box/sing-box"
-command_args="run -c /etc/v2ray-agent/sing-box/conf/config.json"
+command="/etc/Proxy-agent/sing-box/sing-box"
+command_args="run -c /etc/Proxy-agent/sing-box/conf/config.json"
 command_background=true
 pidfile="/var/run/sing-box.pid"
 EOF
@@ -2582,8 +3397,8 @@ EOF
 #!/sbin/openrc-run
 
 description="xray service"
-command="/etc/v2ray-agent/xray/xray"
-command_args="run -confdir /etc/v2ray-agent/xray/conf"
+command="/etc/Proxy-agent/xray/xray"
+command_args="run -confdir /etc/Proxy-agent/xray/conf"
 command_background=true
 pidfile="/var/run/xray.pid"
 EOF
@@ -2595,7 +3410,7 @@ EOF
 # sing-box开机自启
 installSingBoxService() {
     echoContent skyBlue "\n进度  $1/${totalProgress} : 配置sing-box开机自启"
-    execStart='/etc/v2ray-agent/sing-box/sing-box run -c /etc/v2ray-agent/sing-box/conf/config.json'
+    execStart='/etc/Proxy-agent/sing-box/sing-box run -c /etc/Proxy-agent/sing-box/conf/config.json'
 
     if [[ -n $(find /bin /usr/bin -name "systemctl") && "${release}" != "alpine" ]]; then
         rm -rf /etc/systemd/system/sing-box.service
@@ -2633,7 +3448,7 @@ EOF
 # Xray开机自启
 installXrayService() {
     echoContent skyBlue "\n进度  $1/${totalProgress} : 配置Xray开机自启"
-    execStart='/etc/v2ray-agent/xray/xray run -confdir /etc/v2ray-agent/xray/conf'
+    execStart='/etc/Proxy-agent/xray/xray run -confdir /etc/Proxy-agent/xray/conf'
     if [[ -n $(find /bin /usr/bin -name "systemctl") ]]; then
         rm -rf /etc/systemd/system/xray.service
         touch /etc/systemd/system/xray.service
@@ -2662,23 +3477,29 @@ EOF
 
 # 操作Hysteria
 handleHysteria() {
+    local startResult=0
+
     # shellcheck disable=SC2010
     if find /bin /usr/bin | grep -q systemctl && ls /etc/systemd/system/ | grep -q hysteria.service; then
         if [[ -z $(pgrep -f "hysteria/hysteria") ]] && [[ "$1" == "start" ]]; then
-            systemctl start hysteria.service
+            systemctl start hysteria.service || startResult=$?
         elif [[ -n $(pgrep -f "hysteria/hysteria") ]] && [[ "$1" == "stop" ]]; then
             systemctl stop hysteria.service
         fi
     fi
-    sleep 0.8
+    sleep 1.5
 
     if [[ "$1" == "start" ]]; then
         if [[ -n $(pgrep -f "hysteria/hysteria") ]]; then
             echoContent green " ---> Hysteria启动成功"
         else
-            echoContent red "Hysteria启动失败"
-            echoContent red "请手动执行【/etc/v2ray-agent/hysteria/hysteria --log-level debug -c /etc/v2ray-agent/hysteria/conf/config.json server】，查看错误日志"
-            exit 0
+            echoContent red "Hysteria启动失败 (systemctl 返回码: ${startResult})"
+            if [[ -f "/etc/systemd/system/hysteria.service" ]]; then
+                echoContent yellow "\n ---> systemd 服务状态:"
+                systemctl status hysteria.service --no-pager -l 2>&1 | head -20
+            fi
+            echoContent yellow "\n请手动执行【/etc/Proxy-agent/hysteria/hysteria --log-level debug -c /etc/Proxy-agent/hysteria/conf/config.json server】查看详细错误日志"
+            exit 1
         fi
     elif [[ "$1" == "stop" ]]; then
         if [[ -z $(pgrep -f "hysteria/hysteria") ]]; then
@@ -2686,39 +3507,85 @@ handleHysteria() {
         else
             echoContent red "Hysteria关闭失败"
             echoContent red "请手动执行【ps -ef|grep -v grep|grep hysteria|awk '{print \$2}'|xargs kill -9】"
-            exit 0
+            exit 1
         fi
     fi
 }
 
 # 操作sing-box
 handleSingBox() {
+    local startResult=0
+    local mergeResult=0
+
     if [[ -f "/etc/systemd/system/sing-box.service" ]]; then
-        if [[ -z $(pgrep -f "sing-box") ]] && [[ "$1" == "start" ]]; then
-            singBoxMergeConfig
-            systemctl start sing-box.service
-        elif [[ -n $(pgrep -f "sing-box") ]] && [[ "$1" == "stop" ]]; then
+        if [[ "$1" == "start" ]]; then
+            # 先确保停止旧进程
+            if [[ -n $(pgrep -x "sing-box") ]]; then
+                systemctl stop sing-box.service
+                # 等待进程完全退出
+                local waitCount=0
+                while [[ -n $(pgrep -x "sing-box") ]] && [[ ${waitCount} -lt 10 ]]; do
+                    sleep 0.5
+                    ((waitCount++))
+                done
+            fi
+            singBoxMergeConfig || mergeResult=$?
+            if [[ ${mergeResult} -ne 0 ]]; then
+                echoContent red " ---> sing-box 配置合并失败，无法启动服务"
+                exit 1
+            fi
+            systemctl start sing-box.service || startResult=$?
+        elif [[ "$1" == "stop" ]] && [[ -n $(pgrep -x "sing-box") ]]; then
             systemctl stop sing-box.service
+            # 等待进程完全退出
+            local waitCount=0
+            while [[ -n $(pgrep -x "sing-box") ]] && [[ ${waitCount} -lt 10 ]]; do
+                sleep 0.5
+                ((waitCount++))
+            done
         fi
     elif [[ -f "/etc/init.d/sing-box" ]]; then
-        if [[ -z $(pgrep -f "sing-box") ]] && [[ "$1" == "start" ]]; then
-            singBoxMergeConfig
-            rc-service sing-box start
-        elif [[ -n $(pgrep -f "sing-box") ]] && [[ "$1" == "stop" ]]; then
+        if [[ "$1" == "start" ]]; then
+            # 先确保停止旧进程
+            if [[ -n $(pgrep -x "sing-box") ]]; then
+                rc-service sing-box stop
+                local waitCount=0
+                while [[ -n $(pgrep -x "sing-box") ]] && [[ ${waitCount} -lt 10 ]]; do
+                    sleep 0.5
+                    ((waitCount++))
+                done
+            fi
+            singBoxMergeConfig || mergeResult=$?
+            if [[ ${mergeResult} -ne 0 ]]; then
+                echoContent red " ---> sing-box 配置合并失败，无法启动服务"
+                exit 1
+            fi
+            rc-service sing-box start || startResult=$?
+        elif [[ "$1" == "stop" ]] && [[ -n $(pgrep -x "sing-box") ]]; then
             rc-service sing-box stop
+            local waitCount=0
+            while [[ -n $(pgrep -x "sing-box") ]] && [[ ${waitCount} -lt 10 ]]; do
+                sleep 0.5
+                ((waitCount++))
+            done
         fi
     fi
-    sleep 1
+    sleep 1.5
 
     if [[ "$1" == "start" ]]; then
         if [[ -n $(pgrep -f "sing-box") ]]; then
             echoContent green " ---> sing-box启动成功"
         else
-            echoContent red "sing-box启动失败"
-            echoContent yellow "请手动执行【 /etc/v2ray-agent/sing-box/sing-box merge config.json -C /etc/v2ray-agent/sing-box/conf/config/ -D /etc/v2ray-agent/sing-box/conf/ 】，查看错误日志"
-            echo
-            echoContent yellow "如上面命令没有错误，请手动执行【 /etc/v2ray-agent/sing-box/sing-box run -c /etc/v2ray-agent/sing-box/conf/config.json 】，查看错误日志"
-            exit 0
+            echoContent red "sing-box启动失败 (systemctl 返回码: ${startResult})"
+            # 显示 systemd 服务状态以帮助诊断
+            if [[ -f "/etc/systemd/system/sing-box.service" ]]; then
+                echoContent yellow "\n ---> systemd 服务状态:"
+                systemctl status sing-box.service --no-pager -l 2>&1 | head -20
+                echoContent yellow "\n ---> 最近日志:"
+                journalctl -u sing-box.service --no-pager -n 15 2>/dev/null || true
+            fi
+            echoContent yellow "\n请手动执行【 /etc/Proxy-agent/sing-box/sing-box run -c /etc/Proxy-agent/sing-box/conf/config.json 】，查看详细错误日志"
+            exit 1
         fi
     elif [[ "$1" == "stop" ]]; then
         if [[ -z $(pgrep -f "sing-box") ]]; then
@@ -2726,44 +3593,53 @@ handleSingBox() {
         else
             echoContent red " ---> sing-box关闭失败"
             echoContent red "请手动执行【ps -ef|grep -v grep|grep sing-box|awk '{print \$2}'|xargs kill -9】"
-            exit 0
+            exit 1
         fi
     fi
 }
 
 # 操作xray
 handleXray() {
+    local startResult=0
+
     if [[ -n $(find /bin /usr/bin -name "systemctl") ]] && [[ -n $(find /etc/systemd/system/ -name "xray.service") ]]; then
         if [[ -z $(pgrep -f "xray/xray") ]] && [[ "$1" == "start" ]]; then
-            systemctl start xray.service
+            systemctl start xray.service || startResult=$?
         elif [[ -n $(pgrep -f "xray/xray") ]] && [[ "$1" == "stop" ]]; then
             systemctl stop xray.service
         fi
     elif [[ -f "/etc/init.d/xray" ]]; then
         if [[ -z $(pgrep -f "xray/xray") ]] && [[ "$1" == "start" ]]; then
-            rc-service xray start
+            rc-service xray start || startResult=$?
         elif [[ -n $(pgrep -f "xray/xray") ]] && [[ "$1" == "stop" ]]; then
             rc-service xray stop
         fi
     fi
 
-    sleep 0.8
+    sleep 1.5
 
     if [[ "$1" == "start" ]]; then
         if [[ -n $(pgrep -f "xray/xray") ]]; then
             echoContent green " ---> Xray启动成功"
         else
-            echoContent red "Xray启动失败"
-            echoContent red "请手动执行以下的命令后【/etc/v2ray-agent/xray/xray -confdir /etc/v2ray-agent/xray/conf】将错误日志进行反馈"
-            exit 0
+            echoContent red "Xray启动失败 (systemctl 返回码: ${startResult})"
+            # 显示 systemd 服务状态以帮助诊断
+            if [[ -f "/etc/systemd/system/xray.service" ]]; then
+                echoContent yellow "\n ---> systemd 服务状态:"
+                systemctl status xray.service --no-pager -l 2>&1 | head -20
+                echoContent yellow "\n ---> 最近日志:"
+                journalctl -u xray.service --no-pager -n 15 2>/dev/null || true
+            fi
+            echoContent yellow "\n请手动执行【/etc/Proxy-agent/xray/xray -confdir /etc/Proxy-agent/xray/conf】查看详细错误日志"
+            exit 1
         fi
     elif [[ "$1" == "stop" ]]; then
         if [[ -z $(pgrep -f "xray/xray") ]]; then
             echoContent green " ---> Xray关闭成功"
         else
-            echoContent red "xray关闭失败"
+            echoContent red "Xray关闭失败"
             echoContent red "请手动执行【ps -ef|grep -v grep|grep xray|awk '{print \$2}'|xargs kill -9】"
-            exit 0
+            exit 1
         fi
     fi
 }
@@ -2899,11 +3775,7 @@ initSingBoxClients() {
             currentUser="{\"uuid\":\"${uuid}\",\"flow\":\"xtls-rprx-vision\",\"name\":\"${name}-VLESS_Reality_Vision\"}"
             users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
         fi
-        # VLESS Reality gRPC
-        if echo "${type}" | grep -q ",8,"; then
-            currentUser="{\"uuid\":\"${uuid}\",\"name\":\"${name}-VLESS_Reality_gPRC\"}"
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
-        fi
+        # VLESS Reality gRPC - 已移除，推荐使用XHTTP
 
         # hysteria2
         if echo "${type}" | grep -q ",6,"; then
@@ -2935,6 +3807,15 @@ initSingBoxClients() {
             users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
         fi
 
+        # Shadowsocks 2022
+        if echo "${type}" | grep -q ",14,"; then
+            # 使用UUID的前16字节进行base64编码作为用户密钥
+            local ss2022UserKey
+            ss2022UserKey=$(echo -n "${uuid}" | head -c 16 | base64)
+            currentUser="{\"password\":\"${ss2022UserKey}\",\"name\":\"${name}-SS2022\"}"
+            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
+        fi
+
         if echo "${type}" | grep -q ",20,"; then
             currentUser="{\"username\":\"${uuid}\",\"password\":\"${uuid}\"}"
 
@@ -2961,7 +3842,7 @@ initHysteriaPort() {
         echoContent yellow "请输入Hysteria端口[回车随机10000-30000]，不可与其他服务重复"
         read -r -p "端口:" hysteriaPort
         if [[ -z "${hysteriaPort}" ]]; then
-            hysteriaPort=$((RANDOM % 20001 + 10000))
+            hysteriaPort=$(randomNum 10000 30000)
         fi
     fi
     if [[ -z ${hysteriaPort} ]]; then
@@ -2991,6 +3872,77 @@ initHysteria2Network() {
         hysteria2ClientUploadSpeed=50
         echoContent green "\n ---> 上行速度: ${hysteria2ClientUploadSpeed}\n"
     fi
+
+    echoContent yellow "是否启用混淆(obfs)? 留空不启用，输入密码则启用salamander混淆"
+    read -r -p "混淆密码(留空不启用):" hysteria2ObfsPassword
+    if [[ -n "${hysteria2ObfsPassword}" ]]; then
+        echoContent green "\n ---> 混淆已启用\n"
+    else
+        echoContent green "\n ---> 混淆未启用\n"
+    fi
+}
+
+# 初始化 Shadowsocks 2022 配置
+initSS2022Config() {
+    # 读取现有配置
+    if [[ -f "${singBoxConfigPath}14_ss2022_inbounds.json" ]]; then
+        ss2022Port=$(jq -r '.inbounds[0].listen_port' "${singBoxConfigPath}14_ss2022_inbounds.json")
+        ss2022ServerKey=$(jq -r '.inbounds[0].password' "${singBoxConfigPath}14_ss2022_inbounds.json")
+        ss2022Method=$(jq -r '.inbounds[0].method' "${singBoxConfigPath}14_ss2022_inbounds.json")
+    fi
+
+    if [[ -n "${ss2022Port}" ]]; then
+        read -r -p "读取到上次安装时的端口 ${ss2022Port}，是否使用？[y/n]:" historySS2022PortStatus
+        if [[ "${historySS2022PortStatus}" != "y" ]]; then
+            ss2022Port=
+            ss2022ServerKey=
+        fi
+    fi
+
+    if [[ -z "${ss2022Port}" ]]; then
+        echoContent yellow "请输入Shadowsocks 2022端口[回车随机10000-30000]"
+        read -r -p "端口:" ss2022Port
+        if [[ -z "${ss2022Port}" ]]; then
+            ss2022Port=$(randomNum 10000 30000)
+        fi
+        echoContent green "\n ---> 端口: ${ss2022Port}"
+    fi
+
+    # 选择加密方式
+    if [[ -z "${ss2022Method}" ]]; then
+        echoContent yellow "\n请选择加密方式:"
+        echoContent yellow "1.2022-blake3-aes-128-gcm [推荐，密钥较短]"
+        echoContent yellow "2.2022-blake3-aes-256-gcm"
+        echoContent yellow "3.2022-blake3-chacha20-poly1305"
+        read -r -p "请选择[默认1]:" ss2022MethodChoice
+        case ${ss2022MethodChoice} in
+        2)
+            ss2022Method="2022-blake3-aes-256-gcm"
+            ss2022KeyLen=32
+            ;;
+        3)
+            ss2022Method="2022-blake3-chacha20-poly1305"
+            ss2022KeyLen=32
+            ;;
+        *)
+            ss2022Method="2022-blake3-aes-128-gcm"
+            ss2022KeyLen=16
+            ;;
+        esac
+        echoContent green "\n ---> 加密方式: ${ss2022Method}"
+    else
+        if [[ "${ss2022Method}" == "2022-blake3-aes-128-gcm" ]]; then
+            ss2022KeyLen=16
+        else
+            ss2022KeyLen=32
+        fi
+    fi
+
+    # 生成服务器密钥
+    if [[ -z "${ss2022ServerKey}" ]]; then
+        ss2022ServerKey=$(openssl rand -base64 ${ss2022KeyLen})
+        echoContent green " ---> 服务器密钥已自动生成"
+    fi
 }
 
 # firewalld设置端口跳跃
@@ -3011,12 +3963,12 @@ addPortHopping() {
     local targetPort=$2
     if [[ -n "${portHoppingStart}" || -n "${portHoppingEnd}" ]]; then
         echoContent red " ---> 已添加不可重复添加，可删除后重新添加"
-        exit 0
+        exit 1
     fi
     if [[ "${release}" == "centos" ]]; then
         if ! systemctl status firewalld 2>/dev/null | grep -q "active (running)"; then
             echoContent red " ---> 未启动firewalld防火墙，无法设置端口跳跃。"
-            exit 0
+            exit 1
         fi
     fi
 
@@ -3057,14 +4009,14 @@ addPortHopping() {
                 addFirewalldPortHopping "${portStart}" "${portEnd}" "${targetPort}"
                 if ! sudo firewall-cmd --list-forward-ports | grep -q "toport=${targetPort}"; then
                     echoContent red " ---> 端口跳跃添加失败"
-                    exit 0
+                    exit 1
                 fi
             else
-                iptables -t nat -A PREROUTING -p udp --dport "${portStart}:${portEnd}" -m comment --comment "mack-a_${type}_portHopping" -j DNAT --to-destination ":${targetPort}"
+                iptables -t nat -A PREROUTING -p udp --dport "${portStart}:${portEnd}" -m comment --comment "Proxy-agent_${type}_portHopping" -j DNAT --to-destination ":${targetPort}"
                 sudo netfilter-persistent save
-                if ! iptables-save | grep -q "mack-a_${type}_portHopping"; then
+                if ! iptables-save | grep -q "Proxy-agent_${type}_portHopping"; then
                     echoContent red " ---> 端口跳跃添加失败"
-                    exit 0
+                    exit 1
                 fi
             fi
             allowPort "${portStart}:${portEnd}" udp
@@ -3084,9 +4036,9 @@ readPortHopping() {
         portHoppingStart=$(sudo firewall-cmd --list-forward-ports | grep "toport=${targetPort}" | head -1 | cut -d ":" -f 1 | cut -d "=" -f 2)
         portHoppingEnd=$(sudo firewall-cmd --list-forward-ports | grep "toport=${targetPort}" | tail -n 1 | cut -d ":" -f 1 | cut -d "=" -f 2)
     else
-        if iptables-save | grep -q "mack-a_${type}_portHopping"; then
+        if iptables-save | grep -q "Proxy-agent_${type}_portHopping"; then
             local portHopping=
-            portHopping=$(iptables-save | grep "mack-a_${type}_portHopping" | cut -d " " -f 8)
+            portHopping=$(iptables-save | grep "Proxy-agent_${type}_portHopping" | cut -d " " -f 8)
 
             portHoppingStart=$(echo "${portHopping}" | cut -d ":" -f 1)
             portHoppingEnd=$(echo "${portHopping}" | cut -d ":" -f 2)
@@ -3115,7 +4067,7 @@ deletePortHoppingRules() {
         done
         sudo firewall-cmd --reload
     else
-        iptables -t nat -L PREROUTING --line-numbers | grep "mack-a_${type}_portHopping" | awk '{print $1}' | while read -r line; do
+        iptables -t nat -L PREROUTING --line-numbers | grep "Proxy-agent_${type}_portHopping" | awk '{print $1}' | while read -r line; do
             iptables -t nat -D PREROUTING 1
             sudo netfilter-persistent save
         done
@@ -3128,7 +4080,7 @@ portHoppingMenu() {
     # 判断iptables是否存在
     if ! find /usr/bin /usr/sbin | grep -q -w iptables; then
         echoContent red " ---> 无法识别iptables工具，无法使用端口跳跃，退出安装"
-        exit 0
+        exit 1
     fi
 
     local targetPort=
@@ -3185,7 +4137,7 @@ initTuicPort() {
         echoContent yellow "请输入Tuic端口[回车随机10000-30000]，不可与其他服务重复"
         read -r -p "端口:" tuicPort
         if [[ -z "${tuicPort}" ]]; then
-            tuicPort=$((RANDOM % 20001 + 10000))
+            tuicPort=$(randomNum 10000 30000)
         fi
     fi
     if [[ -z ${tuicPort} ]]; then
@@ -3240,25 +4192,6 @@ initTuicProtocol() {
     fi
 }
 
-# 初始化tuic配置
-#initTuicConfig() {
-#    echoContent skyBlue "\n进度 $1/${totalProgress} : 初始化Tuic配置"
-#
-#    initTuicPort
-#    initTuicProtocol
-#    cat <<EOF >/etc/v2ray-agent/tuic/conf/config.json
-#{
-#    "server": "[::]:${tuicPort}",
-#    "users": $(initXrayClients 9),
-#    "certificate": "/etc/v2ray-agent/tls/${currentHost}.crt",
-#    "private_key": "/etc/v2ray-agent/tls/${currentHost}.key",
-#    "congestion_control":"${tuicAlgorithm}",
-#    "alpn": ["h3"],
-#    "log_level": "warn"
-#}
-#EOF
-#}
-
 # 初始化singbox route配置
 initSingBoxRouteConfig() {
     downloadSingBoxGeositeDB
@@ -3290,10 +4223,39 @@ downloadSingBoxGeositeDB() {
         if [[ "${release}" == "alpine" ]]; then
             wget -q -P "${singBoxConfigPath}" https://github.com/Johnshall/sing-geosite/releases/latest/download/geosite.db
         else
-            wget -q "${wgetShowProgressStatus}" -P "${singBoxConfigPath}" https://github.com/Johnshall/sing-geosite/releases/latest/download/geosite.db
+            wget -q ${wgetShowProgressStatus} -P "${singBoxConfigPath}" https://github.com/Johnshall/sing-geosite/releases/latest/download/geosite.db
         fi
 
     fi
+}
+
+# 初始化sing-box规则配置（检查geosite可用性）
+# 参数1: 域名列表(逗号分隔)
+# 参数2: 路由名称后缀
+# 返回: JSON格式 {"domainRules":[], "ruleSet":[]}
+initSingBoxRules() {
+    local domainRules=[]
+    local ruleSet=[]
+    while read -r line; do
+        if [[ -z "${line}" ]]; then
+            continue
+        fi
+        local geositeStatus
+        # 添加超时和错误处理
+        geositeStatus=$(curl -s --connect-timeout 5 --max-time 10 \
+            "https://api.github.com/repos/SagerNet/sing-geosite/contents/geosite-${line}.srs?ref=rule-set" 2>/dev/null | jq -r '.message // empty')
+
+        # 如果API返回null或空(即文件存在)，使用rule_set
+        # 如果API失败或返回错误消息，回退到domain_regex
+        if [[ -z "${geositeStatus}" ]]; then
+            ruleSet=$(echo "${ruleSet}" | jq -r ". += [{\"tag\":\"${line}_$2\",\"type\":\"remote\",\"format\":\"binary\",\"url\":\"https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-${line}.srs\",\"download_detour\":\"01_direct_outbound\"}]")
+        else
+            # 转义域名中的点号用于正则表达式
+            local escapedLine="${line//./\\.}"
+            domainRules=$(echo "${domainRules}" | jq -r ". += [\"^([a-zA-Z0-9_-]+\\\\.)*${escapedLine}\"]")
+        fi
+    done < <(echo "$1" | tr ',' '\n' | grep -v '^$' | sort -u)
+    echo "{ \"domainRules\":${domainRules},\"ruleSet\":${ruleSet}}"
 }
 
 # 添加sing-box路由规则
@@ -3429,7 +4391,7 @@ addXrayOutbound() {
     fi
 
     if [[ -n "${domainStrategy}" ]]; then
-        cat <<EOF >"/etc/v2ray-agent/xray/conf/${tag}.json"
+        cat <<EOF >"/etc/Proxy-agent/xray/conf/${tag}.json"
 {
     "outbounds":[
         {
@@ -3445,7 +4407,7 @@ EOF
     fi
     # direct
     if echo "${tag}" | grep -q "direct"; then
-        cat <<EOF >"/etc/v2ray-agent/xray/conf/${tag}.json"
+        cat <<EOF >"/etc/Proxy-agent/xray/conf/${tag}.json"
 {
     "outbounds":[
         {
@@ -3461,7 +4423,7 @@ EOF
     fi
     # blackhole
     if echo "${tag}" | grep -q "blackhole"; then
-        cat <<EOF >"/etc/v2ray-agent/xray/conf/${tag}.json"
+        cat <<EOF >"/etc/Proxy-agent/xray/conf/${tag}.json"
 {
     "outbounds":[
         {
@@ -3472,35 +4434,8 @@ EOF
 }
 EOF
     fi
-    # socks5 outbound
-    if echo "${tag}" | grep -q "socks5"; then
-        cat <<EOF >"/etc/v2ray-agent/xray/conf/${tag}.json"
-{
-  "outbounds": [
-    {
-      "protocol": "socks",
-      "tag": "${tag}",
-      "settings": {
-        "servers": [
-          {
-            "address": "${socks5RoutingOutboundIP}",
-            "port": ${socks5RoutingOutboundPort},
-            "users": [
-              {
-                "user": "${socks5RoutingOutboundUserName}",
-                "pass": "${socks5RoutingOutboundPassword}"
-              }
-            ]
-          }
-        ]
-      }
-    }
-  ]
-}
-EOF
-    fi
     if echo "${tag}" | grep -q "wireguard_out_IPv4"; then
-        cat <<EOF >"/etc/v2ray-agent/xray/conf/${tag}.json"
+        cat <<EOF >"/etc/Proxy-agent/xray/conf/${tag}.json"
 {
   "outbounds": [
     {
@@ -3530,7 +4465,7 @@ EOF
 EOF
     fi
     if echo "${tag}" | grep -q "wireguard_out_IPv6"; then
-        cat <<EOF >"/etc/v2ray-agent/xray/conf/${tag}.json"
+        cat <<EOF >"/etc/Proxy-agent/xray/conf/${tag}.json"
 {
   "outbounds": [
     {
@@ -3560,7 +4495,7 @@ EOF
 EOF
     fi
     if echo "${tag}" | grep -q "vmess-out"; then
-        cat <<EOF >"/etc/v2ray-agent/xray/conf/${tag}.json"
+        cat <<EOF >"/etc/Proxy-agent/xray/conf/${tag}.json"
 {
   "outbounds": [
     {
@@ -3605,8 +4540,8 @@ EOF
 # 删除 Xray-core出站
 removeXrayOutbound() {
     local tag=$1
-    if [[ -f "/etc/v2ray-agent/xray/conf/${tag}.json" ]]; then
-        rm "/etc/v2ray-agent/xray/conf/${tag}.json" >/dev/null 2>&1
+    if [[ -f "/etc/Proxy-agent/xray/conf/${tag}.json" ]]; then
+        rm "/etc/Proxy-agent/xray/conf/${tag}.json" >/dev/null 2>&1
     fi
 }
 # 移除sing-box配置
@@ -3656,7 +4591,13 @@ initSingBoxHysteria2Config() {
     initHysteriaPort
     initHysteria2Network
 
-    cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/hysteria2.json
+    # 构建obfs配置（如果启用）
+    local hysteria2ObfsConfig=""
+    if [[ -n "${hysteria2ObfsPassword}" ]]; then
+        hysteria2ObfsConfig='"obfs": {"type": "salamander", "password": "'"${hysteria2ObfsPassword}"'"},'
+    fi
+
+    cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/hysteria2.json
 {
     "inbounds": [
         {
@@ -3666,14 +4607,16 @@ initSingBoxHysteria2Config() {
             "users": $(initXrayClients 6),
             "up_mbps":${hysteria2ClientDownloadSpeed},
             "down_mbps":${hysteria2ClientUploadSpeed},
+            "ignore_client_bandwidth": false,
+            ${hysteria2ObfsConfig}
             "tls": {
                 "enabled": true,
                 "server_name":"${currentHost}",
                 "alpn": [
                     "h3"
                 ],
-                "certificate_path": "/etc/v2ray-agent/tls/${currentHost}.crt",
-                "key_path": "/etc/v2ray-agent/tls/${currentHost}.key"
+                "certificate_path": "/etc/Proxy-agent/tls/${currentHost}.crt",
+                "key_path": "/etc/Proxy-agent/tls/${currentHost}.key"
             }
         }
     ]
@@ -3685,7 +4628,7 @@ EOF
 singBoxTuicInstall() {
     if ! echo "${currentInstallProtocolType}" | grep -qE ",0,|,1,|,2,|,3,|,4,|,5,|,6,|,9,|,10,"; then
         echoContent red "\n ---> 由于需要依赖证书，如安装Tuic，请先安装带有TLS标识协议"
-        exit 0
+        exit 1
     fi
 
     totalProgress=5
@@ -3701,7 +4644,7 @@ singBoxTuicInstall() {
 singBoxHysteria2Install() {
     if ! echo "${currentInstallProtocolType}" | grep -qE ",0,|,1,|,2,|,3,|,4,|,5,|,6,|,9,|,10,"; then
         echoContent red "\n ---> 由于需要依赖证书，如安装Hysteria2，请先安装带有TLS标识协议"
-        exit 0
+        exit 1
     fi
 
     totalProgress=5
@@ -3713,72 +4656,40 @@ singBoxHysteria2Install() {
     showAccounts 4
 }
 
-# 合并config
-singBoxMergeConfig() {
-    rm /etc/v2ray-agent/sing-box/conf/config.json >/dev/null 2>&1
-    /etc/v2ray-agent/sing-box/sing-box merge config.json -C /etc/v2ray-agent/sing-box/conf/config/ -D /etc/v2ray-agent/sing-box/conf/ >/dev/null 2>&1
+# sing-box Shadowsocks 2022 安装
+singBoxSS2022Install() {
+    totalProgress=5
+    installSingBox 1
+    selectCustomInstallType=",14,"
+    initSingBoxConfig custom 2 true
+    installSingBoxService 3
+    reloadCore
+    showAccounts 4
 }
 
-# 初始化Xray Trojan XTLS 配置文件
-#initXrayFrontingConfig() {
-#    echoContent red " ---> Trojan暂不支持 xtls-rprx-vision"
-#    if [[ -z "${configPath}" ]]; then
-#        echoContent red " ---> 未安装，请使用脚本安装"
-#        menu
-#        exit 0
-#    fi
-#    if [[ "${coreInstallType}" != "1" ]]; then
-#        echoContent red " ---> 未安装可用类型"
-#    fi
-#    local xtlsType=
-#    if echo ${currentInstallProtocolType} | grep -q trojan; then
-#        xtlsType=VLESS
-#    else
-#        xtlsType=Trojan
-#    fi
-#
-#    echoContent skyBlue "\n功能 1/${totalProgress} : 前置切换为${xtlsType}"
-#    echoContent red "\n=============================================================="
-#    echoContent yellow "# 注意事项\n"
-#    echoContent yellow "会将前置替换为${xtlsType}"
-#    echoContent yellow "如果前置是Trojan，查看账号时则会出现两个Trojan协议的节点，有一个不可用xtls"
-#    echoContent yellow "再次执行可切换至上一次的前置\n"
-#
-#    echoContent yellow "1.切换至${xtlsType}"
-#    echoContent red "=============================================================="
-#    read -r -p "请选择:" selectType
-#    if [[ "${selectType}" == "1" ]]; then
-#
-#        if [[ "${xtlsType}" == "Trojan" ]]; then
-#
-#            local VLESSConfig
-#            VLESSConfig=$(cat ${configPath}${frontingType}.json)
-#            VLESSConfig=${VLESSConfig//"id"/"password"}
-#            VLESSConfig=${VLESSConfig//VLESSTCP/TrojanTCPXTLS}
-#            VLESSConfig=${VLESSConfig//VLESS/Trojan}
-#            VLESSConfig=${VLESSConfig//"vless"/"trojan"}
-#            VLESSConfig=${VLESSConfig//"id"/"password"}
-#
-#            echo "${VLESSConfig}" | jq . >${configPath}02_trojan_TCP_inbounds.json
-#            rm ${configPath}${frontingType}.json
-#        elif [[ "${xtlsType}" == "VLESS" ]]; then
-#
-#            local VLESSConfig
-#            VLESSConfig=$(cat ${configPath}02_trojan_TCP_inbounds.json)
-#            VLESSConfig=${VLESSConfig//"password"/"id"}
-#            VLESSConfig=${VLESSConfig//TrojanTCPXTLS/VLESSTCP}
-#            VLESSConfig=${VLESSConfig//Trojan/VLESS}
-#            VLESSConfig=${VLESSConfig//"trojan"/"vless"}
-#            VLESSConfig=${VLESSConfig//"password"/"id"}
-#
-#            echo "${VLESSConfig}" | jq . >${configPath}02_VLESS_TCP_inbounds.json
-#            rm ${configPath}02_trojan_TCP_inbounds.json
-#        fi
-#        reloadCore
-#    fi
-#
-#    exit 0
-#}
+# 合并config
+singBoxMergeConfig() {
+    rm /etc/Proxy-agent/sing-box/conf/config.json >/dev/null 2>&1
+
+    local mergeOutput mergeResult
+    mergeOutput=$(/etc/Proxy-agent/sing-box/sing-box merge config.json -C /etc/Proxy-agent/sing-box/conf/config/ -D /etc/Proxy-agent/sing-box/conf/ 2>&1)
+    mergeResult=$?
+
+    if [[ ${mergeResult} -ne 0 ]]; then
+        echoContent red " ---> sing-box 配置合并失败"
+        echoContent red " ---> 错误信息:"
+        echo "${mergeOutput}" | head -20
+        return 1
+    fi
+
+    # 验证合并后的配置文件存在且有效
+    if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config.json" ]]; then
+        echoContent red " ---> sing-box 配置文件生成失败"
+        return 1
+    fi
+
+    return 0
+}
 
 # 初始化sing-box端口
 initSingBoxPort() {
@@ -3796,7 +4707,7 @@ initSingBoxPort() {
     if [[ -z "${port}" ]]; then
         read -r -p '请输入自定义端口[需合法]，端口不可重复，[回车]随机端口:' port
         if [[ -z "${port}" ]]; then
-            port=$((RANDOM % 50001 + 10000))
+            port=$(randomNum 10000 60000)
         fi
         if ((port >= 1 && port <= 65535)); then
             allowPort "${port}"
@@ -3804,7 +4715,7 @@ initSingBoxPort() {
             echo "${port}"
         else
             echoContent red " ---> 端口输入错误"
-            exit 0
+            exit 1
         fi
     fi
 }
@@ -3832,7 +4743,7 @@ initXrayConfig() {
         if [[ -n ${customUUID} ]]; then
             uuid=${customUUID}
         else
-            uuid=$(/etc/v2ray-agent/xray/xray uuid)
+            uuid=$(/etc/Proxy-agent/xray/xray uuid)
         fi
 
         echoContent yellow "\n请输入自定义用户名[需合法]，[回车]随机用户名"
@@ -3845,7 +4756,7 @@ initXrayConfig() {
     if [[ -z "${addClientsStatus}" && -z "${uuid}" ]]; then
         addClientsStatus=
         echoContent red "\n ---> uuid读取错误，随机生成"
-        uuid=$(/etc/v2ray-agent/xray/xray uuid)
+        uuid=$(/etc/Proxy-agent/xray/xray uuid)
     fi
 
     if [[ -n "${uuid}" ]]; then
@@ -3855,12 +4766,12 @@ initXrayConfig() {
     fi
 
     # log
-    if [[ ! -f "/etc/v2ray-agent/xray/conf/00_log.json" ]]; then
+    if [[ ! -f "/etc/Proxy-agent/xray/conf/00_log.json" ]]; then
 
-        cat <<EOF >/etc/v2ray-agent/xray/conf/00_log.json
+        cat <<EOF >/etc/Proxy-agent/xray/conf/00_log.json
 {
   "log": {
-    "error": "/etc/v2ray-agent/xray/error.log",
+    "error": "/etc/Proxy-agent/xray/error.log",
     "loglevel": "warning",
     "dnsLog": false
   }
@@ -3868,15 +4779,17 @@ initXrayConfig() {
 EOF
     fi
 
-    if [[ ! -f "/etc/v2ray-agent/xray/conf/12_policy.json" ]]; then
-
-        cat <<EOF >/etc/v2ray-agent/xray/conf/12_policy.json
+    if [[ ! -f "/etc/Proxy-agent/xray/conf/12_policy.json" ]]; then
+        local handshakeVal connIdleVal
+        handshakeVal=$(randomNum 1 4)
+        connIdleVal=$(randomNum 250 300)
+        cat <<EOF >/etc/Proxy-agent/xray/conf/12_policy.json
 {
   "policy": {
       "levels": {
           "0": {
-              "handshake": $((1 + RANDOM % 4)),
-              "connIdle": $((250 + RANDOM % 51))
+              "handshake": ${handshakeVal},
+              "connIdle": ${connIdleVal}
           }
       }
   }
@@ -3886,8 +4799,8 @@ EOF
 
     addXrayOutbound "z_direct_outbound"
     # dns
-    if [[ ! -f "/etc/v2ray-agent/xray/conf/11_dns.json" ]]; then
-        cat <<EOF >/etc/v2ray-agent/xray/conf/11_dns.json
+    if [[ ! -f "/etc/Proxy-agent/xray/conf/11_dns.json" ]]; then
+        cat <<EOF >/etc/Proxy-agent/xray/conf/11_dns.json
 {
     "dns": {
         "servers": [
@@ -3898,7 +4811,7 @@ EOF
 EOF
     fi
     # routing
-    cat <<EOF >/etc/v2ray-agent/xray/conf/09_routing.json
+    cat <<EOF >/etc/Proxy-agent/xray/conf/09_routing.json
 {
   "routing": {
     "rules": [
@@ -3922,7 +4835,7 @@ EOF
     # trojan
     if echo "${selectCustomInstallType}" | grep -q ",4," || [[ "$1" == "all" ]]; then
         fallbacksList='{"dest":31296,"xver":1},{"alpn":"h2","dest":31302,"xver":1}'
-        cat <<EOF >/etc/v2ray-agent/xray/conf/04_trojan_TCP_inbounds.json
+        cat <<EOF >/etc/Proxy-agent/xray/conf/04_trojan_TCP_inbounds.json
 {
 "inbounds":[
 	{
@@ -3951,13 +4864,13 @@ EOF
 }
 EOF
     elif [[ -z "$3" ]]; then
-        rm /etc/v2ray-agent/xray/conf/04_trojan_TCP_inbounds.json >/dev/null 2>&1
+        rm /etc/Proxy-agent/xray/conf/04_trojan_TCP_inbounds.json >/dev/null 2>&1
     fi
 
     # VLESS_WS_TLS
     if echo "${selectCustomInstallType}" | grep -q ",1," || [[ "$1" == "all" ]]; then
         fallbacksList=${fallbacksList}',{"path":"/'${customPath}'ws","dest":31297,"xver":1}'
-        cat <<EOF >/etc/v2ray-agent/xray/conf/03_VLESS_WS_inbounds.json
+        cat <<EOF >/etc/Proxy-agent/xray/conf/03_VLESS_WS_inbounds.json
 {
 "inbounds":[
     {
@@ -3982,15 +4895,16 @@ EOF
 }
 EOF
     elif [[ -z "$3" ]]; then
-        rm /etc/v2ray-agent/xray/conf/03_VLESS_WS_inbounds.json >/dev/null 2>&1
+        rm /etc/Proxy-agent/xray/conf/03_VLESS_WS_inbounds.json >/dev/null 2>&1
     fi
     # VLESS_Reality_XHTTP_TLS
     if echo "${selectCustomInstallType}" | grep -q ",12," || [[ "$1" == "all" ]]; then
         initXrayXHTTPort
         initRealityClientServersName
         initRealityKey
+        initRealityShortIds
         initRealityMldsa65
-        cat <<EOF >/etc/v2ray-agent/xray/conf/12_VLESS_XHTTP_inbounds.json
+        cat <<EOF >/etc/Proxy-agent/xray/conf/12_VLESS_XHTTP_inbounds.json
 {
 "inbounds":[
     {
@@ -4014,16 +4928,19 @@ EOF
             ],
             "privateKey": "${realityPrivateKey}",
             "publicKey": "${realityPublicKey}",
-            "maxTimeDiff": 70000,
+            "maxTimeDiff": 60000,
             "shortIds": [
-                "",
-                "6ba85179e30d4fc2"
+                "${realityShortId1}",
+                "${realityShortId2}"
             ]
         },
         "xhttpSettings": {
             "host": "${realityServerName}",
             "path": "/${customPath}xHTTP",
-            "mode": "auto"
+            "mode": "auto",
+            "extra": {
+                "xPaddingBytes": "100-1000"
+            }
         }
 	  }
 	}
@@ -4031,11 +4948,11 @@ EOF
 }
 EOF
     elif [[ -z "$3" ]]; then
-        rm /etc/v2ray-agent/xray/conf/12_VLESS_XHTTP_inbounds.json >/dev/null 2>&1
+        rm /etc/Proxy-agent/xray/conf/12_VLESS_XHTTP_inbounds.json >/dev/null 2>&1
     fi
     if echo "${selectCustomInstallType}" | grep -q ",3," || [[ "$1" == "all" ]]; then
         fallbacksList=${fallbacksList}',{"path":"/'${customPath}'vws","dest":31299,"xver":1}'
-        cat <<EOF >/etc/v2ray-agent/xray/conf/05_VMess_WS_inbounds.json
+        cat <<EOF >/etc/Proxy-agent/xray/conf/05_VMess_WS_inbounds.json
 {
     "inbounds":[
         {
@@ -4059,40 +4976,18 @@ EOF
 }
 EOF
     elif [[ -z "$3" ]]; then
-        rm /etc/v2ray-agent/xray/conf/05_VMess_WS_inbounds.json >/dev/null 2>&1
+        rm /etc/Proxy-agent/xray/conf/05_VMess_WS_inbounds.json >/dev/null 2>&1
     fi
-    # VLESS_gRPC
-    if echo "${selectCustomInstallType}" | grep -q ",5," || [[ "$1" == "all" ]]; then
-        cat <<EOF >/etc/v2ray-agent/xray/conf/06_VLESS_gRPC_inbounds.json
-{
-    "inbounds":[
-        {
-            "port": 31301,
-            "listen": "127.0.0.1",
-            "protocol": "vless",
-            "tag":"VLESSGRPC",
-            "settings": {
-                "clients": $(initXrayClients 5),
-                "decryption": "none"
-            },
-            "streamSettings": {
-                "network": "grpc",
-                "grpcSettings": {
-                    "serviceName": "${customPath}grpc"
-                }
-            }
-        }
-    ]
-}
-EOF
-    elif [[ -z "$3" ]]; then
-        rm /etc/v2ray-agent/xray/conf/06_VLESS_gRPC_inbounds.json >/dev/null 2>&1
+    # VLESS_gRPC - 已移除，推荐使用XHTTP
+    # gRPC协议已废弃，清理旧配置文件
+    if [[ -z "$3" ]]; then
+        rm /etc/Proxy-agent/xray/conf/06_VLESS_gRPC_inbounds.json >/dev/null 2>&1
     fi
 
     # VLESS Vision
     if echo "${selectCustomInstallType}" | grep -q ",0," || [[ "$1" == "all" ]]; then
 
-        cat <<EOF >/etc/v2ray-agent/xray/conf/02_VLESS_TCP_inbounds.json
+        cat <<EOF >/etc/Proxy-agent/xray/conf/02_VLESS_TCP_inbounds.json
 {
     "inbounds":[
         {
@@ -4106,17 +5001,17 @@ EOF
                 ${fallbacksList}
             ]
           },
-          "add": "${add}",
           "streamSettings": {
             "network": "tcp",
             "security": "tls",
             "tlsSettings": {
+              "alpn": ["h2", "http/1.1"],
               "rejectUnknownSni": true,
               "minVersion": "1.2",
               "certificates": [
                 {
-                  "certificateFile": "/etc/v2ray-agent/tls/${domain}.crt",
-                  "keyFile": "/etc/v2ray-agent/tls/${domain}.key",
+                  "certificateFile": "/etc/Proxy-agent/tls/${domain}.crt",
+                  "keyFile": "/etc/Proxy-agent/tls/${domain}.key",
                   "ocspStapling": 3600
                 }
               ]
@@ -4127,7 +5022,7 @@ EOF
 }
 EOF
     elif [[ -z "$3" ]]; then
-        rm /etc/v2ray-agent/xray/conf/02_VLESS_TCP_inbounds.json >/dev/null 2>&1
+        rm /etc/Proxy-agent/xray/conf/02_VLESS_TCP_inbounds.json >/dev/null 2>&1
     fi
 
     # VLESS_TCP/reality
@@ -4137,8 +5032,9 @@ EOF
         initXrayRealityPort
         initRealityClientServersName
         initRealityKey
+        initRealityShortIds
         initRealityMldsa65
-        cat <<EOF >/etc/v2ray-agent/xray/conf/07_VLESS_vision_reality_inbounds.json
+        cat <<EOF >/etc/Proxy-agent/xray/conf/07_VLESS_vision_reality_inbounds.json
 {
   "inbounds": [
     {
@@ -4164,13 +5060,7 @@ EOF
       "protocol": "vless",
       "settings": {
         "clients": $(initXrayClients 7),
-        "decryption": "none",
-        "fallbacks":[
-          {
-            "dest": "31305",
-            "xver": 1
-          }
-        ]
+        "decryption": "none"
       },
       "streamSettings": {
         "network": "tcp",
@@ -4186,10 +5076,10 @@ EOF
           "publicKey": "${realityPublicKey}",
           "mldsa65Seed": "${realityMldsa65Seed}",
           "mldsa65Verify": "${realityMldsa65Verify}",
-          "maxTimeDiff": 70000,
+          "maxTimeDiff": 60000,
           "shortIds": [
-            "",
-            "6ba85179e30d4fc2"
+            "${realityShortId1}",
+            "${realityShortId2}"
           ]
         }
       },
@@ -4225,36 +5115,10 @@ EOF
   }
 }
 EOF
-        cat <<EOF >/etc/v2ray-agent/xray/conf/08_VLESS_vision_gRPC_inbounds.json
-{
-  "inbounds": [
-    {
-      "port": 31305,
-      "listen": "127.0.0.1",
-      "protocol": "vless",
-      "tag": "VLESSRealityGRPC",
-      "settings": {
-        "clients": $(initXrayClients 8),
-        "decryption": "none"
-      },
-      "streamSettings": {
-            "network": "grpc",
-            "grpcSettings": {
-                "serviceName": "grpc",
-                "multiMode": true
-            },
-            "sockopt": {
-                "acceptProxyProtocol": true
-            }
-      }
-    }
-  ]
-}
-EOF
-
+        # VLESS_Reality_gRPC - 已移除，推荐使用XHTTP
     elif [[ -z "$3" ]]; then
-        rm /etc/v2ray-agent/xray/conf/07_VLESS_vision_reality_inbounds.json >/dev/null 2>&1
-        rm /etc/v2ray-agent/xray/conf/08_VLESS_vision_gRPC_inbounds.json >/dev/null 2>&1
+        rm /etc/Proxy-agent/xray/conf/07_VLESS_vision_reality_inbounds.json >/dev/null 2>&1
+        rm /etc/Proxy-agent/xray/conf/08_VLESS_vision_gRPC_inbounds.json >/dev/null 2>&1
     fi
     installSniffing
     if [[ -z "$3" ]]; then
@@ -4318,7 +5182,7 @@ initSingBoxConfig() {
         if [[ -n ${customUUID} ]]; then
             uuid=${customUUID}
         else
-            uuid=$(/etc/v2ray-agent/sing-box/sing-box generate uuid)
+            uuid=$(/etc/Proxy-agent/sing-box/sing-box generate uuid)
         fi
 
         echoContent yellow "\n请输入自定义用户名[需合法]，[回车]随机用户名"
@@ -4331,7 +5195,7 @@ initSingBoxConfig() {
     if [[ -z "${addClientsStatus}" && -z "${uuid}" ]]; then
         addClientsStatus=
         echoContent red "\n ---> uuid读取错误，随机生成"
-        uuid=$(/etc/v2ray-agent/sing-box/sing-box generate uuid)
+        uuid=$(/etc/Proxy-agent/sing-box/sing-box generate uuid)
     fi
 
     if [[ -n "${uuid}" ]]; then
@@ -4352,7 +5216,7 @@ initSingBoxConfig() {
         handleSingBox stop
 
         checkPortOpen "${result[-1]}" "${domain}"
-        cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/02_VLESS_TCP_inbounds.json
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/02_VLESS_TCP_inbounds.json
 {
     "inbounds":[
         {
@@ -4364,15 +5228,15 @@ initSingBoxConfig() {
           "tls":{
             "server_name": "${sslDomain}",
             "enabled": true,
-            "certificate_path": "/etc/v2ray-agent/tls/${sslDomain}.crt",
-            "key_path": "/etc/v2ray-agent/tls/${sslDomain}.key"
+            "certificate_path": "/etc/Proxy-agent/tls/${sslDomain}.crt",
+            "key_path": "/etc/Proxy-agent/tls/${sslDomain}.key"
           }
         }
     ]
 }
 EOF
     elif [[ -z "$3" ]]; then
-        rm /etc/v2ray-agent/sing-box/conf/config/02_VLESS_TCP_inbounds.json >/dev/null 2>&1
+        rm /etc/Proxy-agent/sing-box/conf/config/02_VLESS_TCP_inbounds.json >/dev/null 2>&1
     fi
 
     if echo "${selectCustomInstallType}" | grep -q ",1," || [[ "$1" == "all" ]]; then
@@ -4387,7 +5251,7 @@ EOF
         handleSingBox stop
         randomPathFunction
         checkPortOpen "${result[-1]}" "${domain}"
-        cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/03_VLESS_WS_inbounds.json
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/03_VLESS_WS_inbounds.json
 {
     "inbounds":[
         {
@@ -4399,8 +5263,8 @@ EOF
           "tls":{
             "server_name": "${sslDomain}",
             "enabled": true,
-            "certificate_path": "/etc/v2ray-agent/tls/${sslDomain}.crt",
-            "key_path": "/etc/v2ray-agent/tls/${sslDomain}.key"
+            "certificate_path": "/etc/Proxy-agent/tls/${sslDomain}.crt",
+            "key_path": "/etc/Proxy-agent/tls/${sslDomain}.key"
           },
           "transport": {
             "type": "ws",
@@ -4413,7 +5277,7 @@ EOF
 }
 EOF
     elif [[ -z "$3" ]]; then
-        rm /etc/v2ray-agent/sing-box/conf/config/03_VLESS_WS_inbounds.json >/dev/null 2>&1
+        rm /etc/Proxy-agent/sing-box/conf/config/03_VLESS_WS_inbounds.json >/dev/null 2>&1
     fi
 
     if echo "${selectCustomInstallType}" | grep -q ",3," || [[ "$1" == "all" ]]; then
@@ -4428,7 +5292,7 @@ EOF
         handleSingBox stop
         randomPathFunction
         checkPortOpen "${result[-1]}" "${domain}"
-        cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/05_VMess_WS_inbounds.json
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/05_VMess_WS_inbounds.json
 {
     "inbounds":[
         {
@@ -4440,8 +5304,8 @@ EOF
           "tls":{
             "server_name": "${sslDomain}",
             "enabled": true,
-            "certificate_path": "/etc/v2ray-agent/tls/${sslDomain}.crt",
-            "key_path": "/etc/v2ray-agent/tls/${sslDomain}.key"
+            "certificate_path": "/etc/Proxy-agent/tls/${sslDomain}.crt",
+            "key_path": "/etc/Proxy-agent/tls/${sslDomain}.key"
           },
           "transport": {
             "type": "ws",
@@ -4454,7 +5318,7 @@ EOF
 }
 EOF
     elif [[ -z "$3" ]]; then
-        rm /etc/v2ray-agent/sing-box/conf/config/05_VMess_WS_inbounds.json >/dev/null 2>&1
+        rm /etc/Proxy-agent/sing-box/conf/config/05_VMess_WS_inbounds.json >/dev/null 2>&1
     fi
 
     # VLESS_Reality_Vision
@@ -4462,11 +5326,12 @@ EOF
         echoContent yellow "\n================= 配置VLESS+Reality+Vision =================\n"
         initRealityClientServersName
         initRealityKey
+        initRealityShortIds
         echoContent skyBlue "\n开始配置VLESS+Reality+Vision协议端口"
         echo
         mapfile -t result < <(initSingBoxPort "${singBoxVLESSRealityVisionPort}")
         echoContent green "\n ---> VLESS_Reality_Vision端口：${result[-1]}"
-        cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/07_VLESS_vision_reality_inbounds.json
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/07_VLESS_vision_reality_inbounds.json
 {
   "inbounds": [
     {
@@ -4486,8 +5351,8 @@ EOF
             },
             "private_key": "${realityPrivateKey}",
             "short_id": [
-                "",
-                "6ba85179e30d4fc2"
+                "${realityShortId1}",
+                "${realityShortId2}"
             ]
         }
       }
@@ -4496,52 +5361,13 @@ EOF
 }
 EOF
     elif [[ -z "$3" ]]; then
-        rm /etc/v2ray-agent/sing-box/conf/config/07_VLESS_vision_reality_inbounds.json >/dev/null 2>&1
+        rm /etc/Proxy-agent/sing-box/conf/config/07_VLESS_vision_reality_inbounds.json >/dev/null 2>&1
     fi
 
-    if echo "${selectCustomInstallType}" | grep -q ",8," || [[ "$1" == "all" ]]; then
-        echoContent yellow "\n================== 配置VLESS+Reality+gRPC ==================\n"
-        initRealityClientServersName
-        initRealityKey
-        echoContent skyBlue "\n开始配置VLESS+Reality+gRPC协议端口"
-        echo
-        mapfile -t result < <(initSingBoxPort "${singBoxVLESSRealityGRPCPort}")
-        echoContent green "\n ---> VLESS_Reality_gPRC端口：${result[-1]}"
-        cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/08_VLESS_vision_gRPC_inbounds.json
-{
-  "inbounds": [
-    {
-      "type": "vless",
-      "listen":"::",
-      "listen_port":${result[-1]},
-      "users":$(initSingBoxClients 8),
-      "tag": "VLESSRealityGRPC",
-      "tls": {
-        "enabled": true,
-        "server_name": "${realityServerName}",
-        "reality": {
-            "enabled": true,
-            "handshake":{
-                "server":"${realityServerName}",
-                "server_port":${realityDomainPort}
-            },
-            "private_key": "${realityPrivateKey}",
-            "short_id": [
-                "",
-                "6ba85179e30d4fc2"
-            ]
-        }
-      },
-      "transport": {
-          "type": "grpc",
-          "service_name": "grpc"
-      }
-    }
-  ]
-}
-EOF
-    elif [[ -z "$3" ]]; then
-        rm /etc/v2ray-agent/sing-box/conf/config/08_VLESS_vision_gRPC_inbounds.json >/dev/null 2>&1
+    # VLESS+Reality+gRPC - 已移除，推荐使用XHTTP
+    # 清理旧配置文件
+    if [[ -z "$3" ]]; then
+        rm /etc/Proxy-agent/sing-box/conf/config/08_VLESS_vision_gRPC_inbounds.json >/dev/null 2>&1
     fi
 
     if echo "${selectCustomInstallType}" | grep -q ",6," || [[ "$1" == "all" ]]; then
@@ -4551,31 +5377,41 @@ EOF
         mapfile -t result < <(initSingBoxPort "${singBoxHysteria2Port}")
         echoContent green "\n ---> Hysteria2端口：${result[-1]}"
         initHysteria2Network
-        cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/06_hysteria2_inbounds.json
+
+        # 构建obfs配置（如果启用）
+        local hysteria2ObfsConfig=""
+        if [[ -n "${hysteria2ObfsPassword}" ]]; then
+            hysteria2ObfsConfig='"obfs": {"type": "salamander", "password": "'"${hysteria2ObfsPassword}"'"},'
+        fi
+
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/06_hysteria2_inbounds.json
 {
     "inbounds": [
         {
             "type": "hysteria2",
+            "tag": "hysteria2-in",
             "listen": "::",
             "listen_port": ${result[-1]},
             "users": $(initSingBoxClients 6),
             "up_mbps":${hysteria2ClientDownloadSpeed},
             "down_mbps":${hysteria2ClientUploadSpeed},
+            "ignore_client_bandwidth": false,
+            ${hysteria2ObfsConfig}
             "tls": {
                 "enabled": true,
                 "server_name":"${sslDomain}",
                 "alpn": [
                     "h3"
                 ],
-                "certificate_path": "/etc/v2ray-agent/tls/${sslDomain}.crt",
-                "key_path": "/etc/v2ray-agent/tls/${sslDomain}.key"
+                "certificate_path": "/etc/Proxy-agent/tls/${sslDomain}.crt",
+                "key_path": "/etc/Proxy-agent/tls/${sslDomain}.key"
             }
         }
     ]
 }
 EOF
     elif [[ -z "$3" ]]; then
-        rm /etc/v2ray-agent/sing-box/conf/config/06_hysteria2_inbounds.json >/dev/null 2>&1
+        rm /etc/Proxy-agent/sing-box/conf/config/06_hysteria2_inbounds.json >/dev/null 2>&1
     fi
 
     if echo "${selectCustomInstallType}" | grep -q ",4," || [[ "$1" == "all" ]]; then
@@ -4584,7 +5420,7 @@ EOF
         echo
         mapfile -t result < <(initSingBoxPort "${singBoxTrojanPort}")
         echoContent green "\n ---> Trojan端口：${result[-1]}"
-        cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/04_trojan_TCP_inbounds.json
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/04_trojan_TCP_inbounds.json
 {
     "inbounds": [
         {
@@ -4595,15 +5431,15 @@ EOF
             "tls": {
                 "enabled": true,
                 "server_name":"${sslDomain}",
-                "certificate_path": "/etc/v2ray-agent/tls/${sslDomain}.crt",
-                "key_path": "/etc/v2ray-agent/tls/${sslDomain}.key"
+                "certificate_path": "/etc/Proxy-agent/tls/${sslDomain}.crt",
+                "key_path": "/etc/Proxy-agent/tls/${sslDomain}.key"
             }
         }
     ]
 }
 EOF
     elif [[ -z "$3" ]]; then
-        rm /etc/v2ray-agent/sing-box/conf/config/04_trojan_TCP_inbounds.json >/dev/null 2>&1
+        rm /etc/Proxy-agent/sing-box/conf/config/04_trojan_TCP_inbounds.json >/dev/null 2>&1
     fi
 
     if echo "${selectCustomInstallType}" | grep -q ",9," || [[ "$1" == "all" ]]; then
@@ -4613,7 +5449,7 @@ EOF
         mapfile -t result < <(initSingBoxPort "${singBoxTuicPort}")
         echoContent green "\n ---> Tuic端口：${result[-1]}"
         initTuicProtocol
-        cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/09_tuic_inbounds.json
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/09_tuic_inbounds.json
 {
      "inbounds": [
         {
@@ -4623,21 +5459,24 @@ EOF
             "listen_port": ${result[-1]},
             "users": $(initSingBoxClients 9),
             "congestion_control": "${tuicAlgorithm}",
+            "auth_timeout": "3s",
+            "zero_rtt_handshake": false,
+            "heartbeat": "10s",
             "tls": {
                 "enabled": true,
                 "server_name":"${sslDomain}",
                 "alpn": [
                     "h3"
                 ],
-                "certificate_path": "/etc/v2ray-agent/tls/${sslDomain}.crt",
-                "key_path": "/etc/v2ray-agent/tls/${sslDomain}.key"
+                "certificate_path": "/etc/Proxy-agent/tls/${sslDomain}.crt",
+                "key_path": "/etc/Proxy-agent/tls/${sslDomain}.key"
             }
         }
     ]
 }
 EOF
     elif [[ -z "$3" ]]; then
-        rm /etc/v2ray-agent/sing-box/conf/config/09_tuic_inbounds.json >/dev/null 2>&1
+        rm /etc/Proxy-agent/sing-box/conf/config/09_tuic_inbounds.json >/dev/null 2>&1
     fi
 
     if echo "${selectCustomInstallType}" | grep -q ",10," || [[ "$1" == "all" ]]; then
@@ -4646,7 +5485,7 @@ EOF
         echo
         mapfile -t result < <(initSingBoxPort "${singBoxNaivePort}")
         echoContent green "\n ---> Naive端口：${result[-1]}"
-        cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/10_naive_inbounds.json
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/10_naive_inbounds.json
 {
      "inbounds": [
         {
@@ -4658,15 +5497,15 @@ EOF
             "tls": {
                 "enabled": true,
                 "server_name":"${sslDomain}",
-                "certificate_path": "/etc/v2ray-agent/tls/${sslDomain}.crt",
-                "key_path": "/etc/v2ray-agent/tls/${sslDomain}.key"
+                "certificate_path": "/etc/Proxy-agent/tls/${sslDomain}.crt",
+                "key_path": "/etc/Proxy-agent/tls/${sslDomain}.key"
             }
         }
     ]
 }
 EOF
     elif [[ -z "$3" ]]; then
-        rm /etc/v2ray-agent/sing-box/conf/config/10_naive_inbounds.json >/dev/null 2>&1
+        rm /etc/Proxy-agent/sing-box/conf/config/10_naive_inbounds.json >/dev/null 2>&1
     fi
     if echo "${selectCustomInstallType}" | grep -q ",11," || [[ "$1" == "all" ]]; then
         echoContent yellow "\n===================== 配置VMess+HTTPUpgrade =====================\n"
@@ -4683,7 +5522,7 @@ EOF
         checkPortOpen "${result[-1]}" "${domain}"
         singBoxNginxConfig "$1" "${result[-1]}"
         bootStartup nginx
-        cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/11_VMess_HTTPUpgrade_inbounds.json
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/11_VMess_HTTPUpgrade_inbounds.json
 {
     "inbounds":[
         {
@@ -4701,7 +5540,7 @@ EOF
 }
 EOF
     elif [[ -z "$3" ]]; then
-        rm /etc/v2ray-agent/sing-box/conf/config/11_VMess_HTTPUpgrade_inbounds.json >/dev/null 2>&1
+        rm /etc/Proxy-agent/sing-box/conf/config/11_VMess_HTTPUpgrade_inbounds.json >/dev/null 2>&1
     fi
 
     if echo "${selectCustomInstallType}" | grep -q ",13," || [[ "$1" == "all" ]]; then
@@ -4710,7 +5549,7 @@ EOF
         echo
         mapfile -t result < <(initSingBoxPort "${singBoxAnyTLSPort}")
         echoContent green "\n ---> AnyTLS端口：${result[-1]}"
-        cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/13_anytls_inbounds.json
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/13_anytls_inbounds.json
 {
     "inbounds": [
         {
@@ -4722,15 +5561,44 @@ EOF
             "tls": {
                 "enabled": true,
                 "server_name":"${sslDomain}",
-                "certificate_path": "/etc/v2ray-agent/tls/${sslDomain}.crt",
-                "key_path": "/etc/v2ray-agent/tls/${sslDomain}.key"
+                "certificate_path": "/etc/Proxy-agent/tls/${sslDomain}.crt",
+                "key_path": "/etc/Proxy-agent/tls/${sslDomain}.key"
             }
         }
     ]
 }
 EOF
     elif [[ -z "$3" ]]; then
-        rm /etc/v2ray-agent/sing-box/conf/config/13_anytls_inbounds.json >/dev/null 2>&1
+        rm /etc/Proxy-agent/sing-box/conf/config/13_anytls_inbounds.json >/dev/null 2>&1
+    fi
+
+    # Shadowsocks 2022
+    if echo "${selectCustomInstallType}" | grep -q ",14," || [[ "$1" == "all" ]]; then
+        echoContent yellow "\n================== 配置 Shadowsocks 2022 ==================\n"
+        echoContent skyBlue "\n开始配置Shadowsocks 2022协议"
+        echo
+        initSS2022Config
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/14_ss2022_inbounds.json
+{
+    "inbounds": [
+        {
+            "type": "shadowsocks",
+            "listen": "::",
+            "tag": "ss2022-in",
+            "listen_port": ${ss2022Port},
+            "method": "${ss2022Method}",
+            "password": "${ss2022ServerKey}",
+            "users": $(initSingBoxClients 14),
+            "multiplex": {
+                "enabled": true
+            }
+        }
+    ]
+}
+EOF
+        echoContent green " ---> Shadowsocks 2022配置完成"
+    elif [[ -z "$3" ]]; then
+        rm /etc/Proxy-agent/sing-box/conf/config/14_ss2022_inbounds.json >/dev/null 2>&1
     fi
 
     if [[ -z "$3" ]]; then
@@ -4749,11 +5617,23 @@ EOF
         removeSingBoxConfig socks5_outbound.json
         removeSingBoxConfig block_domain_outbound
         removeSingBoxConfig dns
+
+        # 确保基础 direct 出站存在，sing-box 需要至少一个默认出站
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
+{
+    "outbounds": [
+        {
+            "type": "direct",
+            "tag": "direct"
+        }
+    ]
+}
+EOF
     fi
 }
 # 初始化 sing-box订阅配置
 initSubscribeLocalConfig() {
-    rm -rf /etc/v2ray-agent/subscribe_local/sing-box/*
+    rm -rf /etc/Proxy-agent/subscribe_local/sing-box/*
 }
 # 通用
 defaultBase64Code() {
@@ -4765,8 +5645,8 @@ defaultBase64Code() {
     local path=$6
     local user=
     user=$(echo "${email}" | awk -F "[-]" '{print $1}')
-    if [[ ! -f "/etc/v2ray-agent/subscribe_local/sing-box/${user}" ]]; then
-        echo [] >"/etc/v2ray-agent/subscribe_local/sing-box/${user}"
+    if [[ ! -f "/etc/Proxy-agent/subscribe_local/sing-box/${user}" ]]; then
+        echo [] >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
     fi
     local singBoxSubscribeLocalConfig=
     if [[ "${type}" == "vlesstcp" ]]; then
@@ -4776,10 +5656,10 @@ defaultBase64Code() {
 
         echoContent yellow " ---> 格式化明文(VLESS+TCP+TLS_Vision)"
         echoContent green "协议类型:VLESS，地址:${currentHost}，端口:${port}，用户ID:${id}，安全:tls，client-fingerprint: chrome，传输方式:tcp，flow:xtls-rprx-vision，账户名:${email}\n"
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/default/${user}"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
 vless://${id}@${currentHost}:${port}?encryption=none&security=tls&type=tcp&host=${currentHost}&fp=chrome&headerType=none&sni=${currentHost}&flow=xtls-rprx-vision#${email}
 EOF
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/clashMeta/${user}"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
   - name: "${email}"
     type: vless
     server: ${currentHost}
@@ -4791,8 +5671,8 @@ EOF
     flow: xtls-rprx-vision
     client-fingerprint: chrome
 EOF
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vless\",\"server\":\"${currentHost}\",\"server_port\":${port},\"uuid\":\"${id}\",\"flow\":\"xtls-rprx-vision\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"packet_encoding\":\"xudp\"}]" "/etc/v2ray-agent/subscribe_local/sing-box/${user}")
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/v2ray-agent/subscribe_local/sing-box/${user}"
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vless\",\"server\":\"${currentHost}\",\"server_port\":${port},\"uuid\":\"${id}\",\"flow\":\"xtls-rprx-vision\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"packet_encoding\":\"xudp\"}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
 
         echoContent yellow " ---> 二维码 VLESS(VLESS+TCP+TLS_Vision)"
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40${currentHost}%3A${port}%3Fencryption%3Dnone%26fp%3Dchrome%26security%3Dtls%26type%3Dtcp%26${currentHost}%3D${currentHost}%26headerType%3Dnone%26sni%3D${currentHost}%26flow%3Dxtls-rprx-vision%23${email}\n"
@@ -4807,10 +5687,10 @@ EOF
         echoContent green "    vmess://${qrCodeBase64Default}\n"
         echoContent yellow " ---> 二维码 vmess(VMess+WS+TLS)"
 
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/default/${user}"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
 vmess://${qrCodeBase64Default}
 EOF
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/clashMeta/${user}"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
   - name: "${email}"
     type: vmess
     server: ${add}
@@ -4828,9 +5708,9 @@ EOF
       headers:
         Host: ${currentHost}
 EOF
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vmess\",\"server\":\"${add}\",\"server_port\":${port},\"uuid\":\"${id}\",\"alter_id\":0,\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"packet_encoding\":\"packetaddr\",\"transport\":{\"type\":\"ws\",\"path\":\"${path}\",\"max_early_data\":2048,\"early_data_header_name\":\"Sec-WebSocket-Protocol\"}}]" "/etc/v2ray-agent/subscribe_local/sing-box/${user}")
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vmess\",\"server\":\"${add}\",\"server_port\":${port},\"uuid\":\"${id}\",\"alter_id\":0,\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"packet_encoding\":\"packetaddr\",\"transport\":{\"type\":\"ws\",\"path\":\"${path}\",\"max_early_data\":2048,\"early_data_header_name\":\"Sec-WebSocket-Protocol\"}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
 
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/v2ray-agent/subscribe_local/sing-box/${user}"
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
 
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vmess://${qrCodeBase64Default}\n"
 
@@ -4842,10 +5722,10 @@ EOF
         echoContent yellow " ---> 格式化明文(VLESS+WS+TLS)"
         echoContent green "    协议类型:VLESS，地址:${add}，伪装域名/SNI:${currentHost}，端口:${port}，client-fingerprint: chrome,用户ID:${id}，安全:tls，传输方式:ws，路径:${path}，账户名:${email}\n"
 
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/default/${user}"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
 vless://${id}@${add}:${port}?encryption=none&security=tls&type=ws&host=${currentHost}&sni=${currentHost}&fp=chrome&path=${path}#${email}
 EOF
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/clashMeta/${user}"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
   - name: "${email}"
     type: vless
     server: ${add}
@@ -4862,8 +5742,8 @@ EOF
         Host: ${currentHost}
 EOF
 
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vless\",\"server\":\"${add}\",\"server_port\":${port},\"uuid\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"multiplex\":{\"enabled\":false,\"protocol\":\"smux\",\"max_streams\":32},\"packet_encoding\":\"xudp\",\"transport\":{\"type\":\"ws\",\"path\":\"${path}\",\"headers\":{\"Host\":\"${currentHost}\"}}}]" "/etc/v2ray-agent/subscribe_local/sing-box/${user}")
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/v2ray-agent/subscribe_local/sing-box/${user}"
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vless\",\"server\":\"${add}\",\"server_port\":${port},\"uuid\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"multiplex\":{\"enabled\":false,\"protocol\":\"smux\",\"max_streams\":32},\"packet_encoding\":\"xudp\",\"transport\":{\"type\":\"ws\",\"path\":\"${path}\",\"headers\":{\"Host\":\"${currentHost}\"}}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
 
         echoContent yellow " ---> 二维码 VLESS(VLESS+WS+TLS)"
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40${add}%3A${port}%3Fencryption%3Dnone%26security%3Dtls%26type%3Dws%26host%3D${currentHost}%26fp%3Dchrome%26sni%3D${currentHost}%26path%3D${path}%23${email}"
@@ -4871,15 +5751,15 @@ EOF
     elif [[ "${type}" == "vlessXHTTP" ]]; then
 
         echoContent yellow " ---> 通用格式(VLESS+reality+XHTTP)"
-        echoContent green "    vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality&type=xhttp&sni=${xrayVLESSRealityXHTTPServerName}&host=${xrayVLESSRealityXHTTPServerName}&fp=chrome&path=${path}&pbk=${currentRealityXHTTPPublicKey}&sid=6ba85179e30d4fc2#${email}\n"
+        echoContent green "    vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality&type=xhttp&sni=${xrayVLESSRealityXHTTPServerName}&host=${xrayVLESSRealityXHTTPServerName}&fp=chrome&path=${path}&pbk=${currentRealityXHTTPPublicKey}&sid=${currentRealityXHTTPShortId}#${email}\n"
 
         echoContent yellow " ---> 格式化明文(VLESS+reality+XHTTP)"
-        echoContent green "协议类型:VLESS reality，地址:$(getPublicIP)，publicKey:${currentRealityXHTTPPublicKey}，shortId: 6ba85179e30d4fc2,serverNames：${xrayVLESSRealityXHTTPServerName}，端口:${port}，路径：${path}，SNI:${xrayVLESSRealityXHTTPServerName}，伪装域名:${xrayVLESSRealityXHTTPServerName}，用户ID:${id}，传输方式:xhttp，账户名:${email}\n"
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/default/${user}"
-vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality&type=xhttp&sni=${xrayVLESSRealityXHTTPServerName}&fp=chrome&path=${path}&pbk=${currentRealityXHTTPPublicKey}&sid=6ba85179e30d4fc2#${email}
+        echoContent green "协议类型:VLESS reality，地址:$(getPublicIP)，publicKey:${currentRealityXHTTPPublicKey}，shortId: ${currentRealityXHTTPShortId},serverNames：${xrayVLESSRealityXHTTPServerName}，端口:${port}，路径：${path}，SNI:${xrayVLESSRealityXHTTPServerName}，伪装域名:${xrayVLESSRealityXHTTPServerName}，用户ID:${id}，传输方式:xhttp，账户名:${email}\n"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
+vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality&type=xhttp&sni=${xrayVLESSRealityXHTTPServerName}&fp=chrome&path=${path}&pbk=${currentRealityXHTTPPublicKey}&sid=${currentRealityXHTTPShortId}#${email}
 EOF
         echoContent yellow " ---> 二维码 VLESS(VLESS+reality+XHTTP)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40$(getPublicIP)%3A${port}%3Fencryption%3Dnone%26security%3Dreality%26type%3Dxhttp%26sni%3D${xrayVLESSRealityXHTTPServerName}%26fp%3Dchrome%26path%3D${path}%26host%3D${xrayVLESSRealityXHTTPServerName}%26pbk%3D${currentRealityXHTTPPublicKey}%26sid%3D6ba85179e30d4fc2%23${email}\n"
+        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40$(getPublicIP)%3A${port}%3Fencryption%3Dnone%26security%3Dreality%26type%3Dxhttp%26sni%3D${xrayVLESSRealityXHTTPServerName}%26fp%3Dchrome%26path%3D${path}%26host%3D${xrayVLESSRealityXHTTPServerName}%26pbk%3D${currentRealityXHTTPPublicKey}%26sid%3D${currentRealityXHTTPShortId}%23${email}\n"
 
     elif
         [[ "${type}" == "vlessgrpc" ]]
@@ -4891,10 +5771,10 @@ EOF
         echoContent yellow " ---> 格式化明文(VLESS+gRPC+TLS)"
         echoContent green "    协议类型:VLESS，地址:${add}，伪装域名/SNI:${currentHost}，端口:${port}，用户ID:${id}，安全:tls，传输方式:gRPC，alpn:h2，client-fingerprint: chrome,serviceName:${currentPath}grpc，账户名:${email}\n"
 
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/default/${user}"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
 vless://${id}@${add}:${port}?encryption=none&security=tls&type=grpc&host=${currentHost}&path=${currentPath}grpc&serviceName=${currentPath}grpc&fp=chrome&alpn=h2&sni=${currentHost}#${email}
 EOF
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/clashMeta/${user}"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
   - name: "${email}"
     type: vless
     server: ${add}
@@ -4909,8 +5789,8 @@ EOF
       grpc-service-name: ${currentPath}grpc
 EOF
 
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\": \"vless\",\"server\": \"${add}\",\"server_port\": ${port},\"uuid\": \"${id}\",\"tls\": {  \"enabled\": true,  \"server_name\": \"${currentHost}\",  \"utls\": {    \"enabled\": true,    \"fingerprint\": \"chrome\"  }},\"packet_encoding\": \"xudp\",\"transport\": {  \"type\": \"grpc\",  \"service_name\": \"${currentPath}grpc\"}}]" "/etc/v2ray-agent/subscribe_local/sing-box/${user}")
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/v2ray-agent/subscribe_local/sing-box/${user}"
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\": \"vless\",\"server\": \"${add}\",\"server_port\": ${port},\"uuid\": \"${id}\",\"tls\": {  \"enabled\": true,  \"server_name\": \"${currentHost}\",  \"utls\": {    \"enabled\": true,    \"fingerprint\": \"chrome\"  }},\"packet_encoding\": \"xudp\",\"transport\": {  \"type\": \"grpc\",  \"service_name\": \"${currentPath}grpc\"}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
 
         echoContent yellow " ---> 二维码 VLESS(VLESS+gRPC+TLS)"
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40${add}%3A${port}%3Fencryption%3Dnone%26security%3Dtls%26type%3Dgrpc%26host%3D${currentHost}%26serviceName%3D${currentPath}grpc%26fp%3Dchrome%26path%3D${currentPath}grpc%26sni%3D${currentHost}%26alpn%3Dh2%23${email}"
@@ -4920,11 +5800,11 @@ EOF
         echoContent yellow " ---> Trojan(TLS)"
         echoContent green "    trojan://${id}@${currentHost}:${port}?peer=${currentHost}&fp=chrome&sni=${currentHost}&alpn=http/1.1#${currentHost}_Trojan\n"
 
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/default/${user}"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
 trojan://${id}@${currentHost}:${port}?peer=${currentHost}&fp=chrome&sni=${currentHost}&alpn=http/1.1#${email}_Trojan
 EOF
 
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/clashMeta/${user}"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
   - name: "${email}"
     type: trojan
     server: ${currentHost}
@@ -4934,8 +5814,8 @@ EOF
     udp: true
     sni: ${currentHost}
 EOF
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"trojan\",\"server\":\"${currentHost}\",\"server_port\":${port},\"password\":\"${id}\",\"tls\":{\"alpn\":[\"http/1.1\"],\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}}}]" "/etc/v2ray-agent/subscribe_local/sing-box/${user}")
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/v2ray-agent/subscribe_local/sing-box/${user}"
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"trojan\",\"server\":\"${currentHost}\",\"server_port\":${port},\"password\":\"${id}\",\"tls\":{\"alpn\":[\"http/1.1\"],\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
 
         echoContent yellow " ---> 二维码 Trojan(TLS)"
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=trojan%3a%2f%2f${id}%40${currentHost}%3a${port}%3fpeer%3d${currentHost}%26fp%3Dchrome%26sni%3d${currentHost}%26alpn%3Dhttp/1.1%23${email}\n"
@@ -4945,10 +5825,10 @@ EOF
 
         echoContent yellow " ---> Trojan gRPC(TLS)"
         echoContent green "    trojan://${id}@${add}:${port}?encryption=none&peer=${currentHost}&fp=chrome&security=tls&type=grpc&sni=${currentHost}&alpn=h2&path=${currentPath}trojangrpc&serviceName=${currentPath}trojangrpc#${email}\n"
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/default/${user}"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
 trojan://${id}@${add}:${port}?encryption=none&peer=${currentHost}&security=tls&type=grpc&fp=chrome&sni=${currentHost}&alpn=h2&path=${currentPath}trojangrpc&serviceName=${currentPath}trojangrpc#${email}
 EOF
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/clashMeta/${user}"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
   - name: "${email}"
     server: ${add}
     port: ${port}
@@ -4961,8 +5841,8 @@ EOF
       grpc-service-name: ${currentPath}trojangrpc
 EOF
 
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"trojan\",\"server\":\"${add}\",\"server_port\":${port},\"password\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"insecure\":true,\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"transport\":{\"type\":\"grpc\",\"service_name\":\"${currentPath}trojangrpc\",\"idle_timeout\":\"15s\",\"ping_timeout\":\"15s\",\"permit_without_stream\":false},\"multiplex\":{\"enabled\":false,\"protocol\":\"smux\",\"max_streams\":32}}]" "/etc/v2ray-agent/subscribe_local/sing-box/${user}")
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/v2ray-agent/subscribe_local/sing-box/${user}"
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"trojan\",\"server\":\"${add}\",\"server_port\":${port},\"password\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"insecure\":true,\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"transport\":{\"type\":\"grpc\",\"service_name\":\"${currentPath}trojangrpc\",\"idle_timeout\":\"15s\",\"ping_timeout\":\"15s\",\"permit_without_stream\":false},\"multiplex\":{\"enabled\":false,\"protocol\":\"smux\",\"max_streams\":32}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
 
         echoContent yellow " ---> 二维码 Trojan gRPC(TLS)"
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=trojan%3a%2f%2f${id}%40${add}%3a${port}%3Fencryption%3Dnone%26fp%3Dchrome%26security%3Dtls%26peer%3d${currentHost}%26type%3Dgrpc%26sni%3d${currentHost}%26path%3D${currentPath}trojangrpc%26alpn%3Dh2%26serviceName%3D${currentPath}trojangrpc%23${email}\n"
@@ -4978,14 +5858,27 @@ EOF
             multiPortEncode="mport%3D${port}%26"
         fi
 
-        echoContent green "    hysteria2://${id}@${currentHost}:${singBoxHysteria2Port}?${multiPort}peer=${currentHost}&insecure=0&sni=${currentHost}&alpn=h3#${email}\n"
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/default/${user}"
-hysteria2://${id}@${currentHost}:${singBoxHysteria2Port}?${multiPort}peer=${currentHost}&insecure=0&sni=${currentHost}&alpn=h3#${email}
+        # 构建obfs参数
+        local obfsUrlParam=""
+        local obfsUrlParamEncode=""
+        local clashMetaObfs=""
+        local singBoxObfs=""
+        if [[ -n "${hysteria2ObfsPassword}" ]]; then
+            obfsUrlParam="obfs=salamander&obfs-password=${hysteria2ObfsPassword}&"
+            obfsUrlParamEncode="obfs%3Dsamalander%26obfs-password%3D${hysteria2ObfsPassword}%26"
+            clashMetaObfs="    obfs: salamander
+    obfs-password: ${hysteria2ObfsPassword}"
+            singBoxObfs=",\"obfs\":{\"type\":\"salamander\",\"password\":\"${hysteria2ObfsPassword}\"}"
+        fi
+
+        echoContent green "    hysteria2://${id}@${currentHost}:${singBoxHysteria2Port}?${multiPort}${obfsUrlParam}peer=${currentHost}&insecure=0&sni=${currentHost}&alpn=h3#${email}\n"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
+hysteria2://${id}@${currentHost}:${singBoxHysteria2Port}?${multiPort}${obfsUrlParam}peer=${currentHost}&insecure=0&sni=${currentHost}&alpn=h3#${email}
 EOF
         echoContent yellow " ---> v2rayN(hysteria+TLS)"
         echo "{\"server\": \"${currentHost}:${port}\",\"socks5\": { \"listen\": \"127.0.0.1:7798\", \"timeout\": 300},\"auth\":\"${id}\",\"tls\":{\"sni\":\"${currentHost}\"}}" | jq
 
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/clashMeta/${user}"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
   - name: "${email}"
     type: hysteria2
     server: ${currentHost}
@@ -4996,13 +5889,14 @@ EOF
     sni: ${currentHost}
     up: "${hysteria2ClientUploadSpeed} Mbps"
     down: "${hysteria2ClientDownloadSpeed} Mbps"
+${clashMetaObfs}
 EOF
 
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"hysteria2\",\"server\":\"${currentHost}\",\"server_port\":${singBoxHysteria2Port},\"up_mbps\":${hysteria2ClientUploadSpeed},\"down_mbps\":${hysteria2ClientDownloadSpeed},\"password\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"alpn\":[\"h3\"]}}]" "/etc/v2ray-agent/subscribe_local/sing-box/${user}")
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/v2ray-agent/subscribe_local/sing-box/${user}"
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"hysteria2\",\"server\":\"${currentHost}\",\"server_port\":${singBoxHysteria2Port},\"up_mbps\":${hysteria2ClientUploadSpeed},\"down_mbps\":${hysteria2ClientDownloadSpeed},\"password\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"alpn\":[\"h3\"]}${singBoxObfs}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
 
         echoContent yellow " ---> 二维码 Hysteria2(TLS)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=hysteria2%3A%2F%2F${id}%40${currentHost}%3A${singBoxHysteria2Port}%3F${multiPortEncode}peer%3D${currentHost}%26insecure%3D0%26sni%3D${currentHost}%26alpn%3Dh3%23${email}\n"
+        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=hysteria2%3A%2F%2F${id}%40${currentHost}%3A${singBoxHysteria2Port}%3F${multiPortEncode}${obfsUrlParamEncode}peer%3D${currentHost}%26insecure%3D0%26sni%3D${currentHost}%26alpn%3Dh3%23${email}\n"
 
     elif [[ "${type}" == "vlessReality" ]]; then
         local realityServerName=${xrayVLESSRealityServerName}
@@ -5014,14 +5908,14 @@ EOF
             publicKey=${singBoxVLESSRealityPublicKey}
         fi
         echoContent yellow " ---> 通用格式(VLESS+reality+uTLS+Vision)"
-        echoContent green "    vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality&pqv=${realityMldsa65Verify}&type=tcp&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=6ba85179e30d4fc2&flow=xtls-rprx-vision#${email}\n"
+        echoContent green "    vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality&pqv=${realityMldsa65Verify}&type=tcp&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=${currentRealityShortId}&flow=xtls-rprx-vision#${email}\n"
 
         echoContent yellow " ---> 格式化明文(VLESS+reality+uTLS+Vision)"
-        echoContent green "协议类型:VLESS reality，地址:$(getPublicIP)，publicKey:${publicKey}，shortId: 6ba85179e30d4fc2，pqv=${realityMldsa65Verify}，serverNames：${realityServerName}，端口:${port}，用户ID:${id}，传输方式:tcp，账户名:${email}\n"
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/default/${user}"
-vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality&pqv=${realityMldsa65Verify}&type=tcp&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=6ba85179e30d4fc2&flow=xtls-rprx-vision#${email}
+        echoContent green "协议类型:VLESS reality，地址:$(getPublicIP)，publicKey:${publicKey}，shortId: ${currentRealityShortId}，pqv=${realityMldsa65Verify}，serverNames：${realityServerName}，端口:${port}，用户ID:${id}，传输方式:tcp，账户名:${email}\n"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
+vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality&pqv=${realityMldsa65Verify}&type=tcp&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=${currentRealityShortId}&flow=xtls-rprx-vision#${email}
 EOF
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/clashMeta/${user}"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
   - name: "${email}"
     type: vless
     server: $(getPublicIP)
@@ -5034,15 +5928,15 @@ EOF
     servername: ${realityServerName}
     reality-opts:
       public-key: ${publicKey}
-      short-id: 6ba85179e30d4fc2
+      short-id: ${currentRealityShortId}
     client-fingerprint: chrome
 EOF
 
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vless\",\"server\":\"$(getPublicIP)\",\"server_port\":${port},\"uuid\":\"${id}\",\"flow\":\"xtls-rprx-vision\",\"tls\":{\"enabled\":true,\"server_name\":\"${realityServerName}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"},\"reality\":{\"enabled\":true,\"public_key\":\"${publicKey}\",\"short_id\":\"6ba85179e30d4fc2\"}},\"packet_encoding\":\"xudp\"}]" "/etc/v2ray-agent/subscribe_local/sing-box/${user}")
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/v2ray-agent/subscribe_local/sing-box/${user}"
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vless\",\"server\":\"$(getPublicIP)\",\"server_port\":${port},\"uuid\":\"${id}\",\"flow\":\"xtls-rprx-vision\",\"tls\":{\"enabled\":true,\"server_name\":\"${realityServerName}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"},\"reality\":{\"enabled\":true,\"public_key\":\"${publicKey}\",\"short_id\":\"${currentRealityShortId}\"}},\"packet_encoding\":\"xudp\"}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
 
         echoContent yellow " ---> 二维码 VLESS(VLESS+reality+uTLS+Vision)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40$(getPublicIP)%3A${port}%3Fencryption%3Dnone%26security%3Dreality%26type%3Dtcp%26sni%3D${realityServerName}%26fp%3Dchrome%26pbk%3D${publicKey}%26sid%3D6ba85179e30d4fc2%26flow%3Dxtls-rprx-vision%23${email}\n"
+        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40$(getPublicIP)%3A${port}%3Fencryption%3Dnone%26security%3Dreality%26type%3Dtcp%26sni%3D${realityServerName}%26fp%3Dchrome%26pbk%3D${publicKey}%26sid%3D${currentRealityShortId}%26flow%3Dxtls-rprx-vision%23${email}\n"
 
     elif [[ "${type}" == "vlessRealityGRPC" ]]; then
         local realityServerName=${xrayVLESSRealityServerName}
@@ -5056,15 +5950,15 @@ EOF
 
         echoContent yellow " ---> 通用格式(VLESS+reality+uTLS+gRPC)"
         # pqv=${realityMldsa65Verify}&
-        echoContent green "    vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality&type=grpc&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=6ba85179e30d4fc2&path=grpc&serviceName=grpc#${email}\n"
+        echoContent green "    vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality&type=grpc&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=${currentRealityShortId}&path=grpc&serviceName=grpc#${email}\n"
 
         echoContent yellow " ---> 格式化明文(VLESS+reality+uTLS+gRPC)"
         # pqv=${realityMldsa65Verify}，
-        echoContent green "协议类型:VLESS reality，serviceName:grpc，地址:$(getPublicIP)，publicKey:${publicKey}，shortId: 6ba85179e30d4fc2，serverNames：${realityServerName}，端口:${port}，用户ID:${id}，传输方式:gRPC，client-fingerprint：chrome，账户名:${email}\n"
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/default/${user}"
-vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality&pqv=${realityMldsa65Verify}&type=grpc&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=6ba85179e30d4fc2&path=grpc&serviceName=grpc#${email}
+        echoContent green "协议类型:VLESS reality，serviceName:grpc，地址:$(getPublicIP)，publicKey:${publicKey}，shortId: ${currentRealityShortId}，serverNames：${realityServerName}，端口:${port}，用户ID:${id}，传输方式:gRPC，client-fingerprint：chrome，账户名:${email}\n"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
+vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality&pqv=${realityMldsa65Verify}&type=grpc&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=${currentRealityShortId}&path=grpc&serviceName=grpc#${email}
 EOF
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/clashMeta/${user}"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
   - name: "${email}"
     type: vless
     server: $(getPublicIP)
@@ -5076,17 +5970,17 @@ EOF
     servername: ${realityServerName}
     reality-opts:
       public-key: ${publicKey}
-      short-id: 6ba85179e30d4fc2
+      short-id: ${currentRealityShortId}
     grpc-opts:
       grpc-service-name: "grpc"
     client-fingerprint: chrome
 EOF
 
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vless\",\"server\":\"$(getPublicIP)\",\"server_port\":${port},\"uuid\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${realityServerName}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"},\"reality\":{\"enabled\":true,\"public_key\":\"${publicKey}\",\"short_id\":\"6ba85179e30d4fc2\"}},\"packet_encoding\":\"xudp\",\"transport\":{\"type\":\"grpc\",\"service_name\":\"grpc\"}}]" "/etc/v2ray-agent/subscribe_local/sing-box/${user}")
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/v2ray-agent/subscribe_local/sing-box/${user}"
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vless\",\"server\":\"$(getPublicIP)\",\"server_port\":${port},\"uuid\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${realityServerName}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"},\"reality\":{\"enabled\":true,\"public_key\":\"${publicKey}\",\"short_id\":\"${currentRealityShortId}\"}},\"packet_encoding\":\"xudp\",\"transport\":{\"type\":\"grpc\",\"service_name\":\"grpc\"}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
 
         echoContent yellow " ---> 二维码 VLESS(VLESS+reality+uTLS+gRPC)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40$(getPublicIP)%3A${port}%3Fencryption%3Dnone%26security%3Dreality%26type%3Dgrpc%26sni%3D${realityServerName}%26fp%3Dchrome%26pbk%3D${publicKey}%26sid%3D6ba85179e30d4fc2%26path%3Dgrpc%26serviceName%3Dgrpc%23${email}\n"
+        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40$(getPublicIP)%3A${port}%3Fencryption%3Dnone%26security%3Dreality%26type%3Dgrpc%26sni%3D${realityServerName}%26fp%3Dchrome%26pbk%3D${publicKey}%26sid%3D${currentRealityShortId}%26path%3Dgrpc%26serviceName%3Dgrpc%23${email}\n"
     elif [[ "${type}" == "tuic" ]]; then
         local tuicUUID=
         tuicUUID=$(echo "${id}" | awk -F "[_]" '{print $1}')
@@ -5096,19 +5990,19 @@ EOF
 
         if [[ -z "${email}" ]]; then
             echoContent red " ---> 读取配置失败，请重新安装"
-            exit 0
+            exit 1
         fi
 
         echoContent yellow " ---> 格式化明文(Tuic+TLS)"
         echoContent green "    协议类型:Tuic，地址:${currentHost}，端口：${port}，uuid：${tuicUUID}，password：${tuicPassword}，congestion-controller:${tuicAlgorithm}，alpn: h3，账户名:${email}\n"
 
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/default/${user}"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
 tuic://${tuicUUID}:${tuicPassword}@${currentHost}:${port}?congestion_control=${tuicAlgorithm}&alpn=h3&sni=${currentHost}&udp_relay_mode=quic&allow_insecure=0#${email}
 EOF
         echoContent yellow " ---> v2rayN(Tuic+TLS)"
         echo "{\"relay\": {\"server\": \"${currentHost}:${port}\",\"uuid\": \"${tuicUUID}\",\"password\": \"${tuicPassword}\",\"ip\": \"${currentHost}\",\"congestion_control\": \"${tuicAlgorithm}\",\"alpn\": [\"h3\"]},\"local\": {\"server\": \"127.0.0.1:7798\"},\"log_level\": \"warn\"}" | jq
 
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/clashMeta/${user}"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
   - name: "${email}"
     server: ${currentHost}
     type: tuic
@@ -5123,8 +6017,8 @@ EOF
     sni: ${email}
 EOF
 
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\": \"tuic\",\"server\": \"${currentHost}\",\"server_port\": ${port},\"uuid\": \"${tuicUUID}\",\"password\": \"${tuicPassword}\",\"congestion_control\": \"${tuicAlgorithm}\",\"tls\": {\"enabled\": true,\"server_name\": \"${currentHost}\",\"alpn\": [\"h3\"]}}]" "/etc/v2ray-agent/subscribe_local/sing-box/${user}")
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/v2ray-agent/subscribe_local/sing-box/${user}"
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\": \"tuic\",\"server\": \"${currentHost}\",\"server_port\": ${port},\"uuid\": \"${tuicUUID}\",\"password\": \"${tuicPassword}\",\"congestion_control\": \"${tuicAlgorithm}\",\"tls\": {\"enabled\": true,\"server_name\": \"${currentHost}\",\"alpn\": [\"h3\"]}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
 
         echoContent yellow "\n ---> 二维码 Tuic"
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=tuic%3A%2F%2F${tuicUUID}%3A${tuicPassword}%40${currentHost}%3A${tuicPort}%3Fcongestion_control%3D${tuicAlgorithm}%26alpn%3Dh3%26sni%3D${currentHost}%26udp_relay_mode%3Dquic%26allow_insecure%3D0%23${email}\n"
@@ -5132,7 +6026,7 @@ EOF
         echoContent yellow " ---> Naive(TLS)"
 
         echoContent green "    naive+https://${email}:${id}@${currentHost}:${port}?padding=true#${email}\n"
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/default/${user}"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
 naive+https://${email}:${id}@${currentHost}:${port}?padding=true#${email}
 EOF
         echoContent yellow " ---> 二维码 Naive(TLS)"
@@ -5147,10 +6041,10 @@ EOF
         echoContent green "    vmess://${qrCodeBase64Default}\n"
         echoContent yellow " ---> 二维码 vmess(VMess+HTTPUpgrade+TLS)"
 
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/default/${user}"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
    vmess://${qrCodeBase64Default}
 EOF
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/clashMeta/${user}"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
   - name: "${email}"
     type: vmess
     server: ${add}
@@ -5169,9 +6063,9 @@ EOF
        Host: ${currentHost}
      v2ray-http-upgrade: true
 EOF
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vmess\",\"server\":\"${add}\",\"server_port\":${port},\"uuid\":\"${id}\",\"security\":\"auto\",\"alter_id\":0,\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"packet_encoding\":\"packetaddr\",\"transport\":{\"type\":\"httpupgrade\",\"path\":\"${path}\"}}]" "/etc/v2ray-agent/subscribe_local/sing-box/${user}")
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vmess\",\"server\":\"${add}\",\"server_port\":${port},\"uuid\":\"${id}\",\"security\":\"auto\",\"alter_id\":0,\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"packet_encoding\":\"packetaddr\",\"transport\":{\"type\":\"httpupgrade\",\"path\":\"${path}\"}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
 
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/v2ray-agent/subscribe_local/sing-box/${user}"
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
 
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vmess://${qrCodeBase64Default}\n"
 
@@ -5182,10 +6076,10 @@ EOF
         echoContent green "协议类型:anytls，地址:${currentHost}，端口:${singBoxAnyTLSPort}，用户ID:${id}，传输方式:tcp，账户名:${email}\n"
 
         echoContent green "    anytls://${id}@${currentHost}:${singBoxAnyTLSPort}?peer=${currentHost}&insecure=0&sni=${currentHost}#${email}\n"
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/default/${user}"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
 anytls://${id}@${currentHost}:${singBoxAnyTLSPort}?peer=${currentHost}&insecure=0&sni=${currentHost}#${email}
 EOF
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/clashMeta/${user}"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
   - name: "${email}"
     type: anytls
     port: ${singBoxAnyTLSPort}
@@ -5199,11 +6093,49 @@ EOF
       - http/1.1
 EOF
 
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"anytls\",\"server\":\"${currentHost}\",\"server_port\":${singBoxAnyTLSPort},\"password\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\"}}]" "/etc/v2ray-agent/subscribe_local/sing-box/${user}")
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/v2ray-agent/subscribe_local/sing-box/${user}"
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"anytls\",\"server\":\"${currentHost}\",\"server_port\":${singBoxAnyTLSPort},\"password\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\"}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
 
         echoContent yellow " ---> 二维码 AnyTLS"
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=anytls%3A%2F%2F${id}%40${currentHost}%3A${singBoxAnyTLSPort}%3Fpeer%3D${currentHost}%26insecure%3D0%26sni%3D${currentHost}%23${email}\n"
+
+    elif [[ "${type}" == "ss2022" ]]; then
+        local ss2022ServerKey=$5
+        local ss2022Method=$6
+        # SS2022 密码格式: serverKey:userKey
+        local ss2022Password="${ss2022ServerKey}:${id}"
+        local ss2022PasswordBase64
+        ss2022PasswordBase64=$(echo -n "${ss2022Password}" | base64 | tr -d '\n')
+
+        echoContent yellow " ---> Shadowsocks 2022"
+
+        echoContent yellow " ---> 格式化明文(SS2022)"
+        echoContent green "协议类型:ss2022，地址:${publicIP}，端口:${port}，加密方式:${ss2022Method}，密码:${ss2022Password}，账户名:${email}\n"
+
+        # SIP002 URL格式: ss://BASE64(method:password)@host:port#name
+        local ss2022UrlPassword
+        ss2022UrlPassword=$(echo -n "${ss2022Method}:${ss2022Password}" | base64 | tr -d '\n')
+        echoContent green "    ss://${ss2022UrlPassword}@${publicIP}:${port}#${email}\n"
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
+ss://${ss2022UrlPassword}@${publicIP}:${port}#${email}
+EOF
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
+  - name: "${email}"
+    type: ss
+    server: ${publicIP}
+    port: ${port}
+    cipher: ${ss2022Method}
+    password: "${ss2022Password}"
+    udp: true
+EOF
+
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"shadowsocks\",\"server\":\"${publicIP}\",\"server_port\":${port},\"method\":\"${ss2022Method}\",\"password\":\"${ss2022Password}\",\"multiplex\":{\"enabled\":true}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
+
+        echoContent yellow " ---> 二维码 SS2022"
+        local ss2022QRCode
+        ss2022QRCode=$(echo -n "ss://${ss2022UrlPassword}@${publicIP}:${port}#${email}" | sed 's/:/%3A/g; s/\//%2F/g; s/@/%40/g; s/#/%23/g')
+        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${ss2022QRCode}\n"
     fi
 
 }
@@ -5265,24 +6197,8 @@ showAccounts() {
             done < <(echo "${currentCDNAddress}" | tr ',' '\n')
         done
     fi
-    # trojan grpc
-    if echo ${currentInstallProtocolType} | grep -q ",2,"; then
-        echoContent skyBlue "\n================================  Trojan gRPC TLS [仅CDN推荐]  ================================\n"
-        jq .inbounds[0].settings.clients ${configPath}04_trojan_gRPC_inbounds.json | jq -c '.[]' | while read -r user; do
-            local email=
-            email=$(echo "${user}" | jq -r .email)
-            local count=
-            while read -r line; do
-                echoContent skyBlue "\n ---> 账号:${email}${count}"
-                echo
-                if [[ -n "${line}" ]]; then
-                    defaultBase64Code trojangrpc "${currentDefaultPort}" "${email}${count}" "$(echo "${user}" | jq -r .password)" "${line}"
-                    count=$((count + 1))
-                fi
-            done < <(echo "${currentCDNAddress}" | tr ',' '\n')
+    # trojan grpc - 已移除
 
-        done
-    fi
     # VMess WS
     if echo ${currentInstallProtocolType} | grep -q ",3,"; then
         echoContent skyBlue "\n================================ VMess WS TLS [仅CDN推荐]  ================================\n"
@@ -5324,26 +6240,8 @@ showAccounts() {
             defaultBase64Code trojan "${currentDefaultPort}${singBoxTrojanPort}" "${email}" "$(echo "${user}" | jq -r .password)"
         done
     fi
-    # VLESS grpc
-    if echo ${currentInstallProtocolType} | grep -q ",5,"; then
-        echoContent skyBlue "\n=============================== VLESS gRPC TLS [仅CDN推荐]  ===============================\n"
-        jq .inbounds[0].settings.clients ${configPath}06_VLESS_gRPC_inbounds.json | jq -c '.[]' | while read -r user; do
+    # VLESS grpc - 已移除
 
-            local email=
-            email=$(echo "${user}" | jq -r .email)
-
-            local count=
-            while read -r line; do
-                echoContent skyBlue "\n ---> 账号:${email}${count}"
-                echo
-                if [[ -n "${line}" ]]; then
-                    defaultBase64Code vlessgrpc "${currentDefaultPort}" "${email}${count}" "$(echo "${user}" | jq -r .id)" "${line}"
-                    count=$((count + 1))
-                fi
-            done < <(echo "${currentCDNAddress}" | tr ',' '\n')
-
-        done
-    fi
     # hysteria2
     if echo ${currentInstallProtocolType} | grep -q ",6," || [[ -n "${hysteriaPort}" ]]; then
         readPortHopping "hysteria2" "${singBoxHysteria2Port}"
@@ -5379,18 +6277,8 @@ showAccounts() {
             defaultBase64Code vlessReality "${xrayVLESSRealityVisionPort}${singBoxVLESSRealityVisionPort}" "${email}" "$(echo "${user}" | jq -r .id//.uuid)"
         done
     fi
-    # VLESS reality gRPC
-    if echo ${currentInstallProtocolType} | grep -q ",8,"; then
-        echoContent skyBlue "============================== VLESS reality_gRPC [推荐] ===============================\n"
-        jq .inbounds[0].settings.clients//.inbounds[0].users ${configPath}08_VLESS_vision_gRPC_inbounds.json | jq -c '.[]' | while read -r user; do
-            local email=
-            email=$(echo "${user}" | jq -r .email//.name)
+    # VLESS reality gRPC - 已移除
 
-            echoContent skyBlue "\n ---> 账号:${email}"
-            echo
-            defaultBase64Code vlessRealityGRPC "${xrayVLESSRealityVisionPort}${singBoxVLESSRealityGRPCPort}" "${email}" "$(echo "${user}" | jq -r .id//.uuid)"
-        done
-    fi
     # tuic
     if echo ${currentInstallProtocolType} | grep -q ",9," || [[ -n "${tuicPort}" ]]; then
         echoContent skyBlue "\n================================  Tuic TLS [推荐]  ================================\n"
@@ -5408,8 +6296,11 @@ showAccounts() {
     # naive
     if echo ${currentInstallProtocolType} | grep -q ",10," || [[ -n "${singBoxNaivePort}" ]]; then
         echoContent skyBlue "\n================================  naive TLS [推荐，不支持ClashMeta]  ================================\n"
-
-        jq -r -c '.inbounds[]|.users[]' "${configPath}10_naive_inbounds.json" | while read -r user; do
+        local path="${configPath}"
+        if [[ "${coreInstallType}" == "1" ]]; then
+            path="${singBoxConfigPath}"
+        fi
+        jq -r -c '.inbounds[]|.users[]' "${path}10_naive_inbounds.json" | while read -r user; do
             echoContent skyBlue "\n ---> 账号:$(echo "${user}" | jq -r .username)"
             echo
             defaultBase64Code naive "${singBoxNaivePort}" "$(echo "${user}" | jq -r .username)" "$(echo "${user}" | jq -r .password)"
@@ -5477,6 +6368,26 @@ showAccounts() {
         done
 
     fi
+
+    # Shadowsocks 2022
+    if echo ${currentInstallProtocolType} | grep -q ",14," || [[ -n "${ss2022Port}" ]]; then
+        echoContent skyBlue "\n================================  Shadowsocks 2022 ================================\n"
+        local path="${singBoxConfigPath}"
+        if [[ -f "${path}14_ss2022_inbounds.json" ]]; then
+            local serverKey
+            local method
+            serverKey=$(jq -r '.inbounds[0].password' "${path}14_ss2022_inbounds.json")
+            method=$(jq -r '.inbounds[0].method' "${path}14_ss2022_inbounds.json")
+            local port
+            port=$(jq -r '.inbounds[0].listen_port' "${path}14_ss2022_inbounds.json")
+
+            jq -r -c '.inbounds[]|.users[]' "${path}14_ss2022_inbounds.json" | while read -r user; do
+                echoContent skyBlue "\n ---> 账号:$(echo "${user}" | jq -r .name)"
+                echo
+                defaultBase64Code ss2022 "${port}" "$(echo "${user}" | jq -r .name)" "$(echo "${user}" | jq -r .password)" "${serverKey}" "${method}"
+            done
+        fi
+    fi
 }
 # 移除nginx302配置
 removeNginx302() {
@@ -5512,14 +6423,14 @@ checkNginx302() {
 # 备份恢复nginx文件
 backupNginxConfig() {
     if [[ "$1" == "backup" ]]; then
-        cp ${nginxConfigPath}alone.conf /etc/v2ray-agent/alone_backup.conf
+        cp ${nginxConfigPath}alone.conf /etc/Proxy-agent/alone_backup.conf
         echoContent green " ---> nginx配置文件备份成功"
     fi
 
-    if [[ "$1" == "restoreBackup" ]] && [[ -f "/etc/v2ray-agent/alone_backup.conf" ]]; then
-        cp /etc/v2ray-agent/alone_backup.conf ${nginxConfigPath}alone.conf
+    if [[ "$1" == "restoreBackup" ]] && [[ -f "/etc/Proxy-agent/alone_backup.conf" ]]; then
+        cp /etc/Proxy-agent/alone_backup.conf ${nginxConfigPath}alone.conf
         echoContent green " ---> nginx配置文件恢复备份成功"
-        rm /etc/v2ray-agent/alone_backup.conf
+        rm /etc/Proxy-agent/alone_backup.conf
     fi
 
 }
@@ -5546,26 +6457,45 @@ addNginx302() {
 updateNginxBlog() {
     if [[ "${coreInstallType}" == "2" ]]; then
         echoContent red "\n ---> 此功能仅支持Xray-core内核"
-        exit 0
+        exit 1
     fi
 
     echoContent skyBlue "\n进度 $1/${totalProgress} : 更换伪装站点"
 
     if ! echo "${currentInstallProtocolType}" | grep -q ",0," || [[ -z "${coreInstallType}" ]]; then
         echoContent red "\n ---> 由于环境依赖，请先安装Xray-core的VLESS_TCP_TLS_Vision"
-        exit 0
+        exit 1
     fi
+
+    # 伪装站模板列表 (来自 Lynthar/website-examples)
+    local templates=("cloud-drive" "game-zone" "net-disk" "play-hub" "stream-box" "video-portal" "music-flow" "podcast-hub" "ai-forge")
+    local templateNames=("云存储网站" "游戏平台" "网盘系统" "游戏中心" "流媒体平台" "视频门户" "音乐平台" "播客平台" "AI平台")
+    local templateCount=${#templates[@]}
+    local repoUrl="https://github.com/Lynthar/website-examples/archive/refs/heads/main.zip"
+    local tempDir="/tmp/website-examples-$$"
+
+    # 显示当前模板
+    local currentTemplate=""
+    if [[ -f "${nginxStaticPath}/check" ]]; then
+        currentTemplate=$(cat "${nginxStaticPath}/check")
+    fi
+
     echoContent red "=============================================================="
+    echoContent yellow "# 模板来源: https://github.com/Lynthar/website-examples"
     echoContent yellow "# 如需自定义，请手动复制模版文件到 ${nginxStaticPath} \n"
-    echoContent yellow "1.新手引导"
-    echoContent yellow "2.游戏网站"
-    echoContent yellow "3.个人博客01"
-    echoContent yellow "4.企业站"
-    echoContent yellow "5.解锁加密的音乐文件模版[https://github.com/ix64/unlock-music]"
-    echoContent yellow "6.mikutap[https://github.com/HFIProgramming/mikutap]"
-    echoContent yellow "7.企业站02"
-    echoContent yellow "8.个人博客02"
-    echoContent yellow "9.404自动跳转baidu"
+    if [[ -n "${currentTemplate}" ]]; then
+        echoContent green "# 当前模板: ${currentTemplate}\n"
+    fi
+
+    local i=1
+    for name in "${templateNames[@]}"; do
+        local marker=""
+        if [[ "${templates[$((i-1))]}" == "${currentTemplate}" ]]; then
+            marker=" [当前]"
+        fi
+        echoContent yellow "${i}.${name}${marker}"
+        ((i++))
+    done
     echoContent yellow "10.302重定向网站"
     echoContent red "=============================================================="
     read -r -p "请选择:" selectInstallNginxBlogType
@@ -5573,7 +6503,7 @@ updateNginxBlog() {
     if [[ "${selectInstallNginxBlogType}" == "10" ]]; then
         if [[ "${coreInstallType}" == "2" ]]; then
             echoContent red "\n ---> 此功能仅支持Xray-core内核，请等待后续更新"
-            exit 0
+            exit 1
         fi
         echoContent red "\n=============================================================="
         echoContent yellow "重定向的优先级更高，配置302之后如果更改伪装站点，根路由下伪装站点将不起作用"
@@ -5586,6 +6516,10 @@ updateNginxBlog() {
         if [[ "${redirectStatus}" == "1" ]]; then
             backupNginxConfig backup
             read -r -p "请输入要重定向的域名,例如 https://www.baidu.com:" redirectDomain
+            if ! isValidRedirectUrl "${redirectDomain}"; then
+                echoContent red " ---> URL格式无效，必须以 http:// 或 https:// 开头且不含特殊字符"
+                exit 1
+            fi
             removeNginx302
             addNginx302 "${redirectDomain}"
             handleNginx stop
@@ -5604,19 +6538,42 @@ updateNginxBlog() {
             exit 0
         fi
     fi
-    if [[ "${selectInstallNginxBlogType}" =~ ^[1-9]$ ]]; then
-        rm -rf "${nginxStaticPath}*"
 
+    if [[ "${selectInstallNginxBlogType}" =~ ^[1-9]$ ]]; then
+        local selectedTemplate="${templates[$((selectInstallNginxBlogType - 1))]}"
+        local selectedName="${templateNames[$((selectInstallNginxBlogType - 1))]}"
+
+        echoContent yellow " ---> 正在下载模板 [${selectedName}]..."
+
+        rm -rf "${nginxStaticPath}"*
+        mkdir -p "${tempDir}"
+
+        # 下载并解压仓库
         if [[ "${release}" == "alpine" ]]; then
-            wget -q -P "${nginxStaticPath}" "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/fodder/blog/unable/html${selectInstallNginxBlogType}.zip"
+            wget -q -O "${tempDir}/repo.zip" "${repoUrl}"
         else
-            wget -q "${wgetShowProgressStatus}" -P "${nginxStaticPath}" "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/fodder/blog/unable/html${selectInstallNginxBlogType}.zip"
+            wget -q ${wgetShowProgressStatus} -O "${tempDir}/repo.zip" "${repoUrl}"
         fi
 
-        unzip -o "${nginxStaticPath}html${selectInstallNginxBlogType}.zip" -d "${nginxStaticPath}" >/dev/null
-        rm -f "${nginxStaticPath}html${selectInstallNginxBlogType}.zip*"
-        echoContent green " ---> 更换伪站成功"
-    else
+        if [[ ! -f "${tempDir}/repo.zip" ]]; then
+            echoContent red " ---> 下载失败，请检查网络连接"
+            rm -rf "${tempDir}"
+            exit 1
+        fi
+
+        unzip -q -o "${tempDir}/repo.zip" -d "${tempDir}"
+
+        # 复制模板到目标目录
+        mkdir -p "${nginxStaticPath}"
+        cp -rf "${tempDir}/website-examples-main/${selectedTemplate}/"* "${nginxStaticPath}"
+
+        # 创建 check 标记文件
+        echo "${selectedTemplate}" > "${nginxStaticPath}/check"
+
+        # 清理临时文件
+        rm -rf "${tempDir}"
+        echoContent green " ---> 更换伪站成功 [${selectedName}]"
+    elif [[ "${selectInstallNginxBlogType}" != "7" ]]; then
         echoContent red " ---> 选择错误，请重新选择"
         updateNginxBlog
     fi
@@ -5627,7 +6584,7 @@ addCorePort() {
 
     if [[ "${coreInstallType}" == "2" ]]; then
         echoContent red "\n ---> 此功能仅支持Xray-core内核"
-        exit 0
+        exit 1
     fi
 
     echoContent skyBlue "\n功能 1/${totalProgress} : 添加新端口"
@@ -5652,14 +6609,16 @@ addCorePort() {
         read -r -p "请输入端口号:" newPort
         read -r -p "请输入默认的端口号，同时会更改订阅端口以及节点端口，[回车]默认443:" defaultPort
 
-        if [[ -n "${defaultPort}" ]]; then
-            rm -rf "$(find ${configPath}* | grep "default")"
+        if [[ -n "${defaultPort}" && -n "${configPath}" ]]; then
+            find "${configPath}" -maxdepth 1 -type f -name "*default*" -exec rm -f {} \;
         fi
 
         if [[ -n "${newPort}" ]]; then
 
             while read -r port; do
-                rm -rf "$(find ${configPath}* | grep "${port}")"
+                if [[ -n "${configPath}" && -n "${port}" ]]; then
+                    find "${configPath}" -maxdepth 1 -type f -name "*${port}*" -exec rm -f {} \;
+                fi
 
                 local fileName=
                 local hysteriaFileName=
@@ -5789,11 +6748,10 @@ unInstall() {
         fi
     fi
 
-    rm -rf /etc/v2ray-agent
-    rm -rf ${nginxConfigPath}alone.conf
-    rm -rf ${nginxConfigPath}checkPortOpen.conf >/dev/null 2>&1
+    rm -rf /etc/Proxy-agent
+    rm -rf "${nginxConfigPath}alone.conf"
+    rm -rf "${nginxConfigPath}checkPortOpen.conf" >/dev/null 2>&1
     rm -rf "${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf" >/dev/null 2>&1
-    rm -rf ${nginxConfigPath}checkPortOpen.conf >/dev/null 2>&1
 
     unInstallSubscribe
 
@@ -5804,8 +6762,10 @@ unInstall() {
 
     rm -rf /usr/bin/vasma
     rm -rf /usr/sbin/vasma
+    rm -rf /usr/bin/pasly
+    rm -rf /usr/sbin/pasly
     echoContent green " ---> 卸载快捷方式完成"
-    echoContent green " ---> 卸载v2ray-agent脚本完成"
+    echoContent green " ---> 卸载 Proxy-agent 脚本完成"
 }
 
 # CDN节点管理
@@ -5817,7 +6777,7 @@ manageCDN() {
         echoContent red "=============================================================="
         echoContent yellow "# 注意事项"
         echoContent yellow "\n教程地址:"
-        echoContent skyBlue "https://www.v2ray-agent.com/archives/cloudflarezi-xuan-ip"
+        echoContent skyBlue "如需优化 Cloudflare 回源 IP，可根据本地网络状况选择可用的 IP 段。"
         echoContent red "\n如对Cloudflare优化不了解，请不要使用"
 
         echoContent yellow "1.CNAME www.digitalocean.com"
@@ -5843,17 +6803,22 @@ manageCDN() {
             ;;
         5)
             read -r -p "请输入想要自定义CDN IP或者域名:" setCDNDomain
+            # 验证输入不包含危险字符
+            if [[ "${setCDNDomain}" =~ [\;\|\&\$\`\(\)\{\}\[\]\<\>\!\#\*\?\~\'\"] ]] || [[ "${setCDNDomain}" =~ [[:space:]] ]]; then
+                echoContent red " ---> 输入包含不安全字符"
+                exit 1
+            fi
             ;;
         6)
-            echo >/etc/v2ray-agent/cdn
+            echo >/etc/Proxy-agent/cdn
             echoContent green " ---> 移除成功"
             exit 0
             ;;
         esac
 
         if [[ -n "${setCDNDomain}" ]]; then
-            echo >/etc/v2ray-agent/cdn
-            echo "${setCDNDomain}" >"/etc/v2ray-agent/cdn"
+            echo >/etc/Proxy-agent/cdn
+            echo "${setCDNDomain}" >"/etc/Proxy-agent/cdn"
             echoContent green " ---> 修改CDN成功"
             subscribe false false
         else
@@ -5862,7 +6827,7 @@ manageCDN() {
         fi
     else
         echoContent yellow "\n教程地址:"
-        echoContent skyBlue "https://www.v2ray-agent.com/archives/cloudflarezi-xuan-ip\n"
+        echoContent skyBlue "请根据网络状况选择合适的 Cloudflare 回源 IP。\n"
         echoContent red " ---> 未检测到可以使用的协议，仅支持ws、grpc、HTTPUpgrade相关的协议"
     fi
 }
@@ -5889,7 +6854,7 @@ customUUID() {
 
         if [[ -n "${checkUUID}" ]]; then
             echoContent red " ---> UUID不可重复"
-            exit 0
+            exit 1
         fi
     fi
 }
@@ -5918,7 +6883,7 @@ customUserEmail() {
 
         if [[ -n "${checkEmail}" ]]; then
             echoContent red " ---> email不可重复"
-            exit 0
+            exit 1
         fi
     fi
 }
@@ -5929,7 +6894,7 @@ addUser() {
     echo
     if [[ -z ${userNum} || ${userNum} -le 0 ]]; then
         echoContent red " ---> 输入有误，请重新输入"
-        exit 0
+        exit 1
     fi
     local userConfig=
     if [[ "${coreInstallType}" == "1" ]]; then
@@ -5974,18 +6939,8 @@ addUser() {
             echo "${clients}" | jq . >${configPath}03_VLESS_WS_inbounds.json
         fi
 
-        # trojan grpc
-        if echo "${currentInstallProtocolType}" | grep -q ",2,"; then
-            local clients=
-            if [[ "${coreInstallType}" == "1" ]]; then
-                clients=$(initXrayClients 2 "${uuid}" "${email}")
-            elif [[ "${coreInstallType}" == "2" ]]; then
-                clients=$(initSingBoxClients 2 "${uuid}" "${email}")
-            fi
+        # trojan grpc - 已移除
 
-            clients=$(jq -r "${userConfig} = ${clients}" ${configPath}04_trojan_gRPC_inbounds.json)
-            echo "${clients}" | jq . >${configPath}04_trojan_gRPC_inbounds.json
-        fi
         # VMess WS
         if echo "${currentInstallProtocolType}" | grep -q ",3,"; then
             local clients=
@@ -6010,41 +6965,24 @@ addUser() {
             echo "${clients}" | jq . >${configPath}04_trojan_TCP_inbounds.json
         fi
 
-        # vless grpc
-        if echo "${currentInstallProtocolType}" | grep -q ",5,"; then
-            local clients=
-            if [[ "${coreInstallType}" == "1" ]]; then
-                clients=$(initXrayClients 5 "${uuid}" "${email}")
-            elif [[ "${coreInstallType}" == "2" ]]; then
-                clients=$(initSingBoxClients 5 "${uuid}" "${email}")
-            fi
-            clients=$(jq -r "${userConfig} = ${clients}" ${configPath}06_VLESS_gRPC_inbounds.json)
-            echo "${clients}" | jq . >${configPath}06_VLESS_gRPC_inbounds.json
-        fi
+        # vless grpc - 已移除
 
         # vless reality vision
         if echo "${currentInstallProtocolType}" | grep -q ",7,"; then
             local clients=
+            local realityUserConfig=
             if [[ "${coreInstallType}" == "1" ]]; then
                 clients=$(initXrayClients 7 "${uuid}" "${email}")
+                realityUserConfig=".inbounds[1].settings.clients"
             elif [[ "${coreInstallType}" == "2" ]]; then
                 clients=$(initSingBoxClients 7 "${uuid}" "${email}")
+                realityUserConfig=".inbounds[0].users"
             fi
-            clients=$(jq -r "${userConfig} = ${clients}" ${configPath}07_VLESS_vision_reality_inbounds.json)
+            clients=$(jq -r "${realityUserConfig} = ${clients}" ${configPath}07_VLESS_vision_reality_inbounds.json)
             echo "${clients}" | jq . >${configPath}07_VLESS_vision_reality_inbounds.json
         fi
 
-        # vless reality grpc
-        if echo "${currentInstallProtocolType}" | grep -q ",8,"; then
-            local clients=
-            if [[ "${coreInstallType}" == "1" ]]; then
-                clients=$(initXrayClients 8 "${uuid}" "${email}")
-            elif [[ "${coreInstallType}" == "2" ]]; then
-                clients=$(initSingBoxClients 8 "${uuid}" "${email}")
-            fi
-            clients=$(jq -r "${userConfig} = ${clients}" ${configPath}08_VLESS_vision_gRPC_inbounds.json)
-            echo "${clients}" | jq . >${configPath}08_VLESS_vision_gRPC_inbounds.json
-        fi
+        # vless reality grpc - 已移除
 
         # hysteria2
         if echo ${currentInstallProtocolType} | grep -q ",6,"; then
@@ -6101,6 +7039,14 @@ addUser() {
             clients=$(jq -r "${userConfig} = ${clients}" ${configPath}13_anytls_inbounds.json)
             echo "${clients}" | jq . >${configPath}13_anytls_inbounds.json
         fi
+        # Shadowsocks 2022
+        if echo "${currentInstallProtocolType}" | grep -q ",14,"; then
+            local clients=
+            clients=$(initSingBoxClients 14 "${uuid}" "${email}")
+
+            clients=$(jq -r "${userConfig} = ${clients}" ${configPath}14_ss2022_inbounds.json)
+            echo "${clients}" | jq . >${configPath}14_ss2022_inbounds.json
+        fi
     done
     reloadCore
     echoContent green " ---> 添加完成"
@@ -6122,16 +7068,21 @@ removeUser() {
     local uuid=
     if [[ -n "${userConfigType}" ]]; then
         if [[ "${coreInstallType}" == "1" ]]; then
-            jq -r -c .inbounds[0].settings.clients[].email ${configPath}${userConfigType}.json | awk '{print NR""":"$0}'
+            jq -r -c '(.inbounds[0].settings.clients // .inbounds[1].settings.clients)[]?|.email' ${configPath}${userConfigType}.json | awk '{print NR""":"$0}'
+            read -r -p "请选择要删除的用户编号[仅支持单个删除]:" delUserIndex
+            if [[ $(jq -r '(.inbounds[0].settings.clients // .inbounds[1].settings.clients)?|length' ${configPath}${userConfigType}.json) -lt ${delUserIndex} ]]; then
+                echoContent red " ---> 选择错误"
+            else
+                delUserIndex=$((delUserIndex - 1))
+            fi
         elif [[ "${coreInstallType}" == "2" ]]; then
             jq -r -c .inbounds[0].users[].name//.inbounds[0].users[].username ${configPath}${userConfigType}.json | awk '{print NR""":"$0}'
-        fi
-
-        read -r -p "请选择要删除的用户编号[仅支持单个删除]:" delUserIndex
-        if [[ $(jq -r '.inbounds[0].settings.clients|length' ${configPath}${userConfigType}.json) -lt ${delUserIndex} && $(jq -r '.inbounds[0].users|length' ${configPath}${userConfigType}.json) -lt ${delUserIndex} ]]; then
-            echoContent red " ---> 选择错误"
-        else
-            delUserIndex=$((delUserIndex - 1))
+            read -r -p "请选择要删除的用户编号[仅支持单个删除]:" delUserIndex
+            if [[ $(jq -r '.inbounds[0].users|length' ${configPath}${userConfigType}.json) -lt ${delUserIndex} ]]; then
+                echoContent red " ---> 选择错误"
+            else
+                delUserIndex=$((delUserIndex - 1))
+            fi
         fi
     fi
 
@@ -6148,11 +7099,7 @@ removeUser() {
             echo "${vlessWSResult}" | jq . >${configPath}03_VLESS_WS_inbounds.json
         fi
 
-        if echo ${currentInstallProtocolType} | grep -q ",2,"; then
-            local trojangRPCUsers
-            trojangRPCUsers=$(jq -r 'del(.inbounds[0].settings.clients['${delUserIndex}'])' ${configPath}04_trojan_gRPC_inbounds.json)
-            echo "${trojangRPCUsers}" | jq . >${configPath}04_trojan_gRPC_inbounds.json
-        fi
+        # Trojan gRPC - 已移除
 
         if echo ${currentInstallProtocolType} | grep -q ",3,"; then
             local vmessWSResult
@@ -6160,11 +7107,7 @@ removeUser() {
             echo "${vmessWSResult}" | jq . >${configPath}05_VMess_WS_inbounds.json
         fi
 
-        if echo ${currentInstallProtocolType} | grep -q ",5,"; then
-            local vlessGRPCResult
-            vlessGRPCResult=$(jq -r 'del(.inbounds[0].settings.clients['${delUserIndex}']//.inbounds[0].users['${delUserIndex}'])' ${configPath}06_VLESS_gRPC_inbounds.json)
-            echo "${vlessGRPCResult}" | jq . >${configPath}06_VLESS_gRPC_inbounds.json
-        fi
+        # VLESS gRPC - 已移除
 
         if echo ${currentInstallProtocolType} | grep -q ",4,"; then
             local trojanTCPResult
@@ -6174,14 +7117,10 @@ removeUser() {
 
         if echo ${currentInstallProtocolType} | grep -q ",7,"; then
             local vlessRealityResult
-            vlessRealityResult=$(jq -r 'del(.inbounds[0].settings.clients['${delUserIndex}']//.inbounds[0].users['${delUserIndex}'])' ${configPath}07_VLESS_vision_reality_inbounds.json)
+            vlessRealityResult=$(jq -r 'del(.inbounds[0].settings.clients['${delUserIndex}']//.inbounds[1].settings.clients['${delUserIndex}']//.inbounds[0].users['${delUserIndex}'])' ${configPath}07_VLESS_vision_reality_inbounds.json)
             echo "${vlessRealityResult}" | jq . >${configPath}07_VLESS_vision_reality_inbounds.json
         fi
-        if echo ${currentInstallProtocolType} | grep -q ",8,"; then
-            local vlessRealityGRPCResult
-            vlessRealityGRPCResult=$(jq -r 'del(.inbounds[0].settings.clients['${delUserIndex}']//.inbounds[0].users['${delUserIndex}'])' ${configPath}08_VLESS_vision_gRPC_inbounds.json)
-            echo "${vlessRealityGRPCResult}" | jq . >${configPath}08_VLESS_vision_gRPC_inbounds.json
-        fi
+        # VLESS Reality gRPC - 已移除
 
         if echo ${currentInstallProtocolType} | grep -q ",6,"; then
             local hysteriaResult
@@ -6205,6 +7144,12 @@ removeUser() {
             echo "${vmessHTTPUpgradeResult}" | jq . >"${singBoxConfigPath}11_VMess_HTTPUpgrade_inbounds.json"
             echo "${vmessHTTPUpgradeResult}" | jq . >${configPath}11_VMess_HTTPUpgrade_inbounds.json
         fi
+        # Shadowsocks 2022
+        if echo ${currentInstallProtocolType} | grep -q ",14,"; then
+            local ss2022Result
+            ss2022Result=$(jq -r 'del(.inbounds[0].users['${delUserIndex}'])' "${singBoxConfigPath}14_ss2022_inbounds.json")
+            echo "${ss2022Result}" | jq . >"${singBoxConfigPath}14_ss2022_inbounds.json"
+        fi
         reloadCore
         readNginxSubscribe
         if [[ -n "${subscribePort}" ]]; then
@@ -6213,25 +7158,452 @@ removeUser() {
     fi
     manageAccount 1
 }
-# 更新脚本
-updateV2RayAgent() {
-    echoContent skyBlue "\n进度  $1/${totalProgress} : 更新v2ray-agent脚本"
-    rm -rf /etc/v2ray-agent/install.sh
-    if [[ "${release}" == "alpine" ]]; then
-        wget -c -q -P /etc/v2ray-agent/ -N --no-check-certificate "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/install.sh"
+
+# ======================= 脚本版本管理 =======================
+
+# 备份脚本
+# 参数: $1 - 备份原因 (update/manual)
+backupScript() {
+    local reason="${1:-manual}"
+    local installDir="/etc/Proxy-agent"
+    local backupDir="${installDir}/backup"
+    local maxBackups=5
+
+    # 确保备份目录存在
+    mkdir -p "${backupDir}"
+
+    # 获取当前版本号
+    local currentVersion=""
+    if [[ -f "${installDir}/VERSION" ]]; then
+        currentVersion=$(cat "${installDir}/VERSION" 2>/dev/null | tr -d '[:space:]')
     else
-        wget -c -q "${wgetShowProgressStatus}" -P /etc/v2ray-agent/ -N --no-check-certificate "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/install.sh"
+        currentVersion="unknown"
     fi
 
-    sudo chmod 700 /etc/v2ray-agent/install.sh
-    local version
-    version=$(grep '当前版本：v' "/etc/v2ray-agent/install.sh" | awk -F "[v]" '{print $2}' | tail -n +2 | head -n 1 | awk -F "[\"]" '{print $1}')
+    # 生成备份文件名 (版本_日期时间)
+    local timestamp
+    timestamp=$(date +%Y%m%d_%H%M%S)
+    local backupName="v${currentVersion}_${timestamp}"
+    local backupPath="${backupDir}/${backupName}"
+
+    mkdir -p "${backupPath}"
+
+    # 备份核心文件
+    if [[ -f "${installDir}/install.sh" ]]; then
+        cp -f "${installDir}/install.sh" "${backupPath}/"
+    fi
+    if [[ -f "${installDir}/VERSION" ]]; then
+        cp -f "${installDir}/VERSION" "${backupPath}/"
+    fi
+    if [[ -d "${installDir}/lib" ]]; then
+        cp -rf "${installDir}/lib" "${backupPath}/"
+    fi
+    if [[ -d "${installDir}/shell/lang" ]]; then
+        mkdir -p "${backupPath}/shell"
+        cp -rf "${installDir}/shell/lang" "${backupPath}/shell/"
+    fi
+
+    # 记录备份信息
+    cat > "${backupPath}/backup_info.json" << EOF
+{
+    "version": "${currentVersion}",
+    "timestamp": "${timestamp}",
+    "reason": "${reason}",
+    "date": "$(date '+%Y-%m-%d %H:%M:%S')"
+}
+EOF
+
+    # 清理旧备份，保留最近 N 个
+    local backupCount
+    backupCount=$(ls -1d "${backupDir}"/v* 2>/dev/null | wc -l)
+    if [[ ${backupCount} -gt ${maxBackups} ]]; then
+        ls -1td "${backupDir}"/v* 2>/dev/null | tail -n +$((maxBackups + 1)) | xargs rm -rf 2>/dev/null
+    fi
+
+    echo "${backupPath}"
+}
+
+# 列出可用的脚本版本（本地备份 + GitHub 历史版本）
+listScriptVersions() {
+    local installDir="/etc/Proxy-agent"
+    local backupDir="${installDir}/backup"
+
+    echoContent skyBlue "\n$(t SCRIPT_VERSION_ROLLBACK)"
+    echoContent red "\n=============================================================="
+    echoContent yellow "# $(t NOTE)"
+    echoContent yellow "# 1. $(t SCRIPT_ROLLBACK_NOTE1)"
+    echoContent yellow "# 2. $(t SCRIPT_ROLLBACK_NOTE2)"
+    echoContent yellow "# 3. $(t SCRIPT_ROLLBACK_NOTE3)\n"
+
+    # 显示当前版本
+    local currentVersion=""
+    if [[ -f "${installDir}/VERSION" ]]; then
+        currentVersion=$(cat "${installDir}/VERSION" 2>/dev/null | tr -d '[:space:]')
+    fi
+    echoContent green "$(t SCRIPT_VERSION_CURRENT): v${currentVersion:-unknown}\n"
+
+    # 列出本地备份
+    echoContent skyBlue "------------------------$(t SCRIPT_ROLLBACK_LOCAL)-------------------------------"
+    local index=1
+    local backupList=()
+
+    if [[ -d "${backupDir}" ]]; then
+        while IFS= read -r backup; do
+            if [[ -n "${backup}" && -d "${backup}" ]]; then
+                local backupName
+                backupName=$(basename "${backup}")
+                local backupInfo=""
+                if [[ -f "${backup}/backup_info.json" ]]; then
+                    local backupDate
+                    backupDate=$(jq -r '.date // "unknown"' "${backup}/backup_info.json" 2>/dev/null)
+                    local backupReason
+                    backupReason=$(jq -r '.reason // "unknown"' "${backup}/backup_info.json" 2>/dev/null)
+                    backupInfo=" [${backupDate}] (${backupReason})"
+                fi
+                echoContent yellow "${index}. ${backupName}${backupInfo}"
+                backupList+=("local:${backup}")
+                ((index++))
+            fi
+        done < <(ls -1td "${backupDir}"/v* 2>/dev/null)
+    fi
+
+    if [[ ${#backupList[@]} -eq 0 ]]; then
+        echoContent yellow "  ($(t SCRIPT_NO_BACKUPS))"
+    fi
+
+    # 列出 GitHub 历史版本
+    echoContent skyBlue "------------------------$(t SCRIPT_ROLLBACK_GITHUB)----------------------------"
+    local githubVersions
+    githubVersions=$(curl -s "https://api.github.com/repos/Lynthar/Proxy-agent/releases?per_page=5" 2>/dev/null | jq -r '.[].tag_name' 2>/dev/null)
+
+    if [[ -n "${githubVersions}" && "${githubVersions}" != "null" ]]; then
+        while IFS= read -r version; do
+            if [[ -n "${version}" ]]; then
+                local mark=""
+                if [[ "${version}" == "v${currentVersion}" ]]; then
+                    mark=" [$(t CURRENT)]"
+                fi
+                echoContent yellow "${index}. ${version}${mark} (GitHub)"
+                backupList+=("github:${version}")
+                ((index++))
+            fi
+        done <<< "${githubVersions}"
+    else
+        echoContent yellow "  ($(t SCRIPT_GITHUB_UNAVAILABLE))"
+    fi
+
+    echoContent skyBlue "--------------------------------------------------------------"
+    echoContent yellow "0. $(t BACK)"
+
+    # 返回版本列表供选择
+    echo "${backupList[*]}"
+}
+
+# 回退脚本版本
+rollbackScript() {
+    local installDir="/etc/Proxy-agent"
+    local backupDir="${installDir}/backup"
+    local rawBase="https://raw.githubusercontent.com/Lynthar/Proxy-agent"
+
+    # 获取版本列表
+    local versionListStr
+    versionListStr=$(listScriptVersions)
+
+    # 解析版本列表（最后一行是版本数组）
+    local versionList
+    IFS=' ' read -ra versionList <<< "${versionListStr}"
+
+    if [[ ${#versionList[@]} -eq 0 ]]; then
+        echoContent red "\n ---> $(t SCRIPT_ROLLBACK_NO_VERSIONS)"
+        return 1
+    fi
+
+    read -r -p "$(t SCRIPT_ROLLBACK_SELECT): " selectVersion
+    if [[ "${selectVersion}" == "0" || -z "${selectVersion}" ]]; then
+        return 0
+    fi
+
+    # 验证选择
+    local selectedIndex=$((selectVersion - 1))
+    if [[ ${selectedIndex} -lt 0 || ${selectedIndex} -ge ${#versionList[@]} ]]; then
+        echoContent red " ---> 选择无效"
+        return 1
+    fi
+
+    local selected="${versionList[${selectedIndex}]}"
+    local sourceType="${selected%%:*}"
+    local sourcePath="${selected#*:}"
+
+    echoContent yellow "\n选择: ${sourcePath}"
+
+    # 确认回退
+    read -r -p "$(t SCRIPT_ROLLBACK_CONFIRM) [y/n]: " confirmRollback
+    if [[ "${confirmRollback}" != "y" ]]; then
+        echoContent green " ---> $(t CANCEL)"
+        return 0
+    fi
+
+    # 备份当前版本
+    echoContent yellow " ---> $(t SCRIPT_BACKUP_BEFORE_UPDATE)"
+    local backupPath
+    backupPath=$(backupScript "rollback")
+    echoContent green " ---> $(t SCRIPT_BACKUP_COMPLETE): ${backupPath}"
+
+    if [[ "${sourceType}" == "local" ]]; then
+        # 从本地备份恢复
+        echoContent yellow " ---> 从本地备份恢复..."
+
+        if [[ -f "${sourcePath}/install.sh" ]]; then
+            cp -f "${sourcePath}/install.sh" "${installDir}/"
+            chmod 700 "${installDir}/install.sh"
+        fi
+        if [[ -f "${sourcePath}/VERSION" ]]; then
+            cp -f "${sourcePath}/VERSION" "${installDir}/"
+        fi
+        if [[ -d "${sourcePath}/lib" ]]; then
+            rm -rf "${installDir}/lib"
+            cp -rf "${sourcePath}/lib" "${installDir}/"
+        fi
+        if [[ -d "${sourcePath}/shell/lang" ]]; then
+            mkdir -p "${installDir}/shell"
+            rm -rf "${installDir}/shell/lang"
+            cp -rf "${sourcePath}/shell/lang" "${installDir}/shell/"
+        fi
+
+        echoContent green "\n ---> $(t SCRIPT_ROLLBACK_SUCCESS)!"
+
+    elif [[ "${sourceType}" == "github" ]]; then
+        # 从 GitHub 下载指定版本
+        local version="${sourcePath}"
+        echoContent yellow " ---> 从 GitHub 下载版本 ${version}..."
+
+        # 下载脚本
+        local downloadUrl="${rawBase}/${version}/install.sh"
+        if [[ "${release}" == "alpine" ]]; then
+            wget -c -q -O "${installDir}/install.sh" "${downloadUrl}"
+        else
+            wget -c -q ${wgetShowProgressStatus} -O "${installDir}/install.sh" "${downloadUrl}"
+        fi
+
+        if [[ ! -f "${installDir}/install.sh" || ! -s "${installDir}/install.sh" ]]; then
+            echoContent red " ---> 下载失败，尝试从备份恢复..."
+            if [[ -f "${backupPath}/install.sh" ]]; then
+                cp -f "${backupPath}/install.sh" "${installDir}/"
+            fi
+            return 1
+        fi
+
+        chmod 700 "${installDir}/install.sh"
+
+        # 更新版本号
+        echo "${version#v}" > "${installDir}/VERSION"
+
+        # 下载相关模块
+        echoContent yellow " ---> 下载模块文件..."
+        mkdir -p "${installDir}/lib"
+        for module in i18n constants utils json-utils system-detect service-control protocol-registry config-reader; do
+            wget -c -q -O "${installDir}/lib/${module}.sh" "${rawBase}/${version}/lib/${module}.sh" 2>/dev/null || true
+        done
+
+        # 下载语言文件
+        echoContent yellow " ---> 下载语言文件..."
+        mkdir -p "${installDir}/shell/lang"
+        for langFile in zh_CN en_US loader; do
+            wget -c -q -O "${installDir}/shell/lang/${langFile}.sh" "${rawBase}/${version}/shell/lang/${langFile}.sh" 2>/dev/null || true
+        done
+
+        echoContent green "\n ---> $(t SCRIPT_ROLLBACK_SUCCESS)!"
+    fi
+
+    # 显示回退后版本
+    local newVersion=""
+    if [[ -f "${installDir}/VERSION" ]]; then
+        newVersion=$(cat "${installDir}/VERSION" 2>/dev/null | tr -d '[:space:]')
+    fi
+    echoContent green " ---> $(t SCRIPT_VERSION_CURRENT): v${newVersion:-unknown}"
+    echoContent yellow " ---> $(t SCRIPT_ROLLBACK_RESTART)\n"
+
+    exit 0
+}
+
+# 脚本版本管理菜单
+scriptVersionMenu() {
+    echoContent skyBlue "\n$(t SCRIPT_VERSION_TITLE)"
+    echoContent red "\n=============================================================="
+
+    local currentVersion=""
+    if [[ -f "/etc/Proxy-agent/VERSION" ]]; then
+        currentVersion=$(cat "/etc/Proxy-agent/VERSION" 2>/dev/null | tr -d '[:space:]')
+    fi
+    echoContent green "$(t SCRIPT_VERSION_CURRENT): v${currentVersion:-unknown}\n"
+
+    echoContent yellow "1.$(t SCRIPT_VERSION_UPDATE)"
+    echoContent yellow "2.$(t SCRIPT_VERSION_ROLLBACK)"
+    echoContent yellow "3.$(t SCRIPT_VERSION_BACKUP)"
+    echoContent yellow "4.$(t SCRIPT_VERSION_LIST)"
+    echoContent yellow "0.$(t SCRIPT_VERSION_BACK)"
+
+    read -r -p "$(t PROMPT_SELECT): " selectType
+    case ${selectType} in
+    1)
+        updateV2RayAgent 1
+        ;;
+    2)
+        rollbackScript
+        ;;
+    3)
+        echoContent yellow "\n ---> $(t PROCESSING)..."
+        local backupPath
+        backupPath=$(backupScript "manual")
+        echoContent green " ---> $(t SCRIPT_BACKUP_SUCCESS): ${backupPath}"
+        ;;
+    4)
+        local backupDir="/etc/Proxy-agent/backup"
+        echoContent skyBlue "\n$(t SCRIPT_VERSION_LIST)"
+        echoContent red "=============================================================="
+        if [[ -d "${backupDir}" ]]; then
+            ls -1td "${backupDir}"/v* 2>/dev/null | while read -r backup; do
+                local backupName
+                backupName=$(basename "${backup}")
+                local backupInfo=""
+                if [[ -f "${backup}/backup_info.json" ]]; then
+                    local backupDate
+                    backupDate=$(jq -r '.date // "unknown"' "${backup}/backup_info.json" 2>/dev/null)
+                    backupInfo=" [${backupDate}]"
+                fi
+                echoContent yellow "  ${backupName}${backupInfo}"
+            done
+        else
+            echoContent yellow "  ($(t SCRIPT_NO_BACKUPS))"
+        fi
+        echoContent red "=============================================================="
+        ;;
+    esac
+}
+
+# 更新脚本
+updateV2RayAgent() {
+    echoContent skyBlue "\n进度  $1/${totalProgress} : 更新 Proxy-agent 脚本"
+
+    local installDir="/etc/Proxy-agent"
+    local latestVersion=""
+    local rawBase=""
+
+    # 检查 GitHub Release 最新版本
+    echoContent yellow " ---> 检查最新版本..."
+
+    # 确保函数存在才调用
+    if type getLatestReleaseVersion &>/dev/null; then
+        latestVersion=$(getLatestReleaseVersion 2>/dev/null)
+    fi
+
+    if [[ -n "${latestVersion}" && "${latestVersion}" != "null" ]]; then
+        # 使用 Release 标签下载，确保代码与版本号一致
+        rawBase="https://raw.githubusercontent.com/Lynthar/Proxy-agent/${latestVersion}"
+        echoContent green " ---> 发现最新 Release: ${latestVersion}"
+        echoContent green " ---> 从 Release ${latestVersion} 下载"
+
+        # 比较版本（确保函数存在）
+        if type compareVersions &>/dev/null; then
+            if ! compareVersions "${SCRIPT_VERSION}" "${latestVersion}"; then
+                echoContent green " ---> 当前已是最新版本 (${SCRIPT_VERSION})"
+                echoContent yellow " ---> 如需强制更新，请使用手动命令"
+                read -r -p "是否继续更新? [y/N]: " forceUpdate
+                if [[ "${forceUpdate}" != "y" && "${forceUpdate}" != "Y" ]]; then
+                    menu
+                    return
+                fi
+            fi
+        fi
+    else
+        # 无法获取 Release 版本时回退到 master 分支
+        rawBase="https://raw.githubusercontent.com/Lynthar/Proxy-agent/master"
+        echoContent yellow " ---> 从 master 分支下载"
+        latestVersion=""
+    fi
+
+    # 更新前自动备份当前版本
+    echoContent yellow " ---> 备份当前版本..."
+    if backupScript "update"; then
+        echoContent green " ---> 备份完成"
+    else
+        echoContent yellow " ---> 备份跳过 (首次安装或备份失败)"
+    fi
+
+    # 下载新版本脚本
+    echoContent yellow " ---> 下载脚本文件..."
+    rm -rf "${installDir}/install.sh"
+
+    if [[ "${release}" == "alpine" ]]; then
+        wget -c -q -P "${installDir}/" -N "${rawBase}/install.sh"
+    else
+        wget -c -q ${wgetShowProgressStatus} -P "${installDir}/" -N "${rawBase}/install.sh"
+    fi
+
+    # 如果从 Release tag 下载失败，回退到 master 分支
+    if [[ ! -f "${installDir}/install.sh" && -n "${latestVersion}" ]]; then
+        echoContent yellow " ---> Release ${latestVersion} 下载失败，尝试从 master 分支下载..."
+        rawBase="https://raw.githubusercontent.com/Lynthar/Proxy-agent/master"
+        latestVersion=""  # 清空版本号，避免版本号与代码不一致
+
+        if [[ "${release}" == "alpine" ]]; then
+            wget -c -q -P "${installDir}/" -N "${rawBase}/install.sh"
+        else
+            wget -c -q ${wgetShowProgressStatus} -P "${installDir}/" -N "${rawBase}/install.sh"
+        fi
+    fi
+
+    if [[ ! -f "${installDir}/install.sh" ]]; then
+        echoContent red " ---> 下载脚本失败!"
+        echoContent yellow "请手动执行: wget -P /root -N ${rawBase}/install.sh"
+        exit 1
+    fi
+    chmod 700 "${installDir}/install.sh"
+
+    # 下载/更新 lib 目录模块
+    echoContent yellow " ---> 下载模块文件..."
+    mkdir -p "${installDir}/lib"
+    local moduleCount=0
+    for module in i18n constants utils json-utils system-detect service-control protocol-registry config-reader; do
+        if wget -c -q -O "${installDir}/lib/${module}.sh" "${rawBase}/lib/${module}.sh" 2>/dev/null; then
+            ((moduleCount++))
+        fi
+    done
+    echoContent green " ---> 已下载 ${moduleCount} 个模块"
+
+    # 下载/更新语言文件
+    echoContent yellow " ---> 下载语言文件..."
+    mkdir -p "${installDir}/shell/lang"
+    for langFile in zh_CN en_US loader; do
+        wget -c -q -O "${installDir}/shell/lang/${langFile}.sh" "${rawBase}/shell/lang/${langFile}.sh" 2>/dev/null || true
+    done
+
+    # 所有文件下载完成后，更新版本文件
+    # 确保版本号与实际下载的代码一致
+    echoContent yellow " ---> 更新版本文件..."
+    if [[ -n "${latestVersion}" ]]; then
+        # 使用 Release 版本号
+        echo "${latestVersion#v}" > "${installDir}/VERSION"
+    else
+        # 从 master 分支下载 VERSION 文件
+        wget -c -q -O "${installDir}/VERSION" "${rawBase}/VERSION" 2>/dev/null || true
+    fi
+
+    # 读取新版本号
+    local version=""
+    if [[ -f "${installDir}/VERSION" && -s "${installDir}/VERSION" ]]; then
+        version="v$(cat "${installDir}/VERSION" 2>/dev/null | tr -d '[:space:]')"
+    elif [[ -n "${latestVersion}" ]]; then
+        version="${latestVersion}"
+    else
+        version="latest"
+    fi
 
     echoContent green "\n ---> 更新完毕"
-    echoContent yellow " ---> 请手动执行[vasma]打开脚本"
-    echoContent green " ---> 当前版本：${version}\n"
-    echoContent yellow "如更新不成功，请手动执行下面命令\n"
-    echoContent skyBlue "wget -P /root -N --no-check-certificate https://raw.githubusercontent.com/mack-a/v2ray-agent/master/install.sh && chmod 700 /root/install.sh && /root/install.sh"
+    echoContent yellow " ---> 请手动执行[pasly]打开脚本"
+    echoContent green " ---> 当前版本: ${version}"
+    echoContent yellow "\n如更新不成功，请手动执行下面命令\n"
+    echoContent skyBlue "wget -P /root -N ${rawBase}/install.sh && chmod 700 /root/install.sh && /root/install.sh"
     echo
     exit 0
 }
@@ -6257,13 +7629,139 @@ bbrInstall() {
     echoContent red "\n=============================================================="
     echoContent green "BBR、DD脚本用的[ylx2016]的成熟作品，地址[https://github.com/ylx2016/Linux-NetSpeed]，请熟知"
     echoContent yellow "1.安装脚本【推荐原版BBR+FQ】"
-    echoContent yellow "2.回退主目录"
+    echoContent yellow "2.TCP 缓冲区优化（内存自适应）"
+    echoContent yellow "3.回退主目录"
     echoContent red "=============================================================="
     read -r -p "请选择:" installBBRStatus
     if [[ "${installBBRStatus}" == "1" ]]; then
         wget -O tcpx.sh "https://github.com/ylx2016/Linux-NetSpeed/raw/master/tcpx.sh" && chmod +x tcpx.sh && ./tcpx.sh
+    elif [[ "${installBBRStatus}" == "2" ]]; then
+        optimizeTCPBuffers
     else
         menu
+    fi
+}
+
+# TCP缓冲区内存自适应优化
+optimizeTCPBuffers() {
+    echoContent skyBlue "\n===== TCP 缓冲区内存自适应优化 ====="
+
+    # 检测当前 BBR 状态
+    local currentCC
+    currentCC=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    if [[ "${currentCC}" != "bbr" ]]; then
+        echoContent yellow " ---> 当前拥塞控制算法: ${currentCC}"
+        echoContent yellow " ---> 建议先安装 BBR 再进行缓冲区优化"
+        read -r -p "是否继续优化? [y/n]:" confirmOptimize
+        if [[ "${confirmOptimize}" != "y" && "${confirmOptimize}" != "Y" ]]; then
+            return
+        fi
+    else
+        echoContent green " ---> 检测到 BBR 已启用"
+    fi
+
+    # 检测系统内存
+    local memMB
+    memMB=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
+    if [[ -z "${memMB}" || "${memMB}" -le 0 ]]; then
+        echoContent red " ---> 无法检测系统内存，退出"
+        return 1
+    fi
+    echoContent green " ---> 检测到系统内存: ${memMB} MB"
+
+    # 根据内存计算缓冲区参数
+    local rmemMax wmemMax tcpRmem tcpWmem somaxconn fileMax netdevMaxBacklog
+
+    if [[ ${memMB} -le 512 ]]; then
+        echoContent yellow " ---> 小内存模式 (≤512MB)"
+        rmemMax=8388608
+        wmemMax=8388608
+        tcpRmem="4096 65536 8388608"
+        tcpWmem="4096 65536 8388608"
+        somaxconn=32768
+        fileMax=262144
+        netdevMaxBacklog=16384
+    elif [[ ${memMB} -le 1024 ]]; then
+        echoContent yellow " ---> 标准模式 (512MB-1GB)"
+        rmemMax=16777216
+        wmemMax=16777216
+        tcpRmem="4096 65536 16777216"
+        tcpWmem="4096 65536 16777216"
+        somaxconn=49152
+        fileMax=524288
+        netdevMaxBacklog=32768
+    elif [[ ${memMB} -le 2048 ]]; then
+        echoContent yellow " ---> 高性能模式 (1GB-2GB)"
+        rmemMax=33554432
+        wmemMax=33554432
+        tcpRmem="4096 87380 33554432"
+        tcpWmem="4096 65536 33554432"
+        somaxconn=65535
+        fileMax=1048576
+        netdevMaxBacklog=32768
+    else
+        echoContent yellow " ---> 大内存模式 (>2GB)"
+        rmemMax=67108864
+        wmemMax=67108864
+        tcpRmem="4096 131072 67108864"
+        tcpWmem="4096 87380 67108864"
+        somaxconn=65535
+        fileMax=2097152
+        netdevMaxBacklog=65536
+    fi
+
+    # 备份现有配置
+    local configFile="/etc/sysctl.d/99-proxy-agent-tcp.conf"
+    if [[ -f "${configFile}" ]]; then
+        cp "${configFile}" "${configFile}.bak.$(date +%Y%m%d%H%M%S)"
+        echoContent green " ---> 已备份现有配置"
+    fi
+
+    # 写入配置文件
+    cat > "${configFile}" << EOF
+# Proxy-agent TCP Buffer Optimization
+# Generated: $(date)
+# System Memory: ${memMB} MB
+
+# TCP Buffer Sizes (Memory Adaptive)
+net.core.rmem_max = ${rmemMax}
+net.core.wmem_max = ${wmemMax}
+net.ipv4.tcp_rmem = ${tcpRmem}
+net.ipv4.tcp_wmem = ${tcpWmem}
+
+# Connection Backlog
+net.core.somaxconn = ${somaxconn}
+net.ipv4.tcp_max_syn_backlog = ${somaxconn}
+net.core.netdev_max_backlog = ${netdevMaxBacklog}
+
+# File Descriptors
+fs.file-max = ${fileMax}
+
+# TCP Optimization
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_mtu_probing = 1
+
+# Memory Management
+vm.swappiness = 10
+EOF
+
+    # 应用配置
+    if sysctl -p "${configFile}" >/dev/null 2>&1; then
+        echoContent green " ---> TCP 缓冲区优化配置已应用"
+        echoContent green " ---> 配置文件: ${configFile}"
+
+        # 显示关键参数
+        echoContent skyBlue "\n===== 当前生效的关键参数 ====="
+        echoContent yellow " rmem_max: $(sysctl -n net.core.rmem_max) bytes"
+        echoContent yellow " wmem_max: $(sysctl -n net.core.wmem_max) bytes"
+        echoContent yellow " tcp_congestion_control: $(sysctl -n net.ipv4.tcp_congestion_control)"
+        echoContent yellow " somaxconn: $(sysctl -n net.core.somaxconn)"
+    else
+        echoContent red " ---> 配置应用失败，请检查系统权限"
+        return 1
     fi
 }
 
@@ -6271,17 +7769,51 @@ bbrInstall() {
 checkLog() {
     if [[ "${coreInstallType}" == "2" ]]; then
         echoContent red "\n ---> 此功能仅支持Xray-core内核"
-        exit 0
+        exit 1
     fi
     if [[ -z "${configPath}" && -z "${realityStatus}" ]]; then
         echoContent red " ---> 没有检测到安装目录，请执行脚本安装内容"
-        exit 0
+        exit 1
     fi
     local realityLogShow=
     local logStatus=false
-    if grep -q "access" ${configPath}00_log.json; then
-        logStatus=true
+    local currentLogLevel="warning"
+    local accessLogPath=
+    local errorLogPath=
+    if [[ -f "${configPath}00_log.json" ]]; then
+        if grep -q "access" ${configPath}00_log.json; then
+            logStatus=true
+        fi
+        currentLogLevel=$(jq -r '.log.loglevel // "warning"' ${configPath}00_log.json)
+        accessLogPath=$(jq -r '.log.access // empty' ${configPath}00_log.json)
+        errorLogPath=$(jq -r '.log.error // empty' ${configPath}00_log.json)
     fi
+
+    writeLogConfig() {
+        local accessPath=$1
+        local errorPath=$2
+        local level=$3
+        {
+            echo "{"
+            echo "  \"log\": {"
+            if [[ -n "${accessPath}" ]]; then
+                echo "    \"access\": \"${accessPath}\"," 
+            fi
+            echo "    \"error\": \"${errorPath}\"," 
+            echo "    \"loglevel\": \"${level}\"," 
+            echo "    \"dnsLog\": false"
+            echo "  }"
+            echo "}"
+        } >${configPath}00_log.json
+    }
+
+    updateRealityLogShow() {
+        if [[ -n ${realityStatus} ]]; then
+            local vlessVisionRealityInbounds
+            vlessVisionRealityInbounds=$(jq -r ".inbounds[0].streamSettings.realitySettings.show=${1}" ${configPath}07_VLESS_vision_reality_inbounds.json)
+            echo "${vlessVisionRealityInbounds}" | jq . >${configPath}07_VLESS_vision_reality_inbounds.json
+        fi
+    }
 
     echoContent skyBlue "\n功能 $1/${totalProgress} : 查看日志"
     echoContent red "\n=============================================================="
@@ -6298,62 +7830,89 @@ checkLog() {
     echoContent yellow "4.查看证书定时任务日志"
     echoContent yellow "5.查看证书安装日志"
     echoContent yellow "6.清空日志"
+    echoContent yellow "7.日志级别(当前:${currentLogLevel})"
     echoContent red "=============================================================="
 
     read -r -p "请选择:" selectAccessLogType
     local configPathLog=${configPath//conf\//}
+    local defaultAccessPath=${accessLogPath:-${configPathLog}access.log}
+    local defaultErrorPath=${errorLogPath:-${configPathLog}error.log}
 
     case ${selectAccessLogType} in
     1)
         if [[ "${logStatus}" == "false" ]]; then
             realityLogShow=true
-            cat <<EOF >${configPath}00_log.json
-{
-  "log": {
-  	"access":"${configPathLog}access.log",
-    "error": "${configPathLog}error.log",
-    "loglevel": "debug"
-  }
-}
-EOF
+            writeLogConfig "${defaultAccessPath}" "${defaultErrorPath}" "${currentLogLevel}"
         elif [[ "${logStatus}" == "true" ]]; then
             realityLogShow=false
-            cat <<EOF >${configPath}00_log.json
-{
-  "log": {
-    "error": "${configPathLog}error.log",
-    "loglevel": "warning"
-  }
-}
-EOF
+            writeLogConfig "" "${defaultErrorPath}" "${currentLogLevel}"
         fi
 
-        if [[ -n ${realityStatus} ]]; then
-            local vlessVisionRealityInbounds
-            vlessVisionRealityInbounds=$(jq -r ".inbounds[0].streamSettings.realitySettings.show=${realityLogShow}" ${configPath}07_VLESS_vision_reality_inbounds.json)
-            echo "${vlessVisionRealityInbounds}" | jq . >${configPath}07_VLESS_vision_reality_inbounds.json
-        fi
+        updateRealityLogShow "${realityLogShow}"
         reloadCore
         checkLog 1
         ;;
     2)
-        tail -f ${configPathLog}access.log
+        tail -f ${defaultAccessPath}
         ;;
     3)
-        tail -f ${configPathLog}error.log
+        tail -f ${defaultErrorPath}
         ;;
     4)
-        if [[ ! -f "/etc/v2ray-agent/crontab_tls.log" ]]; then
-            touch /etc/v2ray-agent/crontab_tls.log
+        if [[ ! -f "/etc/Proxy-agent/crontab_tls.log" ]]; then
+            touch /etc/Proxy-agent/crontab_tls.log
         fi
-        tail -n 100 /etc/v2ray-agent/crontab_tls.log
+        tail -n 100 /etc/Proxy-agent/crontab_tls.log
         ;;
     5)
-        tail -n 100 /etc/v2ray-agent/tls/acme.log
+        tail -n 100 /etc/Proxy-agent/tls/acme.log
         ;;
     6)
-        echo >${configPathLog}access.log
-        echo >${configPathLog}error.log
+        echo >${defaultAccessPath}
+        echo >${defaultErrorPath}
+        ;;
+    7)
+        echoContent yellow "\n日志级别切换(当前:${currentLogLevel})"
+        echoContent yellow "1.warning(默认)"
+        echoContent yellow "2.info"
+        echoContent yellow "3.debug"
+        echoContent yellow "4.最小日志(写入/tmp，适合无盘/调试完毕后使用)"
+        read -r -p "请选择:" selectLogLevel
+        local targetAccessPath=""
+        case ${selectLogLevel} in
+        1)
+            currentLogLevel="warning"
+            ;;
+        2)
+            currentLogLevel="info"
+            ;;
+        3)
+            currentLogLevel="debug"
+            ;;
+        4)
+            local tmpLogDir="/tmp/Proxy-agent"
+            mkdir -p "${tmpLogDir}"
+            currentLogLevel="warning"
+            writeLogConfig "${tmpLogDir}/access.log" "${tmpLogDir}/error.log" "${currentLogLevel}"
+            updateRealityLogShow "false"
+            reloadCore
+            echoContent green "\n ---> 已切换为最小日志模式"
+            echoContent yellow " ---> access/error 将写入 ${tmpLogDir}/，系统临时目录会在重启或周期清理时自动清空，如需立即清理可执行 [rm -f ${tmpLogDir}/*.log]"
+            checkLog 1
+            ;;
+        esac
+        if [[ "${selectLogLevel}" != "4" ]]; then
+            if [[ "${logStatus}" == "true" ]]; then
+                targetAccessPath=${defaultAccessPath}
+                realityLogShow=true
+            else
+                realityLogShow=false
+            fi
+            writeLogConfig "${targetAccessPath}" "${defaultErrorPath}" "${currentLogLevel}"
+            updateRealityLogShow "${realityLogShow}"
+            reloadCore
+            checkLog 1
+        fi
         ;;
     esac
 }
@@ -6361,38 +7920,58 @@ EOF
 # 脚本快捷方式
 aliasInstall() {
 
-    if [[ -f "$HOME/install.sh" ]] && [[ -d "/etc/v2ray-agent" ]] && grep <"$HOME/install.sh" -q "作者:mack-a"; then
-        mv "$HOME/install.sh" /etc/v2ray-agent/install.sh
-        local vasmaType=
+    if [[ -f "$HOME/install.sh" ]] && [[ -d "/etc/Proxy-agent" ]] && grep -Eq "作者[:：]Lynthar|Proxy-agent" "$HOME/install.sh"; then
+        mv "$HOME/install.sh" /etc/Proxy-agent/install.sh
+
+        # 复制 VERSION 文件（如果存在于脚本目录）
+        if [[ -f "${_SCRIPT_DIR}/VERSION" ]]; then
+            cp -f "${_SCRIPT_DIR}/VERSION" /etc/Proxy-agent/VERSION 2>/dev/null
+        fi
+
+        # 复制 lib 目录（如果存在）
+        if [[ -d "${_SCRIPT_DIR}/lib" ]]; then
+            mkdir -p /etc/Proxy-agent/lib
+            cp -rf "${_SCRIPT_DIR}/lib/"*.sh /etc/Proxy-agent/lib/ 2>/dev/null
+        fi
+
+        # 复制 shell/lang 目录（如果存在）
+        if [[ -d "${_SCRIPT_DIR}/shell/lang" ]]; then
+            mkdir -p /etc/Proxy-agent/shell/lang
+            cp -rf "${_SCRIPT_DIR}/shell/lang/"*.sh /etc/Proxy-agent/shell/lang/ 2>/dev/null
+        fi
+
+        local paslyType=
         if [[ -d "/usr/bin/" ]]; then
-            if [[ ! -f "/usr/bin/vasma" ]]; then
-                ln -s /etc/v2ray-agent/install.sh /usr/bin/vasma
-                chmod 700 /usr/bin/vasma
-                vasmaType=true
+            rm -f "/usr/bin/vasma"
+            if [[ ! -f "/usr/bin/pasly" ]]; then
+                ln -s /etc/Proxy-agent/install.sh /usr/bin/pasly
+                chmod 700 /usr/bin/pasly
+                paslyType=true
             fi
 
             rm -rf "$HOME/install.sh"
         elif [[ -d "/usr/sbin" ]]; then
-            if [[ ! -f "/usr/sbin/vasma" ]]; then
-                ln -s /etc/v2ray-agent/install.sh /usr/sbin/vasma
-                chmod 700 /usr/sbin/vasma
-                vasmaType=true
+            rm -f "/usr/sbin/vasma"
+            if [[ ! -f "/usr/sbin/pasly" ]]; then
+                ln -s /etc/Proxy-agent/install.sh /usr/sbin/pasly
+                chmod 700 /usr/sbin/pasly
+                paslyType=true
             fi
             rm -rf "$HOME/install.sh"
         fi
-        if [[ "${vasmaType}" == "true" ]]; then
-            echoContent green "快捷方式创建成功，可执行[vasma]重新打开脚本"
+        if [[ "${paslyType}" == "true" ]]; then
+            echoContent green "快捷方式创建成功，可执行[pasly]重新打开脚本"
         fi
     fi
 }
 
 # 检查ipv6、ipv4
 checkIPv6() {
-    currentIPv6IP=$(curl -s -6 -m 4 http://www.cloudflare.com/cdn-cgi/trace | grep "ip" | cut -d "=" -f 2)
+    currentIPv6IP=$(curl -s -6 -m 4 https://www.cloudflare.com/cdn-cgi/trace | grep "ip" | cut -d "=" -f 2)
 
     if [[ -z "${currentIPv6IP}" ]]; then
         echoContent red " ---> 不支持ipv6"
-        exit 0
+        exit 1
     fi
 }
 
@@ -6401,7 +7980,7 @@ ipv6Routing() {
     if [[ -z "${configPath}" ]]; then
         echoContent red " ---> 未安装，请使用脚本安装"
         menu
-        exit 0
+        exit 1
     fi
 
     checkIPv6
@@ -6420,7 +7999,7 @@ ipv6Routing() {
         echoContent red "=============================================================="
         echoContent yellow "# 注意事项\n"
         echoContent yellow "# 注意事项"
-        echoContent yellow "# 使用教程：https://www.v2ray-agent.com/archives/1683226921000 \n"
+        echoContent yellow "# 使用提示：请参考 documents 目录中的分流与策略说明 \n"
 
         read -r -p "请按照上面示例录入域名:" domainList
         if [[ "${coreInstallType}" == "1" ]]; then
@@ -6500,7 +8079,7 @@ ipv6Routing() {
         echoContent green " ---> IPv6分流卸载成功"
     else
         echoContent red " ---> 选择错误"
-        exit 0
+        exit 1
     fi
 
     reloadCore
@@ -6536,18 +8115,18 @@ showIPv6Routing() {
 btTools() {
     if [[ "${coreInstallType}" == "2" ]]; then
         echoContent red "\n ---> 此功能仅支持Xray-core内核，请等待后续更新"
-        exit 0
+        exit 1
     fi
     if [[ -z "${configPath}" ]]; then
         echoContent red " ---> 未安装，请使用脚本安装"
         menu
-        exit 0
+        exit 1
     fi
 
     echoContent skyBlue "\n功能 1/${totalProgress} : bt下载管理"
     echoContent red "\n=============================================================="
 
-    if [[ -f ${configPath}09_routing.json ]] && grep -q bittorrent <${configPath}09_routing.json; then
+    if [[ -f "${configPath}09_routing.json" ]] && grep -q bittorrent <"${configPath}09_routing.json"; then
         echoContent yellow "当前状态:已禁止下载BT"
     else
         echoContent yellow "当前状态:允许下载BT"
@@ -6599,7 +8178,7 @@ EOF
         echoContent green " ---> 允许BT下载"
     else
         echoContent red " ---> 选择错误"
-        exit 0
+        exit 1
     fi
 
     reloadCore
@@ -6610,7 +8189,7 @@ blacklist() {
     if [[ -z "${configPath}" ]]; then
         echoContent red " ---> 未安装，请使用脚本安装"
         menu
-        exit 0
+        exit 1
     fi
 
     echoContent skyBlue "\n进度  $1/${totalProgress} : 域名黑名单"
@@ -6685,7 +8264,7 @@ blacklist() {
         echoContent green " ---> 域名黑名单删除完毕"
     else
         echoContent red " ---> 选择错误"
-        exit 0
+        exit 1
     fi
     reloadCore
 }
@@ -6698,7 +8277,7 @@ addXrayRouting() {
 
     if [[ -z "${tag}" || -z "${type}" || -z "${domain}" ]]; then
         echoContent red " ---> 参数错误"
-        exit 0
+        exit 1
     fi
 
     local routingRule=
@@ -6727,13 +8306,20 @@ EOF
     fi
 
     while read -r line; do
+        if [[ -z "${line}" ]]; then
+            continue
+        fi
         if echo "${routingRule}" | grep -q "${line}"; then
             echoContent yellow " ---> ${line}已存在，跳过"
         else
             local geositeStatus
-            geositeStatus=$(curl -s "https://api.github.com/repos/v2fly/domain-list-community/contents/data/${line}" | jq .message)
+            # 添加超时和错误处理
+            geositeStatus=$(curl -s --connect-timeout 5 --max-time 10 \
+                "https://api.github.com/repos/v2fly/domain-list-community/contents/data/${line}" 2>/dev/null | jq -r '.message // empty')
 
-            if [[ "${geositeStatus}" == "null" ]]; then
+            # 如果API返回空(文件存在)，使用geosite格式
+            # 如果API失败或返回错误消息，回退到domain格式
+            if [[ -z "${geositeStatus}" ]]; then
                 routingRule=$(echo "${routingRule}" | jq -r '.domain += ["geosite:'"${line}"'"]')
             else
                 routingRule=$(echo "${routingRule}" | jq -r '.domain += ["domain:'"${line}"'"]')
@@ -6796,22 +8382,22 @@ installSniffing() {
 
 # 读取第三方warp配置
 readConfigWarpReg() {
-    if [[ ! -f "/etc/v2ray-agent/warp/config" ]]; then
-        /etc/v2ray-agent/warp/warp-reg >/etc/v2ray-agent/warp/config
+    if [[ ! -f "/etc/Proxy-agent/warp/config" ]]; then
+        /etc/Proxy-agent/warp/warp-reg >/etc/Proxy-agent/warp/config
     fi
 
-    secretKeyWarpReg=$(grep <"/etc/v2ray-agent/warp/config" private_key | awk '{print $2}')
+    secretKeyWarpReg=$(grep <"/etc/Proxy-agent/warp/config" private_key | awk '{print $2}')
 
-    addressWarpReg=$(grep <"/etc/v2ray-agent/warp/config" v6 | awk '{print $2}')
+    addressWarpReg=$(grep <"/etc/Proxy-agent/warp/config" v6 | awk '{print $2}')
 
-    publicKeyWarpReg=$(grep <"/etc/v2ray-agent/warp/config" public_key | awk '{print $2}')
+    publicKeyWarpReg=$(grep <"/etc/Proxy-agent/warp/config" public_key | awk '{print $2}')
 
-    reservedWarpReg=$(grep <"/etc/v2ray-agent/warp/config" reserved | awk -F "[:]" '{print $2}')
+    reservedWarpReg=$(grep <"/etc/Proxy-agent/warp/config" reserved | awk -F "[:]" '{print $2}')
 
 }
 # 安装warp-reg工具
 installWarpReg() {
-    if [[ ! -f "/etc/v2ray-agent/warp/warp-reg" ]]; then
+    if [[ ! -f "/etc/Proxy-agent/warp/warp-reg" ]]; then
         echo
         echoContent yellow "# 注意事项"
         echoContent yellow "# 依赖第三方程序，请熟知其中风险"
@@ -6821,8 +8407,8 @@ installWarpReg() {
 
         if [[ "${installWarpRegStatus}" == "y" ]]; then
 
-            curl -sLo /etc/v2ray-agent/warp/warp-reg "https://github.com/badafans/warp-reg/releases/download/v1.0/${warpRegCoreCPUVendor}"
-            chmod 655 /etc/v2ray-agent/warp/warp-reg
+            curl -sLo /etc/Proxy-agent/warp/warp-reg "https://github.com/badafans/warp-reg/releases/download/v1.0/${warpRegCoreCPUVendor}"
+            chmod 655 /etc/Proxy-agent/warp/warp-reg
 
         else
             echoContent yellow " ---> 放弃安装"
@@ -6895,11 +8481,11 @@ unInstallWireGuard() {
 
         if [[ "${type}" == "IPv4" ]]; then
             if [[ ! -f "${configPath}wireguard_out_IPv6.json" ]]; then
-                rm -rf /etc/v2ray-agent/warp/config >/dev/null 2>&1
+                rm -rf /etc/Proxy-agent/warp/config >/dev/null 2>&1
             fi
         elif [[ "${type}" == "IPv6" ]]; then
             if [[ ! -f "${configPath}wireguard_out_IPv4.json" ]]; then
-                rm -rf /etc/v2ray-agent/warp/config >/dev/null 2>&1
+                rm -rf /etc/Proxy-agent/warp/config >/dev/null 2>&1
             fi
         fi
     fi
@@ -6907,7 +8493,7 @@ unInstallWireGuard() {
     if [[ -n "${singBoxConfigPath}" ]]; then
         if [[ ! -f "${singBoxConfigPath}wireguard_endpoints_IPv6_route.json" && ! -f "${singBoxConfigPath}wireguard_endpoints_IPv4_route.json" ]]; then
             rm "${singBoxConfigPath}wireguard_outbound.json" >/dev/null 2>&1
-            rm -rf /etc/v2ray-agent/warp/config >/dev/null 2>&1
+            rm -rf /etc/Proxy-agent/warp/config >/dev/null 2>&1
         fi
     fi
 }
@@ -6960,7 +8546,7 @@ warpRoutingReg() {
     elif [[ "${warpStatus}" == "2" ]]; then
         echoContent yellow "# 注意事项"
         echoContent yellow "# 支持sing-box、Xray-core"
-        echoContent yellow "# 使用教程：https://www.v2ray-agent.com/archives/1683226921000 \n"
+        echoContent yellow "# 使用提示：请参考 documents 目录中的分流与策略说明 \n"
 
         read -r -p "请按照上面示例录入域名:" domainList
         addWireGuardRoute "${type}" outboundTag "${domainList}"
@@ -7044,10 +8630,5062 @@ warpRoutingReg() {
     else
 
         echoContent red " ---> 选择错误"
-        exit 0
+        exit 1
     fi
     reloadCore
 }
+
+# ======================= 链式代理功能 =======================
+
+# 链式代理主菜单
+chainProxyMenu() {
+    echoContent skyBlue "\n功能: 链式代理管理"
+    echoContent red "\n=============================================================="
+    echoContent yellow "# 链式代理说明"
+    echoContent yellow "# 用于在多台境外VPS之间建立加密转发链路"
+    echoContent yellow "# 支持多层中继: 入口 → 中继1 → 中继2 → ... → 出口 → 互联网"
+    echoContent yellow "# 使用 Shadowsocks 2022 协议，加密安全、性能优秀\n"
+
+    echoContent yellow "1.$(t CHAIN_MENU_WIZARD) [$(t RECOMMENDED)]"
+    echoContent yellow "2.$(t CHAIN_MENU_STATUS)"
+    echoContent yellow "3.$(t CHAIN_MENU_TEST)"
+    echoContent yellow "4.$(t CHAIN_MENU_ADVANCED)"
+    echoContent yellow "5.$(t CHAIN_MENU_UNINSTALL)"
+    echoContent yellow "6.$(t EXT_MENU_TITLE)"
+    echoContent yellow "7.$(t CHAIN_MENU_PROTOCOL_ROUTING)"
+
+    read -r -p "$(t PROMPT_SELECT):" selectType
+
+    case ${selectType} in
+    1)
+        chainProxyWizard
+        ;;
+    2)
+        showChainStatus
+        ;;
+    3)
+        testChainConnection
+        ;;
+    4)
+        chainProxyAdvanced
+        ;;
+    5)
+        removeChainProxy
+        ;;
+    6)
+        externalNodeMenu
+        ;;
+    7)
+        configureProtocolChainRouting
+        ;;
+    esac
+}
+
+# 链式代理配置向导
+chainProxyWizard() {
+    echoContent skyBlue "\n链式代理配置向导"
+    echoContent red "\n=============================================================="
+    echoContent yellow "请选择本机角色:\n"
+    echoContent yellow "1.出口节点 (Exit) - 链路终点，直接访问互联网"
+    echoContent yellow "  └─ 生成配置码，供中继或入口节点导入"
+    echoContent yellow ""
+    echoContent yellow "2.中继节点 (Relay) - 链路中间节点，转发流量"
+    echoContent yellow "  └─ 导入下游配置码，生成新配置码供上游使用"
+    echoContent yellow "  └─ 支持多层中继: 入口→中继1→中继2→...→出口"
+    echoContent yellow ""
+    echoContent yellow "3.入口节点 (Entry) - 单链路模式"
+    echoContent yellow "  └─ 导入出口或中继节点的配置码"
+    echoContent yellow ""
+    echoContent yellow "4.入口节点 (Entry) - 多链路分流模式"
+    echoContent yellow "  └─ 配置多条链路，按规则分流到不同出口"
+    echoContent yellow ""
+    echoContent yellow "5.手动配置入口节点"
+    echoContent yellow "  └─ 手动输入出口节点信息 (仅支持单跳)"
+
+    read -r -p "请选择:" selectType
+
+    case ${selectType} in
+    1)
+        setupChainExit
+        ;;
+    2)
+        setupChainRelay
+        ;;
+    3)
+        setupChainEntryByCode
+        ;;
+    4)
+        setupMultiChainEntry
+        ;;
+    5)
+        setupChainEntryManual
+        ;;
+    esac
+}
+
+# 确保 sing-box 已安装
+ensureSingBoxInstalled() {
+    if [[ ! -f "/etc/Proxy-agent/sing-box/sing-box" ]]; then
+        echoContent yellow "\n检测到 sing-box 未安装，正在安装..."
+        installSingBox
+        if [[ ! -f "/etc/Proxy-agent/sing-box/sing-box" ]]; then
+            echoContent red " ---> sing-box 安装失败"
+            return 1
+        fi
+    fi
+
+    # 确保配置目录存在
+    mkdir -p /etc/Proxy-agent/sing-box/conf/config/
+
+    # 确保基础配置存在
+    if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config/00_log.json" ]]; then
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/00_log.json
+{
+    "log": {
+        "disabled": false,
+        "level": "info",
+        "timestamp": true
+    }
+}
+EOF
+    fi
+
+    # 确保 DNS 配置存在 (使用 sing-box 1.12+ 兼容格式)
+    if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config/01_dns.json" ]]; then
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_dns.json
+{
+    "dns": {
+        "servers": [
+            {
+                "tag": "google",
+                "address": "8.8.8.8"
+            },
+            {
+                "tag": "cloudflare",
+                "address": "1.1.1.1"
+            }
+        ]
+    }
+}
+EOF
+    fi
+
+    # 确保直连出站存在（使用 prefer_ipv4 策略，优先IPv4但保留IPv6兼容）
+    if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json" ]]; then
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
+{
+    "outbounds": [
+        {
+            "type": "direct",
+            "tag": "direct",
+            "domain_strategy": "prefer_ipv4"
+        }
+    ]
+}
+EOF
+    fi
+
+    # 确保 systemd 服务已安装且路径正确（修复：链式代理需要服务才能启动）
+    # 检查服务文件是否存在，以及是否指向正确的路径
+    local needUpdateService=false
+    if [[ ! -f "/etc/systemd/system/sing-box.service" ]] && [[ ! -f "/etc/init.d/sing-box" ]]; then
+        needUpdateService=true
+        echoContent yellow "\n检测到 sing-box 服务未配置，正在配置..."
+    elif [[ -f "/etc/systemd/system/sing-box.service" ]]; then
+        # 检查服务文件是否指向正确路径（修复从 v2ray-agent 迁移的问题）
+        if grep -q "v2ray-agent" /etc/systemd/system/sing-box.service; then
+            needUpdateService=true
+            echoContent yellow "\n检测到 sing-box 服务路径需要更新..."
+        fi
+    fi
+
+    if [[ "${needUpdateService}" == "true" ]]; then
+        local execStart='/etc/Proxy-agent/sing-box/sing-box run -c /etc/Proxy-agent/sing-box/conf/config.json'
+
+        if [[ -n $(find /bin /usr/bin -name "systemctl") ]] && [[ "${release}" != "alpine" ]]; then
+            cat <<EOF >/etc/systemd/system/sing-box.service
+[Unit]
+Description=Sing-Box Service
+Documentation=https://sing-box.sagernet.org
+After=network.target nss-lookup.target
+
+[Service]
+User=root
+WorkingDirectory=/root
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+ExecStart=${execStart}
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=10
+LimitNPROC=infinity
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+            systemctl daemon-reload
+            systemctl enable sing-box.service >/dev/null 2>&1
+            echoContent green " ---> sing-box 服务配置完成"
+        elif [[ "${release}" == "alpine" ]]; then
+            cat <<EOF >/etc/init.d/sing-box
+#!/sbin/openrc-run
+
+name="sing-box"
+description="Sing-Box Service"
+command="/etc/Proxy-agent/sing-box/sing-box"
+command_args="run -c /etc/Proxy-agent/sing-box/conf/config.json"
+command_background=true
+pidfile="/run/\${RC_SVCNAME}.pid"
+
+depend() {
+    need net
+    after firewall
+}
+EOF
+            chmod +x /etc/init.d/sing-box
+            rc-update add sing-box default >/dev/null 2>&1
+            echoContent green " ---> sing-box 服务配置完成 (Alpine)"
+        fi
+    fi
+
+    return 0
+}
+
+# 生成链式代理密钥 (Shadowsocks 2022 需要 Base64 编码)
+generateChainKey() {
+    # AES-128-GCM 需要 16 字节密钥
+    openssl rand -base64 16
+}
+
+# 获取本机公网 IP
+getChainPublicIP() {
+    local ip=""
+    # 尝试多个服务获取公网IP
+    ip=$(curl -s4 --connect-timeout 5 https://api.ipify.org 2>/dev/null)
+    if [[ -z "${ip}" ]]; then
+        ip=$(curl -s4 --connect-timeout 5 https://ifconfig.me 2>/dev/null)
+    fi
+    if [[ -z "${ip}" ]]; then
+        ip=$(curl -s4 --connect-timeout 5 https://ip.sb 2>/dev/null)
+    fi
+    echo "${ip}"
+}
+
+# 配置出口节点 (Exit)
+setupChainExit() {
+    echoContent skyBlue "\n配置出口节点 (Exit)"
+    echoContent red "\n=============================================================="
+
+    # 确保 sing-box 已安装
+    if ! ensureSingBoxInstalled; then
+        return 1
+    fi
+
+    # 检查是否已存在链式代理入站
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/config/chain_inbound.json" ]]; then
+        echoContent yellow "\n检测到已存在链式代理配置"
+        read -r -p "是否覆盖现有配置？[y/n]:" confirmOverwrite
+        if [[ "${confirmOverwrite}" != "y" ]]; then
+            # 显示现有配置码
+            showExistingChainCode
+            return 0
+        fi
+    fi
+
+    # 生成随机端口 (10000-60000)
+    local chainPort
+    chainPort=$(randomNum 10000 60000)
+    echoContent yellow "\n请输入链式代理端口 [回车使用随机端口: ${chainPort}]"
+    read -r -p "端口:" inputPort
+    if [[ -n "${inputPort}" ]]; then
+        if [[ ! "${inputPort}" =~ ^[0-9]+$ ]] || [[ "${inputPort}" -lt 1 ]] || [[ "${inputPort}" -gt 65535 ]]; then
+            echoContent red " ---> 端口格式错误"
+            return 1
+        fi
+        chainPort=${inputPort}
+    fi
+
+    # 生成密钥
+    local chainKey
+    chainKey=$(generateChainKey)
+    echoContent green "\n ---> 已生成随机密钥"
+
+    # 加密方法
+    local chainMethod="2022-blake3-aes-128-gcm"
+
+    # 获取公网IP
+    local publicIP
+    publicIP=$(getChainPublicIP)
+    if [[ -z "${publicIP}" ]]; then
+        echoContent yellow "\n无法自动获取公网IP，请手动输入"
+        read -r -p "公网IP:" publicIP
+        if [[ -z "${publicIP}" ]]; then
+            echoContent red " ---> IP不能为空"
+            return 1
+        fi
+        if ! isValidIP "${publicIP}"; then
+            echoContent red " ---> IP地址格式无效"
+            return 1
+        fi
+    fi
+    echoContent green " ---> 本机公网IP: ${publicIP}"
+
+    # 询问是否限制入口IP
+    echoContent yellow "\n是否限制只允许特定IP连接？(提高安全性)"
+    echoContent yellow "1.不限制 [回车默认]"
+    echoContent yellow "2.限制特定IP"
+    read -r -p "请选择:" limitIPChoice
+
+    local allowedIP=""
+    if [[ "${limitIPChoice}" == "2" ]]; then
+        read -r -p "请输入允许连接的入口节点IP:" allowedIP
+        if [[ -z "${allowedIP}" ]]; then
+            echoContent red " ---> IP不能为空"
+            return 1
+        fi
+        if ! isValidIP "${allowedIP}"; then
+            echoContent red " ---> IP地址格式无效"
+            return 1
+        fi
+    fi
+
+    # 询问网络策略（IPv4/IPv6）
+    echoContent yellow "\n选择出站网络策略："
+    echoContent yellow "1.优先IPv4 [回车默认] - 推荐：出口机只有IPv4或网络不稳定时使用"
+    echoContent yellow "2.优先IPv6 - 出口机双栈且希望优先使用IPv6"
+    echoContent yellow "3.双栈自动 - 出口机双栈，按DNS返回顺序连接"
+    read -r -p "请选择:" networkStrategyChoice
+
+    local domainStrategy="prefer_ipv4"
+    local strategyDesc="优先IPv4"
+    case "${networkStrategyChoice}" in
+        2)
+            domainStrategy="prefer_ipv6"
+            strategyDesc="优先IPv6"
+            ;;
+        3)
+            domainStrategy=""
+            strategyDesc="双栈自动"
+            ;;
+        *)
+            domainStrategy="prefer_ipv4"
+            strategyDesc="优先IPv4"
+            ;;
+    esac
+    echoContent green " ---> 网络策略: ${strategyDesc}"
+
+    # 创建入站配置
+    # 启用 sniff 嗅探 TLS/HTTP 域名，配合 domain_strategy 进行智能路由
+    if [[ -n "${domainStrategy}" ]]; then
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
+{
+    "inbounds": [
+        {
+            "type": "shadowsocks",
+            "tag": "chain_inbound",
+            "listen": "::",
+            "listen_port": ${chainPort},
+            "method": "${chainMethod}",
+            "password": "${chainKey}",
+            "multiplex": {
+                "enabled": true
+            },
+            "sniff": true,
+            "sniff_override_destination": true,
+            "domain_strategy": "${domainStrategy}"
+        }
+    ]
+}
+EOF
+    else
+        # 双栈自动模式：不设置 domain_strategy
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
+{
+    "inbounds": [
+        {
+            "type": "shadowsocks",
+            "tag": "chain_inbound",
+            "listen": "::",
+            "listen_port": ${chainPort},
+            "method": "${chainMethod}",
+            "password": "${chainKey}",
+            "multiplex": {
+                "enabled": true
+            },
+            "sniff": true,
+            "sniff_override_destination": true
+        }
+    ]
+}
+EOF
+    fi
+
+    # 同步更新 direct 出站配置
+    if [[ -n "${domainStrategy}" ]]; then
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
+{
+    "outbounds": [
+        {
+            "type": "direct",
+            "tag": "direct",
+            "domain_strategy": "${domainStrategy}"
+        }
+    ]
+}
+EOF
+    else
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
+{
+    "outbounds": [
+        {
+            "type": "direct",
+            "tag": "direct"
+        }
+    ]
+}
+EOF
+    fi
+
+    # 创建路由配置 (让链式入站流量走直连)
+    cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
+{
+    "route": {
+        "rules": [
+            {
+                "inbound": ["chain_inbound"],
+                "outbound": "direct"
+            }
+        ],
+        "final": "direct"
+    }
+}
+EOF
+
+    # 保存配置信息用于生成配置码（包含网络策略）
+    cat <<EOF >/etc/Proxy-agent/sing-box/conf/chain_exit_info.json
+{
+    "role": "exit",
+    "ip": "${publicIP}",
+    "port": ${chainPort},
+    "method": "${chainMethod}",
+    "password": "${chainKey}",
+    "allowed_ip": "${allowedIP}",
+    "domain_strategy": "${domainStrategy}"
+}
+EOF
+
+    # 开放防火墙端口
+    if [[ -n "${allowedIP}" ]]; then
+        allowPort "${chainPort}" "tcp" "${allowedIP}/32"
+        echoContent green " ---> 已开放端口 ${chainPort} (仅允许 ${allowedIP})"
+    else
+        allowPort "${chainPort}" "tcp"
+        echoContent green " ---> 已开放端口 ${chainPort}"
+    fi
+
+    # 合并配置并重启
+    mergeSingBoxConfig
+    reloadCore
+
+    # 生成并显示配置码
+    echoContent green "\n=============================================================="
+    echoContent green "出口节点配置完成！"
+    echoContent green "=============================================================="
+    echoContent yellow "\n链式代理配置码 (请复制到入口节点):\n"
+
+    local chainCode
+    chainCode="chain://ss2022@${publicIP}:${chainPort}?key=$(echo -n "${chainKey}" | base64 | tr -d '\n')&method=${chainMethod}"
+    echoContent skyBlue "${chainCode}"
+
+    echoContent yellow "\n或手动配置:"
+    echoContent green "  IP地址: ${publicIP}"
+    echoContent green "  端口: ${chainPort}"
+    echoContent green "  密钥: ${chainKey}"
+    echoContent green "  加密方式: ${chainMethod}"
+
+    echoContent red "\n请妥善保管配置码，切勿泄露！"
+}
+
+# 显示现有配置码
+showExistingChainCode() {
+    if [[ ! -f "/etc/Proxy-agent/sing-box/conf/chain_exit_info.json" ]]; then
+        echoContent red " ---> 未找到出口节点配置信息"
+        return 1
+    fi
+
+    local publicIP port method password
+    publicIP=$(jq -r '.ip' /etc/Proxy-agent/sing-box/conf/chain_exit_info.json)
+    port=$(jq -r '.port' /etc/Proxy-agent/sing-box/conf/chain_exit_info.json)
+    method=$(jq -r '.method' /etc/Proxy-agent/sing-box/conf/chain_exit_info.json)
+    password=$(jq -r '.password' /etc/Proxy-agent/sing-box/conf/chain_exit_info.json)
+
+    echoContent green "\n=============================================================="
+    echoContent green "现有出口节点配置"
+    echoContent green "=============================================================="
+
+    local chainCode
+    chainCode="chain://ss2022@${publicIP}:${port}?key=$(echo -n "${password}" | base64 | tr -d '\n')&method=${method}"
+    echoContent yellow "\n配置码:\n"
+    echoContent skyBlue "${chainCode}"
+
+    echoContent yellow "\n手动配置信息:"
+    echoContent green "  IP地址: ${publicIP}"
+    echoContent green "  端口: ${port}"
+    echoContent green "  密钥: ${password}"
+    echoContent green "  加密方式: ${method}"
+}
+
+# 解析配置码 (支持 V1 单跳和 V2 多跳格式)
+# V1 格式: chain://ss2022@IP:PORT?key=xxx&method=xxx
+# V2 格式: chain://v2@BASE64_JSON_ARRAY
+# 输出: chainHops 数组 (JSON), chainHopCount 跳数
+parseChainCode() {
+    local code=$1
+
+    # 初始化全局变量
+    chainHops=""
+    chainHopCount=0
+    chainExitIP=""
+    chainExitPort=""
+    chainExitKey=""
+    chainExitMethod=""
+
+    # V2 多跳格式
+    if [[ "${code}" =~ ^chain://v2@ ]]; then
+        local base64Data
+        base64Data=$(echo "${code}" | sed 's/chain:\/\/v2@//')
+
+        # 解码 Base64
+        chainHops=$(echo "${base64Data}" | base64 -d 2>/dev/null)
+        if [[ -z "${chainHops}" ]] || ! echo "${chainHops}" | jq empty 2>/dev/null; then
+            echoContent red " ---> V2 配置码解析失败，JSON格式错误"
+            return 1
+        fi
+
+        chainHopCount=$(echo "${chainHops}" | jq 'length')
+        if [[ "${chainHopCount}" -lt 1 ]]; then
+            echoContent red " ---> 配置码不包含任何跳转节点"
+            return 1
+        fi
+
+        echoContent green " ---> V2 多跳配置码解析成功"
+        echoContent green "  总跳数: ${chainHopCount}"
+
+        # 显示链路
+        local i=1
+        while [[ $i -le ${chainHopCount} ]]; do
+            local hopIP hopPort
+            hopIP=$(echo "${chainHops}" | jq -r ".[$((i-1))].ip")
+            hopPort=$(echo "${chainHops}" | jq -r ".[$((i-1))].port")
+            if [[ $i -eq ${chainHopCount} ]]; then
+                echoContent green "  第${i}跳 (出口): ${hopIP}:${hopPort}"
+            else
+                echoContent green "  第${i}跳 (中继): ${hopIP}:${hopPort}"
+            fi
+            ((i++))
+        done
+
+        # 兼容性：设置最后一跳为出口
+        chainExitIP=$(echo "${chainHops}" | jq -r '.[-1].ip')
+        chainExitPort=$(echo "${chainHops}" | jq -r '.[-1].port')
+        chainExitKey=$(echo "${chainHops}" | jq -r '.[-1].key')
+        chainExitMethod=$(echo "${chainHops}" | jq -r '.[-1].method')
+
+        return 0
+    fi
+
+    # V1 单跳格式
+    if [[ "${code}" =~ ^chain://ss2022@ ]]; then
+        # 提取 IP:PORT
+        local ipPort
+        ipPort=$(echo "${code}" | sed 's/chain:\/\/ss2022@//' | cut -d'?' -f1)
+        chainExitIP=$(echo "${ipPort}" | cut -d':' -f1)
+        chainExitPort=$(echo "${ipPort}" | cut -d':' -f2)
+
+        # 提取参数
+        local params
+        params=$(echo "${code}" | cut -d'?' -f2)
+
+        # 提取 key (Base64 编码的密钥需要解码)
+        local keyBase64
+        keyBase64=$(echo "${params}" | grep -oP 'key=\K[^&]+')
+        chainExitKey=$(echo "${keyBase64}" | base64 -d 2>/dev/null)
+        if [[ -z "${chainExitKey}" ]]; then
+            chainExitKey="${keyBase64}"
+        fi
+
+        # 提取 method
+        chainExitMethod=$(echo "${params}" | grep -oP 'method=\K[^&]+')
+        if [[ -z "${chainExitMethod}" ]]; then
+            chainExitMethod="2022-blake3-aes-128-gcm"
+        fi
+
+        # 验证提取结果
+        if [[ -z "${chainExitIP}" ]] || [[ -z "${chainExitPort}" ]] || [[ -z "${chainExitKey}" ]]; then
+            echoContent red " ---> 配置码解析失败"
+            return 1
+        fi
+
+        # 转换为 V2 格式的单跳数组
+        chainHops=$(jq -n --arg ip "${chainExitIP}" --argjson port "${chainExitPort}" \
+            --arg key "${chainExitKey}" --arg method "${chainExitMethod}" \
+            '[{ip: $ip, port: $port, key: $key, method: $method}]')
+        chainHopCount=1
+
+        echoContent green " ---> V1 配置码解析成功"
+        echoContent green "  出口IP: ${chainExitIP}"
+        echoContent green "  出口端口: ${chainExitPort}"
+        echoContent green "  加密方式: ${chainExitMethod}"
+
+        return 0
+    fi
+
+    echoContent red " ---> 配置码格式错误，不支持的格式"
+    return 1
+}
+
+# 通过配置码配置入口节点
+setupChainEntryByCode() {
+    echoContent skyBlue "\n配置入口节点 (Entry) - 配置码模式"
+    echoContent red "\n=============================================================="
+
+    echoContent yellow "请粘贴出口或中继节点的配置码:"
+    read -r -p "配置码:" chainCode
+
+    if [[ -z "${chainCode}" ]]; then
+        echoContent red " ---> 配置码不能为空"
+        return 1
+    fi
+
+    # 解析配置码 (支持 V1 单跳和 V2 多跳)
+    if ! parseChainCode "${chainCode}"; then
+        return 1
+    fi
+
+    # 根据跳数调用不同的配置函数
+    if [[ ${chainHopCount} -gt 1 ]]; then
+        # 多跳模式 - 使用全局 chainHops 变量
+        setupChainEntryMultiHop
+    else
+        # 单跳模式 - 向后兼容
+        setupChainEntry "${chainExitIP}" "${chainExitPort}" "${chainExitKey}" "${chainExitMethod}"
+    fi
+}
+
+# 手动配置入口节点
+setupChainEntryManual() {
+    echoContent skyBlue "\n配置入口节点 (Entry) - 手动模式"
+    echoContent red "\n=============================================================="
+
+    read -r -p "出口节点IP:" chainExitIP
+    if [[ -z "${chainExitIP}" ]]; then
+        echoContent red " ---> IP不能为空"
+        return 1
+    fi
+    if ! isValidIP "${chainExitIP}"; then
+        echoContent red " ---> IP地址格式无效"
+        return 1
+    fi
+
+    read -r -p "出口节点端口:" chainExitPort
+    if [[ -z "${chainExitPort}" ]]; then
+        echoContent red " ---> 端口不能为空"
+        return 1
+    fi
+
+    read -r -p "密钥:" chainExitKey
+    if [[ -z "${chainExitKey}" ]]; then
+        echoContent red " ---> 密钥不能为空"
+        return 1
+    fi
+
+    echoContent yellow "\n加密方式 [回车默认: 2022-blake3-aes-128-gcm]"
+    read -r -p "加密方式:" chainExitMethod
+    if [[ -z "${chainExitMethod}" ]]; then
+        chainExitMethod="2022-blake3-aes-128-gcm"
+    fi
+
+    setupChainEntry "${chainExitIP}" "${chainExitPort}" "${chainExitKey}" "${chainExitMethod}"
+}
+
+# 配置中继节点 (Relay)
+# 中继节点同时作为上游的"出口"（接收流量）和下游的"入口"（转发流量）
+setupChainRelay() {
+    echoContent skyBlue "\n配置中继节点 (Relay)"
+    echoContent red "\n=============================================================="
+    echoContent yellow "中继节点工作原理:"
+    echoContent yellow "  上游节点 → [本机] → 下游节点 → ... → 出口 → 互联网"
+    echoContent yellow "  本机将接收上游流量并转发到下游链路\n"
+
+    # 确保 sing-box 已安装
+    if ! ensureSingBoxInstalled; then
+        return 1
+    fi
+
+    # 检查是否已存在链式代理配置
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/config/chain_inbound.json" ]] || \
+       [[ -f "/etc/Proxy-agent/sing-box/conf/config/chain_outbound.json" ]]; then
+        echoContent yellow "\n检测到已存在链式代理配置"
+        read -r -p "是否覆盖现有配置？[y/n]:" confirmOverwrite
+        if [[ "${confirmOverwrite}" != "y" ]]; then
+            return 0
+        fi
+    fi
+
+    # 步骤1: 导入下游配置码
+    echoContent yellow "步骤 1/3: 导入下游节点配置码"
+    echoContent yellow "请粘贴下游节点（出口或其他中继）的配置码:"
+    read -r -p "配置码:" downstreamCode
+
+    if [[ -z "${downstreamCode}" ]]; then
+        echoContent red " ---> 配置码不能为空"
+        return 1
+    fi
+
+    # 解析下游配置码
+    if ! parseChainCode "${downstreamCode}"; then
+        return 1
+    fi
+
+    # chainHops 现在包含下游所有节点
+
+    # 步骤2: 配置本机监听
+    echoContent yellow "\n步骤 2/3: 配置本机监听端口"
+
+    # 生成随机端口 (10000-60000)
+    local chainPort
+    chainPort=$(randomNum 10000 60000)
+    echoContent yellow "请输入本机链式代理端口 [回车使用随机端口: ${chainPort}]"
+    read -r -p "端口:" inputPort
+    if [[ -n "${inputPort}" ]]; then
+        if [[ ! "${inputPort}" =~ ^[0-9]+$ ]] || [[ "${inputPort}" -lt 1 ]] || [[ "${inputPort}" -gt 65535 ]]; then
+            echoContent red " ---> 端口格式错误"
+            return 1
+        fi
+        chainPort=${inputPort}
+    fi
+
+    # 生成密钥
+    local chainKey
+    chainKey=$(generateChainKey)
+    local chainMethod="2022-blake3-aes-128-gcm"
+
+    # 获取公网IP
+    local publicIP
+    publicIP=$(getChainPublicIP)
+    if [[ -z "${publicIP}" ]]; then
+        echoContent yellow "\n无法自动获取公网IP，请手动输入"
+        read -r -p "公网IP:" publicIP
+        if [[ -z "${publicIP}" ]]; then
+            echoContent red " ---> IP不能为空"
+            return 1
+        fi
+        if ! isValidIP "${publicIP}"; then
+            echoContent red " ---> IP地址格式无效"
+            return 1
+        fi
+    fi
+    echoContent green " ---> 本机公网IP: ${publicIP}"
+
+    # 步骤3: 生成配置
+    echoContent yellow "\n步骤 3/3: 生成配置..."
+
+    # 创建入站配置 (接收上游流量)
+    # 启用 sniff 嗅探域名用于日志记录（中继节点不设置 domain_strategy，由出口节点决定）
+    cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
+{
+    "inbounds": [
+        {
+            "type": "shadowsocks",
+            "tag": "chain_inbound",
+            "listen": "::",
+            "listen_port": ${chainPort},
+            "method": "${chainMethod}",
+            "password": "${chainKey}",
+            "multiplex": {
+                "enabled": true
+            },
+            "sniff": true
+        }
+    ]
+}
+EOF
+
+    # 创建出站配置 (detour chain 到下游)
+    # 根据 chainHops 生成 detour 链
+    local outboundsJson="["
+    local i=0
+    local hopCount=${chainHopCount}
+
+    while [[ $i -lt ${hopCount} ]]; do
+        local hopIP hopPort hopKey hopMethod hopTag
+        hopIP=$(echo "${chainHops}" | jq -r ".[$i].ip")
+        hopPort=$(echo "${chainHops}" | jq -r ".[$i].port")
+        hopKey=$(echo "${chainHops}" | jq -r ".[$i].key")
+        hopMethod=$(echo "${chainHops}" | jq -r ".[$i].method")
+        hopTag="chain_hop_$((i+1))"
+
+        if [[ $i -gt 0 ]]; then
+            outboundsJson+=","
+        fi
+
+        # 第一跳直连，后续跳通过前一跳
+        if [[ $i -eq 0 ]]; then
+            outboundsJson+="
+        {
+            \"type\": \"shadowsocks\",
+            \"tag\": \"${hopTag}\",
+            \"server\": \"${hopIP}\",
+            \"server_port\": ${hopPort},
+            \"method\": \"${hopMethod}\",
+            \"password\": \"${hopKey}\",
+            \"multiplex\": {
+                \"enabled\": true,
+                \"protocol\": \"h2mux\",
+                \"max_connections\": 4,
+                \"min_streams\": 4
+            }
+        }"
+        else
+            local prevTag="chain_hop_${i}"
+            outboundsJson+="
+        {
+            \"type\": \"shadowsocks\",
+            \"tag\": \"${hopTag}\",
+            \"server\": \"${hopIP}\",
+            \"server_port\": ${hopPort},
+            \"method\": \"${hopMethod}\",
+            \"password\": \"${hopKey}\",
+            \"multiplex\": {
+                \"enabled\": true,
+                \"protocol\": \"h2mux\",
+                \"max_connections\": 4,
+                \"min_streams\": 4
+            },
+            \"detour\": \"${prevTag}\"
+        }"
+        fi
+
+        ((i++))
+    done
+
+    # 最后添加 chain_outbound 作为最终出站
+    local finalHopTag="chain_hop_${hopCount}"
+    outboundsJson+=",
+        {
+            \"type\": \"direct\",
+            \"tag\": \"chain_outbound\",
+            \"detour\": \"${finalHopTag}\"
+        }
+    ]"
+
+    echo "{\"outbounds\": ${outboundsJson}}" | jq . > /etc/Proxy-agent/sing-box/conf/config/chain_outbound.json
+
+    # 创建路由配置
+    cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
+{
+    "route": {
+        "rules": [
+            {
+                "inbound": ["chain_inbound"],
+                "outbound": "chain_outbound"
+            }
+        ],
+        "final": "direct"
+    }
+}
+EOF
+
+    # 构建新的 hops 数组 (本机 + 下游所有节点)
+    local newHops
+    newHops=$(jq -n --arg ip "${publicIP}" --argjson port "${chainPort}" \
+        --arg key "${chainKey}" --arg method "${chainMethod}" \
+        --argjson downstream "${chainHops}" \
+        '[{ip: $ip, port: $port, key: $key, method: $method}] + $downstream')
+
+    # 保存配置信息
+    cat <<EOF >/etc/Proxy-agent/sing-box/conf/chain_relay_info.json
+{
+    "role": "relay",
+    "ip": "${publicIP}",
+    "port": ${chainPort},
+    "method": "${chainMethod}",
+    "password": "${chainKey}",
+    "downstream_hops": ${chainHops},
+    "total_hops": $((chainHopCount + 1))
+}
+EOF
+
+    # 开放防火墙端口
+    allowPort "${chainPort}" "tcp"
+    echoContent green " ---> 已开放端口 ${chainPort}"
+
+    # 合并配置并重启
+    mergeSingBoxConfig
+    handleSingBox stop >/dev/null 2>&1
+    handleSingBox start
+
+    # 验证启动成功
+    sleep 1
+    if ! pgrep -x "sing-box" >/dev/null 2>&1; then
+        echoContent red " ---> sing-box 启动失败"
+        echoContent yellow "请手动执行: /etc/Proxy-agent/sing-box/sing-box run -c /etc/Proxy-agent/sing-box/conf/config.json"
+        return 1
+    fi
+
+    # 生成 V2 配置码
+    local newChainCode
+    newChainCode="chain://v2@$(echo -n "${newHops}" | base64 | tr -d '\n')"
+
+    echoContent green "\n=============================================================="
+    echoContent green "中继节点配置完成！"
+    echoContent green "=============================================================="
+    echoContent yellow "\n当前链路 (${chainHopCount} + 1 = $((chainHopCount + 1)) 跳):"
+    echoContent green "  上游 → 本机(${publicIP}:${chainPort})"
+
+    i=1
+    while [[ $i -le ${chainHopCount} ]]; do
+        local hopIP hopPort
+        hopIP=$(echo "${chainHops}" | jq -r ".[$((i-1))].ip")
+        hopPort=$(echo "${chainHops}" | jq -r ".[$((i-1))].port")
+        if [[ $i -eq ${chainHopCount} ]]; then
+            echoContent green "        → 出口(${hopIP}:${hopPort}) → 互联网"
+        else
+            echoContent green "        → 中继${i}(${hopIP}:${hopPort})"
+        fi
+        ((i++))
+    done
+
+    echoContent yellow "\n配置码 (供上游入口或中继节点使用):\n"
+    echoContent skyBlue "${newChainCode}"
+
+    echoContent red "\n请妥善保管配置码，切勿泄露！"
+}
+
+# 配置入口节点 - 多跳模式
+# 使用全局变量 chainHops (由 parseChainCode 设置)
+setupChainEntryMultiHop() {
+    local chainBridgePort=31111  # sing-box SOCKS5 桥接端口
+
+    # 确保 sing-box 已安装
+    if ! ensureSingBoxInstalled; then
+        return 1
+    fi
+
+    # 检查是否已存在链式代理配置
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/config/chain_outbound.json" ]]; then
+        echoContent yellow "\n检测到已存在链式代理配置"
+        read -r -p "是否覆盖现有配置？[y/n]:" confirmOverwrite
+        if [[ "${confirmOverwrite}" != "y" ]]; then
+            return 0
+        fi
+    fi
+
+    echoContent yellow "\n正在配置入口节点 (多跳模式, ${chainHopCount}跳)..."
+
+    # 检测是否有 Xray 代理协议在运行
+    local hasXrayProtocols=false
+    if [[ -f "/etc/Proxy-agent/xray/conf/02_VLESS_TCP_inbounds.json" ]] || \
+       [[ -f "/etc/Proxy-agent/xray/conf/07_VLESS_vision_reality_inbounds.json" ]] || \
+       [[ -f "/etc/Proxy-agent/xray/conf/04_trojan_TCP_inbounds.json" ]]; then
+        hasXrayProtocols=true
+        echoContent green " ---> 检测到 Xray 代理协议，将同时配置 Xray 链式转发"
+    fi
+
+    # ============= sing-box 配置 =============
+
+    # 创建多跳出站配置 (detour chain)
+    local outboundsJson="["
+    local i=0
+    local hopCount=${chainHopCount}
+
+    while [[ $i -lt ${hopCount} ]]; do
+        local hopIP hopPort hopKey hopMethod hopTag
+        hopIP=$(echo "${chainHops}" | jq -r ".[$i].ip")
+        hopPort=$(echo "${chainHops}" | jq -r ".[$i].port")
+        hopKey=$(echo "${chainHops}" | jq -r ".[$i].key")
+        hopMethod=$(echo "${chainHops}" | jq -r ".[$i].method")
+        hopTag="chain_hop_$((i+1))"
+
+        if [[ $i -gt 0 ]]; then
+            outboundsJson+=","
+        fi
+
+        # 第一跳直连，后续跳通过前一跳 (detour)
+        if [[ $i -eq 0 ]]; then
+            outboundsJson+="
+        {
+            \"type\": \"shadowsocks\",
+            \"tag\": \"${hopTag}\",
+            \"server\": \"${hopIP}\",
+            \"server_port\": ${hopPort},
+            \"method\": \"${hopMethod}\",
+            \"password\": \"${hopKey}\",
+            \"multiplex\": {
+                \"enabled\": true,
+                \"protocol\": \"h2mux\",
+                \"max_connections\": 4,
+                \"min_streams\": 4
+            }
+        }"
+        else
+            local prevTag="chain_hop_${i}"
+            outboundsJson+="
+        {
+            \"type\": \"shadowsocks\",
+            \"tag\": \"${hopTag}\",
+            \"server\": \"${hopIP}\",
+            \"server_port\": ${hopPort},
+            \"method\": \"${hopMethod}\",
+            \"password\": \"${hopKey}\",
+            \"multiplex\": {
+                \"enabled\": true,
+                \"protocol\": \"h2mux\",
+                \"max_connections\": 4,
+                \"min_streams\": 4
+            },
+            \"detour\": \"${prevTag}\"
+        }"
+        fi
+
+        ((i++))
+    done
+
+    # 最后添加 chain_outbound 作为最终出站
+    local finalHopTag="chain_hop_${hopCount}"
+    outboundsJson+=",
+        {
+            \"type\": \"direct\",
+            \"tag\": \"chain_outbound\",
+            \"detour\": \"${finalHopTag}\"
+        }
+    ]"
+
+    echo "{\"outbounds\": ${outboundsJson}}" | jq . > /etc/Proxy-agent/sing-box/conf/config/chain_outbound.json
+
+    # 如果有 Xray 代理协议，创建 SOCKS5 桥接入站
+    # 启用 sniff 嗅探域名并用 prefer_ipv4 重新解析，解决出口机无 IPv6 的问题
+    if [[ "${hasXrayProtocols}" == "true" ]]; then
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json
+{
+    "inbounds": [
+        {
+            "type": "socks",
+            "tag": "chain_bridge_in",
+            "listen": "127.0.0.1",
+            "listen_port": ${chainBridgePort},
+            "sniff": true,
+            "sniff_override_destination": true,
+            "domain_strategy": "prefer_ipv4"
+        }
+    ]
+}
+EOF
+        # 路由：桥接入站流量走链式出站
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
+{
+    "route": {
+        "rules": [
+            {
+                "inbound": ["chain_bridge_in"],
+                "outbound": "chain_outbound"
+            }
+        ],
+        "final": "chain_outbound"
+    }
+}
+EOF
+    else
+        # 没有 Xray，直接设置 final
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
+{
+    "route": {
+        "final": "chain_outbound"
+    }
+}
+EOF
+    fi
+
+    # 保存配置信息
+    cat <<EOF >/etc/Proxy-agent/sing-box/conf/chain_entry_info.json
+{
+    "role": "entry",
+    "mode": "multi_hop",
+    "hop_count": ${chainHopCount},
+    "hops": ${chainHops},
+    "bridge_port": ${chainBridgePort},
+    "has_xray": ${hasXrayProtocols}
+}
+EOF
+
+    # 合并 sing-box 配置
+    echoContent yellow "正在合并 sing-box 配置..."
+    if ! /etc/Proxy-agent/sing-box/sing-box merge config.json -C /etc/Proxy-agent/sing-box/conf/config/ -D /etc/Proxy-agent/sing-box/conf/ 2>/dev/null; then
+        echoContent red " ---> sing-box 配置合并失败"
+        echoContent yellow "调试命令: /etc/Proxy-agent/sing-box/sing-box merge config.json -C /etc/Proxy-agent/sing-box/conf/config/ -D /etc/Proxy-agent/sing-box/conf/"
+        return 1
+    fi
+
+    # 验证配置文件已生成
+    if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config.json" ]]; then
+        echoContent red " ---> sing-box 配置文件生成失败"
+        return 1
+    fi
+
+    # 启动 sing-box
+    echoContent yellow "正在启动 sing-box..."
+    handleSingBox stop >/dev/null 2>&1
+    handleSingBox start
+
+    # 验证 sing-box 启动成功
+    sleep 1
+    if ! pgrep -x "sing-box" >/dev/null 2>&1; then
+        echoContent red " ---> sing-box 启动失败"
+        echoContent yellow "请手动执行: /etc/Proxy-agent/sing-box/sing-box run -c /etc/Proxy-agent/sing-box/conf/config.json"
+        return 1
+    fi
+    echoContent green " ---> sing-box 启动成功"
+
+    # ============= Xray 配置 (如果存在) =============
+    if [[ "${hasXrayProtocols}" == "true" ]]; then
+        echoContent yellow "正在配置 Xray 链式转发..."
+
+        # 创建 Xray SOCKS5 出站 (指向 sing-box 桥接)
+        cat <<EOF >/etc/Proxy-agent/xray/conf/chain_outbound.json
+{
+    "outbounds": [
+        {
+            "tag": "chain_proxy",
+            "protocol": "socks",
+            "settings": {
+                "servers": [
+                    {
+                        "address": "127.0.0.1",
+                        "port": ${chainBridgePort}
+                    }
+                ]
+            }
+        }
+    ]
+}
+EOF
+
+        # 备份原路由配置
+        if [[ -f "/etc/Proxy-agent/xray/conf/09_routing.json" ]]; then
+            cp /etc/Proxy-agent/xray/conf/09_routing.json /etc/Proxy-agent/xray/conf/09_routing.json.bak.chain
+        fi
+
+        # 创建新的路由配置
+        cat <<EOF >/etc/Proxy-agent/xray/conf/09_routing.json
+{
+    "routing": {
+        "domainStrategy": "AsIs",
+        "rules": [
+            {
+                "type": "field",
+                "ip": ["127.0.0.0/8", "::1"],
+                "outboundTag": "z_direct_outbound"
+            },
+            {
+                "type": "field",
+                "domain": [
+                    "domain:gstatic.com",
+                    "domain:googleapis.com",
+                    "domain:googleapis.cn"
+                ],
+                "outboundTag": "chain_proxy"
+            },
+            {
+                "type": "field",
+                "network": "tcp,udp",
+                "outboundTag": "chain_proxy"
+            }
+        ]
+    }
+}
+EOF
+
+        # 重启 Xray
+        echoContent yellow "正在重启 Xray..."
+        handleXray stop >/dev/null 2>&1
+        handleXray start
+
+        sleep 1
+        if pgrep -f "xray/xray" >/dev/null 2>&1; then
+            echoContent green " ---> Xray 重启成功，链式转发已启用"
+        else
+            echoContent red " ---> Xray 重启失败"
+            echoContent yellow "请检查配置: /etc/Proxy-agent/xray/xray run -confdir /etc/Proxy-agent/xray/conf"
+            return 1
+        fi
+    fi
+
+    echoContent green "\n=============================================================="
+    echoContent green "入口节点配置完成！(多跳模式)"
+    echoContent green "=============================================================="
+
+    # 显示链路
+    echoContent yellow "\n当前链路 (${chainHopCount} 跳):"
+    if [[ "${hasXrayProtocols}" == "true" ]]; then
+        echoContent green "  客户端 → Xray → sing-box"
+    else
+        echoContent green "  客户端 → sing-box"
+    fi
+
+    i=1
+    while [[ $i -le ${chainHopCount} ]]; do
+        local hopIP hopPort
+        hopIP=$(echo "${chainHops}" | jq -r ".[$((i-1))].ip")
+        hopPort=$(echo "${chainHops}" | jq -r ".[$((i-1))].port")
+        if [[ $i -eq ${chainHopCount} ]]; then
+            echoContent green "           → 出口(${hopIP}:${hopPort}) → 互联网"
+        else
+            echoContent green "           → 中继${i}(${hopIP}:${hopPort})"
+        fi
+        ((i++))
+    done
+
+    # 自动测试连通性
+    echoContent yellow "\n正在测试链路连通性..."
+    sleep 2
+    testChainConnection
+}
+
+# 配置入口节点 (单跳模式，向后兼容)
+setupChainEntry() {
+    local exitIP=$1
+    local exitPort=$2
+    local exitKey=$3
+    local exitMethod=$4
+    local chainBridgePort=31111  # sing-box SOCKS5 桥接端口
+
+    # 确保 sing-box 已安装
+    if ! ensureSingBoxInstalled; then
+        return 1
+    fi
+
+    # 检查是否已存在链式代理出站
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/config/chain_outbound.json" ]]; then
+        echoContent yellow "\n检测到已存在链式代理配置"
+        read -r -p "是否覆盖现有配置？[y/n]:" confirmOverwrite
+        if [[ "${confirmOverwrite}" != "y" ]]; then
+            return 0
+        fi
+    fi
+
+    echoContent yellow "\n正在配置入口节点..."
+
+    # 检测是否有 Xray 代理协议在运行
+    local hasXrayProtocols=false
+    if [[ -f "/etc/Proxy-agent/xray/conf/02_VLESS_TCP_inbounds.json" ]] || \
+       [[ -f "/etc/Proxy-agent/xray/conf/07_VLESS_vision_reality_inbounds.json" ]] || \
+       [[ -f "/etc/Proxy-agent/xray/conf/04_trojan_TCP_inbounds.json" ]]; then
+        hasXrayProtocols=true
+        echoContent green " ---> 检测到 Xray 代理协议，将同时配置 Xray 链式转发"
+    fi
+
+    # ============= sing-box 配置 =============
+
+    # 创建 Shadowsocks 出站 (到出口节点)
+    cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_outbound.json
+{
+    "outbounds": [
+        {
+            "type": "shadowsocks",
+            "tag": "chain_outbound",
+            "server": "${exitIP}",
+            "server_port": ${exitPort},
+            "method": "${exitMethod}",
+            "password": "${exitKey}",
+            "multiplex": {
+                "enabled": true,
+                "protocol": "h2mux",
+                "max_connections": 4,
+                "min_streams": 4
+            }
+        }
+    ]
+}
+EOF
+
+    # 如果有 Xray 代理协议，创建 SOCKS5 桥接入站
+    # 启用 sniff 嗅探域名并用 prefer_ipv4 重新解析，解决出口机无 IPv6 的问题
+    if [[ "${hasXrayProtocols}" == "true" ]]; then
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json
+{
+    "inbounds": [
+        {
+            "type": "socks",
+            "tag": "chain_bridge_in",
+            "listen": "127.0.0.1",
+            "listen_port": ${chainBridgePort},
+            "sniff": true,
+            "sniff_override_destination": true,
+            "domain_strategy": "prefer_ipv4"
+        }
+    ]
+}
+EOF
+        # 路由：桥接入站流量走链式出站
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
+{
+    "route": {
+        "rules": [
+            {
+                "inbound": ["chain_bridge_in"],
+                "outbound": "chain_outbound"
+            }
+        ],
+        "final": "chain_outbound"
+    }
+}
+EOF
+    else
+        # 没有 Xray，直接设置 final
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
+{
+    "route": {
+        "final": "chain_outbound"
+    }
+}
+EOF
+    fi
+
+    # 保存配置信息
+    cat <<EOF >/etc/Proxy-agent/sing-box/conf/chain_entry_info.json
+{
+    "role": "entry",
+    "exit_ip": "${exitIP}",
+    "exit_port": ${exitPort},
+    "method": "${exitMethod}",
+    "password": "${exitKey}",
+    "bridge_port": ${chainBridgePort},
+    "has_xray": ${hasXrayProtocols}
+}
+EOF
+
+    # 合并 sing-box 配置
+    echoContent yellow "正在合并 sing-box 配置..."
+    if ! /etc/Proxy-agent/sing-box/sing-box merge config.json -C /etc/Proxy-agent/sing-box/conf/config/ -D /etc/Proxy-agent/sing-box/conf/ 2>/dev/null; then
+        echoContent red " ---> sing-box 配置合并失败"
+        echoContent yellow "调试命令: /etc/Proxy-agent/sing-box/sing-box merge config.json -C /etc/Proxy-agent/sing-box/conf/config/ -D /etc/Proxy-agent/sing-box/conf/"
+        return 1
+    fi
+
+    # 验证配置文件已生成
+    if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config.json" ]]; then
+        echoContent red " ---> sing-box 配置文件生成失败"
+        return 1
+    fi
+
+    # 启动 sing-box
+    echoContent yellow "正在启动 sing-box..."
+    handleSingBox stop >/dev/null 2>&1
+    handleSingBox start
+
+    # 验证 sing-box 启动成功
+    sleep 1
+    if ! pgrep -x "sing-box" >/dev/null 2>&1; then
+        echoContent red " ---> sing-box 启动失败"
+        echoContent yellow "请手动执行: /etc/Proxy-agent/sing-box/sing-box run -c /etc/Proxy-agent/sing-box/conf/config.json"
+        return 1
+    fi
+    echoContent green " ---> sing-box 启动成功"
+
+    # ============= Xray 配置 (如果存在) =============
+    if [[ "${hasXrayProtocols}" == "true" ]]; then
+        echoContent yellow "正在配置 Xray 链式转发..."
+
+        # 创建 Xray SOCKS5 出站 (指向 sing-box 桥接)
+        cat <<EOF >/etc/Proxy-agent/xray/conf/chain_outbound.json
+{
+    "outbounds": [
+        {
+            "tag": "chain_proxy",
+            "protocol": "socks",
+            "settings": {
+                "servers": [
+                    {
+                        "address": "127.0.0.1",
+                        "port": ${chainBridgePort}
+                    }
+                ]
+            }
+        }
+    ]
+}
+EOF
+
+        # 修改 Xray 路由，让流量走链式代理
+        # 备份原路由配置
+        if [[ -f "/etc/Proxy-agent/xray/conf/09_routing.json" ]]; then
+            cp /etc/Proxy-agent/xray/conf/09_routing.json /etc/Proxy-agent/xray/conf/09_routing.json.bak.chain
+        fi
+
+        # 创建新的路由配置，默认出站改为 chain_proxy
+        cat <<EOF >/etc/Proxy-agent/xray/conf/09_routing.json
+{
+    "routing": {
+        "domainStrategy": "AsIs",
+        "rules": [
+            {
+                "type": "field",
+                "ip": ["127.0.0.0/8", "::1"],
+                "outboundTag": "z_direct_outbound"
+            },
+            {
+                "type": "field",
+                "domain": [
+                    "domain:gstatic.com",
+                    "domain:googleapis.com",
+                    "domain:googleapis.cn"
+                ],
+                "outboundTag": "chain_proxy"
+            },
+            {
+                "type": "field",
+                "network": "tcp,udp",
+                "outboundTag": "chain_proxy"
+            }
+        ]
+    }
+}
+EOF
+
+        # 重启 Xray
+        echoContent yellow "正在重启 Xray..."
+        handleXray stop >/dev/null 2>&1
+        handleXray start
+
+        sleep 1
+        if pgrep -f "xray/xray" >/dev/null 2>&1; then
+            echoContent green " ---> Xray 重启成功，链式转发已启用"
+        else
+            echoContent red " ---> Xray 重启失败"
+            echoContent yellow "请检查配置: /etc/Proxy-agent/xray/xray run -confdir /etc/Proxy-agent/xray/conf"
+            return 1
+        fi
+    fi
+
+    echoContent green "\n=============================================================="
+    echoContent green "入口节点配置完成！"
+    echoContent green "=============================================================="
+    if [[ "${hasXrayProtocols}" == "true" ]]; then
+        echoContent yellow "流量路径: 客户端 → Xray → sing-box → 出口节点"
+    else
+        echoContent yellow "流量路径: 客户端 → sing-box → 出口节点"
+    fi
+
+    # 自动测试连通性
+    echoContent yellow "\n正在测试链路连通性..."
+    sleep 2
+    testChainConnection
+}
+
+# 查看链路状态
+showChainStatus() {
+    echoContent skyBlue "\n链式代理状态"
+    echoContent red "\n=============================================================="
+
+    # 检查是否为多链路模式
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" ]]; then
+        showMultiChainStatus
+        return $?
+    fi
+
+    local role="未配置"
+    local exitIP=""
+    local exitPort=""
+    local status="❌ 未配置"
+
+    # 检查是否为出口节点
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_exit_info.json" ]]; then
+        role="出口节点 (Exit)"
+        local ip port
+        ip=$(jq -r '.ip' /etc/Proxy-agent/sing-box/conf/chain_exit_info.json)
+        port=$(jq -r '.port' /etc/Proxy-agent/sing-box/conf/chain_exit_info.json)
+        local allowedIP
+        allowedIP=$(jq -r '.allowed_ip' /etc/Proxy-agent/sing-box/conf/chain_exit_info.json)
+
+        # 检查 sing-box 是否运行
+        if pgrep -x "sing-box" >/dev/null 2>&1; then
+            status="✅ 运行中"
+        else
+            status="❌ 未运行"
+        fi
+
+        echoContent green "╔══════════════════════════════════════════════════════════════╗"
+        echoContent green "║                      链式代理状态                              ║"
+        echoContent green "╠══════════════════════════════════════════════════════════════╣"
+        echoContent yellow "  当前角色: ${role}"
+        echoContent yellow "  监听端口: ${port}"
+        echoContent yellow "  本机IP: ${ip}"
+        echoContent yellow "  允许连接: ${allowedIP:-所有IP}"
+        echoContent yellow "  运行状态: ${status}"
+        echoContent green "╚══════════════════════════════════════════════════════════════╝"
+
+        # 显示配置码
+        showExistingChainCode
+
+    # 检查是否为中继节点
+    elif [[ -f "/etc/Proxy-agent/sing-box/conf/chain_relay_info.json" ]]; then
+        role="中继节点 (Relay)"
+        local ip port totalHops
+        ip=$(jq -r '.ip' /etc/Proxy-agent/sing-box/conf/chain_relay_info.json)
+        port=$(jq -r '.port' /etc/Proxy-agent/sing-box/conf/chain_relay_info.json)
+        totalHops=$(jq -r '.total_hops' /etc/Proxy-agent/sing-box/conf/chain_relay_info.json)
+        local downstreamHops
+        downstreamHops=$(jq -r '.downstream_hops' /etc/Proxy-agent/sing-box/conf/chain_relay_info.json)
+
+        # 检查 sing-box 是否运行
+        if pgrep -x "sing-box" >/dev/null 2>&1; then
+            status="✅ 运行中"
+        else
+            status="❌ 未运行"
+        fi
+
+        echoContent green "╔══════════════════════════════════════════════════════════════╗"
+        echoContent green "║                      链式代理状态                              ║"
+        echoContent green "╠══════════════════════════════════════════════════════════════╣"
+        echoContent yellow "  当前角色: ${role}"
+        echoContent yellow "  监听端口: ${port}"
+        echoContent yellow "  本机IP: ${ip}"
+        echoContent yellow "  链路总跳数: ${totalHops}"
+        echoContent yellow "  运行状态: ${status}"
+        echoContent green "╠══════════════════════════════════════════════════════════════╣"
+        echoContent yellow "  下游链路:"
+
+        local i=0
+        local hopCount
+        hopCount=$(echo "${downstreamHops}" | jq 'length')
+        while [[ $i -lt ${hopCount} ]]; do
+            local hopIP hopPort
+            hopIP=$(echo "${downstreamHops}" | jq -r ".[$i].ip")
+            hopPort=$(echo "${downstreamHops}" | jq -r ".[$i].port")
+            if [[ $i -eq $((hopCount - 1)) ]]; then
+                echoContent yellow "    → 出口(${hopIP}:${hopPort}) → 互联网"
+            else
+                echoContent yellow "    → 中继$((i+1))(${hopIP}:${hopPort})"
+            fi
+            ((i++))
+        done
+        echoContent green "╚══════════════════════════════════════════════════════════════╝"
+
+        # 显示配置码
+        showRelayChainCode
+
+    # 检查是否为入口节点
+    elif [[ -f "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json" ]]; then
+        local mode
+        mode=$(jq -r '.mode // "single_hop"' /etc/Proxy-agent/sing-box/conf/chain_entry_info.json)
+
+        # 检查 sing-box 是否运行
+        if pgrep -x "sing-box" >/dev/null 2>&1; then
+            status="✅ 运行中"
+        else
+            status="❌ 未运行"
+        fi
+
+        if [[ "${mode}" == "multi_hop" ]]; then
+            role="入口节点 (Entry) - 多跳模式"
+            local hopCount hops
+            hopCount=$(jq -r '.hop_count' /etc/Proxy-agent/sing-box/conf/chain_entry_info.json)
+            hops=$(jq -r '.hops' /etc/Proxy-agent/sing-box/conf/chain_entry_info.json)
+
+            echoContent green "╔══════════════════════════════════════════════════════════════╗"
+            echoContent green "║                      链式代理状态                              ║"
+            echoContent green "╠══════════════════════════════════════════════════════════════╣"
+            echoContent yellow "  当前角色: ${role}"
+            echoContent yellow "  链路跳数: ${hopCount}"
+            echoContent yellow "  运行状态: ${status}"
+            echoContent green "╠══════════════════════════════════════════════════════════════╣"
+            echoContent yellow "  链路详情:"
+
+            local i=0
+            while [[ $i -lt ${hopCount} ]]; do
+                local hopIP hopPort
+                hopIP=$(echo "${hops}" | jq -r ".[$i].ip")
+                hopPort=$(echo "${hops}" | jq -r ".[$i].port")
+                if [[ $i -eq $((hopCount - 1)) ]]; then
+                    echoContent yellow "    → 出口(${hopIP}:${hopPort}) → 互联网"
+                else
+                    echoContent yellow "    → 中继$((i+1))(${hopIP}:${hopPort})"
+                fi
+                ((i++))
+            done
+            echoContent green "╚══════════════════════════════════════════════════════════════╝"
+        else
+            role="入口节点 (Entry)"
+            exitIP=$(jq -r '.exit_ip' /etc/Proxy-agent/sing-box/conf/chain_entry_info.json)
+            exitPort=$(jq -r '.exit_port' /etc/Proxy-agent/sing-box/conf/chain_entry_info.json)
+
+            echoContent green "╔══════════════════════════════════════════════════════════════╗"
+            echoContent green "║                      链式代理状态                              ║"
+            echoContent green "╠══════════════════════════════════════════════════════════════╣"
+            echoContent yellow "  当前角色: ${role}"
+            echoContent yellow "  出口地址: ${exitIP}:${exitPort}"
+            echoContent yellow "  运行状态: ${status}"
+            echoContent green "╚══════════════════════════════════════════════════════════════╝"
+        fi
+
+    else
+        echoContent yellow "未配置链式代理"
+        echoContent yellow "请使用 '快速配置向导' 进行配置"
+    fi
+}
+
+# 显示中继节点配置码
+showRelayChainCode() {
+    if [[ ! -f "/etc/Proxy-agent/sing-box/conf/chain_relay_info.json" ]]; then
+        echoContent red " ---> 未找到中继节点配置信息"
+        return 1
+    fi
+
+    local publicIP port method password downstreamHops
+    publicIP=$(jq -r '.ip' /etc/Proxy-agent/sing-box/conf/chain_relay_info.json)
+    port=$(jq -r '.port' /etc/Proxy-agent/sing-box/conf/chain_relay_info.json)
+    method=$(jq -r '.method' /etc/Proxy-agent/sing-box/conf/chain_relay_info.json)
+    password=$(jq -r '.password' /etc/Proxy-agent/sing-box/conf/chain_relay_info.json)
+    downstreamHops=$(jq -r '.downstream_hops' /etc/Proxy-agent/sing-box/conf/chain_relay_info.json)
+
+    # 构建新的 hops 数组 (本机 + 下游所有节点)
+    local newHops
+    newHops=$(jq -n --arg ip "${publicIP}" --argjson port "${port}" \
+        --arg key "${password}" --arg method "${method}" \
+        --argjson downstream "${downstreamHops}" \
+        '[{ip: $ip, port: $port, key: $key, method: $method}] + $downstream')
+
+    local chainCode
+    chainCode="chain://v2@$(echo -n "${newHops}" | base64 | tr -d '\n')"
+
+    echoContent yellow "\n配置码 (供上游入口或中继节点使用):\n"
+    echoContent skyBlue "${chainCode}"
+}
+
+# 测试链路连通性
+testChainConnection() {
+    # 检测多链路模式，使用专用测试函数
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" ]]; then
+        testMultiChainConnection
+        return $?
+    fi
+
+    echoContent skyBlue "\n测试链路连通性"
+    echoContent red "\n=============================================================="
+
+    # 确定节点角色并获取首跳信息
+    local firstHopIP=""
+    local firstHopPort=""
+    local role=""
+
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json" ]]; then
+        role="entry"
+        local mode
+        mode=$(jq -r '.mode // "single_hop"' /etc/Proxy-agent/sing-box/conf/chain_entry_info.json)
+
+        if [[ "${mode}" == "multi_hop" ]]; then
+            # 多跳模式，获取第一跳
+            firstHopIP=$(jq -r '.hops[0].ip' /etc/Proxy-agent/sing-box/conf/chain_entry_info.json)
+            firstHopPort=$(jq -r '.hops[0].port' /etc/Proxy-agent/sing-box/conf/chain_entry_info.json)
+        else
+            # 单跳模式
+            firstHopIP=$(jq -r '.exit_ip' /etc/Proxy-agent/sing-box/conf/chain_entry_info.json)
+            firstHopPort=$(jq -r '.exit_port' /etc/Proxy-agent/sing-box/conf/chain_entry_info.json)
+        fi
+
+    elif [[ -f "/etc/Proxy-agent/sing-box/conf/chain_relay_info.json" ]]; then
+        role="relay"
+        # 中继节点获取下游第一跳
+        firstHopIP=$(jq -r '.downstream_hops[0].ip' /etc/Proxy-agent/sing-box/conf/chain_relay_info.json)
+        firstHopPort=$(jq -r '.downstream_hops[0].port' /etc/Proxy-agent/sing-box/conf/chain_relay_info.json)
+
+    elif [[ -f "/etc/Proxy-agent/sing-box/conf/chain_exit_info.json" ]]; then
+        role="exit"
+        echoContent yellow "当前为出口节点，无需测试链路"
+        echoContent yellow "请在入口节点测试连通性"
+
+        # 测试出口节点自身网络
+        echoContent yellow "\n测试出口节点网络..."
+        local testIP
+        testIP=$(curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null)
+        if [[ -n "${testIP}" ]]; then
+            echoContent green "✅ 出口节点网络正常"
+            echoContent green "   出口IP: ${testIP}"
+        else
+            echoContent red "❌ 出口节点网络异常"
+        fi
+        return 0
+    else
+        echoContent red " ---> 未配置链式代理"
+        return 1
+    fi
+
+    echoContent yellow "首跳节点: ${firstHopIP}:${firstHopPort}\n"
+
+    # 测试1: TCP端口连通性 (到第一跳)
+    echoContent yellow "测试1: TCP端口连通性..."
+    if nc -zv -w 5 "${firstHopIP}" "${firstHopPort}" >/dev/null 2>&1; then
+        echoContent green "  ✅ TCP端口连通 (${firstHopIP}:${firstHopPort})"
+    else
+        echoContent red "  ❌ TCP端口不通"
+        echoContent red "  请检查:"
+        echoContent red "  1. 目标节点防火墙是否开放端口 ${firstHopPort}"
+        echoContent red "  2. 目标节点 sing-box 是否运行"
+        echoContent red "  3. IP地址是否正确"
+        return 1
+    fi
+
+    # 测试2: 通过链路访问外网
+    echoContent yellow "测试2: 链路转发测试..."
+
+    # 检查 sing-box 是否运行
+    if ! pgrep -x "sing-box" >/dev/null 2>&1; then
+        echoContent red "  ❌ sing-box 未运行"
+        return 1
+    fi
+
+    # 通过链路获取出口IP
+    sleep 1
+    local outIP
+    outIP=$(curl -s --connect-timeout 10 https://api.ipify.org 2>/dev/null)
+
+    if [[ -n "${outIP}" ]]; then
+        echoContent green "  ✅ 链路转发正常"
+        echoContent green "  出口IP: ${outIP}"
+
+        # 测试延迟
+        local startTime endTime latency
+        startTime=$(date +%s%N)
+        curl -s --connect-timeout 5 https://www.google.com >/dev/null 2>&1
+        endTime=$(date +%s%N)
+        latency=$(( (endTime - startTime) / 1000000 ))
+        echoContent green "  延迟: ${latency}ms"
+    else
+        echoContent red "  ❌ 链路转发失败"
+        echoContent red "  请检查各节点配置和网络"
+        return 1
+    fi
+
+    echoContent green "\n=============================================================="
+    echoContent green "链路测试通过！"
+    echoContent green "=============================================================="
+}
+
+# 高级设置
+chainProxyAdvanced() {
+    # 检查是否为多链路模式
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" ]]; then
+        multiChainAdvancedMenu
+        return $?
+    fi
+
+    echoContent skyBlue "\n链式代理高级设置"
+    echoContent red "\n=============================================================="
+
+    echoContent yellow "1.显示配置码 (出口/中继节点)"
+    echoContent yellow "2.更新密钥"
+    echoContent yellow "3.修改端口"
+    echoContent yellow "4.查看详细配置"
+
+    read -r -p "请选择:" selectType
+
+    case ${selectType} in
+    1)
+        if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_exit_info.json" ]]; then
+            showExistingChainCode
+        elif [[ -f "/etc/Proxy-agent/sing-box/conf/chain_relay_info.json" ]]; then
+            showRelayChainCode
+        else
+            echoContent red " ---> 当前不是出口或中继节点"
+        fi
+        ;;
+    2)
+        updateChainKey
+        ;;
+    3)
+        updateChainPort
+        ;;
+    4)
+        showChainDetailConfig
+        ;;
+    esac
+}
+
+# 更新密钥
+updateChainKey() {
+    echoContent yellow "\n更新链式代理密钥"
+
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_exit_info.json" ]]; then
+        # 出口节点
+        local port method
+        port=$(jq -r '.port' /etc/Proxy-agent/sing-box/conf/chain_exit_info.json)
+        method=$(jq -r '.method' /etc/Proxy-agent/sing-box/conf/chain_exit_info.json)
+        local publicIP
+        publicIP=$(jq -r '.ip' /etc/Proxy-agent/sing-box/conf/chain_exit_info.json)
+
+        # 生成新密钥
+        local newKey
+        newKey=$(generateChainKey)
+
+        # 更新入站配置 - 使用安全的临时文件
+        local tmpInboundFile
+        tmpInboundFile=$(mktemp)
+        chmod 600 "${tmpInboundFile}"
+        jq --arg key "${newKey}" '.inbounds[0].password = $key' \
+            /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json > "${tmpInboundFile}"
+        mv "${tmpInboundFile}" /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
+
+        # 更新信息文件 - 使用安全的临时文件
+        local tmpInfoFile
+        tmpInfoFile=$(mktemp)
+        chmod 600 "${tmpInfoFile}"
+        jq --arg key "${newKey}" '.password = $key' \
+            /etc/Proxy-agent/sing-box/conf/chain_exit_info.json > "${tmpInfoFile}"
+        mv "${tmpInfoFile}" /etc/Proxy-agent/sing-box/conf/chain_exit_info.json
+
+        mergeSingBoxConfig
+        reloadCore
+
+        echoContent green " ---> 密钥已更新"
+        echoContent yellow "\n新配置码:\n"
+        local chainCode
+        chainCode="chain://ss2022@${publicIP}:${port}?key=$(echo -n "${newKey}" | base64 | tr -d '\n')&method=${method}"
+        echoContent skyBlue "${chainCode}"
+        echoContent red "\n请更新入口节点配置！"
+
+    elif [[ -f "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json" ]]; then
+        echoContent red " ---> 入口节点请从出口节点获取新配置码后重新配置"
+    else
+        echoContent red " ---> 未配置链式代理"
+    fi
+}
+
+# 更新端口
+updateChainPort() {
+    echoContent yellow "\n更新链式代理端口"
+
+    local infoFile=""
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_exit_info.json" ]]; then
+        infoFile="/etc/Proxy-agent/sing-box/conf/chain_exit_info.json"
+    elif [[ -f "/etc/Proxy-agent/sing-box/conf/chain_relay_info.json" ]]; then
+        infoFile="/etc/Proxy-agent/sing-box/conf/chain_relay_info.json"
+    else
+        echoContent red " ---> 仅出口或中继节点可修改端口"
+        return 1
+    fi
+
+    local oldPort
+    oldPort=$(jq -r '.port' "${infoFile}")
+
+    read -r -p "新端口 [当前: ${oldPort}]:" newPort
+    if [[ -z "${newPort}" ]]; then
+        return 0
+    fi
+
+    if [[ ! "${newPort}" =~ ^[0-9]+$ ]] || [[ "${newPort}" -lt 1 ]] || [[ "${newPort}" -gt 65535 ]]; then
+        echoContent red " ---> 端口格式错误"
+        return 1
+    fi
+
+    # 更新入站配置 - 使用安全的临时文件
+    local tmpInboundFile
+    tmpInboundFile=$(mktemp)
+    chmod 600 "${tmpInboundFile}"
+    jq --argjson port "${newPort}" '.inbounds[0].listen_port = $port' \
+        /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json > "${tmpInboundFile}"
+    mv "${tmpInboundFile}" /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
+
+    # 更新信息文件 - 使用安全的临时文件
+    local tmpInfoFile
+    tmpInfoFile=$(mktemp)
+    chmod 600 "${tmpInfoFile}"
+    jq --argjson port "${newPort}" '.port = $port' \
+        "${infoFile}" > "${tmpInfoFile}"
+    mv "${tmpInfoFile}" "${infoFile}"
+
+    # 更新防火墙
+    allowPort "${newPort}" "tcp"
+
+    mergeSingBoxConfig
+    reloadCore
+
+    echoContent green " ---> 端口已更新为 ${newPort}"
+
+    # 显示相应的配置码
+    if [[ "${infoFile}" == *"exit"* ]]; then
+        showExistingChainCode
+    else
+        showRelayChainCode
+    fi
+    echoContent red "\n请更新上游节点配置！"
+}
+
+# 显示详细配置
+showChainDetailConfig() {
+    echoContent skyBlue "\n链式代理详细配置"
+    echoContent red "\n=============================================================="
+
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/config/chain_inbound.json" ]]; then
+        echoContent yellow "\n入站配置 (chain_inbound.json):"
+        jq . /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
+    fi
+
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/config/chain_outbound.json" ]]; then
+        echoContent yellow "\n出站配置 (chain_outbound.json):"
+        jq . /etc/Proxy-agent/sing-box/conf/config/chain_outbound.json
+    fi
+
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/config/chain_route.json" ]]; then
+        echoContent yellow "\n路由配置 (chain_route.json):"
+        jq . /etc/Proxy-agent/sing-box/conf/config/chain_route.json
+    fi
+}
+
+# 卸载链式代理
+removeChainProxy() {
+    echoContent skyBlue "\n卸载链式代理"
+    echoContent red "\n=============================================================="
+
+    # 检测链式代理模式
+    local isMultiChain=false
+    local isSingleChain=false
+
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" ]]; then
+        isMultiChain=true
+        local chainCount
+        chainCount=$(jq -r '.chains | length' /etc/Proxy-agent/sing-box/conf/chain_multi_info.json 2>/dev/null || echo "0")
+        echoContent yellow "\n检测到多链路分流模式，共 ${chainCount} 条链路"
+    elif [[ -f "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json" ]] || \
+         [[ -f "/etc/Proxy-agent/sing-box/conf/chain_exit_info.json" ]] || \
+         [[ -f "/etc/Proxy-agent/sing-box/conf/chain_relay_info.json" ]]; then
+        isSingleChain=true
+        echoContent yellow "\n检测到单链路模式"
+    else
+        echoContent red "\n未检测到链式代理配置"
+        return 0
+    fi
+
+    read -r -p "确认卸载链式代理？[y/n]:" confirmRemove
+    if [[ "${confirmRemove}" != "y" ]]; then
+        return 0
+    fi
+
+    # 删除 sing-box 配置文件 - 单链路模式
+    rm -f /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
+    rm -f /etc/Proxy-agent/sing-box/conf/config/chain_outbound.json
+    rm -f /etc/Proxy-agent/sing-box/conf/config/chain_route.json
+    rm -f /etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json
+    rm -f /etc/Proxy-agent/sing-box/conf/chain_exit_info.json
+    rm -f /etc/Proxy-agent/sing-box/conf/chain_entry_info.json
+    rm -f /etc/Proxy-agent/sing-box/conf/chain_relay_info.json
+
+    # 删除外部节点单链路配置（兼容旧配置）
+    rm -f /etc/Proxy-agent/sing-box/conf/config/external_outbound.json
+    rm -f /etc/Proxy-agent/sing-box/conf/config/external_route.json
+    rm -f /etc/Proxy-agent/sing-box/conf/external_entry_info.json
+
+    # 删除 sing-box 配置文件 - 多链路模式
+    if [[ "${isMultiChain}" == "true" ]]; then
+        # 删除所有链路出站配置文件
+        rm -f /etc/Proxy-agent/sing-box/conf/config/chain_outbound_*.json 2>/dev/null
+        # 删除多链路路由配置
+        rm -f /etc/Proxy-agent/sing-box/conf/config/chain_multi_route.json 2>/dev/null
+        # 删除多链路信息文件
+        rm -f /etc/Proxy-agent/sing-box/conf/chain_multi_info.json
+        echoContent yellow " ---> 已删除多链路分流配置"
+    fi
+
+    # 删除 Xray 链式代理配置
+    if [[ -f "/etc/Proxy-agent/xray/conf/chain_outbound.json" ]]; then
+        rm -f /etc/Proxy-agent/xray/conf/chain_outbound.json
+        echoContent yellow " ---> 已删除 Xray 链式出站配置"
+
+        # 恢复原路由配置
+        if [[ -f "/etc/Proxy-agent/xray/conf/09_routing.json.bak.chain" ]]; then
+            mv /etc/Proxy-agent/xray/conf/09_routing.json.bak.chain /etc/Proxy-agent/xray/conf/09_routing.json
+            echoContent yellow " ---> 已恢复 Xray 原路由配置"
+        else
+            # 如果没有备份，创建默认路由配置
+            cat <<EOF >/etc/Proxy-agent/xray/conf/09_routing.json
+{
+    "routing": {
+        "rules": [
+            {
+                "type": "field",
+                "domain": [
+                    "domain:gstatic.com",
+                    "domain:googleapis.com",
+                    "domain:googleapis.cn"
+                ],
+                "outboundTag": "z_direct_outbound"
+            }
+        ]
+    }
+}
+EOF
+            echoContent yellow " ---> 已重置 Xray 路由配置为默认"
+        fi
+
+        # 重启 Xray
+        handleXray stop >/dev/null 2>&1
+        handleXray start
+    fi
+
+    # 重新合并 sing-box 配置
+    mergeSingBoxConfig
+    reloadCore
+
+    echoContent green " ---> 链式代理已卸载"
+}
+
+# ======================= 按协议分流功能 =======================
+
+# 生成协议分流路由配置
+# 参数: $@ - 要走链式代理的 inbound tag 列表
+generateProtocolChainRoute() {
+    local selectedTags=("$@")
+    local inboundArray
+    local routeConfig
+
+    # 构建 JSON 数组
+    inboundArray=$(printf '"%s",' "${selectedTags[@]}")
+    inboundArray="[${inboundArray%,}]"
+
+    # 检查是否存在 bridge inbound（Xray 桥接）
+    local hasBridge=false
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json" ]]; then
+        hasBridge=true
+    fi
+
+    if [[ "${hasBridge}" == "true" ]]; then
+        # 包含 bridge inbound 的路由配置
+        routeConfig=$(cat <<EOF
+{
+    "route": {
+        "rules": [
+            {
+                "inbound": ["chain_bridge_in"],
+                "outbound": "chain_outbound"
+            },
+            {
+                "inbound": ${inboundArray},
+                "outbound": "chain_outbound"
+            }
+        ],
+        "final": "direct"
+    }
+}
+EOF
+)
+    else
+        # 标准路由配置
+        routeConfig=$(cat <<EOF
+{
+    "route": {
+        "rules": [
+            {
+                "inbound": ${inboundArray},
+                "outbound": "chain_outbound"
+            }
+        ],
+        "final": "direct"
+    }
+}
+EOF
+)
+    fi
+
+    echo "${routeConfig}" | jq . > /etc/Proxy-agent/sing-box/conf/config/chain_route.json
+}
+
+# 保存协议分流偏好设置
+saveProtocolRoutingPreference() {
+    local selection="$1"
+    local protocolNames="$2"
+    local entryInfo="/etc/Proxy-agent/sing-box/conf/chain_entry_info.json"
+
+    if [[ -f "${entryInfo}" ]]; then
+        local updatedInfo
+        updatedInfo=$(jq --arg sel "${selection}" --arg names "${protocolNames}" \
+            '. + {protocol_routing: {enabled: true, selection: $sel, protocols: $names}}' \
+            "${entryInfo}")
+        echo "${updatedInfo}" | jq . > "${entryInfo}"
+    fi
+}
+
+# 按协议分流配置主函数
+configureProtocolChainRouting() {
+    echoContent skyBlue "\n$(t CHAIN_PROTOCOL_ROUTING_TITLE)"
+    echoContent red "\n=============================================================="
+    echoContent yellow "$(t CHAIN_PROTOCOL_ROUTING_DESC)"
+    echoContent yellow "$(t CHAIN_PROTOCOL_ROUTING_DESC2)\n"
+
+    # 检查是否运行 sing-box 核心
+    if [[ ! -f "/etc/Proxy-agent/sing-box/sing-box" ]]; then
+        echoContent red " ---> $(t CHAIN_PROTOCOL_SINGBOX_ONLY)"
+        return 1
+    fi
+
+    # 检查是否为入口节点
+    if [[ ! -f "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json" ]]; then
+        echoContent red " ---> $(t CHAIN_PROTOCOL_NOT_ENTRY_NODE)"
+        return 1
+    fi
+
+    # 检查链式代理出站是否已配置
+    if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config/chain_outbound.json" ]]; then
+        echoContent red " ---> $(t CHAIN_PROTOCOL_NO_CHAIN_OUTBOUND)"
+        return 1
+    fi
+
+    # 获取已安装的协议（sing-box）
+    local cfgPath="/etc/Proxy-agent/sing-box/conf/config/"
+    local installedProtocols=""
+    local protocolCount=0
+
+    # 扫描 sing-box 配置文件
+    for configFile in "${cfgPath}"*_inbounds.json "${cfgPath}"*_inbounds_s.json; do
+        [[ ! -f "${configFile}" ]] && continue
+        local filename
+        filename=$(basename "${configFile}")
+        # 跳过链式代理相关的 inbound
+        [[ "${filename}" == *chain* ]] && continue
+
+        local protocolId
+        protocolId=$(parseProtocolIdFromFileName "${filename}")
+        [[ -z "${protocolId}" ]] && continue
+
+        installedProtocols="${installedProtocols}${protocolId}\n"
+        ((protocolCount++))
+    done
+
+    if [[ ${protocolCount} -eq 0 ]]; then
+        echoContent red " ---> $(t CHAIN_PROTOCOL_NO_PROTOCOLS)"
+        return 1
+    fi
+
+    # 显示已安装的协议列表
+    echoContent yellow "$(t CHAIN_PROTOCOL_SELECT_PROMPT)"
+    echoContent yellow "--------------------------------------------------------------"
+
+    local idx=1
+    local protocolMap=""
+    while IFS= read -r protocolId; do
+        [[ -z "${protocolId}" ]] && continue
+        local displayName
+        displayName=$(getProtocolDisplayName "${protocolId}")
+        local inboundTag
+        inboundTag=$(getProtocolInboundTag "${protocolId}")
+
+        [[ -z "${inboundTag}" ]] && continue
+
+        echoContent yellow "${idx}. ${displayName} [tag: ${inboundTag}]"
+        protocolMap="${protocolMap}${idx}:${protocolId}:${inboundTag},"
+        ((idx++))
+    done <<< "$(echo -e "${installedProtocols}" | sort -n | uniq)"
+
+    echoContent yellow "--------------------------------------------------------------"
+    echoContent yellow "$(t CHAIN_PROTOCOL_INPUT_HINT)"
+
+    # 读取用户选择
+    local userSelection
+    read -r -p "$(t PROMPT_SELECT):" userSelection
+
+    if [[ -z "${userSelection}" ]]; then
+        echoContent red " ---> $(t CHAIN_PROTOCOL_NO_SELECTION)"
+        return 1
+    fi
+
+    # 解析选择并构建 inbound tag 列表
+    local selectedTags=()
+    local selectedProtocolNames=()
+    IFS=',' read -ra selections <<< "${userSelection}"
+
+    for sel in "${selections[@]}"; do
+        sel=$(echo "${sel}" | tr -d ' ')
+        [[ -z "${sel}" ]] && continue
+
+        # 查找匹配的协议
+        local match
+        match=$(echo "${protocolMap}" | tr ',' '\n' | grep "^${sel}:" | head -1)
+        if [[ -n "${match}" ]]; then
+            local protocolId tag displayName
+            protocolId=$(echo "${match}" | cut -d':' -f2)
+            tag=$(echo "${match}" | cut -d':' -f3)
+            displayName=$(getProtocolDisplayName "${protocolId}")
+            selectedTags+=("${tag}")
+            selectedProtocolNames+=("${displayName}")
+        fi
+    done
+
+    if [[ ${#selectedTags[@]} -eq 0 ]]; then
+        echoContent red " ---> $(t CHAIN_PROTOCOL_INVALID_SELECTION)"
+        return 1
+    fi
+
+    # 显示已选择的协议
+    echoContent green "\n$(t CHAIN_PROTOCOL_SELECTED):"
+    for name in "${selectedProtocolNames[@]}"; do
+        echoContent yellow "  - ${name}"
+    done
+
+    # 确认
+    read -r -p "$(t CHAIN_PROTOCOL_CONFIRM) [y/n]:" confirmChoice
+    if [[ "${confirmChoice}" != "y" && "${confirmChoice}" != "Y" ]]; then
+        echoContent yellow " ---> $(t CANCELLED)"
+        return 0
+    fi
+
+    # 生成路由配置
+    generateProtocolChainRoute "${selectedTags[@]}"
+
+    # 保存偏好设置
+    saveProtocolRoutingPreference "${userSelection}" "${selectedProtocolNames[*]}"
+
+    # 重载 sing-box 配置
+    echoContent yellow " ---> $(t CHAIN_PROTOCOL_RELOADING)"
+    mergeSingBoxConfig
+
+    if ! reloadCore; then
+        echoContent red " ---> $(t CHAIN_PROTOCOL_RELOAD_FAILED)"
+        return 1
+    fi
+
+    echoContent green " ---> $(t CHAIN_PROTOCOL_SUCCESS)"
+}
+
+# 合并 sing-box 配置 (如果函数不存在则定义)
+# 注意：此函数与 singBoxMergeConfig 保持一致，用于链式代理独立运行场景
+if ! type mergeSingBoxConfig >/dev/null 2>&1; then
+    mergeSingBoxConfig() {
+        if [[ -d "/etc/Proxy-agent/sing-box/conf/config/" ]]; then
+            # 先删除旧配置，再合并生成新配置
+            rm -f /etc/Proxy-agent/sing-box/conf/config.json >/dev/null 2>&1
+            # 使用 sing-box 合并配置（与 singBoxMergeConfig 保持一致）
+            if [[ -f "/etc/Proxy-agent/sing-box/sing-box" ]]; then
+                /etc/Proxy-agent/sing-box/sing-box merge config.json -C /etc/Proxy-agent/sing-box/conf/config/ -D /etc/Proxy-agent/sing-box/conf/ >/dev/null 2>&1
+            fi
+        fi
+    }
+fi
+
+# ======================= 多链路分流功能 =======================
+
+# 预设规则集定义
+# 返回预设规则对应的 geosite 规则集名称
+getPresetRulesets() {
+    local preset=$1
+    case "${preset}" in
+        streaming)
+            echo "geosite-netflix,geosite-disney,geosite-youtube,geosite-hbo,geosite-hulu,geosite-primevideo"
+            ;;
+        ai)
+            echo "geosite-openai,geosite-bing"
+            ;;
+        social)
+            echo "geosite-telegram,geosite-twitter,geosite-instagram,geosite-facebook"
+            ;;
+        developer)
+            echo "geosite-github,geosite-gitlab,geosite-stackoverflow"
+            ;;
+        gaming)
+            echo "geosite-steam,geosite-epicgames"
+            ;;
+        google)
+            echo "geosite-google"
+            ;;
+        microsoft)
+            echo "geosite-microsoft"
+            ;;
+        apple)
+            echo "geosite-apple"
+            ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
+
+# 获取预设规则显示名称
+getPresetDisplayName() {
+    local preset=$1
+    case "${preset}" in
+        streaming) echo "流媒体 (Netflix/Disney+/YouTube/...)" ;;
+        ai) echo "AI服务 (OpenAI/Bing/...)" ;;
+        social) echo "社交媒体 (Telegram/Twitter/...)" ;;
+        developer) echo "开发者 (GitHub/GitLab/...)" ;;
+        gaming) echo "游戏 (Steam/Epic/...)" ;;
+        google) echo "谷歌服务" ;;
+        microsoft) echo "微软服务" ;;
+        apple) echo "苹果服务" ;;
+        *) echo "${preset}" ;;
+    esac
+}
+
+# 验证链路名称格式（仅允许英文字母、数字、下划线）
+validateChainName() {
+    local name=$1
+    if [[ -z "${name}" ]]; then
+        return 1
+    fi
+    if [[ ! "${name}" =~ ^[a-zA-Z0-9_]+$ ]]; then
+        return 1
+    fi
+    # 名称长度限制
+    if [[ ${#name} -gt 32 ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# 验证 IP CIDR 格式
+validateIpCidrs() {
+    local input=$1
+    IFS=',' read -ra cidrArray <<< "${input}"
+
+    for cidr in "${cidrArray[@]}"; do
+        cidr=$(echo "${cidr}" | xargs)  # trim whitespace
+
+        # IPv4 CIDR 格式: x.x.x.x/prefix
+        if [[ "${cidr}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
+            # 验证 IP 部分
+            local ip="${cidr%/*}"
+            local prefix="${cidr#*/}"
+
+            IFS='.' read -ra octets <<< "${ip}"
+            for octet in "${octets[@]}"; do
+                if [[ ${octet} -gt 255 ]]; then
+                    return 1
+                fi
+            done
+
+            # 验证前缀长度
+            if [[ ${prefix} -gt 32 ]]; then
+                return 1
+            fi
+        # IPv6 CIDR 格式: xxxx:xxxx::/prefix
+        elif [[ "${cidr}" =~ ^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}/[0-9]{1,3}$ ]]; then
+            local prefix="${cidr#*/}"
+            if [[ ${prefix} -gt 128 ]]; then
+                return 1
+            fi
+        else
+            return 1
+        fi
+    done
+
+    return 0
+}
+
+# 生成下一个可用的链路名称
+generateNextChainName() {
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+    local index=1
+
+    if [[ -f "${infoFile}" ]]; then
+        # 找出已有的最大编号
+        local existingNames
+        existingNames=$(jq -r '.chains[].name' "${infoFile}" 2>/dev/null | grep -E '^chain_[0-9]+$' | sed 's/chain_//' | sort -n | tail -1)
+        if [[ -n "${existingNames}" ]]; then
+            index=$((existingNames + 1))
+        fi
+    fi
+
+    echo "chain_${index}"
+}
+
+# 检查链路名称是否已存在
+isChainNameExists() {
+    local name=$1
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+
+    if [[ ! -f "${infoFile}" ]]; then
+        return 1
+    fi
+
+    if jq -e ".chains[] | select(.name == \"${name}\")" "${infoFile}" >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+# 多链路入口配置向导
+setupMultiChainEntry() {
+    echoContent skyBlue "\n$(t CHAIN_MULTI_TITLE)"
+    echoContent red "\n=============================================================="
+    echoContent yellow "$(t CHAIN_MULTI_DESC)"
+    echoContent yellow "$(t CHAIN_MULTI_EXAMPLE)\n"
+
+    # 检查是否已存在单链路配置
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json" ]] && \
+       [[ ! -f "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" ]]; then
+        echoContent yellow "$(t CHAIN_SINGLE_EXISTS)"
+        echoContent yellow "$(t CHAIN_SINGLE_UNINSTALL_HINT)"
+        echoContent yellow "$(t CHAIN_MENU_PATH)"
+        return 1
+    fi
+
+    # 检查是否已存在多链路配置
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" ]]; then
+        echoContent yellow "$(t CHAIN_MULTI_EXISTS)"
+        echoContent yellow "1.$(t CHAIN_CONTINUE_ADD_NEW)"
+        echoContent yellow "2.$(t CHAIN_RECONFIGURE)"
+        echoContent yellow "3.$(t CANCEL)"
+        read -r -p "$(t PROMPT_SELECT):" existingChoice
+
+        case "${existingChoice}" in
+            1)
+                addSingleChainOutbound
+                return $?
+                ;;
+            2)
+                echoContent yellow "$(t CHAIN_CONFIRM_CLEAR)[y/n]"
+                read -r -p "$(t CONFIRM):" confirmClear
+                if [[ "${confirmClear}" != "y" ]]; then
+                    return 0
+                fi
+                # 清除现有多链路配置
+                rm -f /etc/Proxy-agent/sing-box/conf/chain_multi_info.json
+                rm -f /etc/Proxy-agent/sing-box/conf/config/chain_outbound_*.json
+                rm -f /etc/Proxy-agent/sing-box/conf/config/chain_route.json
+                rm -f /etc/Proxy-agent/sing-box/conf/config/chain_ruleset.json
+                rm -f /etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json
+                ;;
+            *)
+                return 0
+                ;;
+        esac
+    fi
+
+    # 确保 sing-box 已安装
+    if ! ensureSingBoxInstalled; then
+        return 1
+    fi
+
+    echoContent yellow "$(t CHAIN_SELECT_CONFIG_MODE):\n"
+    echoContent yellow "1.$(t CHAIN_ADD_INTERACTIVE) [$(t RECOMMENDED)]"
+    echoContent yellow "2.$(t CHAIN_BATCH_IMPORT)"
+    read -r -p "$(t PROMPT_SELECT):" configMode
+
+    case "${configMode}" in
+        1)
+            # 逐个添加模式
+            setupMultiChainInteractive
+            ;;
+        2)
+            # 批量导入模式
+            setupMultiChainBatch
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
+# 交互式逐个添加链路
+setupMultiChainInteractive() {
+    local chainCount=0
+    local continueAdding="y"
+
+    # 初始化多链路信息文件
+    cat <<EOF >/etc/Proxy-agent/sing-box/conf/chain_multi_info.json
+{
+    "role": "entry",
+    "mode": "multi_chain",
+    "chains": [],
+    "rules": [],
+    "default_chain": "direct",
+    "bridge_port": 31111,
+    "has_xray": false
+}
+EOF
+
+    while [[ "${continueAdding}" == "y" ]]; do
+        ((chainCount++))
+        echoContent skyBlue "\n$(t CHAIN_ADD_NUMBER) #${chainCount}"
+        echoContent red "=============================================================="
+
+        # 选择添加方式
+        echoContent yellow "$(t CHAIN_ADD_TYPE_SELECT):\n"
+        echoContent yellow "1.$(t CHAIN_ADD_BY_CODE)"
+        echoContent yellow "2.$(t CHAIN_ADD_BY_EXTERNAL)"
+        echoContent yellow "0.$(t CANCEL)"
+
+        read -r -p "$(t PROMPT_SELECT): " addType
+
+        local addResult=1
+        case "${addType}" in
+            1)
+                addSingleChainOutbound
+                addResult=$?
+                ;;
+            2)
+                addExternalNodeAsChain
+                addResult=$?
+                ;;
+            0|"")
+                ((chainCount--))
+                ;;
+            *)
+                ((chainCount--))
+                echoContent yellow " ---> $(t INVALID_SELECTION)"
+                ;;
+        esac
+
+        if [[ ${addResult} -ne 0 && "${addType}" != "0" && -n "${addType}" ]]; then
+            ((chainCount--))
+            echoContent yellow "\n$(t CHAIN_ADD_FAILED)"
+        fi
+
+        echoContent yellow "\n$(t CHAIN_CONTINUE_ADD)? [y/n]"
+        read -r -p "$(t CONTINUE):" continueAdding
+    done
+
+    # 检查是否至少添加了一条链路
+    local totalChains
+    totalChains=$(jq '.chains | length' /etc/Proxy-agent/sing-box/conf/chain_multi_info.json)
+
+    if [[ "${totalChains}" -lt 1 ]]; then
+        echoContent red "\n ---> $(t CHAIN_NO_CHAINS_ADDED)"
+        rm -f /etc/Proxy-agent/sing-box/conf/chain_multi_info.json
+        return 1
+    fi
+
+    # 完成配置
+    finalizeMultiChainConfig
+}
+
+# 批量导入配置码
+setupMultiChainBatch() {
+    echoContent skyBlue "\n$(t CHAIN_BATCH_TITLE)"
+    echoContent red "=============================================================="
+    echoContent yellow "$(t CHAIN_BATCH_HINT)"
+    echoContent yellow "$(t CHAIN_BATCH_END_HINT)\n"
+
+    # 初始化多链路信息文件
+    cat <<EOF >/etc/Proxy-agent/sing-box/conf/chain_multi_info.json
+{
+    "role": "entry",
+    "mode": "multi_chain",
+    "chains": [],
+    "rules": [],
+    "default_chain": "direct",
+    "bridge_port": 31111,
+    "has_xray": false
+}
+EOF
+
+    local chainIndex=0
+    local line
+
+    while true; do
+        read -r -p "$(t CHAIN_CODE_PROMPT) #$((chainIndex + 1)): " line
+
+        # 空行结束输入
+        if [[ -z "${line}" ]]; then
+            break
+        fi
+
+        # 解析配置码
+        if ! parseChainCode "${line}"; then
+            echoContent red " ---> $(t CHAIN_CODE_PARSE_FAILED)"
+            continue
+        fi
+
+        # 生成链路名称
+        local chainName
+        chainName=$(generateNextChainName)
+
+        # 添加链路
+        if addChainToConfig "${chainName}" "${chainExitIP}" "${chainExitPort}" "${chainExitKey}" "${chainExitMethod}"; then
+            echoContent green " ---> $(t CHAIN_ADDED): [${chainName}] (${chainExitIP}:${chainExitPort})"
+            ((chainIndex++))
+        fi
+    done
+
+    if [[ ${chainIndex} -lt 1 ]]; then
+        echoContent red "\n ---> $(t CHAIN_IMPORT_NONE)"
+        rm -f /etc/Proxy-agent/sing-box/conf/chain_multi_info.json
+        return 1
+    fi
+
+    echoContent green "\n ---> $(t CHAIN_IMPORT_SUCCESS "${chainIndex}")"
+
+    # 配置分流规则
+    echoContent yellow "\n$(t CHAIN_CONFIG_RULES_NOW)[y/n]"
+    read -r -p "$(t CONFIRM):" configRules
+
+    if [[ "${configRules}" == "y" ]]; then
+        configureMultiChainRules
+    fi
+
+    # 完成配置
+    finalizeMultiChainConfig
+}
+
+# 添加外部节点作为链路
+addExternalNodeAsChain() {
+    initExternalNodeFile
+
+    local nodeCount
+    nodeCount=$(getExternalNodeCount)
+
+    if [[ "${nodeCount}" == "0" ]]; then
+        echoContent red "\n ---> $(t EXT_NO_NODES)"
+        echoContent yellow "$(t EXT_ADD_NODE_HINT)"
+        return 1
+    fi
+
+    echoContent yellow "\n$(t EXT_SELECT_FOR_CHAIN):"
+    echoContent red "=============================================================="
+
+    # 列出可用的外部节点
+    local index=1
+    local nodeIds=()
+    while IFS= read -r node; do
+        local id name type server port
+        id=$(echo "${node}" | jq -r '.id')
+        name=$(echo "${node}" | jq -r '.name')
+        type=$(echo "${node}" | jq -r '.type')
+        server=$(echo "${node}" | jq -r '.server')
+        port=$(echo "${node}" | jq -r '.server_port')
+
+        local typeLabel=""
+        case "${type}" in
+            "shadowsocks") typeLabel="SS" ;;
+            "socks") typeLabel="SOCKS5" ;;
+            "trojan") typeLabel="Trojan" ;;
+            *) typeLabel="${type}" ;;
+        esac
+
+        echoContent yellow "  ${index}. [${typeLabel}] ${name} (${server}:${port})"
+        nodeIds+=("${id}")
+        ((index++))
+    done < <(jq -c '.nodes[]' "${EXTERNAL_NODE_FILE}" 2>/dev/null)
+
+    echoContent yellow "  0. $(t CANCEL)"
+
+    read -r -p "$(t PROMPT_SELECT): " selectIndex
+
+    if [[ -z "${selectIndex}" || "${selectIndex}" == "0" ]]; then
+        return 1
+    fi
+
+    # 获取选择的节点
+    local selectedIndex=$((selectIndex - 1))
+    if [[ ${selectedIndex} -lt 0 || ${selectedIndex} -ge ${#nodeIds[@]} ]]; then
+        echoContent red " ---> $(t EXT_INVALID_SELECTION)"
+        return 1
+    fi
+
+    local selectedNodeId="${nodeIds[${selectedIndex}]}"
+    local selectedNode
+    selectedNode=$(getExternalNodeById "${selectedNodeId}")
+
+    if [[ -z "${selectedNode}" ]]; then
+        echoContent red " ---> $(t EXT_NODE_NOT_FOUND)"
+        return 1
+    fi
+
+    local nodeName nodeType
+    nodeName=$(echo "${selectedNode}" | jq -r '.name')
+    nodeType=$(echo "${selectedNode}" | jq -r '.type')
+
+    echoContent green "\n ---> $(t EXT_SELECTED): ${nodeName}"
+
+    # 步骤2: 命名链路
+    echoContent yellow "\n$(t CHAIN_STEP_NAME)"
+    echoContent yellow "$(t CHAIN_NAME_HINT)"
+
+    local defaultName
+    defaultName=$(generateNextChainName)
+
+    read -r -p "$(t CHAIN_NAME_PROMPT) [${defaultName}]: " inputName
+
+    local chainName="${inputName:-${defaultName}}"
+
+    # 验证名称格式
+    if ! validateChainName "${chainName}"; then
+        echoContent red " ---> $(t CHAIN_NAME_INVALID)"
+        return 1
+    fi
+
+    # 检查名称是否已存在
+    if isChainNameExists "${chainName}"; then
+        echoContent red " ---> $(t CHAIN_NAME_EXISTS)"
+        return 1
+    fi
+
+    # 步骤3: 设置分流规则 (复用现有逻辑)
+    echoContent yellow "\n$(t CHAIN_STEP_RULES)"
+    echoContent yellow "$(t CHAIN_RULES_HINT):\n"
+    echoContent yellow "1.$(t CHAIN_RULE_LATER)"
+    echoContent yellow "2.$(t CHAIN_RULE_PRESET)"
+    echoContent yellow "  a) $(t CHAIN_PRESET_STREAMING)"
+    echoContent yellow "  b) $(t CHAIN_PRESET_AI)"
+    echoContent yellow "  c) $(t CHAIN_PRESET_SOCIAL)"
+    echoContent yellow "  d) $(t CHAIN_PRESET_DEV)"
+    echoContent yellow "  e) $(t CHAIN_PRESET_GAMING)"
+    echoContent yellow "  f) $(t CHAIN_PRESET_GOOGLE)"
+    echoContent yellow "  g) $(t CHAIN_PRESET_MICROSOFT)"
+    echoContent yellow "  h) $(t CHAIN_PRESET_APPLE)"
+    echoContent yellow "3.$(t CHAIN_RULE_CUSTOM)"
+    echoContent yellow "4.$(t CHAIN_RULE_DEFAULT)"
+
+    read -r -p "$(t PROMPT_SELECT): " ruleChoice
+
+    local ruleType=""
+    local ruleName=""
+    local customDomains=""
+    local isDefault="false"
+
+    case "${ruleChoice}" in
+        1)
+            ruleType="none"
+            ;;
+        2a|2A)
+            ruleType="preset"
+            ruleName="streaming"
+            ;;
+        2b|2B)
+            ruleType="preset"
+            ruleName="ai"
+            ;;
+        2c|2C)
+            ruleType="preset"
+            ruleName="social"
+            ;;
+        2d|2D)
+            ruleType="preset"
+            ruleName="developer"
+            ;;
+        2e|2E)
+            ruleType="preset"
+            ruleName="gaming"
+            ;;
+        2f|2F)
+            ruleType="preset"
+            ruleName="google"
+            ;;
+        2g|2G)
+            ruleType="preset"
+            ruleName="microsoft"
+            ;;
+        2h|2H)
+            ruleType="preset"
+            ruleName="apple"
+            ;;
+        3)
+            ruleType="custom"
+            echoContent yellow "$(t CHAIN_CUSTOM_DOMAIN_HINT):"
+            read -r -p "$(t DOMAIN): " customDomains
+            if [[ -z "${customDomains}" ]]; then
+                ruleType="none"
+            fi
+            ;;
+        4)
+            ruleType="default"
+            isDefault="true"
+            ;;
+        *)
+            ruleType="none"
+            ;;
+    esac
+
+    # 添加外部节点链路到配置
+    if ! addExternalChainToConfig "${chainName}" "${selectedNodeId}" "${isDefault}"; then
+        return 1
+    fi
+
+    # 添加规则
+    if [[ "${ruleType}" == "preset" ]]; then
+        addRuleToConfig "preset" "${ruleName}" "${chainName}"
+        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
+        echoContent green "   $(t EXT_NODE): ${nodeName} (${nodeType})"
+        echoContent green "   $(t RULES): $(getPresetDisplayName "${ruleName}")"
+    elif [[ "${ruleType}" == "custom" ]]; then
+        addRuleToConfig "custom" "${customDomains}" "${chainName}"
+        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
+        echoContent green "   $(t EXT_NODE): ${nodeName} (${nodeType})"
+        echoContent green "   $(t RULES): $(t CUSTOM_DOMAIN)"
+    elif [[ "${ruleType}" == "default" ]]; then
+        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}] ($(t DEFAULT_CHAIN))"
+        echoContent green "   $(t EXT_NODE): ${nodeName} (${nodeType})"
+        echoContent green "   $(t RULES): $(t ALL_UNMATCHED)"
+    else
+        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
+        echoContent green "   $(t EXT_NODE): ${nodeName} (${nodeType})"
+        echoContent green "   $(t RULES): $(t PENDING_CONFIG)"
+    fi
+
+    return 0
+}
+
+# 添加外部节点链路到配置文件
+addExternalChainToConfig() {
+    local name=$1
+    local nodeId=$2
+    local isDefault=${3:-false}
+
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+
+    # 获取外部节点信息
+    local node
+    node=$(getExternalNodeById "${nodeId}")
+
+    if [[ -z "${node}" ]]; then
+        echoContent red " ---> $(t EXT_NODE_NOT_FOUND)"
+        return 1
+    fi
+
+    local nodeType server port
+    nodeType=$(echo "${node}" | jq -r '.type')
+    server=$(echo "${node}" | jq -r '.server')
+    port=$(echo "${node}" | jq -r '.server_port')
+
+    # 添加到 chains 数组 (标记为外部节点)
+    local tmpFile
+    tmpFile=$(mktemp)
+    chmod 600 "${tmpFile}"
+
+    jq --arg name "${name}" \
+       --arg server "${server}" \
+       --argjson port "${port}" \
+       --arg nodeType "${nodeType}" \
+       --arg nodeId "${nodeId}" \
+       --argjson isDefault "${isDefault}" \
+       '.chains += [{
+           "name": $name,
+           "ip": $server,
+           "port": $port,
+           "source": "external",
+           "external_node_id": $nodeId,
+           "external_type": $nodeType,
+           "is_default": $isDefault
+       }]' "${infoFile}" > "${tmpFile}"
+
+    mv "${tmpFile}" "${infoFile}"
+
+    # 如果设为默认链路，更新 default_chain
+    if [[ "${isDefault}" == "true" ]]; then
+        tmpFile=$(mktemp)
+        chmod 600 "${tmpFile}"
+        jq --arg name "${name}" '.default_chain = $name' "${infoFile}" > "${tmpFile}"
+        mv "${tmpFile}" "${infoFile}"
+    fi
+
+    # 生成链路出站配置文件 (使用外部节点配置)
+    local outboundConfig
+    outboundConfig=$(generateExternalOutboundConfig "${nodeId}" "${name}")
+
+    if [[ -z "${outboundConfig}" ]]; then
+        echoContent red " ---> $(t EXT_CONFIG_FAILED)"
+        return 1
+    fi
+
+    echo "{\"outbounds\": [${outboundConfig}]}" | jq . > "/etc/Proxy-agent/sing-box/conf/config/chain_outbound_${name}.json"
+
+    return 0
+}
+
+# 添加单条链路
+addSingleChainOutbound() {
+    echoContent yellow "\n$(t CHAIN_STEP_IMPORT)"
+    echoContent yellow "$(t CHAIN_PASTE_CODE):"
+    read -r -p "$(t CHAIN_CODE):" inputCode
+
+    if [[ -z "${inputCode}" ]]; then
+        echoContent red " ---> $(t CHAIN_CODE_EMPTY)"
+        return 1
+    fi
+
+    # 解析配置码
+    if ! parseChainCode "${inputCode}"; then
+        return 1
+    fi
+
+    echoContent green "\n ---> $(t CHAIN_PARSE_SUCCESS):"
+    echoContent green "   $(t CHAIN_NODE_IP): ${chainExitIP}"
+    echoContent green "   $(t CHAIN_PORT): ${chainExitPort}"
+    echoContent green "   $(t CHAIN_PROTOCOL): Shadowsocks 2022"
+
+    # 步骤2: 命名链路
+    echoContent yellow "\n$(t CHAIN_STEP_NAME)"
+    echoContent yellow "$(t CHAIN_NAME_HINT)"
+
+    local defaultName
+    defaultName=$(generateNextChainName)
+
+    read -r -p "$(t CHAIN_NAME_PROMPT) [${defaultName}]: " inputName
+
+    local chainName="${inputName:-${defaultName}}"
+
+    # 验证名称格式
+    if ! validateChainName "${chainName}"; then
+        echoContent red " ---> $(t CHAIN_NAME_INVALID)"
+        return 1
+    fi
+
+    # 检查名称是否已存在
+    if isChainNameExists "${chainName}"; then
+        echoContent red " ---> $(t CHAIN_NAME_EXISTS)"
+        return 1
+    fi
+
+    # 步骤3: 设置分流规则
+    echoContent yellow "\n$(t CHAIN_STEP_RULES)"
+    echoContent yellow "$(t CHAIN_RULES_SELECT):\n"
+    echoContent yellow "1.$(t CHAIN_RULE_LATER)"
+    echoContent yellow "2.$(t CHAIN_RULE_PRESET)"
+    echoContent yellow "  a) $(t CHAIN_PRESET_STREAMING)"
+    echoContent yellow "  b) $(t CHAIN_PRESET_AI)"
+    echoContent yellow "  c) $(t CHAIN_PRESET_SOCIAL)"
+    echoContent yellow "  d) $(t CHAIN_PRESET_DEV)"
+    echoContent yellow "  e) $(t CHAIN_PRESET_GAMING)"
+    echoContent yellow "  f) $(t CHAIN_PRESET_GOOGLE)"
+    echoContent yellow "  g) $(t CHAIN_PRESET_MICROSOFT)"
+    echoContent yellow "  h) $(t CHAIN_PRESET_APPLE)"
+    echoContent yellow "3.$(t CHAIN_RULE_CUSTOM_DOMAIN)"
+    echoContent yellow "4.$(t CHAIN_RULE_IP_CIDR)"
+    echoContent yellow "5.$(t CHAIN_RULE_GEOIP)"
+    echoContent yellow "6.$(t CHAIN_RULE_SET_DEFAULT)"
+    echoContent yellow ""
+    echoContent skyBlue "$(t CHAIN_DEFAULT_HINT)"
+
+    read -r -p "$(t PROMPT_SELECT): " ruleChoice
+
+    local ruleType=""
+    local ruleName=""
+    local customDomains=""
+    local customIpCidrs=""
+    local isDefault="false"
+
+    case "${ruleChoice}" in
+        1)
+            ruleType="none"
+            ;;
+        2a|2A)
+            ruleType="preset"
+            ruleName="streaming"
+            ;;
+        2b|2B)
+            ruleType="preset"
+            ruleName="ai"
+            ;;
+        2c|2C)
+            ruleType="preset"
+            ruleName="social"
+            ;;
+        2d|2D)
+            ruleType="preset"
+            ruleName="developer"
+            ;;
+        2e|2E)
+            ruleType="preset"
+            ruleName="gaming"
+            ;;
+        2f|2F)
+            ruleType="preset"
+            ruleName="google"
+            ;;
+        2g|2G)
+            ruleType="preset"
+            ruleName="microsoft"
+            ;;
+        2h|2H)
+            ruleType="preset"
+            ruleName="apple"
+            ;;
+        3)
+            ruleType="custom"
+            echoContent yellow "$(t CHAIN_DOMAIN_HINT):"
+            read -r -p "$(t CHAIN_DOMAIN): " customDomains
+            if [[ -z "${customDomains}" ]]; then
+                ruleType="none"
+            fi
+            ;;
+        4)
+            ruleType="ip_cidr"
+            echoContent yellow "$(t CHAIN_IP_CIDR_HINT):"
+            echoContent yellow "$(t CHAIN_IP_CIDR_EXAMPLE)"
+            read -r -p "$(t IP_CIDR): " customIpCidrs
+            if [[ -z "${customIpCidrs}" ]]; then
+                ruleType="none"
+            elif ! validateIpCidrs "${customIpCidrs}"; then
+                echoContent red " ---> $(t CHAIN_IP_CIDR_INVALID)"
+                return 1
+            fi
+            ;;
+        5)
+            ruleType="geoip"
+            echoContent yellow "\n$(t CHAIN_GEOIP_SELECT):\n"
+            echoContent yellow "1.$(t CHAIN_GEOIP_CN) (geoip-cn)"
+            echoContent yellow "2.$(t CHAIN_GEOIP_US) (geoip-us)"
+            echoContent yellow "3.$(t CHAIN_GEOIP_JP) (geoip-jp)"
+            echoContent yellow "4.$(t CHAIN_GEOIP_HK) (geoip-hk)"
+            echoContent yellow "5.$(t CHAIN_GEOIP_TW) (geoip-tw)"
+            echoContent yellow "6.$(t CHAIN_GEOIP_SG) (geoip-sg)"
+            echoContent yellow "7.$(t CHAIN_GEOIP_PRIVATE) (geoip-private)"
+            echoContent yellow "8.$(t CHAIN_GEOIP_CUSTOM)"
+            read -r -p "$(t PROMPT_SELECT): " geoipChoice
+
+            case "${geoipChoice}" in
+                1) ruleName="cn" ;;
+                2) ruleName="us" ;;
+                3) ruleName="jp" ;;
+                4) ruleName="hk" ;;
+                5) ruleName="tw" ;;
+                6) ruleName="sg" ;;
+                7) ruleName="private" ;;
+                8)
+                    echoContent yellow "$(t CHAIN_GEOIP_CUSTOM_HINT):"
+                    read -r -p "GeoIP: " ruleName
+                    ;;
+                *)
+                    echoContent red " ---> $(t INVALID_SELECTION)"
+                    return 1
+                    ;;
+            esac
+            ;;
+        6)
+            ruleType="default"
+            isDefault="true"
+            ;;
+        *)
+            ruleType="none"
+            ;;
+    esac
+
+    # 添加链路到配置
+    if ! addChainToConfig "${chainName}" "${chainExitIP}" "${chainExitPort}" "${chainExitKey}" "${chainExitMethod}" "${isDefault}"; then
+        return 1
+    fi
+
+    # 添加规则
+    if [[ "${ruleType}" == "preset" ]]; then
+        addRuleToConfig "preset" "${ruleName}" "${chainName}"
+        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
+        echoContent green "   $(t CHAIN_TARGET): ${chainExitIP}:${chainExitPort}"
+        echoContent green "   $(t RULES): $(getPresetDisplayName "${ruleName}")"
+    elif [[ "${ruleType}" == "custom" ]]; then
+        addRuleToConfig "custom" "${customDomains}" "${chainName}"
+        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
+        echoContent green "   $(t CHAIN_TARGET): ${chainExitIP}:${chainExitPort}"
+        echoContent green "   $(t RULES): $(t CUSTOM_DOMAIN)"
+    elif [[ "${ruleType}" == "ip_cidr" ]]; then
+        addRuleToConfig "ip_cidr" "${customIpCidrs}" "${chainName}"
+        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
+        echoContent green "   $(t CHAIN_TARGET): ${chainExitIP}:${chainExitPort}"
+        echoContent green "   $(t RULES): IP CIDR"
+    elif [[ "${ruleType}" == "geoip" ]]; then
+        addRuleToConfig "geoip" "${ruleName}" "${chainName}"
+        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
+        echoContent green "   $(t CHAIN_TARGET): ${chainExitIP}:${chainExitPort}"
+        echoContent green "   $(t RULES): geoip-${ruleName}"
+    elif [[ "${ruleType}" == "default" ]]; then
+        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}] ($(t DEFAULT_CHAIN))"
+        echoContent green "   $(t CHAIN_TARGET): ${chainExitIP}:${chainExitPort}"
+        echoContent green "   $(t RULES): $(t ALL_UNMATCHED)"
+    else
+        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
+        echoContent green "   $(t CHAIN_TARGET): ${chainExitIP}:${chainExitPort}"
+        echoContent green "   $(t RULES): $(t PENDING_CONFIG)"
+    fi
+
+    return 0
+}
+
+# 添加链路到配置文件
+addChainToConfig() {
+    local name=$1
+    local ip=$2
+    local port=$3
+    local key=$4
+    local method=$5
+    local isDefault=${6:-false}
+
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+
+    # 添加到 chains 数组
+    local tmpFile
+    tmpFile=$(mktemp)
+    chmod 600 "${tmpFile}"
+
+    jq --arg name "${name}" \
+       --arg ip "${ip}" \
+       --argjson port "${port}" \
+       --arg key "${key}" \
+       --arg method "${method}" \
+       --argjson isDefault "${isDefault}" \
+       '.chains += [{
+           "name": $name,
+           "ip": $ip,
+           "port": $port,
+           "method": $method,
+           "password": $key,
+           "is_default": $isDefault
+       }]' "${infoFile}" > "${tmpFile}"
+
+    mv "${tmpFile}" "${infoFile}"
+
+    # 如果设为默认链路，更新 default_chain
+    if [[ "${isDefault}" == "true" ]]; then
+        tmpFile=$(mktemp)
+        chmod 600 "${tmpFile}"
+        jq --arg name "${name}" '.default_chain = $name' "${infoFile}" > "${tmpFile}"
+        mv "${tmpFile}" "${infoFile}"
+    fi
+
+    # 生成链路出站配置文件
+    cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_outbound_${name}.json
+{
+    "outbounds": [
+        {
+            "type": "shadowsocks",
+            "tag": "${name}",
+            "server": "${ip}",
+            "server_port": ${port},
+            "method": "${method}",
+            "password": "${key}",
+            "multiplex": {
+                "enabled": true,
+                "protocol": "h2mux",
+                "max_connections": 4,
+                "min_streams": 4
+            }
+        }
+    ]
+}
+EOF
+
+    return 0
+}
+
+# 添加规则到配置
+addRuleToConfig() {
+    local ruleType=$1
+    local ruleValue=$2
+    local chainName=$3
+
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+    local tmpFile
+    tmpFile=$(mktemp)
+    chmod 600 "${tmpFile}"
+
+    jq --arg type "${ruleType}" \
+       --arg value "${ruleValue}" \
+       --arg chain "${chainName}" \
+       '.rules += [{
+           "type": $type,
+           "value": $value,
+           "chain": $chain
+       }]' "${infoFile}" > "${tmpFile}"
+
+    mv "${tmpFile}" "${infoFile}"
+}
+
+# 配置多链路分流规则
+configureMultiChainRules() {
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+
+    if [[ ! -f "${infoFile}" ]]; then
+        echoContent red " ---> $(t CHAIN_NO_CONFIG)"
+        return 1
+    fi
+
+    # 获取所有链路
+    local chains
+    chains=$(jq -r '.chains[].name' "${infoFile}")
+
+    if [[ -z "${chains}" ]]; then
+        echoContent red " ---> $(t CHAIN_NO_CHAINS)"
+        return 1
+    fi
+
+    echoContent skyBlue "\n$(t CHAIN_RULES_TITLE)"
+    echoContent red "=============================================================="
+    echoContent yellow "$(t CHAIN_CURRENT_CHAINS):\n"
+
+    local index=1
+    while IFS= read -r chain; do
+        local chainIP chainPort
+        chainIP=$(jq -r ".chains[] | select(.name == \"${chain}\") | .ip" "${infoFile}")
+        chainPort=$(jq -r ".chains[] | select(.name == \"${chain}\") | .port" "${infoFile}")
+        echoContent yellow "  ${index}. ${chain} (${chainIP}:${chainPort})"
+        ((index++))
+    done <<< "${chains}"
+
+    echoContent yellow "\n$(t CHAIN_SELECT_CHAIN):"
+    read -r -p "$(t CHAIN_INDEX): " chainIndex
+
+    # 获取选中的链路名称
+    local selectedChain
+    selectedChain=$(echo "${chains}" | sed -n "${chainIndex}p")
+
+    if [[ -z "${selectedChain}" ]]; then
+        echoContent red " ---> $(t CHAIN_INVALID_CHAIN)"
+        return 1
+    fi
+
+    echoContent yellow "\n$(t CHAIN_RULE_FOR) [${selectedChain}] $(t CHAIN_RULE_TYPE_SELECT):\n"
+    echoContent yellow "1.$(t CHAIN_RULE_PRESET)"
+    echoContent yellow "2.$(t CHAIN_RULE_CUSTOM_DOMAIN)"
+    echoContent yellow "3.$(t CHAIN_RULE_IP_CIDR)"
+    echoContent yellow "4.$(t CHAIN_RULE_GEOIP)"
+    echoContent yellow "5.$(t CHAIN_RULE_SET_DEFAULT)"
+
+    read -r -p "$(t PROMPT_SELECT): " ruleTypeChoice
+
+    case "${ruleTypeChoice}" in
+        1)
+            echoContent yellow "\n$(t CHAIN_RULE_PRESET):\n"
+            echoContent yellow "1.$(t CHAIN_PRESET_STREAMING)"
+            echoContent yellow "2.$(t CHAIN_PRESET_AI)"
+            echoContent yellow "3.$(t CHAIN_PRESET_SOCIAL)"
+            echoContent yellow "4.$(t CHAIN_PRESET_DEV)"
+            echoContent yellow "5.$(t CHAIN_PRESET_GAMING)"
+            echoContent yellow "6.$(t CHAIN_PRESET_GOOGLE)"
+            echoContent yellow "7.$(t CHAIN_PRESET_MICROSOFT)"
+            echoContent yellow "8.$(t CHAIN_PRESET_APPLE)"
+
+            read -r -p "$(t PROMPT_SELECT): " presetChoice
+
+            local presetName
+            case "${presetChoice}" in
+                1) presetName="streaming" ;;
+                2) presetName="ai" ;;
+                3) presetName="social" ;;
+                4) presetName="developer" ;;
+                5) presetName="gaming" ;;
+                6) presetName="google" ;;
+                7) presetName="microsoft" ;;
+                8) presetName="apple" ;;
+                *)
+                    echoContent red " ---> $(t INVALID_SELECTION)"
+                    return 1
+                    ;;
+            esac
+
+            addRuleToConfig "preset" "${presetName}" "${selectedChain}"
+            echoContent green " ---> $(t CHAIN_RULE_ADDED): $(getPresetDisplayName "${presetName}") → ${selectedChain}"
+            ;;
+        2)
+            echoContent yellow "$(t CHAIN_DOMAIN_HINT):"
+            read -r -p "$(t CHAIN_DOMAIN): " customDomains
+
+            if [[ -z "${customDomains}" ]]; then
+                echoContent red " ---> $(t CHAIN_DOMAIN_EMPTY)"
+                return 1
+            fi
+
+            addRuleToConfig "custom" "${customDomains}" "${selectedChain}"
+            echoContent green " ---> $(t CHAIN_CUSTOM_RULE_ADDED) → ${selectedChain}"
+            ;;
+        3)
+            echoContent yellow "$(t CHAIN_IP_CIDR_HINT):"
+            echoContent yellow "$(t CHAIN_IP_CIDR_EXAMPLE)"
+            read -r -p "$(t IP_CIDR): " customIpCidrs
+
+            if [[ -z "${customIpCidrs}" ]]; then
+                echoContent red " ---> $(t IP_CIDR_EMPTY)"
+                return 1
+            fi
+
+            if ! validateIpCidrs "${customIpCidrs}"; then
+                echoContent red " ---> $(t CHAIN_IP_CIDR_INVALID)"
+                return 1
+            fi
+
+            addRuleToConfig "ip_cidr" "${customIpCidrs}" "${selectedChain}"
+            echoContent green " ---> $(t CHAIN_IP_CIDR_RULE_ADDED) → ${selectedChain}"
+            ;;
+        4)
+            echoContent yellow "\n$(t CHAIN_GEOIP_SELECT):\n"
+            echoContent yellow "1.$(t CHAIN_GEOIP_CN) (geoip-cn)"
+            echoContent yellow "2.$(t CHAIN_GEOIP_US) (geoip-us)"
+            echoContent yellow "3.$(t CHAIN_GEOIP_JP) (geoip-jp)"
+            echoContent yellow "4.$(t CHAIN_GEOIP_HK) (geoip-hk)"
+            echoContent yellow "5.$(t CHAIN_GEOIP_TW) (geoip-tw)"
+            echoContent yellow "6.$(t CHAIN_GEOIP_SG) (geoip-sg)"
+            echoContent yellow "7.$(t CHAIN_GEOIP_PRIVATE) (geoip-private)"
+            echoContent yellow "8.$(t CHAIN_GEOIP_CUSTOM)"
+            read -r -p "$(t PROMPT_SELECT): " geoipChoice
+
+            local geoipName
+            case "${geoipChoice}" in
+                1) geoipName="cn" ;;
+                2) geoipName="us" ;;
+                3) geoipName="jp" ;;
+                4) geoipName="hk" ;;
+                5) geoipName="tw" ;;
+                6) geoipName="sg" ;;
+                7) geoipName="private" ;;
+                8)
+                    echoContent yellow "$(t CHAIN_GEOIP_CUSTOM_HINT):"
+                    read -r -p "GeoIP: " geoipName
+                    ;;
+                *)
+                    echoContent red " ---> $(t INVALID_SELECTION)"
+                    return 1
+                    ;;
+            esac
+
+            addRuleToConfig "geoip" "${geoipName}" "${selectedChain}"
+            echoContent green " ---> $(t CHAIN_GEOIP_RULE_ADDED): geoip-${geoipName} → ${selectedChain}"
+            ;;
+        5)
+            local tmpFile
+            tmpFile=$(mktemp)
+            chmod 600 "${tmpFile}"
+            jq --arg name "${selectedChain}" '.default_chain = $name' "${infoFile}" > "${tmpFile}"
+            mv "${tmpFile}" "${infoFile}"
+
+            # 更新链路的 is_default 标志
+            tmpFile=$(mktemp)
+            chmod 600 "${tmpFile}"
+            jq --arg name "${selectedChain}" '
+                .chains = [.chains[] | if .name == $name then .is_default = true else .is_default = false end]
+            ' "${infoFile}" > "${tmpFile}"
+            mv "${tmpFile}" "${infoFile}"
+
+            echoContent green " ---> $(t CHAIN_SET_DEFAULT_SUCCESS "${selectedChain}")"
+            ;;
+        *)
+            echoContent red " ---> $(t INVALID_SELECTION)"
+            return 1
+            ;;
+    esac
+
+    return 0
+}
+
+# 完成多链路配置
+finalizeMultiChainConfig() {
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+
+    echoContent yellow "\n$(t CHAIN_GENERATING)"
+
+    # 检查是否设置了默认链路
+    local defaultChain
+    defaultChain=$(jq -r '.default_chain' "${infoFile}")
+
+    if [[ "${defaultChain}" == "direct" ]]; then
+        echoContent yellow "\n$(t CHAIN_NO_DEFAULT_SET)"
+        echoContent yellow "$(t CHAIN_SET_DEFAULT_NOW)\n"
+
+        local chains
+        chains=$(jq -r '.chains[].name' "${infoFile}")
+
+        local index=1
+        while IFS= read -r chain; do
+            echoContent yellow "  ${index}. ${chain}"
+            ((index++))
+        done <<< "${chains}"
+        echoContent yellow "  ${index}. $(t CHAIN_NO_DEFAULT_OPTION)"
+
+        read -r -p "$(t PROMPT_SELECT) [${index}]: " defaultChoice
+
+        if [[ -n "${defaultChoice}" ]] && [[ "${defaultChoice}" != "${index}" ]]; then
+            local selectedDefault
+            selectedDefault=$(echo "${chains}" | sed -n "${defaultChoice}p")
+
+            if [[ -n "${selectedDefault}" ]]; then
+                local tmpFile
+                tmpFile=$(mktemp)
+                chmod 600 "${tmpFile}"
+                jq --arg name "${selectedDefault}" '.default_chain = $name' "${infoFile}" > "${tmpFile}"
+                mv "${tmpFile}" "${infoFile}"
+
+                defaultChain="${selectedDefault}"
+                echoContent green " ---> $(t CHAIN_SET_DEFAULT_SUCCESS "${selectedDefault}")"
+            fi
+        fi
+    fi
+
+    # 检测是否有 Xray 代理协议在运行
+    local hasXrayProtocols=false
+    if [[ -f "/etc/Proxy-agent/xray/conf/02_VLESS_TCP_inbounds.json" ]] || \
+       [[ -f "/etc/Proxy-agent/xray/conf/07_VLESS_vision_reality_inbounds.json" ]] || \
+       [[ -f "/etc/Proxy-agent/xray/conf/04_trojan_TCP_inbounds.json" ]]; then
+        hasXrayProtocols=true
+        echoContent green " ---> $(t CHAIN_XRAY_DETECTED)"
+    fi
+
+    # 更新 has_xray 标志
+    local tmpFile
+    tmpFile=$(mktemp)
+    chmod 600 "${tmpFile}"
+    jq --argjson hasXray "${hasXrayProtocols}" '.has_xray = $hasXray' "${infoFile}" > "${tmpFile}"
+    mv "${tmpFile}" "${infoFile}"
+
+    # 生成路由配置
+    generateMultiChainRouteConfig
+
+    # 如果有 Xray，创建 SOCKS5 桥接入站
+    local chainBridgePort=31111
+    if [[ "${hasXrayProtocols}" == "true" ]]; then
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json
+{
+    "inbounds": [
+        {
+            "type": "socks",
+            "tag": "chain_bridge_in",
+            "listen": "127.0.0.1",
+            "listen_port": ${chainBridgePort},
+            "sniff": true,
+            "sniff_override_destination": true,
+            "domain_strategy": "prefer_ipv4"
+        }
+    ]
+}
+EOF
+    fi
+
+    # 合并配置
+    echoContent yellow "$(t CHAIN_MERGING_SINGBOX)"
+    mergeSingBoxConfig
+
+    # 启动 sing-box
+    echoContent yellow "$(t CHAIN_STARTING_SINGBOX)"
+    handleSingBox stop >/dev/null 2>&1
+    handleSingBox start
+
+    # 验证 sing-box 启动成功
+    sleep 1
+    if ! pgrep -x "sing-box" >/dev/null 2>&1; then
+        echoContent red " ---> $(t CHAIN_SINGBOX_START_FAILED)"
+        echoContent yellow "$(t CHAIN_SINGBOX_DEBUG) /etc/Proxy-agent/sing-box/sing-box run -c /etc/Proxy-agent/sing-box/conf/config.json"
+        return 1
+    fi
+    echoContent green " ---> $(t CHAIN_SINGBOX_START_SUCCESS)"
+
+    # 配置 Xray（如果存在）
+    if [[ "${hasXrayProtocols}" == "true" ]]; then
+        configureXrayForMultiChain "${chainBridgePort}"
+    fi
+
+    # 显示配置摘要
+    showMultiChainSummary
+
+    # 测试连通性
+    echoContent yellow "\n$(t CHAIN_TESTING_CONNECTIVITY)"
+    sleep 2
+    testMultiChainConnection
+}
+
+# 生成多链路路由配置
+generateMultiChainRouteConfig() {
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+
+    # 获取默认链路
+    local defaultChain
+    defaultChain=$(jq -r '.default_chain' "${infoFile}")
+
+    # 获取是否有 Xray
+    local hasXray
+    hasXray=$(jq -r '.has_xray' "${infoFile}")
+
+    # 开始构建路由配置
+    local routeRules="[]"
+    local ruleSetDefs="[]"
+    local usedRuleSets=""
+
+    # 如果有 SOCKS5 桥接入站，添加对应路由规则
+    if [[ "${hasXray}" == "true" ]]; then
+        routeRules=$(echo "${routeRules}" | jq '. + [{
+            "inbound": ["chain_bridge_in"],
+            "outbound": "'"${defaultChain}"'"
+        }]')
+    fi
+
+    # 处理预设规则
+    local rules
+    rules=$(jq -c '.rules[]' "${infoFile}" 2>/dev/null)
+
+    while IFS= read -r rule; do
+        [[ -z "${rule}" ]] && continue
+
+        local ruleType ruleValue ruleChain
+        ruleType=$(echo "${rule}" | jq -r '.type')
+        ruleValue=$(echo "${rule}" | jq -r '.value')
+        ruleChain=$(echo "${rule}" | jq -r '.chain')
+
+        if [[ "${ruleType}" == "preset" ]]; then
+            # 获取预设规则对应的规则集
+            local rulesets
+            rulesets=$(getPresetRulesets "${ruleValue}")
+
+            IFS=',' read -ra rulesetArray <<< "${rulesets}"
+            local rulesetNames="[]"
+
+            for ruleset in "${rulesetArray[@]}"; do
+                rulesetNames=$(echo "${rulesetNames}" | jq --arg rs "${ruleset}" '. + [$rs]')
+
+                # 如果规则集未添加，添加定义
+                if [[ ! "${usedRuleSets}" =~ "${ruleset}" ]]; then
+                    usedRuleSets="${usedRuleSets},${ruleset}"
+
+                    local rulesetUrl="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/${ruleset#geosite-}.srs"
+
+                    ruleSetDefs=$(echo "${ruleSetDefs}" | jq --arg tag "${ruleset}" --arg url "${rulesetUrl}" '. + [{
+                        "tag": $tag,
+                        "type": "remote",
+                        "format": "binary",
+                        "url": $url,
+                        "download_detour": "direct",
+                        "update_interval": "1d"
+                    }]')
+                fi
+            done
+
+            # 添加路由规则
+            routeRules=$(echo "${routeRules}" | jq --argjson rs "${rulesetNames}" --arg chain "${ruleChain}" '. + [{
+                "rule_set": $rs,
+                "outbound": $chain
+            }]')
+
+        elif [[ "${ruleType}" == "custom" ]]; then
+            # 自定义域名规则
+            local domains="[]"
+            IFS=',' read -ra domainArray <<< "${ruleValue}"
+            for domain in "${domainArray[@]}"; do
+                domain=$(echo "${domain}" | xargs)  # trim
+                domains=$(echo "${domains}" | jq --arg d "${domain}" '. + [$d]')
+            done
+
+            routeRules=$(echo "${routeRules}" | jq --argjson ds "${domains}" --arg chain "${ruleChain}" '. + [{
+                "domain_suffix": $ds,
+                "outbound": $chain
+            }]')
+
+        elif [[ "${ruleType}" == "ip_cidr" ]]; then
+            # IP CIDR 规则
+            local ipCidrs="[]"
+            IFS=',' read -ra cidrArray <<< "${ruleValue}"
+            for cidr in "${cidrArray[@]}"; do
+                cidr=$(echo "${cidr}" | xargs)  # trim
+                ipCidrs=$(echo "${ipCidrs}" | jq --arg c "${cidr}" '. + [$c]')
+            done
+
+            routeRules=$(echo "${routeRules}" | jq --argjson ips "${ipCidrs}" --arg chain "${ruleChain}" '. + [{
+                "ip_cidr": $ips,
+                "outbound": $chain
+            }]')
+
+        elif [[ "${ruleType}" == "geoip" ]]; then
+            # GeoIP 规则
+            local geoipTag="geoip-${ruleValue}"
+
+            # 如果规则集未添加，添加定义
+            if [[ ! "${usedRuleSets}" =~ "${geoipTag}" ]]; then
+                usedRuleSets="${usedRuleSets},${geoipTag}"
+
+                local geoipUrl="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/${ruleValue}.srs"
+
+                ruleSetDefs=$(echo "${ruleSetDefs}" | jq --arg tag "${geoipTag}" --arg url "${geoipUrl}" '. + [{
+                    "tag": $tag,
+                    "type": "remote",
+                    "format": "binary",
+                    "url": $url,
+                    "download_detour": "direct",
+                    "update_interval": "1d"
+                }]')
+            fi
+
+            # 添加路由规则
+            routeRules=$(echo "${routeRules}" | jq --arg rs "${geoipTag}" --arg chain "${ruleChain}" '. + [{
+                "rule_set": [$rs],
+                "outbound": $chain
+            }]')
+        fi
+    done <<< "${rules}"
+
+    # 确保 direct 出站存在
+    if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json" ]]; then
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
+{
+    "outbounds": [
+        {
+            "type": "direct",
+            "tag": "direct",
+            "domain_strategy": "prefer_ipv4"
+        }
+    ]
+}
+EOF
+    fi
+
+    # 生成最终路由配置
+    local finalOutbound="${defaultChain}"
+
+    # 构建完整的路由配置 JSON
+    local routeConfig
+    routeConfig=$(jq -n \
+        --argjson rules "${routeRules}" \
+        --argjson ruleSets "${ruleSetDefs}" \
+        --arg final "${finalOutbound}" \
+        '{
+            "route": {
+                "rule_set": $ruleSets,
+                "rules": $rules,
+                "final": $final,
+                "auto_detect_interface": true
+            }
+        }')
+
+    echo "${routeConfig}" > /etc/Proxy-agent/sing-box/conf/config/chain_route.json
+}
+
+# 配置 Xray 链式转发
+configureXrayForMultiChain() {
+    local bridgePort=$1
+
+    echoContent yellow "$(t CHAIN_CONFIGURING_XRAY)"
+
+    # 创建 Xray SOCKS5 出站 (指向 sing-box 桥接)
+    cat <<EOF >/etc/Proxy-agent/xray/conf/chain_outbound.json
+{
+    "outbounds": [
+        {
+            "tag": "chain_proxy",
+            "protocol": "socks",
+            "settings": {
+                "servers": [
+                    {
+                        "address": "127.0.0.1",
+                        "port": ${bridgePort}
+                    }
+                ]
+            }
+        }
+    ]
+}
+EOF
+
+    # 备份原路由配置
+    if [[ -f "/etc/Proxy-agent/xray/conf/09_routing.json" ]]; then
+        cp /etc/Proxy-agent/xray/conf/09_routing.json /etc/Proxy-agent/xray/conf/09_routing.json.bak.chain
+    fi
+
+    # 创建新的路由配置
+    cat <<EOF >/etc/Proxy-agent/xray/conf/09_routing.json
+{
+    "routing": {
+        "domainStrategy": "AsIs",
+        "rules": [
+            {
+                "type": "field",
+                "ip": ["127.0.0.0/8", "::1"],
+                "outboundTag": "z_direct_outbound"
+            },
+            {
+                "type": "field",
+                "domain": [
+                    "domain:gstatic.com",
+                    "domain:googleapis.com",
+                    "domain:googleapis.cn"
+                ],
+                "outboundTag": "chain_proxy"
+            },
+            {
+                "type": "field",
+                "network": "tcp,udp",
+                "outboundTag": "chain_proxy"
+            }
+        ]
+    }
+}
+EOF
+
+    # 重启 Xray
+    echoContent yellow "$(t CHAIN_RESTARTING_XRAY)"
+    handleXray stop >/dev/null 2>&1
+    handleXray start
+
+    sleep 1
+    if pgrep -f "xray/xray" >/dev/null 2>&1; then
+        echoContent green " ---> $(t CHAIN_XRAY_RESTART_SUCCESS)"
+    else
+        echoContent red " ---> $(t CHAIN_XRAY_RESTART_FAILED)"
+        echoContent yellow "$(t CHAIN_XRAY_CHECK_CONFIG) /etc/Proxy-agent/xray/xray run -confdir /etc/Proxy-agent/xray/conf"
+    fi
+}
+
+# 显示多链路配置摘要
+showMultiChainSummary() {
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+
+    echoContent green "\n=============================================================="
+    echoContent green "$(t CHAIN_CONFIG_COMPLETE)"
+    echoContent green "=============================================================="
+
+    local chainCount
+    chainCount=$(jq '.chains | length' "${infoFile}")
+
+    echoContent yellow "\n$(t CHAIN_CONFIGURED_COUNT "${chainCount}"):\n"
+
+    # 表头
+    printf "  %-15s %-20s %-20s\n" "$(t CHAIN_SUMMARY_NAME)" "$(t CHAIN_SUMMARY_TARGET)" "$(t CHAIN_SUMMARY_RULES)"
+    printf "  %-15s %-20s %-20s\n" "---------------" "--------------------" "--------------------"
+
+    # 遍历链路
+    local chains
+    chains=$(jq -c '.chains[]' "${infoFile}")
+
+    while IFS= read -r chain; do
+        local name ip port isDefault
+        name=$(echo "${chain}" | jq -r '.name')
+        ip=$(echo "${chain}" | jq -r '.ip')
+        port=$(echo "${chain}" | jq -r '.port')
+        isDefault=$(echo "${chain}" | jq -r '.is_default')
+
+        # 获取此链路的规则
+        local ruleDesc
+        ruleDesc="$(t CHAIN_RULE_PENDING)"
+        local rules
+        rules=$(jq -r ".rules[] | select(.chain == \"${name}\") | .type + \":\" + .value" "${infoFile}" 2>/dev/null)
+
+        if [[ -n "${rules}" ]]; then
+            local firstRule
+            firstRule=$(echo "${rules}" | head -1)
+            local ruleType ruleValue
+            ruleType=$(echo "${firstRule}" | cut -d: -f1)
+            ruleValue=$(echo "${firstRule}" | cut -d: -f2-)
+
+            if [[ "${ruleType}" == "preset" ]]; then
+                ruleDesc=$(getPresetDisplayName "${ruleValue}")
+            elif [[ "${ruleType}" == "custom" ]]; then
+                ruleDesc="$(t CHAIN_RULE_CUSTOM_DOMAIN)"
+            fi
+        fi
+
+        if [[ "${isDefault}" == "true" ]]; then
+            ruleDesc="$(t CHAIN_DEFAULT_ALL_TRAFFIC)"
+        fi
+
+        printf "  %-15s %-20s %-20s\n" "${name}" "${ip}:${port}" "${ruleDesc}"
+    done <<< "${chains}"
+
+    # 显示默认链路
+    local defaultChain
+    defaultChain=$(jq -r '.default_chain' "${infoFile}")
+
+    if [[ "${defaultChain}" == "direct" ]]; then
+        echoContent yellow "\n$(t CHAIN_DEFAULT_OUTBOUND_DIRECT)"
+    else
+        echoContent yellow "\n$(t CHAIN_DEFAULT_OUTBOUND): ${defaultChain}"
+    fi
+}
+
+# 并行测试多链路连通性
+testMultiChainConnection() {
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+
+    if [[ ! -f "${infoFile}" ]]; then
+        # 如果不是多链路模式，使用原有测试函数
+        testChainConnection
+        return $?
+    fi
+
+    echoContent skyBlue "\n$(t CHAIN_TEST_MULTI_TITLE)"
+    echoContent red "=============================================================="
+
+    local chains
+    chains=$(jq -c '.chains[]' "${infoFile}")
+    local chainCount
+    chainCount=$(jq '.chains | length' "${infoFile}")
+
+    echoContent yellow "$(t CHAIN_TESTING_PARALLEL "${chainCount}")\n"
+
+    # 创建临时目录存放测试结果
+    local tmpDir
+    tmpDir=$(mktemp -d)
+
+    # 并行测试每条链路
+    local pids=""
+    local index=0
+
+    while IFS= read -r chain; do
+        local name ip port
+        name=$(echo "${chain}" | jq -r '.name')
+        ip=$(echo "${chain}" | jq -r '.ip')
+        port=$(echo "${chain}" | jq -r '.port')
+
+        # 后台执行测试
+        (
+            local result="fail"
+            local latency="N/A"
+
+            # TCP 连接测试
+            if nc -zv -w 5 "${ip}" "${port}" >/dev/null 2>&1; then
+                result="pass"
+
+                # 测量延迟
+                local startTime endTime
+                startTime=$(date +%s%N)
+                nc -zv -w 3 "${ip}" "${port}" >/dev/null 2>&1
+                endTime=$(date +%s%N)
+                latency=$(( (endTime - startTime) / 1000000 ))
+            fi
+
+            echo "${name}|${ip}:${port}|${result}|${latency}" > "${tmpDir}/result_${index}"
+        ) &
+
+        pids="${pids} $!"
+        ((index++))
+    done <<< "${chains}"
+
+    # 等待所有测试完成
+    for pid in ${pids}; do
+        wait "${pid}" 2>/dev/null
+    done
+
+    # 读取并显示结果
+    local passCount=0
+    local failCount=0
+
+    for resultFile in "${tmpDir}"/result_*; do
+        if [[ -f "${resultFile}" ]]; then
+            local result
+            result=$(cat "${resultFile}")
+            local name target status latency
+            name=$(echo "${result}" | cut -d'|' -f1)
+            target=$(echo "${result}" | cut -d'|' -f2)
+            status=$(echo "${result}" | cut -d'|' -f3)
+            latency=$(echo "${result}" | cut -d'|' -f4)
+
+            if [[ "${status}" == "pass" ]]; then
+                echoContent green "  ✅ ${name} (${target}) - $(t CHAIN_TEST_LATENCY): ${latency}ms"
+                ((passCount++))
+            else
+                echoContent red "  ❌ ${name} (${target}) - $(t CHAIN_TEST_CONN_FAIL)"
+                ((failCount++))
+            fi
+        fi
+    done
+
+    # 清理临时文件
+    rm -rf "${tmpDir}"
+
+    # 显示汇总
+    echoContent yellow "\n$(t CHAIN_TEST_COMPLETE "${passCount}" "${failCount}")"
+
+    if [[ ${failCount} -gt 0 ]]; then
+        echoContent yellow "\n$(t CHAIN_TEST_CHECK_HINT)"
+        echoContent yellow "  $(t CHAIN_TEST_CHECK_1)"
+        echoContent yellow "  $(t CHAIN_TEST_CHECK_2)"
+        echoContent yellow "  $(t CHAIN_TEST_CHECK_3)"
+    fi
+}
+
+# 显示多链路状态
+showMultiChainStatus() {
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+
+    if [[ ! -f "${infoFile}" ]]; then
+        return 1
+    fi
+
+    local status="❌ $(t CHAIN_STATUS_STOPPED)"
+    if pgrep -x "sing-box" >/dev/null 2>&1; then
+        status="✅ $(t CHAIN_STATUS_RUNNING)"
+    fi
+
+    local chainCount
+    chainCount=$(jq '.chains | length' "${infoFile}")
+    local defaultChain
+    defaultChain=$(jq -r '.default_chain' "${infoFile}")
+
+    echoContent green "╔══════════════════════════════════════════════════════════════╗"
+    echoContent green "║                      $(t CHAIN_STATUS_TITLE)                              ║"
+    echoContent green "╠══════════════════════════════════════════════════════════════╣"
+    echoContent yellow "  $(t CHAIN_STATUS_ROLE): $(t CHAIN_STATUS_ROLE_ENTRY)"
+    echoContent yellow "  $(t CHAIN_STATUS_RUN): ${status}"
+    echoContent yellow "  $(t CHAIN_STATUS_COUNT): ${chainCount}"
+    echoContent yellow "  $(t CHAIN_DEFAULT_OUTBOUND): ${defaultChain}"
+    echoContent green "╠══════════════════════════════════════════════════════════════╣"
+    echoContent yellow "  $(t CHAIN_STATUS_DETAILS):"
+
+    local chains
+    chains=$(jq -c '.chains[]' "${infoFile}")
+
+    while IFS= read -r chain; do
+        local name ip port isDefault
+        name=$(echo "${chain}" | jq -r '.name')
+        ip=$(echo "${chain}" | jq -r '.ip')
+        port=$(echo "${chain}" | jq -r '.port')
+        isDefault=$(echo "${chain}" | jq -r '.is_default')
+
+        local defaultMark=""
+        if [[ "${isDefault}" == "true" ]]; then
+            defaultMark=" $(t CHAIN_STATUS_DEFAULT_MARK)"
+        fi
+
+        echoContent yellow "    • ${name}: ${ip}:${port}${defaultMark}"
+    done <<< "${chains}"
+
+    echoContent green "╚══════════════════════════════════════════════════════════════╝"
+
+    return 0
+}
+
+# 多链路高级管理菜单
+multiChainAdvancedMenu() {
+    echoContent skyBlue "\n多链路高级管理"
+    echoContent red "=============================================================="
+
+    echoContent yellow "1.添加链式出站"
+    echoContent yellow "2.删除链式出站"
+    echoContent yellow "3.配置分流规则"
+    echoContent yellow "4.设置默认链路"
+    echoContent yellow "5.查看详细配置"
+
+    read -r -p "请选择:" selectType
+
+    case ${selectType} in
+    1)
+        addSingleChainOutbound
+        if [[ $? -eq 0 ]]; then
+            generateMultiChainRouteConfig
+            mergeSingBoxConfig
+            reloadCore
+            echoContent green " ---> 配置已更新"
+        fi
+        ;;
+    2)
+        removeMultiChainOutbound
+        ;;
+    3)
+        configureMultiChainRules
+        generateMultiChainRouteConfig
+        mergeSingBoxConfig
+        reloadCore
+        echoContent green " ---> 配置已更新"
+        ;;
+    4)
+        setDefaultChain
+        ;;
+    5)
+        showMultiChainDetailConfig
+        ;;
+    esac
+}
+
+# 删除链路
+removeMultiChainOutbound() {
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+
+    if [[ ! -f "${infoFile}" ]]; then
+        echoContent red " ---> 未找到多链路配置"
+        return 1
+    fi
+
+    echoContent yellow "\n当前链路:\n"
+
+    local chains
+    chains=$(jq -r '.chains[].name' "${infoFile}")
+    local chainCount
+    chainCount=$(jq '.chains | length' "${infoFile}")
+
+    if [[ ${chainCount} -lt 1 ]]; then
+        echoContent red " ---> 没有可删除的链路"
+        return 1
+    fi
+
+    local index=1
+    while IFS= read -r chain; do
+        local chainIP chainPort isDefault
+        chainIP=$(jq -r ".chains[] | select(.name == \"${chain}\") | .ip" "${infoFile}")
+        chainPort=$(jq -r ".chains[] | select(.name == \"${chain}\") | .port" "${infoFile}")
+        isDefault=$(jq -r ".chains[] | select(.name == \"${chain}\") | .is_default" "${infoFile}")
+
+        local defaultMark=""
+        if [[ "${isDefault}" == "true" ]]; then
+            defaultMark=" $(t CHAIN_STATUS_DEFAULT_MARK)"
+        fi
+
+        echoContent yellow "  ${index}. ${chain} (${chainIP}:${chainPort})${defaultMark}"
+        ((index++))
+    done <<< "${chains}"
+
+    read -r -p "请选择要删除的链路编号: " deleteIndex
+
+    local selectedChain
+    selectedChain=$(echo "${chains}" | sed -n "${deleteIndex}p")
+
+    if [[ -z "${selectedChain}" ]]; then
+        echoContent red " ---> 无效的选择"
+        return 1
+    fi
+
+    echoContent yellow "\n确认删除链路 [${selectedChain}]？[y/n]"
+    read -r -p "确认: " confirmDelete
+
+    if [[ "${confirmDelete}" != "y" ]]; then
+        return 0
+    fi
+
+    # 删除链路配置文件
+    rm -f "/etc/Proxy-agent/sing-box/conf/config/chain_outbound_${selectedChain}.json"
+
+    # 从 info 文件中删除
+    local tmpFile
+    tmpFile=$(mktemp)
+    chmod 600 "${tmpFile}"
+
+    jq --arg name "${selectedChain}" '
+        .chains = [.chains[] | select(.name != $name)] |
+        .rules = [.rules[] | select(.chain != $name)]
+    ' "${infoFile}" > "${tmpFile}"
+    mv "${tmpFile}" "${infoFile}"
+
+    # 如果删除的是默认链路，重置为 direct
+    local wasDefault
+    wasDefault=$(jq -r ".default_chain" "${infoFile}")
+    if [[ "${wasDefault}" == "${selectedChain}" ]]; then
+        tmpFile=$(mktemp)
+        chmod 600 "${tmpFile}"
+        jq '.default_chain = "direct"' "${infoFile}" > "${tmpFile}"
+        mv "${tmpFile}" "${infoFile}"
+        echoContent yellow " ---> 已重置默认链路为直连"
+    fi
+
+    # 重新生成路由配置
+    generateMultiChainRouteConfig
+    mergeSingBoxConfig
+    reloadCore
+
+    echoContent green " ---> 链路 [${selectedChain}] 已删除"
+}
+
+# 设置默认链路
+setDefaultChain() {
+    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+
+    if [[ ! -f "${infoFile}" ]]; then
+        echoContent red " ---> 未找到多链路配置"
+        return 1
+    fi
+
+    echoContent yellow "\n选择默认链路:\n"
+
+    local chains
+    chains=$(jq -r '.chains[].name' "${infoFile}")
+
+    local index=1
+    while IFS= read -r chain; do
+        echoContent yellow "  ${index}. ${chain}"
+        ((index++))
+    done <<< "${chains}"
+    echoContent yellow "  ${index}. 直连 (未匹配流量直连访问)"
+
+    read -r -p "请选择: " defaultChoice
+
+    local newDefault
+    if [[ "${defaultChoice}" == "${index}" ]]; then
+        newDefault="direct"
+    else
+        newDefault=$(echo "${chains}" | sed -n "${defaultChoice}p")
+    fi
+
+    if [[ -z "${newDefault}" ]]; then
+        echoContent red " ---> 无效的选择"
+        return 1
+    fi
+
+    local tmpFile
+    tmpFile=$(mktemp)
+    chmod 600 "${tmpFile}"
+    jq --arg name "${newDefault}" '.default_chain = $name' "${infoFile}" > "${tmpFile}"
+    mv "${tmpFile}" "${infoFile}"
+
+    # 更新 is_default 标志
+    tmpFile=$(mktemp)
+    chmod 600 "${tmpFile}"
+    if [[ "${newDefault}" == "direct" ]]; then
+        jq '.chains = [.chains[] | .is_default = false]' "${infoFile}" > "${tmpFile}"
+    else
+        jq --arg name "${newDefault}" '
+            .chains = [.chains[] | if .name == $name then .is_default = true else .is_default = false end]
+        ' "${infoFile}" > "${tmpFile}"
+    fi
+    mv "${tmpFile}" "${infoFile}"
+
+    # 重新生成路由配置
+    generateMultiChainRouteConfig
+    mergeSingBoxConfig
+    reloadCore
+
+    echoContent green " ---> 默认链路已设置为: ${newDefault}"
+}
+
+# 显示多链路详细配置
+showMultiChainDetailConfig() {
+    echoContent skyBlue "\n多链路详细配置"
+    echoContent red "=============================================================="
+
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" ]]; then
+        echoContent yellow "\n元数据 (chain_multi_info.json):"
+        jq . /etc/Proxy-agent/sing-box/conf/chain_multi_info.json
+    fi
+
+    echoContent yellow "\n链路出站配置:"
+    for f in /etc/Proxy-agent/sing-box/conf/config/chain_outbound_*.json; do
+        if [[ -f "${f}" ]]; then
+            echoContent yellow "\n$(basename "${f}"):"
+            jq . "${f}"
+        fi
+    done
+
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/config/chain_route.json" ]]; then
+        echoContent yellow "\n路由配置 (chain_route.json):"
+        jq . /etc/Proxy-agent/sing-box/conf/config/chain_route.json
+    fi
+}
+
+# ======================= 多链路分流功能结束 =======================
+
+# ======================= 链式代理功能结束 =======================
+
+# ======================= 外部节点功能开始 =======================
+
+# 外部节点配置文件路径
+EXTERNAL_NODE_FILE="/etc/Proxy-agent/sing-box/conf/external_node_info.json"
+
+# 初始化外部节点配置文件
+initExternalNodeFile() {
+    local confDir="/etc/Proxy-agent/sing-box/conf"
+    mkdir -p "${confDir}"
+
+    if [[ ! -f "${EXTERNAL_NODE_FILE}" ]]; then
+        echo '{"nodes": []}' > "${EXTERNAL_NODE_FILE}"
+        chmod 600 "${EXTERNAL_NODE_FILE}"
+    fi
+}
+
+# 生成唯一节点ID
+generateNodeId() {
+    echo "ext_$(date +%s)_${RANDOM}"
+}
+
+# 获取外部节点列表
+getExternalNodes() {
+    initExternalNodeFile
+    jq -r '.nodes' "${EXTERNAL_NODE_FILE}" 2>/dev/null || echo "[]"
+}
+
+# 获取外部节点数量
+getExternalNodeCount() {
+    initExternalNodeFile
+    jq -r '.nodes | length' "${EXTERNAL_NODE_FILE}" 2>/dev/null || echo "0"
+}
+
+# 添加外部节点到配置文件
+addExternalNodeToFile() {
+    local nodeJson="$1"
+    initExternalNodeFile
+
+    local tempFile="${EXTERNAL_NODE_FILE}.tmp"
+    jq --argjson node "${nodeJson}" '.nodes += [$node]' "${EXTERNAL_NODE_FILE}" > "${tempFile}"
+    mv "${tempFile}" "${EXTERNAL_NODE_FILE}"
+    chmod 600 "${EXTERNAL_NODE_FILE}"
+}
+
+# 删除外部节点
+removeExternalNodeFromFile() {
+    local nodeId="$1"
+    initExternalNodeFile
+
+    local tempFile="${EXTERNAL_NODE_FILE}.tmp"
+    jq --arg id "${nodeId}" '.nodes = [.nodes[] | select(.id != $id)]' "${EXTERNAL_NODE_FILE}" > "${tempFile}"
+    mv "${tempFile}" "${EXTERNAL_NODE_FILE}"
+    chmod 600 "${EXTERNAL_NODE_FILE}"
+}
+
+# 获取单个节点信息
+getExternalNodeById() {
+    local nodeId="$1"
+    initExternalNodeFile
+    jq -r --arg id "${nodeId}" '.nodes[] | select(.id == $id)' "${EXTERNAL_NODE_FILE}" 2>/dev/null
+}
+
+# Shadowsocks 加密方式列表
+SS_METHODS=(
+    "aes-128-gcm"
+    "aes-256-gcm"
+    "chacha20-ietf-poly1305"
+    "xchacha20-ietf-poly1305"
+    "2022-blake3-aes-128-gcm"
+    "2022-blake3-aes-256-gcm"
+    "2022-blake3-chacha20-poly1305"
+)
+
+# 显示加密方式选择菜单
+selectSSMethod() {
+    echoContent yellow "\n$(t EXT_SELECT_METHOD):"
+    local i=1
+    for method in "${SS_METHODS[@]}"; do
+        echoContent yellow "  ${i}. ${method}"
+        ((i++))
+    done
+
+    read -r -p "$(t PROMPT_SELECT): " methodIndex
+    if [[ "${methodIndex}" -ge 1 && "${methodIndex}" -le ${#SS_METHODS[@]} ]]; then
+        echo "${SS_METHODS[$((methodIndex-1))]}"
+    else
+        echo "aes-256-gcm"
+    fi
+}
+
+# 手动添加 Shadowsocks 节点
+addExternalNodeSS() {
+    echoContent skyBlue "\n$(t EXT_ADD_SS)"
+    echoContent red "=============================================================="
+
+    # 服务器地址
+    read -r -p "$(t EXT_INPUT_SERVER): " server
+    if [[ -z "${server}" ]]; then
+        echoContent red " ---> $(t EXT_SERVER_REQUIRED)"
+        return 1
+    fi
+
+    # 端口
+    read -r -p "$(t EXT_INPUT_PORT): " port
+    if [[ -z "${port}" || ! "${port}" =~ ^[0-9]+$ ]]; then
+        echoContent red " ---> $(t EXT_PORT_INVALID)"
+        return 1
+    fi
+
+    # 加密方式
+    local method
+    method=$(selectSSMethod)
+
+    # 密码
+    read -r -p "$(t EXT_INPUT_PASSWORD): " password
+    if [[ -z "${password}" ]]; then
+        echoContent red " ---> $(t EXT_PASSWORD_REQUIRED)"
+        return 1
+    fi
+
+    # 节点名称
+    read -r -p "$(t EXT_INPUT_NAME) [SS-${server}]: " nodeName
+    if [[ -z "${nodeName}" ]]; then
+        nodeName="SS-${server}"
+    fi
+
+    # 生成节点JSON
+    local nodeId
+    nodeId=$(generateNodeId)
+    local nodeJson
+    nodeJson=$(cat <<EOF
+{
+    "id": "${nodeId}",
+    "name": "${nodeName}",
+    "type": "shadowsocks",
+    "server": "${server}",
+    "server_port": ${port},
+    "method": "${method}",
+    "password": "${password}",
+    "enabled": true,
+    "created_at": "$(date -Iseconds)"
+}
+EOF
+)
+
+    # 添加到配置文件
+    addExternalNodeToFile "${nodeJson}"
+
+    echoContent green "\n ---> $(t EXT_NODE_ADDED): ${nodeName}"
+    echoContent yellow " ---> ID: ${nodeId}"
+}
+
+# 手动添加 SOCKS5 节点
+addExternalNodeSOCKS() {
+    echoContent skyBlue "\n$(t EXT_ADD_SOCKS)"
+    echoContent red "=============================================================="
+
+    # 服务器地址
+    read -r -p "$(t EXT_INPUT_SERVER): " server
+    if [[ -z "${server}" ]]; then
+        echoContent red " ---> $(t EXT_SERVER_REQUIRED)"
+        return 1
+    fi
+
+    # 端口
+    read -r -p "$(t EXT_INPUT_PORT): " port
+    if [[ -z "${port}" || ! "${port}" =~ ^[0-9]+$ ]]; then
+        echoContent red " ---> $(t EXT_PORT_INVALID)"
+        return 1
+    fi
+
+    # 用户名 (可选)
+    read -r -p "$(t EXT_INPUT_USERNAME) ($(t OPTIONAL)): " username
+
+    # 密码 (可选)
+    local password=""
+    if [[ -n "${username}" ]]; then
+        read -r -p "$(t EXT_INPUT_PASSWORD): " password
+    fi
+
+    # 节点名称
+    read -r -p "$(t EXT_INPUT_NAME) [SOCKS5-${server}]: " nodeName
+    if [[ -z "${nodeName}" ]]; then
+        nodeName="SOCKS5-${server}"
+    fi
+
+    # 生成节点JSON
+    local nodeId
+    nodeId=$(generateNodeId)
+    local nodeJson
+
+    if [[ -n "${username}" ]]; then
+        nodeJson=$(cat <<EOF
+{
+    "id": "${nodeId}",
+    "name": "${nodeName}",
+    "type": "socks",
+    "server": "${server}",
+    "server_port": ${port},
+    "version": "5",
+    "username": "${username}",
+    "password": "${password}",
+    "enabled": true,
+    "created_at": "$(date -Iseconds)"
+}
+EOF
+)
+    else
+        nodeJson=$(cat <<EOF
+{
+    "id": "${nodeId}",
+    "name": "${nodeName}",
+    "type": "socks",
+    "server": "${server}",
+    "server_port": ${port},
+    "version": "5",
+    "enabled": true,
+    "created_at": "$(date -Iseconds)"
+}
+EOF
+)
+    fi
+
+    # 添加到配置文件
+    addExternalNodeToFile "${nodeJson}"
+
+    echoContent green "\n ---> $(t EXT_NODE_ADDED): ${nodeName}"
+    echoContent yellow " ---> ID: ${nodeId}"
+}
+
+# 手动添加 Trojan 节点
+addExternalNodeTrojan() {
+    echoContent skyBlue "\n$(t EXT_ADD_TROJAN)"
+    echoContent red "=============================================================="
+
+    # 服务器地址
+    read -r -p "$(t EXT_INPUT_SERVER): " server
+    if [[ -z "${server}" ]]; then
+        echoContent red " ---> $(t EXT_SERVER_REQUIRED)"
+        return 1
+    fi
+
+    # 端口
+    read -r -p "$(t EXT_INPUT_PORT) [443]: " port
+    if [[ -z "${port}" ]]; then
+        port=443
+    fi
+    if [[ ! "${port}" =~ ^[0-9]+$ ]]; then
+        echoContent red " ---> $(t EXT_PORT_INVALID)"
+        return 1
+    fi
+
+    # 密码
+    read -r -p "$(t EXT_INPUT_PASSWORD): " password
+    if [[ -z "${password}" ]]; then
+        echoContent red " ---> $(t EXT_PASSWORD_REQUIRED)"
+        return 1
+    fi
+
+    # SNI (可选)
+    read -r -p "$(t EXT_INPUT_SNI) [${server}]: " sni
+    if [[ -z "${sni}" ]]; then
+        sni="${server}"
+    fi
+
+    # 是否跳过证书验证
+    echoContent yellow "\n$(t EXT_SKIP_CERT_VERIFY)?"
+    echoContent yellow "  1. $(t NO) ($(t RECOMMENDED))"
+    echoContent yellow "  2. $(t YES)"
+    read -r -p "$(t PROMPT_SELECT) [1]: " insecureChoice
+    local insecure="false"
+    if [[ "${insecureChoice}" == "2" ]]; then
+        insecure="true"
+    fi
+
+    # 节点名称
+    read -r -p "$(t EXT_INPUT_NAME) [Trojan-${server}]: " nodeName
+    if [[ -z "${nodeName}" ]]; then
+        nodeName="Trojan-${server}"
+    fi
+
+    # 生成节点JSON
+    local nodeId
+    nodeId=$(generateNodeId)
+    local nodeJson
+    nodeJson=$(cat <<EOF
+{
+    "id": "${nodeId}",
+    "name": "${nodeName}",
+    "type": "trojan",
+    "server": "${server}",
+    "server_port": ${port},
+    "password": "${password}",
+    "tls": {
+        "enabled": true,
+        "server_name": "${sni}",
+        "insecure": ${insecure},
+        "alpn": ["h2", "http/1.1"]
+    },
+    "enabled": true,
+    "created_at": "$(date -Iseconds)"
+}
+EOF
+)
+
+    # 添加到配置文件
+    addExternalNodeToFile "${nodeJson}"
+
+    echoContent green "\n ---> $(t EXT_NODE_ADDED): ${nodeName}"
+    echoContent yellow " ---> ID: ${nodeId}"
+}
+
+# 解析 SS 链接
+parseSSLink() {
+    local link="$1"
+
+    # 移除 ss:// 前缀
+    link="${link#ss://}"
+
+    # 分离名称 (# 后面的部分)
+    local name=""
+    if [[ "${link}" == *"#"* ]]; then
+        name=$(echo "${link}" | sed 's/.*#//' | python3 -c "import sys, urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))" 2>/dev/null || echo "${link##*#}")
+        link="${link%%#*}"
+    fi
+
+    # 分离服务器和端口
+    local serverPart=""
+    local userInfo=""
+
+    if [[ "${link}" == *"@"* ]]; then
+        userInfo="${link%%@*}"
+        serverPart="${link#*@}"
+    else
+        # 整个是 base64 编码的
+        local decoded
+        decoded=$(echo "${link}" | base64 -d 2>/dev/null)
+        if [[ -n "${decoded}" && "${decoded}" == *"@"* ]]; then
+            userInfo="${decoded%%@*}"
+            serverPart="${decoded#*@}"
+        else
+            echo ""
+            return 1
+        fi
+    fi
+
+    # 解析 userInfo (可能是 base64 编码的 method:password)
+    local method=""
+    local password=""
+
+    # 尝试 base64 解码
+    local decodedUser
+    decodedUser=$(echo "${userInfo}" | base64 -d 2>/dev/null)
+    if [[ -n "${decodedUser}" && "${decodedUser}" == *":"* ]]; then
+        method="${decodedUser%%:*}"
+        password="${decodedUser#*:}"
+    elif [[ "${userInfo}" == *":"* ]]; then
+        method="${userInfo%%:*}"
+        password="${userInfo#*:}"
+    else
+        echo ""
+        return 1
+    fi
+
+    # 分离服务器和端口（处理可能的查询参数）
+    serverPart="${serverPart%%\?*}"
+    serverPart="${serverPart%%/*}"
+
+    local server="${serverPart%%:*}"
+    local port="${serverPart##*:}"
+
+    if [[ -z "${server}" || -z "${port}" || -z "${method}" ]]; then
+        echo ""
+        return 1
+    fi
+
+    # 如果没有名称，使用服务器地址
+    if [[ -z "${name}" ]]; then
+        name="SS-${server}"
+    fi
+
+    # 输出 JSON
+    cat <<EOF
+{
+    "name": "${name}",
+    "type": "shadowsocks",
+    "server": "${server}",
+    "server_port": ${port},
+    "method": "${method}",
+    "password": "${password}"
+}
+EOF
+}
+
+# 解析 Trojan 链接
+parseTrojanLink() {
+    local link="$1"
+
+    # 移除 trojan:// 前缀
+    link="${link#trojan://}"
+
+    # 分离名称
+    local name=""
+    if [[ "${link}" == *"#"* ]]; then
+        name=$(echo "${link}" | sed 's/.*#//' | python3 -c "import sys, urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))" 2>/dev/null || echo "${link##*#}")
+        link="${link%%#*}"
+    fi
+
+    # 分离参数
+    local params=""
+    if [[ "${link}" == *"?"* ]]; then
+        params="${link#*\?}"
+        link="${link%%\?*}"
+    fi
+
+    # 解析密码和服务器
+    local password="${link%%@*}"
+    local serverPart="${link#*@}"
+
+    local server="${serverPart%%:*}"
+    local port="${serverPart##*:}"
+
+    # 解析参数
+    local sni="${server}"
+    local insecure="false"
+
+    if [[ -n "${params}" ]]; then
+        # 解析 sni/peer/host
+        if [[ "${params}" == *"sni="* ]]; then
+            sni=$(echo "${params}" | grep -oP 'sni=\K[^&]+')
+        elif [[ "${params}" == *"peer="* ]]; then
+            sni=$(echo "${params}" | grep -oP 'peer=\K[^&]+')
+        fi
+
+        # 解析 allowInsecure
+        if [[ "${params}" == *"allowInsecure=1"* || "${params}" == *"allowInsecure=true"* ]]; then
+            insecure="true"
+        fi
+    fi
+
+    if [[ -z "${server}" || -z "${port}" || -z "${password}" ]]; then
+        echo ""
+        return 1
+    fi
+
+    if [[ -z "${name}" ]]; then
+        name="Trojan-${server}"
+    fi
+
+    cat <<EOF
+{
+    "name": "${name}",
+    "type": "trojan",
+    "server": "${server}",
+    "server_port": ${port},
+    "password": "${password}",
+    "tls": {
+        "enabled": true,
+        "server_name": "${sni}",
+        "insecure": ${insecure},
+        "alpn": ["h2", "http/1.1"]
+    }
+}
+EOF
+}
+
+# 解析 SOCKS5 链接
+parseSOCKS5Link() {
+    local link="$1"
+
+    # 移除 socks5:// 或 socks:// 前缀
+    link="${link#socks5://}"
+    link="${link#socks://}"
+
+    # 分离名称
+    local name=""
+    if [[ "${link}" == *"#"* ]]; then
+        name=$(echo "${link}" | sed 's/.*#//' | python3 -c "import sys, urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))" 2>/dev/null || echo "${link##*#}")
+        link="${link%%#*}"
+    fi
+
+    local username=""
+    local password=""
+    local serverPart=""
+
+    if [[ "${link}" == *"@"* ]]; then
+        local userInfo="${link%%@*}"
+        serverPart="${link#*@}"
+
+        if [[ "${userInfo}" == *":"* ]]; then
+            username="${userInfo%%:*}"
+            password="${userInfo#*:}"
+        fi
+    else
+        serverPart="${link}"
+    fi
+
+    local server="${serverPart%%:*}"
+    local port="${serverPart##*:}"
+
+    if [[ -z "${server}" || -z "${port}" ]]; then
+        echo ""
+        return 1
+    fi
+
+    if [[ -z "${name}" ]]; then
+        name="SOCKS5-${server}"
+    fi
+
+    if [[ -n "${username}" ]]; then
+        cat <<EOF
+{
+    "name": "${name}",
+    "type": "socks",
+    "server": "${server}",
+    "server_port": ${port},
+    "version": "5",
+    "username": "${username}",
+    "password": "${password}"
+}
+EOF
+    else
+        cat <<EOF
+{
+    "name": "${name}",
+    "type": "socks",
+    "server": "${server}",
+    "server_port": ${port},
+    "version": "5"
+}
+EOF
+    fi
+}
+
+# 通过链接添加外部节点
+addExternalNodeByLink() {
+    echoContent skyBlue "\n$(t EXT_ADD_BY_LINK)"
+    echoContent red "=============================================================="
+    echoContent yellow "$(t EXT_SUPPORTED_LINKS):"
+    echoContent yellow "  - ss://..."
+    echoContent yellow "  - trojan://..."
+    echoContent yellow "  - socks5://...\n"
+
+    read -r -p "$(t EXT_PASTE_LINK): " link
+
+    if [[ -z "${link}" ]]; then
+        echoContent red " ---> $(t EXT_LINK_EMPTY)"
+        return 1
+    fi
+
+    local nodeJson=""
+    local nodeType=""
+
+    if [[ "${link}" == ss://* ]]; then
+        nodeType="Shadowsocks"
+        nodeJson=$(parseSSLink "${link}")
+    elif [[ "${link}" == trojan://* ]]; then
+        nodeType="Trojan"
+        nodeJson=$(parseTrojanLink "${link}")
+    elif [[ "${link}" == socks5://* || "${link}" == socks://* ]]; then
+        nodeType="SOCKS5"
+        nodeJson=$(parseSOCKS5Link "${link}")
+    else
+        echoContent red " ---> $(t EXT_LINK_UNSUPPORTED)"
+        return 1
+    fi
+
+    if [[ -z "${nodeJson}" ]]; then
+        echoContent red " ---> $(t EXT_LINK_PARSE_FAILED)"
+        return 1
+    fi
+
+    # 显示解析结果
+    echoContent green "\n$(t EXT_PARSE_RESULT):"
+    echoContent yellow "  $(t EXT_PROTOCOL): ${nodeType}"
+    echoContent yellow "  $(t EXT_SERVER): $(echo "${nodeJson}" | jq -r '.server')"
+    echoContent yellow "  $(t EXT_PORT): $(echo "${nodeJson}" | jq -r '.server_port')"
+    echoContent yellow "  $(t EXT_NAME): $(echo "${nodeJson}" | jq -r '.name')"
+
+    read -r -p "\n$(t EXT_CONFIRM_ADD)? [y/n]: " confirmAdd
+    if [[ "${confirmAdd}" != "y" && "${confirmAdd}" != "Y" ]]; then
+        echoContent yellow " ---> $(t CANCEL)"
+        return 0
+    fi
+
+    # 添加节点ID和时间戳
+    local nodeId
+    nodeId=$(generateNodeId)
+    nodeJson=$(echo "${nodeJson}" | jq --arg id "${nodeId}" --arg time "$(date -Iseconds)" '. + {id: $id, enabled: true, created_at: $time}')
+
+    addExternalNodeToFile "${nodeJson}"
+
+    local nodeName
+    nodeName=$(echo "${nodeJson}" | jq -r '.name')
+    echoContent green "\n ---> $(t EXT_NODE_ADDED): ${nodeName}"
+}
+
+# 显示外部节点列表
+listExternalNodes() {
+    initExternalNodeFile
+
+    echoContent skyBlue "\n$(t EXT_NODE_LIST)"
+    echoContent red "=============================================================="
+
+    local nodeCount
+    nodeCount=$(getExternalNodeCount)
+
+    if [[ "${nodeCount}" == "0" ]]; then
+        echoContent yellow "  ($(t EXT_NO_NODES))"
+        return
+    fi
+
+    local index=1
+    while IFS= read -r node; do
+        local name type server port enabled
+        name=$(echo "${node}" | jq -r '.name')
+        type=$(echo "${node}" | jq -r '.type')
+        server=$(echo "${node}" | jq -r '.server')
+        port=$(echo "${node}" | jq -r '.server_port')
+        enabled=$(echo "${node}" | jq -r '.enabled')
+
+        local typeLabel=""
+        case "${type}" in
+            "shadowsocks") typeLabel="SS" ;;
+            "socks") typeLabel="SOCKS5" ;;
+            "trojan") typeLabel="Trojan" ;;
+            *) typeLabel="${type}" ;;
+        esac
+
+        local status=""
+        if [[ "${enabled}" == "false" ]]; then
+            status=" [$(t DISABLED)]"
+        fi
+
+        echoContent yellow "  ${index}. [${typeLabel}] ${name} (${server}:${port})${status}"
+        ((index++))
+    done < <(jq -c '.nodes[]' "${EXTERNAL_NODE_FILE}" 2>/dev/null)
+}
+
+# 删除外部节点
+deleteExternalNode() {
+    listExternalNodes
+
+    local nodeCount
+    nodeCount=$(getExternalNodeCount)
+
+    if [[ "${nodeCount}" == "0" ]]; then
+        return
+    fi
+
+    echoContent red "=============================================================="
+    read -r -p "$(t EXT_SELECT_DELETE): " selectIndex
+
+    if [[ -z "${selectIndex}" || "${selectIndex}" == "0" ]]; then
+        return
+    fi
+
+    # 获取节点ID
+    local nodeId
+    nodeId=$(jq -r --argjson idx "$((selectIndex-1))" '.nodes[$idx].id' "${EXTERNAL_NODE_FILE}" 2>/dev/null)
+
+    if [[ -z "${nodeId}" || "${nodeId}" == "null" ]]; then
+        echoContent red " ---> $(t EXT_INVALID_SELECTION)"
+        return 1
+    fi
+
+    local nodeName
+    nodeName=$(jq -r --argjson idx "$((selectIndex-1))" '.nodes[$idx].name' "${EXTERNAL_NODE_FILE}" 2>/dev/null)
+
+    read -r -p "$(t EXT_CONFIRM_DELETE) [${nodeName}]? [y/n]: " confirmDelete
+    if [[ "${confirmDelete}" != "y" && "${confirmDelete}" != "Y" ]]; then
+        return
+    fi
+
+    removeExternalNodeFromFile "${nodeId}"
+    echoContent green " ---> $(t EXT_NODE_DELETED): ${nodeName}"
+}
+
+# 生成外部节点的 sing-box 出站配置
+generateExternalOutboundConfig() {
+    local nodeId="$1"
+    local tag="$2"
+
+    local node
+    node=$(getExternalNodeById "${nodeId}")
+
+    if [[ -z "${node}" ]]; then
+        return 1
+    fi
+
+    local type
+    type=$(echo "${node}" | jq -r '.type')
+
+    case "${type}" in
+        "shadowsocks")
+            local server port method password
+            server=$(echo "${node}" | jq -r '.server')
+            port=$(echo "${node}" | jq -r '.server_port')
+            method=$(echo "${node}" | jq -r '.method')
+            password=$(echo "${node}" | jq -r '.password')
+
+            cat <<EOF
+{
+    "type": "shadowsocks",
+    "tag": "${tag}",
+    "server": "${server}",
+    "server_port": ${port},
+    "method": "${method}",
+    "password": "${password}"
+}
+EOF
+            ;;
+        "socks")
+            local server port username password
+            server=$(echo "${node}" | jq -r '.server')
+            port=$(echo "${node}" | jq -r '.server_port')
+            username=$(echo "${node}" | jq -r '.username // empty')
+            password=$(echo "${node}" | jq -r '.password // empty')
+
+            if [[ -n "${username}" ]]; then
+                cat <<EOF
+{
+    "type": "socks",
+    "tag": "${tag}",
+    "server": "${server}",
+    "server_port": ${port},
+    "version": "5",
+    "username": "${username}",
+    "password": "${password}"
+}
+EOF
+            else
+                cat <<EOF
+{
+    "type": "socks",
+    "tag": "${tag}",
+    "server": "${server}",
+    "server_port": ${port},
+    "version": "5"
+}
+EOF
+            fi
+            ;;
+        "trojan")
+            local server port password tlsConfig
+            server=$(echo "${node}" | jq -r '.server')
+            port=$(echo "${node}" | jq -r '.server_port')
+            password=$(echo "${node}" | jq -r '.password')
+            tlsConfig=$(echo "${node}" | jq -c '.tls // {"enabled": true, "server_name": "'${server}'", "insecure": false}')
+
+            cat <<EOF
+{
+    "type": "trojan",
+    "tag": "${tag}",
+    "server": "${server}",
+    "server_port": ${port},
+    "password": "${password}",
+    "tls": ${tlsConfig}
+}
+EOF
+            ;;
+    esac
+}
+
+# 将外部节点设置为链式代理出口（单出口模式）
+setupExternalAsSingleExit() {
+    listExternalNodes
+
+    local nodeCount
+    nodeCount=$(getExternalNodeCount)
+
+    if [[ "${nodeCount}" == "0" ]]; then
+        echoContent red "\n ---> $(t EXT_ADD_NODE_FIRST)"
+        return 1
+    fi
+
+    echoContent red "=============================================================="
+    read -r -p "$(t EXT_SELECT_AS_EXIT): " selectIndex
+
+    if [[ -z "${selectIndex}" || "${selectIndex}" == "0" ]]; then
+        return
+    fi
+
+    # 获取节点信息
+    local nodeId nodeName
+    nodeId=$(jq -r --argjson idx "$((selectIndex-1))" '.nodes[$idx].id' "${EXTERNAL_NODE_FILE}" 2>/dev/null)
+    nodeName=$(jq -r --argjson idx "$((selectIndex-1))" '.nodes[$idx].name' "${EXTERNAL_NODE_FILE}" 2>/dev/null)
+
+    if [[ -z "${nodeId}" || "${nodeId}" == "null" ]]; then
+        echoContent red " ---> $(t EXT_INVALID_SELECTION)"
+        return 1
+    fi
+
+    echoContent yellow "\n$(t EXT_CONFIGURING): ${nodeName}"
+
+    # 生成出站配置
+    local outboundConfig
+    outboundConfig=$(generateExternalOutboundConfig "${nodeId}" "chain_external_outbound")
+
+    if [[ -z "${outboundConfig}" ]]; then
+        echoContent red " ---> $(t EXT_CONFIG_FAILED)"
+        return 1
+    fi
+
+    # 保存出站配置
+    local configDir="/etc/Proxy-agent/sing-box/conf/config"
+    mkdir -p "${configDir}"
+
+    echo "{\"outbounds\": [${outboundConfig}]}" | jq . > "${configDir}/chain_outbound.json"
+
+    # 生成路由配置 - 所有流量走外部节点
+    cat <<EOF > "${configDir}/chain_route.json"
+{
+    "route": {
+        "rules": [],
+        "final": "chain_external_outbound"
+    }
+}
+EOF
+
+    # 保存外部节点入口信息
+    cat <<EOF > "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json"
+{
+    "role": "entry",
+    "mode": "external_single",
+    "external_node_id": "${nodeId}",
+    "external_node_name": "${nodeName}"
+}
+EOF
+
+    # 合并配置
+    mergeSingBoxConfig
+
+    # 重启服务
+    reloadCore
+
+    echoContent green "\n ---> $(t EXT_CONFIG_SUCCESS)"
+    echoContent yellow " ---> $(t EXT_TRAFFIC_ROUTE): $(t USER) → $(t ENTRY_NODE) → ${nodeName} → $(t INTERNET)"
+}
+
+# 测试外部节点连通性
+testExternalNodeConnection() {
+    listExternalNodes
+
+    local nodeCount
+    nodeCount=$(getExternalNodeCount)
+
+    if [[ "${nodeCount}" == "0" ]]; then
+        return
+    fi
+
+    echoContent red "=============================================================="
+    read -r -p "$(t EXT_SELECT_TEST): " selectIndex
+
+    if [[ -z "${selectIndex}" || "${selectIndex}" == "0" ]]; then
+        return
+    fi
+
+    local node
+    node=$(jq -c --argjson idx "$((selectIndex-1))" '.nodes[$idx]' "${EXTERNAL_NODE_FILE}" 2>/dev/null)
+
+    if [[ -z "${node}" || "${node}" == "null" ]]; then
+        echoContent red " ---> $(t EXT_INVALID_SELECTION)"
+        return 1
+    fi
+
+    local server port nodeName
+    server=$(echo "${node}" | jq -r '.server')
+    port=$(echo "${node}" | jq -r '.server_port')
+    nodeName=$(echo "${node}" | jq -r '.name')
+
+    echoContent yellow "\n$(t EXT_TESTING): ${nodeName} (${server}:${port})"
+
+    # TCP 连通性测试
+    if timeout 5 bash -c "echo >/dev/tcp/${server}/${port}" 2>/dev/null; then
+        echoContent green " ---> $(t EXT_TCP_SUCCESS)"
+    else
+        echoContent red " ---> $(t EXT_TCP_FAILED)"
+    fi
+}
+
+# 外部节点管理菜单
+externalNodeMenu() {
+    echoContent skyBlue "\n$(t EXT_MENU_TITLE)"
+    echoContent red "\n=============================================================="
+
+    listExternalNodes
+
+    echoContent red "=============================================================="
+    echoContent yellow "\n$(t EXT_MENU_OPTIONS):"
+    echoContent yellow "  1. $(t EXT_ADD_BY_LINK)"
+    echoContent yellow "  2. $(t EXT_ADD_MANUAL)"
+    echoContent yellow "  3. $(t EXT_DELETE_NODE)"
+    echoContent yellow "  4. $(t EXT_TEST_NODE)"
+    echoContent yellow "  5. $(t EXT_SET_AS_EXIT)"
+    echoContent yellow "  0. $(t BACK)"
+
+    read -r -p "$(t PROMPT_SELECT): " menuChoice
+
+    case "${menuChoice}" in
+        1)
+            addExternalNodeByLink
+            externalNodeMenu
+            ;;
+        2)
+            echoContent yellow "\n$(t EXT_SELECT_PROTOCOL):"
+            echoContent yellow "  1. Shadowsocks"
+            echoContent yellow "  2. SOCKS5"
+            echoContent yellow "  3. Trojan"
+            read -r -p "$(t PROMPT_SELECT): " protocolChoice
+            case "${protocolChoice}" in
+                1) addExternalNodeSS ;;
+                2) addExternalNodeSOCKS ;;
+                3) addExternalNodeTrojan ;;
+            esac
+            externalNodeMenu
+            ;;
+        3)
+            deleteExternalNode
+            externalNodeMenu
+            ;;
+        4)
+            testExternalNodeConnection
+            externalNodeMenu
+            ;;
+        5)
+            setupExternalAsSingleExit
+            ;;
+        0|"")
+            chainProxyMenu
+            ;;
+        *)
+            externalNodeMenu
+            ;;
+    esac
+}
+
+# ======================= 外部节点功能结束 =======================
 
 # 分流工具
 routingToolsMenu() {
@@ -7059,10 +13697,8 @@ routingToolsMenu() {
     echoContent yellow "1.WARP分流【第三方 IPv4】"
     echoContent yellow "2.WARP分流【第三方 IPv6】"
     echoContent yellow "3.IPv6分流"
-    echoContent yellow "4.Socks5分流【替换任意门分流】"
-    echoContent yellow "5.DNS分流"
-    #    echoContent yellow "6.VMess+WS+TLS分流"
-    echoContent yellow "7.SNI反向代理分流"
+    echoContent yellow "4.DNS分流"
+    echoContent yellow "5.SNI反向代理分流"
 
     read -r -p "请选择:" selectType
 
@@ -7077,18 +13713,9 @@ routingToolsMenu() {
         ipv6Routing 1
         ;;
     4)
-        socks5Routing
-        ;;
-    5)
         dnsRouting 1
         ;;
-        #    6)
-        #        if [[ -n "${singBoxConfigPath}" ]]; then
-        #            echoContent red "\n ---> 此功能不支持Hysteria2、Tuic"
-        #        fi
-        #        vmessWSRouting 1
-        #        ;;
-    7)
+    5)
         if [[ -n "${singBoxConfigPath}" ]]; then
             echoContent red "\n ---> 此功能不支持Hysteria2、Tuic"
         fi
@@ -7103,7 +13730,7 @@ vmessWSRouting() {
     echoContent skyBlue "\n功能 1/${totalProgress} : VMess+WS+TLS 分流"
     echoContent red "\n=============================================================="
     echoContent yellow "# 注意事项"
-    echoContent yellow "# 使用教程：https://www.v2ray-agent.com/archives/1683226921000 \n"
+    echoContent yellow "# 使用提示：详见 documents 目录中的分流与策略说明 \n"
 
     echoContent yellow "1.添加出站"
     echoContent yellow "2.卸载"
@@ -7117,485 +13744,6 @@ vmessWSRouting() {
         removeVMessWSRouting
         ;;
     esac
-}
-# Socks5分流
-socks5Routing() {
-    if [[ -z "${coreInstallType}" ]]; then
-        echoContent red " ---> 未安装任意协议，请使用 1.安装 或者 2.任意组合安装 进行安装后使用"
-        exit 0
-    fi
-    echoContent skyBlue "\n功能 1/${totalProgress} : Socks5分流"
-    echoContent red "\n=============================================================="
-    echoContent red "# 注意事项"
-    echoContent yellow "# 流量明文访问"
-
-    echoContent yellow "# 仅限正常网络环境下设备间流量转发，禁止用于代理访问。"
-    echoContent yellow "# 使用教程：https://www.v2ray-agent.com/archives/1683226921000#heading-5 \n"
-
-    echoContent yellow "1.Socks5出站"
-    echoContent yellow "2.Socks5入站"
-    echoContent yellow "3.卸载"
-    read -r -p "请选择:" selectType
-
-    case ${selectType} in
-    1)
-        socks5OutboundRoutingMenu
-        ;;
-    2)
-        socks5InboundRoutingMenu
-        ;;
-    3)
-        removeSocks5Routing
-        ;;
-    esac
-}
-# Socks5入站菜单
-socks5InboundRoutingMenu() {
-    readInstallType
-    echoContent skyBlue "\n功能 1/1 : Socks5入站"
-    echoContent red "\n=============================================================="
-
-    echoContent yellow "1.安装Socks5入站"
-    echoContent yellow "2.查看分流规则"
-    echoContent yellow "3.添加分流规则"
-    echoContent yellow "4.查看入站配置"
-    read -r -p "请选择:" selectType
-    case ${selectType} in
-    1)
-        totalProgress=1
-        installSingBox 1
-        installSingBoxService 1
-        setSocks5Inbound
-        setSocks5InboundRouting
-        reloadCore
-        socks5InboundRoutingMenu
-        ;;
-    2)
-        showSingBoxRoutingRules socks5_02_inbound_route
-        socks5InboundRoutingMenu
-        ;;
-    3)
-        setSocks5InboundRouting addRules
-        reloadCore
-        socks5InboundRoutingMenu
-        ;;
-    4)
-        if [[ -f "${singBoxConfigPath}20_socks5_inbounds.json" ]]; then
-            echoContent yellow "\n ---> 下列内容需要配置到其他机器的出站，请不要进行代理行为\n"
-            echoContent green " 端口：$(jq .inbounds[0].listen_port ${singBoxConfigPath}20_socks5_inbounds.json)"
-            echoContent green " 用户名称：$(jq -r .inbounds[0].users[0].username ${singBoxConfigPath}20_socks5_inbounds.json)"
-            echoContent green " 用户密码：$(jq -r .inbounds[0].users[0].password ${singBoxConfigPath}20_socks5_inbounds.json)"
-        else
-            echoContent red " ---> 未安装相应功能"
-            socks5InboundRoutingMenu
-        fi
-        ;;
-    esac
-
-}
-
-# Socks5出站菜单
-socks5OutboundRoutingMenu() {
-    echoContent skyBlue "\n功能 1/1 : Socks5出站"
-    echoContent red "\n=============================================================="
-
-    echoContent yellow "1.安装Socks5出站"
-    echoContent yellow "2.设置Socks5全局转发"
-    echoContent yellow "3.查看分流规则"
-    echoContent yellow "4.添加分流规则"
-    read -r -p "请选择:" selectType
-    case ${selectType} in
-    1)
-        setSocks5Outbound
-        setSocks5OutboundRouting
-        reloadCore
-        socks5OutboundRoutingMenu
-        ;;
-    2)
-        setSocks5Outbound
-        setSocks5OutboundRoutingAll
-        reloadCore
-        socks5OutboundRoutingMenu
-        ;;
-    3)
-        showSingBoxRoutingRules socks5_01_outbound_route
-        showXrayRoutingRules socks5_outbound
-        socks5OutboundRoutingMenu
-        ;;
-    4)
-        setSocks5OutboundRouting addRules
-        reloadCore
-        socks5OutboundRoutingMenu
-        ;;
-    esac
-
-}
-
-# socks5全局
-setSocks5OutboundRoutingAll() {
-
-    echoContent red "=============================================================="
-    echoContent yellow "# 注意事项\n"
-    echoContent yellow "1.会删除所有已经设置的分流规则，包括其他分流（warp、IPv6等）"
-    echoContent yellow "2.会删除Socks5之外的所有出站规则\n"
-    read -r -p "是否确认设置？[y/n]:" socksOutStatus
-
-    if [[ "${socksOutStatus}" == "y" ]]; then
-        if [[ "${coreInstallType}" == "1" ]]; then
-            removeXrayOutbound IPv4_out
-            removeXrayOutbound IPv6_out
-            removeXrayOutbound z_direct_outbound
-            removeXrayOutbound blackhole_out
-            removeXrayOutbound wireguard_out_IPv4
-            removeXrayOutbound wireguard_out_IPv6
-
-            rm ${configPath}09_routing.json >/dev/null 2>&1
-        fi
-        if [[ -n "${singBoxConfigPath}" ]]; then
-
-            removeSingBoxConfig IPv4_out
-            removeSingBoxConfig IPv6_out
-
-            removeSingBoxConfig wireguard_endpoints_IPv4_route
-            removeSingBoxConfig wireguard_endpoints_IPv6_route
-            removeSingBoxConfig wireguard_endpoints_IPv4
-            removeSingBoxConfig wireguard_endpoints_IPv6
-
-            removeSingBoxConfig socks5_01_outbound_route
-            removeSingBoxConfig 01_direct_outbound
-        fi
-
-        echoContent green " ---> Socks5全局出站设置完毕"
-    fi
-}
-# socks5 分流规则
-showSingBoxRoutingRules() {
-    if [[ -n "${singBoxConfigPath}" ]]; then
-        if [[ -f "${singBoxConfigPath}$1.json" ]]; then
-            jq .route.rules "${singBoxConfigPath}$1.json"
-        elif [[ "$1" == "socks5_01_outbound_route" && -f "${singBoxConfigPath}socks5_outbound.json" ]]; then
-            echoContent yellow "已安装 sing-box socks5全局出站分流"
-            echoContent yellow "\n出站分流配置："
-            echoContent skyBlue "$(jq .outbounds[0] ${singBoxConfigPath}socks5_outbound.json)"
-        elif [[ "$1" == "socks5_02_inbound_route" && -f "${singBoxConfigPath}20_socks5_inbounds.json" ]]; then
-            echoContent yellow "已安装 sing-box socks5全局入站分流"
-            echoContent yellow "\n出站分流配置："
-            echoContent skyBlue "$(jq .outbounds[0] ${singBoxConfigPath}socks5_outbound.json)"
-        fi
-    fi
-}
-
-# xray内核分流规则
-showXrayRoutingRules() {
-    if [[ "${coreInstallType}" == "1" ]]; then
-        if [[ -f "${configPath}09_routing.json" ]]; then
-            jq ".routing.rules[]|select(.outboundTag==\"$1\")" "${configPath}09_routing.json"
-
-            echoContent yellow "\n已安装 xray-core socks5全局出站分流"
-            echoContent yellow "\n出站分流配置："
-            echoContent skyBlue "$(jq .outbounds[0].settings.servers[0] ${configPath}socks5_outbound.json)"
-
-        elif [[ "$1" == "socks5_outbound" && -f "${configPath}socks5_outbound.json" ]]; then
-            echoContent yellow "\n已安装 xray-core socks5全局出站分流"
-            echoContent yellow "\n出站分流配置："
-            echoContent skyBlue "$(jq .outbounds[0].settings.servers[0] ${configPath}socks5_outbound.json)"
-        fi
-    fi
-}
-
-# 卸载Socks5分流
-removeSocks5Routing() {
-    echoContent skyBlue "\n功能 1/1 : 卸载Socks5分流"
-    echoContent red "\n=============================================================="
-
-    echoContent yellow "1.卸载Socks5出站"
-    echoContent yellow "2.卸载Socks5入站"
-    echoContent yellow "3.卸载全部"
-    read -r -p "请选择:" unInstallSocks5RoutingStatus
-    if [[ "${unInstallSocks5RoutingStatus}" == "1" ]]; then
-        if [[ "${coreInstallType}" == "1" ]]; then
-            removeXrayOutbound socks5_outbound
-            unInstallRouting socks5_outbound outboundTag
-            addXrayOutbound z_direct_outbound
-        fi
-
-        if [[ -n "${singBoxConfigPath}" ]]; then
-            removeSingBoxConfig socks5_outbound
-            removeSingBoxConfig socks5_01_outbound_route
-            addSingBoxOutbound 01_direct_outbound
-        fi
-
-    elif [[ "${unInstallSocks5RoutingStatus}" == "2" ]]; then
-
-        removeSingBoxConfig 20_socks5_inbounds
-        removeSingBoxConfig socks5_02_inbound_route
-
-        handleSingBox stop
-    elif [[ "${unInstallSocks5RoutingStatus}" == "3" ]]; then
-        if [[ "${coreInstallType}" == "1" ]]; then
-            removeXrayOutbound socks5_outbound
-            unInstallRouting socks5_outbound outboundTag
-            addXrayOutbound z_direct_outbound
-        fi
-
-        if [[ -n "${singBoxConfigPath}" ]]; then
-            removeSingBoxConfig socks5_outbound
-            removeSingBoxConfig socks5_01_outbound_route
-            removeSingBoxConfig 20_socks5_inbounds
-            removeSingBoxConfig socks5_02_inbound_route
-            addSingBoxOutbound 01_direct_outbound
-        fi
-
-        handleSingBox stop
-    else
-        echoContent red " ---> 选择错误"
-        exit 0
-    fi
-    echoContent green " ---> 卸载完毕"
-    reloadCore
-}
-# Socks5入站
-setSocks5Inbound() {
-
-    echoContent yellow "\n==================== 配置 Socks5 入站(解锁机、落地机) =====================\n"
-    echoContent skyBlue "\n开始配置Socks5协议入站端口"
-    echo
-    mapfile -t result < <(initSingBoxPort "${singBoxSocks5Port}")
-    echoContent green "\n ---> 入站Socks5端口：${result[-1]}"
-    echoContent green "\n ---> 此端口需要配置到其他机器出站，请不要进行代理行为"
-
-    echoContent yellow "\n请输入自定义UUID[需合法]，[回车]随机UUID"
-    read -r -p 'UUID:' socks5RoutingUUID
-    if [[ -z "${socks5RoutingUUID}" ]]; then
-        if [[ "${coreInstallType}" == "1" ]]; then
-            socks5RoutingUUID=$(/etc/v2ray-agent/xray/xray uuid)
-        elif [[ -n "${singBoxConfigPath}" ]]; then
-            socks5RoutingUUID=$(/etc/v2ray-agent/sing-box/sing-box generate uuid)
-        fi
-    fi
-    echo
-    echoContent green "用户名称：${socks5RoutingUUID}"
-    echoContent green "用户密码：${socks5RoutingUUID}"
-
-    echoContent yellow "\n请选择分流域名DNS解析类型"
-    echoContent yellow "# 注意事项：需要保证vps支持相应的DNS解析"
-    echoContent yellow "1.IPv4[回车默认]"
-    echoContent yellow "2.IPv6"
-
-    read -r -p 'IP类型:' socks5InboundDomainStrategyStatus
-    local domainStrategy=
-    if [[ -z "${socks5InboundDomainStrategyStatus}" || "${socks5InboundDomainStrategyStatus}" == "1" ]]; then
-        domainStrategy="ipv4_only"
-    elif [[ "${socks5InboundDomainStrategyStatus}" == "2" ]]; then
-        domainStrategy="ipv6_only"
-    else
-        echoContent red " ---> 选择类型错误"
-        exit 0
-    fi
-    cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/20_socks5_inbounds.json
-{
-    "inbounds":[
-        {
-          "type": "socks",
-          "listen":"::",
-          "listen_port":${result[-1]},
-          "tag":"socks5_inbound",
-          "users":[
-            {
-                  "username": "${socks5RoutingUUID}",
-                  "password": "${socks5RoutingUUID}"
-            }
-          ],
-          "domain_strategy":"${domainStrategy}"
-        }
-    ]
-}
-EOF
-
-}
-
-# 初始化sing-box rule配置
-initSingBoxRules() {
-    local domainRules=[]
-    local ruleSet=[]
-    while read -r line; do
-        local geositeStatus
-        geositeStatus=$(curl -s "https://api.github.com/repos/SagerNet/sing-geosite/contents/geosite-${line}.srs?ref=rule-set" | jq .message)
-
-        if [[ "${geositeStatus}" == "null" ]]; then
-            ruleSet=$(echo "${ruleSet}" | jq -r ". += [{\"tag\":\"${line}_$2\",\"type\":\"remote\",\"format\":\"binary\",\"url\":\"https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-${line}.srs\",\"download_detour\":\"01_direct_outbound\"}]")
-        else
-            domainRules=$(echo "${domainRules}" | jq -r ". += [\"^([a-zA-Z0-9_-]+\\\.)*${line//./\\\\.}\"]")
-        fi
-    done < <(echo "$1" | tr ',' '\n' | grep -v '^$' | sort -n | uniq | paste -sd ',' | tr ',' '\n')
-    echo "{ \"domainRules\":${domainRules},\"ruleSet\":${ruleSet}}"
-}
-
-# socks5 inbound routing规则
-setSocks5InboundRouting() {
-
-    singBoxConfigPath=/etc/v2ray-agent/sing-box/conf/config/
-
-    if [[ "$1" == "addRules" && ! -f "${singBoxConfigPath}socks5_02_inbound_route.json" && ! -f "${configPath}09_routing.json" ]]; then
-        echoContent red " ---> 请安装入站分流后再添加分流规则"
-        echoContent red " ---> 如已选择允许所有网站，请重新安装分流后设置规则"
-        exit 0
-    fi
-    local socks5InboundRoutingIPs=
-    if [[ "$1" == "addRules" ]]; then
-        socks5InboundRoutingIPs=$(jq .route.rules[0].source_ip_cidr "${singBoxConfigPath}socks5_02_inbound_route.json")
-    else
-        echoContent red "=============================================================="
-        echoContent skyBlue "请输入允许访问的IP地址，多个IP英文逗号隔开。例如:1.1.1.1,2.2.2.2\n"
-        read -r -p "IP:" socks5InboundRoutingIPs
-
-        if [[ -z "${socks5InboundRoutingIPs}" ]]; then
-            echoContent red " ---> IP不可为空"
-            exit 0
-        fi
-        socks5InboundRoutingIPs=$(echo "\"${socks5InboundRoutingIPs}"\" | jq -c '.|split(",")')
-    fi
-
-    echoContent red "=============================================================="
-    echoContent skyBlue "请输入要分流的域名\n"
-    echoContent yellow "支持Xray-core geosite匹配，支持sing-box1.8+ rule_set匹配\n"
-    echoContent yellow "非增量添加，会替换原有规则\n"
-    echoContent yellow "当输入的规则匹配到geosite或者rule_set后会使用相应的规则\n"
-    echoContent yellow "如无法匹配则，则使用domain精确匹配\n"
-
-    read -r -p "是否允许所有网站？请选择[y/n]:" socks5InboundRoutingDomainStatus
-    if [[ "${socks5InboundRoutingDomainStatus}" == "y" ]]; then
-        addSingBoxRouteRule "01_direct_outbound" "" "socks5_02_inbound_route"
-        local route=
-        route=$(jq ".route.rules[0].inbound = [\"socks5_inbound\"]" "${singBoxConfigPath}socks5_02_inbound_route.json")
-        route=$(echo "${route}" | jq ".route.rules[0].source_ip_cidr=${socks5InboundRoutingIPs}")
-        echo "${route}" | jq . >"${singBoxConfigPath}socks5_02_inbound_route.json"
-
-        addSingBoxOutbound block
-        addSingBoxOutbound "01_direct_outbound"
-    else
-        echoContent yellow "录入示例:netflix,openai,v2ray-agent.com\n"
-        read -r -p "域名:" socks5InboundRoutingDomain
-        if [[ -z "${socks5InboundRoutingDomain}" ]]; then
-            echoContent red " ---> 域名不可为空"
-            exit 0
-        fi
-        addSingBoxRouteRule "01_direct_outbound" "${socks5InboundRoutingDomain}" "socks5_02_inbound_route"
-        local route=
-        route=$(jq ".route.rules[0].inbound = [\"socks5_inbound\"]" "${singBoxConfigPath}socks5_02_inbound_route.json")
-        route=$(echo "${route}" | jq ".route.rules[0].source_ip_cidr=${socks5InboundRoutingIPs}")
-        echo "${route}" | jq . >"${singBoxConfigPath}socks5_02_inbound_route.json"
-
-        addSingBoxOutbound block
-        addSingBoxOutbound "01_direct_outbound"
-    fi
-
-}
-
-# socks5 出站
-setSocks5Outbound() {
-
-    echoContent yellow "\n==================== 配置 Socks5 出站（转发机、代理机） =====================\n"
-    echo
-    read -r -p "请输入落地机IP地址:" socks5RoutingOutboundIP
-    if [[ -z "${socks5RoutingOutboundIP}" ]]; then
-        echoContent red " ---> IP不可为空"
-        exit 0
-    fi
-    echo
-    read -r -p "请输入落地机端口:" socks5RoutingOutboundPort
-    if [[ -z "${socks5RoutingOutboundPort}" ]]; then
-        echoContent red " ---> 端口不可为空"
-        exit 0
-    fi
-    echo
-    read -r -p "请输入用户名:" socks5RoutingOutboundUserName
-    if [[ -z "${socks5RoutingOutboundUserName}" ]]; then
-        echoContent red " ---> 用户名不可为空"
-        exit 0
-    fi
-    echo
-    read -r -p "请输入用户密码:" socks5RoutingOutboundPassword
-    if [[ -z "${socks5RoutingOutboundPassword}" ]]; then
-        echoContent red " ---> 用户密码不可为空"
-        exit 0
-    fi
-    echo
-    if [[ -n "${singBoxConfigPath}" ]]; then
-        cat <<EOF >"${singBoxConfigPath}socks5_outbound.json"
-{
-    "outbounds":[
-        {
-          "type": "socks",
-          "tag":"socks5_outbound",
-          "server": "${socks5RoutingOutboundIP}",
-          "server_port": ${socks5RoutingOutboundPort},
-          "version": "5",
-          "username":"${socks5RoutingOutboundUserName}",
-          "password":"${socks5RoutingOutboundPassword}"
-        }
-    ]
-}
-EOF
-    fi
-    if [[ "${coreInstallType}" == "1" ]]; then
-        addXrayOutbound socks5_outbound
-    fi
-}
-
-# socks5 outbound routing规则
-setSocks5OutboundRouting() {
-
-    if [[ "$1" == "addRules" && ! -f "${singBoxConfigPath}socks5_01_outbound_route.json" && ! -f "${configPath}09_routing.json" ]]; then
-        echoContent red " ---> 请安装出站分流后再添加分流规则"
-        exit 0
-    fi
-
-    echoContent red "=============================================================="
-    echoContent skyBlue "请输入要分流的域名\n"
-    echoContent yellow "支持Xray-core geosite匹配，支持sing-box1.8+ rule_set匹配\n"
-    echoContent yellow "非增量添加，会替换原有规则\n"
-    echoContent yellow "当输入的规则匹配到geosite或者rule_set后会使用相应的规则\n"
-    echoContent yellow "如无法匹配则，则使用domain精确匹配\n"
-    echoContent yellow "录入示例:netflix,openai,v2ray-agent.com\n"
-    read -r -p "域名:" socks5RoutingOutboundDomain
-    if [[ -z "${socks5RoutingOutboundDomain}" ]]; then
-        echoContent red " ---> IP不可为空"
-        exit 0
-    fi
-    addSingBoxRouteRule "socks5_outbound" "${socks5RoutingOutboundDomain}" "socks5_01_outbound_route"
-    addSingBoxOutbound "01_direct_outbound"
-
-    if [[ "${coreInstallType}" == "1" ]]; then
-
-        unInstallRouting "socks5_outbound" "outboundTag"
-        local domainRules=[]
-        while read -r line; do
-            if echo "${routingRule}" | grep -q "${line}"; then
-                echoContent yellow " ---> ${line}已存在，跳过"
-            else
-                local geositeStatus
-                geositeStatus=$(curl -s "https://api.github.com/repos/v2fly/domain-list-community/contents/data/${line}" | jq .message)
-
-                if [[ "${geositeStatus}" == "null" ]]; then
-                    domainRules=$(echo "${domainRules}" | jq -r ". += [\"geosite:${line}\"]")
-                else
-                    domainRules=$(echo "${domainRules}" | jq -r ". += [\"domain:${line}\"]")
-                fi
-            fi
-        done < <(echo "${socks5RoutingOutboundDomain}" | tr ',' '\n')
-        if [[ ! -f "${configPath}09_routing.json" ]]; then
-            cat <<EOF >${configPath}09_routing.json
-{
-    "routing":{
-        "rules": []
-  }
-}
-EOF
-        fi
-        routing=$(jq -r ".routing.rules += [{\"type\": \"field\",\"domain\": ${domainRules},\"outboundTag\": \"socks5_outbound\"}]" ${configPath}09_routing.json)
-        echo "${routing}" | jq . >${configPath}09_routing.json
-    fi
 }
 
 # 设置VMess+WS+TLS【仅出站】
@@ -7673,12 +13821,12 @@ dnsRouting() {
     if [[ -z "${configPath}" ]]; then
         echoContent red " ---> 未安装，请使用脚本安装"
         menu
-        exit 0
+        exit 1
     fi
     echoContent skyBlue "\n功能 1/${totalProgress} : DNS分流"
     echoContent red "\n=============================================================="
     echoContent yellow "# 注意事项"
-    echoContent yellow "# 使用教程：https://www.v2ray-agent.com/archives/1683226921000 \n"
+    echoContent yellow "# 使用提示：请参考 documents 目录中的分流与策略说明 \n"
 
     echoContent yellow "1.添加"
     echoContent yellow "2.卸载"
@@ -7700,12 +13848,12 @@ sniRouting() {
     if [[ -z "${configPath}" ]]; then
         echoContent red " ---> 未安装，请使用脚本安装"
         menu
-        exit 0
+        exit 1
     fi
     echoContent skyBlue "\n功能 1/${totalProgress} : SNI反向代理分流"
     echoContent red "\n=============================================================="
     echoContent yellow "# 注意事项"
-    echoContent yellow "# 使用教程：https://www.v2ray-agent.com/archives/1683226921000 \n"
+    echoContent yellow "# 使用提示：请参考 documents 目录中的分流与策略说明 \n"
     echoContent yellow "# sing-box不支持规则集，仅支持指定域名。\n"
 
     echoContent yellow "1.添加"
@@ -7725,6 +13873,11 @@ sniRouting() {
 setUnlockSNI() {
     read -r -p "请输入分流的SNI IP:" setSNIP
     if [[ -n ${setSNIP} ]]; then
+        # 验证IP格式
+        if ! isValidIP "${setSNIP}"; then
+            echoContent red " ---> IP地址格式无效，请输入正确的IPv4或IPv6地址"
+            exit 1
+        fi
         echoContent red "=============================================================="
 
         if [[ "${coreInstallType}" == 1 ]]; then
@@ -7756,7 +13909,7 @@ EOF
     else
         echoContent red " ---> SNI IP不可为空"
     fi
-    exit 0
+    exit 1
 }
 
 # 添加xray dns 配置
@@ -7765,10 +13918,16 @@ addXrayDNSConfig() {
     local domainList=$2
     local domains=[]
     while read -r line; do
+        if [[ -z "${line}" ]]; then
+            continue
+        fi
         local geositeStatus
-        geositeStatus=$(curl -s "https://api.github.com/repos/v2fly/domain-list-community/contents/data/${line}" | jq .message)
+        # 添加超时和错误处理
+        geositeStatus=$(curl -s --connect-timeout 5 --max-time 10 \
+            "https://api.github.com/repos/v2fly/domain-list-community/contents/data/${line}" 2>/dev/null | jq -r '.message // empty')
 
-        if [[ "${geositeStatus}" == "null" ]]; then
+        # 如果API返回空(文件存在)，使用geosite格式
+        if [[ -z "${geositeStatus}" ]]; then
             domains=$(echo "${domains}" | jq -r '. += ["geosite:'"${line}"'"]')
         else
             domains=$(echo "${domains}" | jq -r '. += ["domain:'"${line}"'"]')
@@ -7901,7 +14060,7 @@ setUnlockDNS() {
     else
         echoContent red " ---> dns不可为空"
     fi
-    exit 0
+    exit 1
 }
 
 # 移除 DNS分流
@@ -7982,21 +14141,22 @@ customSingBoxInstall() {
     echoContent yellow "4.Trojan+TLS[不推荐]"
     echoContent yellow "6.Hysteria2"
     echoContent yellow "7.VLESS+Reality+Vision"
-    echoContent yellow "8.VLESS+Reality+gRPC"
+    # echoContent yellow "8.VLESS+Reality+gRPC"  # gRPC已移除，推荐使用XHTTP
     echoContent yellow "9.Tuic"
     echoContent yellow "10.Naive"
     echoContent yellow "11.VMess+TLS+HTTPUpgrade"
     echoContent yellow "13.anytls"
+    echoContent yellow "14.Shadowsocks 2022[无需TLS证书]"
 
     read -r -p "请选择[多选]，[例如:1,2,3]:" selectCustomInstallType
     echoContent skyBlue "--------------------------------------------------------------"
     if echo "${selectCustomInstallType}" | grep -q "，"; then
         echoContent red " ---> 请使用英文逗号分隔"
-        exit 0
+        exit 1
     fi
-    if [[ "${selectCustomInstallType}" != "10" ]] && [[ "${selectCustomInstallType}" != "11" ]] && [[ "${selectCustomInstallType}" != "13" ]] && ((${#selectCustomInstallType} >= 2)) && ! echo "${selectCustomInstallType}" | grep -q ","; then
+    if [[ "${selectCustomInstallType}" != "10" ]] && [[ "${selectCustomInstallType}" != "11" ]] && [[ "${selectCustomInstallType}" != "13" ]] && [[ "${selectCustomInstallType}" != "14" ]] && ((${#selectCustomInstallType} >= 2)) && ! echo "${selectCustomInstallType}" | grep -q ","; then
         echoContent red " ---> 多选请使用英文逗号分隔"
-        exit 0
+        exit 1
     fi
     if [[ "${selectCustomInstallType: -1}" != "," ]]; then
         selectCustomInstallType="${selectCustomInstallType},"
@@ -8006,6 +14166,13 @@ customSingBoxInstall() {
     fi
 
     if [[ "${selectCustomInstallType//,/}" =~ ^[0-9]+$ ]]; then
+        # WebSocket 协议迁移提示
+        if echo "${selectCustomInstallType}" | grep -q -E ",1,|,3,"; then
+            echoContent yellow "\n ---> 提示: WebSocket传输已逐渐被XHTTP(SplitHTTP)取代"
+            echoContent yellow " ---> XHTTP具有更好的抗检测能力和CDN兼容性，建议在Xray中使用VLESS+Reality+XHTTP"
+            echoContent yellow " ---> 参考: https://xtls.github.io/en/config/transports/splithttp.html\n"
+        fi
+
         readLastInstallationConfig
         unInstallSubscribe
         totalProgress=9
@@ -8044,7 +14211,7 @@ customXrayInstall() {
     #    echoContent yellow "2.Trojan+TLS+gRPC[仅CDN推荐]"
     echoContent yellow "3.VMess+TLS+WS[仅CDN推荐]"
     echoContent yellow "4.Trojan+TLS[不推荐]"
-    echoContent yellow "5.VLESS+TLS+gRPC[仅CDN推荐]"
+    # echoContent yellow "5.VLESS+TLS+gRPC[仅CDN推荐]"  # gRPC已移除，推荐使用XHTTP
     echoContent yellow "7.VLESS+Reality+uTLS+Vision[推荐]"
     # echoContent yellow "8.VLESS+Reality+gRPC"
     echoContent yellow "12.VLESS+Reality+XHTTP+TLS[CDN可用]"
@@ -8052,11 +14219,11 @@ customXrayInstall() {
     echoContent skyBlue "--------------------------------------------------------------"
     if echo "${selectCustomInstallType}" | grep -q "，"; then
         echoContent red " ---> 请使用英文逗号分隔"
-        exit 0
+        exit 1
     fi
     if [[ "${selectCustomInstallType}" != "12" ]] && ((${#selectCustomInstallType} >= 2)) && ! echo "${selectCustomInstallType}" | grep -q ","; then
         echoContent red " ---> 多选请使用英文逗号分隔"
-        exit 0
+        exit 1
     fi
 
     if [[ "${selectCustomInstallType}" == "7" ]]; then
@@ -8073,6 +14240,13 @@ customXrayInstall() {
         selectCustomInstallType=",${selectCustomInstallType},"
     fi
     if [[ "${selectCustomInstallType//,/}" =~ ^[0-7]+$ ]]; then
+        # WebSocket 协议迁移提示
+        if echo "${selectCustomInstallType}" | grep -q -E ",1,|,3,"; then
+            echoContent yellow "\n ---> 提示: WebSocket传输已逐渐被XHTTP(SplitHTTP)取代"
+            echoContent yellow " ---> XHTTP具有更好的抗检测能力和CDN兼容性，建议选择12.VLESS+Reality+XHTTP+TLS"
+            echoContent yellow " ---> 参考: https://xtls.github.io/en/config/transports/splithttp.html\n"
+        fi
+
         readLastInstallationConfig
         unInstallSubscribe
         checkBTPanel
@@ -8250,7 +14424,7 @@ coreVersionManageMenu() {
     if [[ -z "${coreInstallType}" ]]; then
         echoContent red "\n ---> 没有检测到安装目录，请执行脚本安装内容"
         menu
-        exit 0
+        exit 1
     fi
     echoContent skyBlue "\n功能 1/1 : 请选择核心"
     echoContent red "\n=============================================================="
@@ -8271,8 +14445,8 @@ cronFunction() {
         renewalTLS
         exit 0
     elif [[ "${cronName}" == "UpdateGeo" ]]; then
-        updateGeoSite >>/etc/v2ray-agent/crontab_updateGeoSite.log
-        echoContent green " ---> geo更新日期:$(date "+%F %H:%M:%S")" >>/etc/v2ray-agent/crontab_updateGeoSite.log
+        updateGeoSite >>/etc/Proxy-agent/crontab_updateGeoSite.log
+        echoContent green " ---> geo更新日期:$(date "+%F %H:%M:%S")" >>/etc/Proxy-agent/crontab_updateGeoSite.log
         exit 0
     fi
 }
@@ -8281,7 +14455,7 @@ manageAccount() {
     echoContent skyBlue "\n功能 1/${totalProgress} : 账号管理"
     if [[ -z "${configPath}" ]]; then
         echoContent red " ---> 未安装"
-        exit 0
+        exit 1
     fi
 
     echoContent red "\n=============================================================="
@@ -8328,7 +14502,7 @@ installSubscribe() {
                 installNginxTools
             else
                 echoContent red " ---> 放弃安装nginx\n"
-                exit 0
+                exit 1
             fi
         fi
         echoContent yellow "开始配置订阅，请输入订阅的端口\n"
@@ -8339,8 +14513,25 @@ installSubscribe() {
         nginxBlog
         echo
         local httpSubscribeStatus=
+        local subscribeServerName=
 
-        if ! echo "${selectCustomInstallType}" | grep -qE ",0,|,1,|,2,|,3,|,4,|,5,|,6,|,9,|,10,|,11,|,13," && ! echo "${currentInstallProtocolType}" | grep -qE ",0,|,1,|,2,|,3,|,4,|,5,|,6,|,9,|,10,|,11,|,13," && [[ -z "${domain}" ]]; then
+        # 确定订阅使用的域名
+        if [[ -n "${currentHost}" ]]; then
+            subscribeServerName="${currentHost}"
+        elif [[ -n "${domain}" ]]; then
+            subscribeServerName="${domain}"
+        fi
+
+        # 检查是否有可用的TLS证书（实际检查文件是否存在）
+        local tlsCertExists=false
+        if [[ -n "${subscribeServerName}" ]] && \
+           [[ -f "/etc/Proxy-agent/tls/${subscribeServerName}.crt" ]] && \
+           [[ -f "/etc/Proxy-agent/tls/${subscribeServerName}.key" ]]; then
+            tlsCertExists=true
+        fi
+
+        # 如果没有TLS证书，使用HTTP订阅
+        if [[ "${tlsCertExists}" != "true" ]]; then
             httpSubscribeStatus=true
         fi
 
@@ -8355,18 +14546,11 @@ installSubscribe() {
                 exit
             fi
         else
-            local subscribeServerName=
-            if [[ -n "${currentHost}" ]]; then
-                subscribeServerName="${currentHost}"
-            else
-                subscribeServerName="${domain}"
-            fi
-
             SSLType="ssl"
             serverName="server_name ${subscribeServerName};"
-            nginxSubscribeSSL="ssl_certificate /etc/v2ray-agent/tls/${subscribeServerName}.crt;ssl_certificate_key /etc/v2ray-agent/tls/${subscribeServerName}.key;"
+            nginxSubscribeSSL="ssl_certificate /etc/Proxy-agent/tls/${subscribeServerName}.crt;ssl_certificate_key /etc/Proxy-agent/tls/${subscribeServerName}.key;"
         fi
-        if [[ -n "$(curl --connect-timeout 2 -s -6 http://www.cloudflare.com/cdn-cgi/trace | grep "ip" | cut -d "=" -f 2)" ]]; then
+        if [[ -n "$(curl --connect-timeout 2 -s -6 https://www.cloudflare.com/cdn-cgi/trace | grep "ip" | cut -d "=" -f 2)" ]]; then
             listenIPv6="listen [::]:${result[-1]} ${SSLType};"
         fi
         if echo "${nginxVersion}" | grep -q "1.25" && [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $3}') -gt 0 ]] || [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $2}') -gt 25 ]]; then
@@ -8390,7 +14574,7 @@ server {
     root ${nginxStaticPath};
     location ~ ^/s/(clashMeta|default|clashMetaProfiles|sing-box|sing-box_profiles)/(.*) {
         default_type 'text/plain; charset=utf-8';
-        alias /etc/v2ray-agent/subscribe/\$1/\$2;
+        alias /etc/Proxy-agent/subscribe/\$1/\$2;
     }
     location / {
     }
@@ -8406,7 +14590,7 @@ EOF
 }
 # 卸载订阅
 unInstallSubscribe() {
-    rm -rf ${nginxConfigPath}subscribe.conf >/dev/null 2>&1
+    rm -rf "${nginxConfigPath}subscribe.conf" >/dev/null 2>&1
 }
 
 # 添加订阅
@@ -8419,18 +14603,18 @@ addSubscribeMenu() {
     if [[ "${addSubscribeStatus}" == "1" ]]; then
         addOtherSubscribe
     elif [[ "${addSubscribeStatus}" == "2" ]]; then
-        if [[ ! -f "/etc/v2ray-agent/subscribe_remote/remoteSubscribeUrl" ]]; then
+        if [[ ! -f "/etc/Proxy-agent/subscribe_remote/remoteSubscribeUrl" ]]; then
             echoContent green " ---> 未安装其他订阅"
             exit 0
         fi
-        grep -v '^$' "/etc/v2ray-agent/subscribe_remote/remoteSubscribeUrl" | awk '{print NR""":"$0}'
+        grep -v '^$' "/etc/Proxy-agent/subscribe_remote/remoteSubscribeUrl" | awk '{print NR""":"$0}'
         read -r -p "请选择要删除的订阅编号[仅支持单个删除]:" delSubscribeIndex
         if [[ -z "${delSubscribeIndex}" ]]; then
             echoContent green " ---> 不可以为空"
             exit 0
         fi
 
-        sed -i "$((delSubscribeIndex))d" "/etc/v2ray-agent/subscribe_remote/remoteSubscribeUrl" >/dev/null 2>&1
+        sed -i "$((delSubscribeIndex))d" "/etc/Proxy-agent/subscribe_remote/remoteSubscribeUrl" >/dev/null 2>&1
 
         echoContent green " ---> 其他机器订阅删除成功"
         subscribe
@@ -8439,8 +14623,8 @@ addSubscribeMenu() {
 # 添加其他机器clashMeta订阅
 addOtherSubscribe() {
     echoContent yellow "#注意事项:"
-    echoContent yellow "请仔细阅读以下文章： https://www.v2ray-agent.com/archives/1681804748677"
-    echoContent skyBlue "录入示例：www.v2ray-agent.com:443:vps1\n"
+    echoContent yellow "请输入目标站点信息，确保与 Reality 配置相匹配。"
+    echoContent skyBlue "录入示例：www.example.com:443:vps1\n"
     read -r -p "请输入域名 端口 机器别名:" remoteSubscribeUrl
     if [[ -z "${remoteSubscribeUrl}" ]]; then
         echoContent red " ---> 不可为空"
@@ -8449,16 +14633,16 @@ addOtherSubscribe() {
         echoContent red " ---> 规则不合法"
     else
 
-        if [[ -f "/etc/v2ray-agent/subscribe_remote/remoteSubscribeUrl" ]] && grep -q "${remoteSubscribeUrl}" /etc/v2ray-agent/subscribe_remote/remoteSubscribeUrl; then
+        if [[ -f "/etc/Proxy-agent/subscribe_remote/remoteSubscribeUrl" ]] && grep -q "${remoteSubscribeUrl}" /etc/Proxy-agent/subscribe_remote/remoteSubscribeUrl; then
             echoContent red " ---> 此订阅已添加"
-            exit 0
+            exit 1
         fi
         echo
         read -r -p "是否是HTTP订阅？[y/n]" httpSubscribeStatus
         if [[ "${httpSubscribeStatus}" == "y" ]]; then
             remoteSubscribeUrl="${remoteSubscribeUrl}:http"
         fi
-        echo "${remoteSubscribeUrl}" >>/etc/v2ray-agent/subscribe_remote/remoteSubscribeUrl
+        echo "${remoteSubscribeUrl}" >>/etc/Proxy-agent/subscribe_remote/remoteSubscribeUrl
         subscribe
     fi
 }
@@ -8466,7 +14650,7 @@ addOtherSubscribe() {
 clashMetaConfig() {
     local url=$1
     local id=$2
-    cat <<EOF >"/etc/v2ray-agent/subscribe/clashMetaProfiles/${id}"
+    cat <<EOF >"/etc/Proxy-agent/subscribe/clashMetaProfiles/${id}"
 log-level: debug
 mode: rule
 ipv6: true
@@ -8553,7 +14737,7 @@ proxy-groups:
     proxies: null
   - name: 自动选择
     type: url-test
-    url: http://www.gstatic.com/generate_204
+    url: https://www.gstatic.com/generate_204
     interval: 36000
     tolerance: 50
     use:
@@ -8851,13 +15035,15 @@ rules:
 EOF
 
 }
-# 随机salt
+# 随机salt - 使用更安全的随机源
 initRandomSalt() {
     local chars="abcdefghijklmnopqrtuxyz"
     local initCustomPath=
+    local charLen=${#chars}
     for i in {1..10}; do
-        echo "${i}" >/dev/null
-        initCustomPath+="${chars:RANDOM%${#chars}:1}"
+        local idx
+        idx=$(randomNum 0 $((charLen - 1)))
+        initCustomPath+="${chars:idx:1}"
     done
     echo "${initCustomPath}"
 }
@@ -8876,16 +15062,16 @@ subscribe() {
         echoContent red "# 需要手动输入md5加密的salt值，如果不了解使用随机即可"
         echoContent yellow "# 不影响已添加的远程订阅的内容\n"
 
-        if [[ -f "/etc/v2ray-agent/subscribe_local/subscribeSalt" && -n $(cat "/etc/v2ray-agent/subscribe_local/subscribeSalt") ]]; then
+        if [[ -f "/etc/Proxy-agent/subscribe_local/subscribeSalt" && -n $(cat "/etc/Proxy-agent/subscribe_local/subscribeSalt") ]]; then
             if [[ -z "${renewSalt}" ]]; then
                 read -r -p "读取到上次安装设置的Salt，是否使用上次生成的Salt ？[y/n]:" historySaltStatus
                 if [[ "${historySaltStatus}" == "y" ]]; then
-                    subscribeSalt=$(cat /etc/v2ray-agent/subscribe_local/subscribeSalt)
+                    subscribeSalt=$(cat /etc/Proxy-agent/subscribe_local/subscribeSalt)
                 else
                     read -r -p "请输入salt值, [回车]使用随机:" subscribeSalt
                 fi
             else
-                subscribeSalt=$(cat /etc/v2ray-agent/subscribe_local/subscribeSalt)
+                subscribeSalt=$(cat /etc/Proxy-agent/subscribe_local/subscribeSalt)
             fi
         else
             read -r -p "请输入salt值, [回车]使用随机:" subscribeSalt
@@ -8897,16 +15083,16 @@ subscribe() {
         fi
         echoContent yellow "\n ---> Salt: ${subscribeSalt}"
 
-        echo "${subscribeSalt}" >/etc/v2ray-agent/subscribe_local/subscribeSalt
+        echo "${subscribeSalt}" >/etc/Proxy-agent/subscribe_local/subscribeSalt
 
-        rm -rf /etc/v2ray-agent/subscribe/default/*
-        rm -rf /etc/v2ray-agent/subscribe/clashMeta/*
-        rm -rf /etc/v2ray-agent/subscribe_local/default/*
-        rm -rf /etc/v2ray-agent/subscribe_local/clashMeta/*
-        rm -rf /etc/v2ray-agent/subscribe_local/sing-box/*
+        rm -rf /etc/Proxy-agent/subscribe/default/*
+        rm -rf /etc/Proxy-agent/subscribe/clashMeta/*
+        rm -rf /etc/Proxy-agent/subscribe_local/default/*
+        rm -rf /etc/Proxy-agent/subscribe_local/clashMeta/*
+        rm -rf /etc/Proxy-agent/subscribe_local/sing-box/*
         showAccounts >/dev/null
-        if [[ -n $(ls /etc/v2ray-agent/subscribe_local/default/) ]]; then
-            if [[ -f "/etc/v2ray-agent/subscribe_remote/remoteSubscribeUrl" && -n $(cat "/etc/v2ray-agent/subscribe_remote/remoteSubscribeUrl") ]]; then
+        if [[ -n $(ls /etc/Proxy-agent/subscribe_local/default/) ]]; then
+            if [[ -f "/etc/Proxy-agent/subscribe_remote/remoteSubscribeUrl" && -n $(cat "/etc/Proxy-agent/subscribe_remote/remoteSubscribeUrl") ]]; then
                 if [[ -z "${renewSalt}" ]]; then
                     read -r -p "读取到其他订阅，是否更新？[y/n]" updateOtherSubscribeStatus
                 else
@@ -8914,19 +15100,19 @@ subscribe() {
                 fi
             fi
             local subscribePortLocal="${subscribePort}"
-            find /etc/v2ray-agent/subscribe_local/default/* | while read -r email; do
+            find /etc/Proxy-agent/subscribe_local/default/* | while read -r email; do
                 email=$(echo "${email}" | awk -F "[d][e][f][a][u][l][t][/]" '{print $2}')
 
                 local emailMd5=
                 emailMd5=$(echo -n "${email}${subscribeSalt}"$'\n' | md5sum | awk '{print $1}')
 
-                cat "/etc/v2ray-agent/subscribe_local/default/${email}" >>"/etc/v2ray-agent/subscribe/default/${emailMd5}"
+                cat "/etc/Proxy-agent/subscribe_local/default/${email}" >>"/etc/Proxy-agent/subscribe/default/${emailMd5}"
                 if [[ "${updateOtherSubscribeStatus}" == "y" ]]; then
                     updateRemoteSubscribe "${emailMd5}" "${email}"
                 fi
                 local base64Result
-                base64Result=$(base64 -w 0 "/etc/v2ray-agent/subscribe/default/${emailMd5}")
-                echo "${base64Result}" >"/etc/v2ray-agent/subscribe/default/${emailMd5}"
+                base64Result=$(base64 -w 0 "/etc/Proxy-agent/subscribe/default/${emailMd5}")
+                echo "${base64Result}" >"/etc/Proxy-agent/subscribe/default/${emailMd5}"
                 echoContent yellow "--------------------------------------------------------------"
                 local currentDomain=${currentHost}
 
@@ -8950,11 +15136,11 @@ subscribe() {
                     fi
 
                     # clashMeta
-                    if [[ -f "/etc/v2ray-agent/subscribe_local/clashMeta/${email}" ]]; then
+                    if [[ -f "/etc/Proxy-agent/subscribe_local/clashMeta/${email}" ]]; then
 
-                        cat "/etc/v2ray-agent/subscribe_local/clashMeta/${email}" >>"/etc/v2ray-agent/subscribe/clashMeta/${emailMd5}"
+                        cat "/etc/Proxy-agent/subscribe_local/clashMeta/${email}" >>"/etc/Proxy-agent/subscribe/clashMeta/${emailMd5}"
 
-                        sed -i '1i\proxies:' "/etc/v2ray-agent/subscribe/clashMeta/${emailMd5}"
+                        sed -i '1i\proxies:' "/etc/Proxy-agent/subscribe/clashMeta/${emailMd5}"
 
                         local clashProxyUrl="${subscribeType}://${currentDomain}/s/clashMeta/${emailMd5}"
                         clashMetaConfig "${clashProxyUrl}" "${emailMd5}"
@@ -8967,18 +15153,18 @@ subscribe() {
 
                     fi
                     # sing-box
-                    if [[ -f "/etc/v2ray-agent/subscribe_local/sing-box/${email}" ]]; then
-                        cp "/etc/v2ray-agent/subscribe_local/sing-box/${email}" "/etc/v2ray-agent/subscribe/sing-box_profiles/${emailMd5}"
+                    if [[ -f "/etc/Proxy-agent/subscribe_local/sing-box/${email}" ]]; then
+                        cp "/etc/Proxy-agent/subscribe_local/sing-box/${email}" "/etc/Proxy-agent/subscribe/sing-box_profiles/${emailMd5}"
 
                         echoContent skyBlue " ---> 下载 sing-box 通用配置文件"
                         if [[ "${release}" == "alpine" ]]; then
-                            wget -O "/etc/v2ray-agent/subscribe/sing-box/${emailMd5}" -q "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/documents/sing-box.json"
+                            wget -O "/etc/Proxy-agent/subscribe/sing-box/${emailMd5}" -q "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/documents/sing-box.json"
                         else
-                            wget -O "/etc/v2ray-agent/subscribe/sing-box/${emailMd5}" -q "${wgetShowProgressStatus}" "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/documents/sing-box.json"
+                            wget -O "/etc/Proxy-agent/subscribe/sing-box/${emailMd5}" -q ${wgetShowProgressStatus} "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/documents/sing-box.json"
                         fi
 
-                        jq ".outbounds=$(jq ".outbounds|map(if has(\"outbounds\") then .outbounds += $(jq ".|map(.tag)" "/etc/v2ray-agent/subscribe_local/sing-box/${email}") else . end)" "/etc/v2ray-agent/subscribe/sing-box/${emailMd5}")" "/etc/v2ray-agent/subscribe/sing-box/${emailMd5}" >"/etc/v2ray-agent/subscribe/sing-box/${emailMd5}_tmp" && mv "/etc/v2ray-agent/subscribe/sing-box/${emailMd5}_tmp" "/etc/v2ray-agent/subscribe/sing-box/${emailMd5}"
-                        jq ".outbounds += $(jq '.' "/etc/v2ray-agent/subscribe_local/sing-box/${email}")" "/etc/v2ray-agent/subscribe/sing-box/${emailMd5}" >"/etc/v2ray-agent/subscribe/sing-box/${emailMd5}_tmp" && mv "/etc/v2ray-agent/subscribe/sing-box/${emailMd5}_tmp" "/etc/v2ray-agent/subscribe/sing-box/${emailMd5}"
+                        jq ".outbounds=$(jq ".outbounds|map(if has(\"outbounds\") then .outbounds += $(jq ".|map(.tag)" "/etc/Proxy-agent/subscribe_local/sing-box/${email}") else . end)" "/etc/Proxy-agent/subscribe/sing-box/${emailMd5}")" "/etc/Proxy-agent/subscribe/sing-box/${emailMd5}" >"/etc/Proxy-agent/subscribe/sing-box/${emailMd5}_tmp" && mv "/etc/Proxy-agent/subscribe/sing-box/${emailMd5}_tmp" "/etc/Proxy-agent/subscribe/sing-box/${emailMd5}"
+                        jq ".outbounds += $(jq '.' "/etc/Proxy-agent/subscribe_local/sing-box/${email}")" "/etc/Proxy-agent/subscribe/sing-box/${emailMd5}" >"/etc/Proxy-agent/subscribe/sing-box/${emailMd5}_tmp" && mv "/etc/Proxy-agent/subscribe/sing-box/${emailMd5}_tmp" "/etc/Proxy-agent/subscribe/sing-box/${emailMd5}"
 
                         echoContent skyBlue "\n----------sing-box订阅----------\n"
                         echoContent yellow "url:${subscribeType}://${currentDomain}/s/sing-box/${emailMd5}\n"
@@ -9027,7 +15213,7 @@ updateRemoteSubscribe() {
         clashMetaProxies=$(curl -s "${subscribeType}://${remoteUrl}/s/clashMeta/${emailMD5}" | sed '/proxies:/d' | sed "s/\"${email}/\"${email}_${serverAlias}/g")
 
         if ! echo "${clashMetaProxies}" | grep -q "nginx" && [[ -n "${clashMetaProxies}" ]]; then
-            echo "${clashMetaProxies}" >>"/etc/v2ray-agent/subscribe/clashMeta/${emailMD5}"
+            echo "${clashMetaProxies}" >>"/etc/Proxy-agent/subscribe/clashMeta/${emailMD5}"
             echoContent green " ---> clashMeta订阅 ${remoteUrl}:${email} 更新成功"
         else
             echoContent red " ---> clashMeta订阅 ${remoteUrl}:${email}不存在"
@@ -9038,7 +15224,7 @@ updateRemoteSubscribe() {
 
         if ! echo "${default}" | grep -q "nginx" && [[ -n "${default}" ]]; then
             default=$(echo "${default}" | base64 -d | sed "s/#${email}/#${email}_${serverAlias}/g")
-            echo "${default}" >>"/etc/v2ray-agent/subscribe/default/${emailMD5}"
+            echo "${default}" >>"/etc/Proxy-agent/subscribe/default/${emailMD5}"
 
             echoContent green " ---> 通用订阅 ${remoteUrl}:${email} 更新成功"
         else
@@ -9050,15 +15236,15 @@ updateRemoteSubscribe() {
 
         if ! echo "${singBoxSubscribe}" | grep -q "nginx" && [[ -n "${singBoxSubscribe}" ]]; then
             singBoxSubscribe=${singBoxSubscribe//tag\": \"${email}/tag\": \"${email}_${serverAlias}}
-            singBoxSubscribe=$(jq ". +=${singBoxSubscribe}" "/etc/v2ray-agent/subscribe_local/sing-box/${email}")
-            echo "${singBoxSubscribe}" | jq . >"/etc/v2ray-agent/subscribe_local/sing-box/${email}"
+            singBoxSubscribe=$(jq ". +=${singBoxSubscribe}" "/etc/Proxy-agent/subscribe_local/sing-box/${email}")
+            echo "${singBoxSubscribe}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${email}"
 
             echoContent green " ---> 通用订阅 ${remoteUrl}:${email} 更新成功"
         else
             echoContent red " ---> 通用订阅 ${remoteUrl}:${email} 不存在"
         fi
 
-    done < <(grep -v '^$' <"/etc/v2ray-agent/subscribe_remote/remoteSubscribeUrl")
+    done < <(grep -v '^$' <"/etc/Proxy-agent/subscribe_remote/remoteSubscribeUrl")
 }
 
 # 切换alpn
@@ -9066,7 +15252,7 @@ switchAlpn() {
     echoContent skyBlue "\n功能 1/${totalProgress} : 切换alpn"
     if [[ -z ${currentAlpn} ]]; then
         echoContent red " ---> 无法读取alpn，请检查是否安装"
-        exit 0
+        exit 1
     fi
 
     echoContent red "\n=============================================================="
@@ -9099,7 +15285,7 @@ switchAlpn() {
         echo "${frontingTypeJSON}" | jq . >${configPath}${frontingType}.json
     else
         echoContent red " ---> 选择错误"
-        exit 0
+        exit 1
     fi
     reloadCore
 }
@@ -9119,19 +15305,22 @@ initRealityKey() {
     fi
     if [[ -z "${realityPrivateKey}" ]]; then
         if [[ "${selectCoreType}" == "2" || "${coreInstallType}" == "2" ]]; then
-            realityX25519Key=$(/etc/v2ray-agent/sing-box/sing-box generate reality-keypair)
+            realityX25519Key=$(/etc/Proxy-agent/sing-box/sing-box generate reality-keypair)
             realityPrivateKey=$(echo "${realityX25519Key}" | head -1 | awk '{print $2}')
             realityPublicKey=$(echo "${realityX25519Key}" | tail -n 1 | awk '{print $2}')
-            echo "publicKey:${realityPublicKey}" >/etc/v2ray-agent/sing-box/conf/config/reality_key
+            echo "publicKey:${realityPublicKey}" >/etc/Proxy-agent/sing-box/conf/config/reality_key
         else
             read -r -p "请输入Private Key[回车自动生成]:" historyPrivateKey
             if [[ -n "${historyPrivateKey}" ]]; then
-                realityX25519Key=$(/etc/v2ray-agent/xray/xray x25519 -i "${historyPrivateKey}")
+                realityX25519Key=$(/etc/Proxy-agent/xray/xray x25519 -i "${historyPrivateKey}")
             else
-                realityX25519Key=$(/etc/v2ray-agent/xray/xray x25519)
+                realityX25519Key=$(/etc/Proxy-agent/xray/xray x25519)
             fi
-            realityPrivateKey=$(echo "${realityX25519Key}" | grep "PrivateKey" | awk '{print $2}')
-            realityPublicKey=$(echo "${realityX25519Key}" | grep "Password" | awk '{print $2}')
+            # 兼容新旧版本 Xray x25519 输出格式
+            # 旧版: "Private key: xxx" / "Public key: xxx"
+            # 新版: "PrivateKey: xxx" / "Password: xxx"
+            realityPrivateKey=$(echo "${realityX25519Key}" | grep -E "Private|PrivateKey" | awk '{print $NF}')
+            realityPublicKey=$(echo "${realityX25519Key}" | grep -E "Public|Password" | awk '{print $NF}')
             if [[ -z "${realityPrivateKey}" ]]; then
                 echoContent red "输入的Private Key不合法"
                 initRealityKey
@@ -9142,11 +15331,20 @@ initRealityKey() {
         fi
     fi
 }
+
+# 生成随机 Reality shortIds
+initRealityShortIds() {
+    if [[ -z "${realityShortId1}" ]]; then
+        realityShortId1=$(openssl rand -hex 8)
+        realityShortId2=$(openssl rand -hex 8)
+    fi
+}
+
 # 初始化 mldsa65Seed
 initRealityMldsa65() {
     echoContent skyBlue "\n生成Reality mldsa65\n"
-    if /etc/v2ray-agent/xray/xray tls ping "${realityServerName}:${realityDomainPort}" 2>/dev/null | grep -q "X25519MLKEM768"; then
-        length=$(/etc/v2ray-agent/xray/xray tls ping "${realityServerName}:${realityDomainPort}" | grep "Certificate chain's total length:" | awk '{print $5}' | head -1)
+    if /etc/Proxy-agent/xray/xray tls ping "${realityServerName}:${realityDomainPort}" 2>/dev/null | grep -q "X25519MLKEM768"; then
+        length=$(/etc/Proxy-agent/xray/xray tls ping "${realityServerName}:${realityDomainPort}" | grep "Certificate chain's total length:" | awk '{print $5}' | head -1)
 
         if [ "$length" -gt 3500 ]; then
             if [[ -n "${currentRealityMldsa65}" && -z "${lastInstallationConfig}" ]]; then
@@ -9161,12 +15359,12 @@ initRealityMldsa65() {
             fi
             if [[ -z "${realityMldsa65Seed}" ]]; then
                 #        if [[ "${selectCoreType}" == "2" || "${coreInstallType}" == "2" ]]; then
-                #            realityX25519Key=$(/etc/v2ray-agent/sing-box/sing-box generate reality-keypair)
+                #            realityX25519Key=$(/etc/Proxy-agent/sing-box/sing-box generate reality-keypair)
                 #            realityPrivateKey=$(echo "${realityX25519Key}" | head -1 | awk '{print $2}')
                 #            realityPublicKey=$(echo "${realityX25519Key}" | tail -n 1 | awk '{print $2}')
-                #            echo "publicKey:${realityPublicKey}" >/etc/v2ray-agent/sing-box/conf/config/reality_key
+                #            echo "publicKey:${realityPublicKey}" >/etc/Proxy-agent/sing-box/conf/config/reality_key
                 #        else
-                realityMldsa65=$(/etc/v2ray-agent/xray/xray mldsa65)
+                realityMldsa65=$(/etc/Proxy-agent/xray/xray mldsa65)
                 realityMldsa65Seed=$(echo "${realityMldsa65}" | head -1 | awk '{print $2}')
                 realityMldsa65Verify=$(echo "${realityMldsa65}" | tail -n 1 | awk '{print $2}')
                 #        fi
@@ -9188,7 +15386,7 @@ checkRealityDest() {
         echoContent red "\n ---> 检测到使用的域名，托管在cloudflare并开启了代理，使用此类型域名可能导致VPS流量被其他人使用[不建议使用]\n"
         read -r -p "是否继续 ？[y/n]" setRealityDestStatus
         if [[ "${setRealityDestStatus}" != 'y' ]]; then
-            exit 0
+            exit 1
         fi
         echoContent yellow "\n ---> 忽略风险，继续使用"
     fi
@@ -9208,9 +15406,6 @@ initRealityClientServersName() {
             realityServerName=
             realityDomainPort=
         fi
-    elif [[ -n "${realityServerName}" && -z "${lastInstallationConfig}" ]]; then
-        realityServerName=
-        realityDomainPort=
     fi
 
     if [[ -z "${realityServerName}" ]]; then
@@ -9245,12 +15440,23 @@ initRealityClientServersName() {
             realityDomainPort=443
             echoContent skyBlue "\n================ 配置客户端可用的serverNames ===============\n"
             echoContent yellow "#注意事项"
-            echoContent green "Reality目标可用域名列表：https://www.v2ray-agent.com/archives/1689439383686#heading-3\n"
+            echoContent green "请确保所选 Reality 目标域名支持 TLS，且为可直连的常见站点。\n"
             echoContent yellow "录入示例:addons.mozilla.org:443\n"
             read -r -p "请输入目标域名，[回车]随机域名，默认端口443:" realityServerName
             if [[ -z "${realityServerName}" ]]; then
-                randomNum=$(randomNum 1 27)
-                realityServerName=$(echo "${realityDestDomainList}" | awk -F ',' -v randomNum="$randomNum" '{print $randomNum}')
+                # 动态计算域名列表数量，避免硬编码
+                local domainCount
+                domainCount=$(echo "${realityDestDomainList}" | awk -F',' '{print NF}')
+                local randomIndex
+                randomIndex=$(randomNum 1 "${domainCount}")
+                realityServerName=$(echo "${realityDestDomainList}" | awk -F ',' -v idx="${randomIndex}" '{print $idx}')
+            else
+                # 验证用户输入的域名（可能包含端口，先提取域名部分验证）
+                local realityDomainCheck="${realityServerName%%:*}"
+                if ! isValidDomain "${realityDomainCheck}"; then
+                    echoContent red " ---> 域名格式无效或包含不安全字符"
+                    exit 1
+                fi
             fi
             if echo "${realityServerName}" | grep -q ":"; then
                 realityDomainPort=$(echo "${realityServerName}" | awk -F "[:]" '{print $2}')
@@ -9284,7 +15490,7 @@ initXrayRealityPort() {
 
         read -r -p "端口:" realityPort
         if [[ -z "${realityPort}" ]]; then
-            realityPort=$((RANDOM % 20001 + 10000))
+            realityPort=$(randomNum 10000 30000)
         fi
         #        fi
         if [[ -n "${realityPort}" && "${xrayVLESSRealityPort}" == "${realityPort}" ]]; then
@@ -9317,7 +15523,7 @@ initXrayXHTTPort() {
         echoContent yellow "请输入端口[回车随机10000-30000]"
         read -r -p "端口:" xHTTPort
         if [[ -z "${xHTTPort}" ]]; then
-            xHTTPort=$((RANDOM % 20001 + 10000))
+            xHTTPort=$(randomNum 10000 30000)
         fi
         if [[ -n "${xHTTPort}" && "${xrayVLESSRealityXHTTPort}" == "${xHTTPort}" ]]; then
             handleXray stop
@@ -9342,8 +15548,8 @@ manageReality() {
     readSingBoxConfig
 
     if ! echo "${currentInstallProtocolType}" | grep -q -E "7,|8," || [[ -z "${coreInstallType}" ]]; then
-        echoContent red "\n ---> 请先安装Reality协议，参考教程 https://www.v2ray-agent.com/archives/1680104902581#heading-11"
-        exit 0
+        echoContent red "\n ---> 请先安装Reality协议，并确认已配置可用的 serverName/公钥。"
+        exit 1
     fi
 
     if [[ "${coreInstallType}" == "1" ]]; then
@@ -9365,10 +15571,10 @@ manageReality() {
 
 # 安装reality scanner
 installRealityScanner() {
-    if [[ ! -f "/etc/v2ray-agent/xray/reality_scan/RealiTLScanner-linux-64" ]]; then
+    if [[ ! -f "/etc/Proxy-agent/xray/reality_scan/RealiTLScanner-linux-64" ]]; then
         version=$(curl -s https://api.github.com/repos/XTLS/RealiTLScanner/releases?per_page=1 | jq -r '.[]|.tag_name')
-        wget -c -q -P /etc/v2ray-agent/xray/reality_scan/ "https://github.com/XTLS/RealiTLScanner/releases/download/${version}/RealiTLScanner-linux-64"
-        chmod 655 /etc/v2ray-agent/xray/reality_scan/RealiTLScanner-linux-64
+        wget -c -q -P /etc/Proxy-agent/xray/reality_scan/ "https://github.com/XTLS/RealiTLScanner/releases/download/${version}/RealiTLScanner-linux-64"
+        chmod 655 /etc/Proxy-agent/xray/reality_scan/RealiTLScanner-linux-64
     fi
 }
 # reality scanner
@@ -9399,13 +15605,13 @@ realityScanner() {
     echoContent yellow "IP:${publicIP}"
     if [[ -z "${publicIP}" ]]; then
         echoContent red " ---> 无法获取IP"
-        exit 0
+        exit 1
     fi
 
     read -r -p "IP是否正确？[y/n]:" ipStatus
     if [[ "${ipStatus}" == "y" ]]; then
-        echoContent yellow "结果存储在 /etc/v2ray-agent/xray/reality_scan/result.log 文件中\n"
-        /etc/v2ray-agent/xray/reality_scan/RealiTLScanner-linux-64 -addr "${publicIP}" | tee /etc/v2ray-agent/xray/reality_scan/result.log
+        echoContent yellow "结果存储在 /etc/Proxy-agent/xray/reality_scan/result.log 文件中\n"
+        /etc/Proxy-agent/xray/reality_scan/RealiTLScanner-linux-64 -addr "${publicIP}" | tee /etc/Proxy-agent/xray/reality_scan/result.log
     else
         echoContent red " ---> 无法读取正确IP"
     fi
@@ -9415,7 +15621,7 @@ manageHysteria() {
     echoContent skyBlue "\n进度  1/1 : Hysteria2 管理"
     echoContent red "\n=============================================================="
     local hysteria2Status=
-    if [[ -n "${singBoxConfigPath}" ]] && [[ -f "/etc/v2ray-agent/sing-box/conf/config/06_hysteria2_inbounds.json" ]]; then
+    if [[ -n "${singBoxConfigPath}" ]] && [[ -f "/etc/Proxy-agent/sing-box/conf/config/06_hysteria2_inbounds.json" ]]; then
         echoContent yellow "依赖第三方sing-box\n"
         echoContent yellow "1.重新安装"
         echoContent yellow "2.卸载"
@@ -9442,7 +15648,7 @@ manageTuic() {
     echoContent skyBlue "\n进度  1/1 : Tuic管理"
     echoContent red "\n=============================================================="
     local tuicStatus=
-    if [[ -n "${singBoxConfigPath}" ]] && [[ -f "/etc/v2ray-agent/sing-box/conf/config/09_tuic_inbounds.json" ]]; then
+    if [[ -n "${singBoxConfigPath}" ]] && [[ -f "/etc/Proxy-agent/sing-box/conf/config/09_tuic_inbounds.json" ]]; then
         echoContent yellow "依赖sing-box内核\n"
         echoContent yellow "1.重新安装"
         echoContent yellow "2.卸载"
@@ -9465,12 +15671,12 @@ manageTuic() {
 }
 # sing-box log日志
 singBoxLog() {
-    cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/log.json
+    cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/log.json
 {
   "log": {
     "disabled": $1,
-    "level": "debug",
-    "output": "/etc/v2ray-agent/sing-box/conf/box.log",
+    "level": "warn",
+    "output": "/etc/Proxy-agent/sing-box/conf/box.log",
     "timestamp": true
   }
 }
@@ -9486,7 +15692,7 @@ singBoxVersionManageMenu() {
     if [[ -z "${singBoxConfigPath}" ]]; then
         echoContent red " ---> 没有检测到安装程序，请执行脚本安装内容"
         menu
-        exit 0
+        exit 1
     fi
     echoContent red "\n=============================================================="
     echoContent yellow "1.升级 sing-box"
@@ -9531,57 +15737,102 @@ singBoxVersionManageMenu() {
     fi
 }
 
+# ============================================================================
+# 切换语言 / Switch Language
+# ============================================================================
+switchLanguage() {
+    local langFile="/etc/Proxy-agent/lang_pref"
+    local currentLang="${CURRENT_LANG:-zh_CN}"
+    local scriptPath="/etc/Proxy-agent/install.sh"
+
+    # 如果安装目录的脚本不存在，使用当前脚本路径
+    if [[ ! -f "${scriptPath}" ]]; then
+        scriptPath="${_SCRIPT_DIR}/install.sh"
+    fi
+
+    echoContent red "\n=============================================================="
+    echoContent skyBlue "当前语言 / Current Language: ${currentLang}"
+    echoContent red "=============================================================="
+    echoContent yellow "1. 中文 (Chinese)"
+    echoContent yellow "2. English"
+    echoContent yellow "0. 返回 / Back"
+    echoContent red "=============================================================="
+
+    read -r -p "请选择 / Select: " langChoice
+
+    case "${langChoice}" in
+        1)
+            echo "zh_CN" > "${langFile}"
+            export V2RAY_LANG="zh_CN"
+            echoContent green "语言已设置为中文，重新加载菜单..."
+            sleep 1
+            exec bash "${scriptPath}"
+            ;;
+        2)
+            echo "en_US" > "${langFile}"
+            export V2RAY_LANG="en_US"
+            echoContent green "Language set to English, reloading menu..."
+            sleep 1
+            exec bash "${scriptPath}"
+            ;;
+        0|*)
+            menu
+            ;;
+    esac
+}
+
 # 主菜单
 menu() {
     cd "$HOME" || exit
     echoContent red "\n=============================================================="
-    echoContent green "作者：mack-a"
-    echoContent green "当前版本：v3.5.1"
-    echoContent green "Github：https://github.com/mack-a/v2ray-agent"
-    echoContent green "描述：八合一共存脚本\c"
-    showInstallStatus
-    checkWgetShowProgress
-    echoContent red "\n=========================== 推广区============================"
-    echoContent red "                                              "
-    echoContent yellow "VPS选购攻略"
-    echoContent green "https://www.v2ray-agent.com/archives/1679975663984"
-    echoContent yellow "年付10美金低价VPS AS4837"
-    echoContent green "https://www.v2ray-agent.com/archives/racknerdtao-can-zheng-li-nian-fu-10mei-yuan"
-    echoContent yellow "优质常驻套餐DMIT CN2-GIA"
-    echoContent green "https://www.v2ray-agent.com/archives/186cee7b-9459-4e57-b9b2-b07a4f36931c"
-    echoContent yellow "VPS探针：https://ping.v2ray-agent.com/"
-    echoContent red "                                              "
-    echoContent red "=============================================================="
-    if [[ -n "${coreInstallType}" ]]; then
-        echoContent yellow "1.重新安装"
+    echoContent green "$(t MENU_AUTHOR): Lynthar"
+
+    # 显示版本号，并在后台检查更新
+    local versionDisplay="${SCRIPT_VERSION}"
+    if [[ -n "${LATEST_VERSION}" ]] && compareVersions "${SCRIPT_VERSION}" "${LATEST_VERSION}"; then
+        versionDisplay="${SCRIPT_VERSION} -> ${LATEST_VERSION} [有更新/Update Available]"
+        echoContent yellow "$(t MENU_VERSION): ${versionDisplay}"
     else
-        echoContent yellow "1.安装"
+        echoContent green "$(t MENU_VERSION): ${versionDisplay}"
     fi
 
-    echoContent yellow "2.任意组合安装"
-    echoContent yellow "4.Hysteria2管理"
-    echoContent yellow "5.REALITY管理"
-    echoContent yellow "6.Tuic管理"
+    echoContent green "$(t MENU_GITHUB): https://github.com/Lynthar/Proxy-agent"
+    echoContent green "$(t MENU_DESC): $(t MENU_TITLE)"
+    showInstallStatus
+    checkWgetShowProgress
+    if [[ -n "${coreInstallType}" ]]; then
+        echoContent yellow "1.$(t MENU_REINSTALL)"
+    else
+        echoContent yellow "1.$(t MENU_INSTALL)"
+    fi
 
-    echoContent skyBlue "-------------------------工具管理-----------------------------"
-    echoContent yellow "7.用户管理"
-    echoContent yellow "8.伪装站管理"
-    echoContent yellow "9.证书管理"
-    echoContent yellow "10.CDN节点管理"
-    echoContent yellow "11.分流工具"
-    echoContent yellow "12.添加新端口"
-    echoContent yellow "13.BT下载管理"
-    echoContent yellow "15.域名黑名单"
-    echoContent skyBlue "-------------------------版本管理-----------------------------"
-    echoContent yellow "16.core管理"
-    echoContent yellow "17.更新脚本"
-    echoContent yellow "18.安装BBR、DD脚本"
-    echoContent skyBlue "-------------------------脚本管理-----------------------------"
-    echoContent yellow "20.卸载脚本"
+    echoContent yellow "2.$(t MENU_COMBO_INSTALL)"
+    echoContent yellow "3.$(t MENU_CHAIN_PROXY)"
+    echoContent yellow "4.$(t MENU_HYSTERIA2)"
+    echoContent yellow "5.$(t MENU_REALITY)"
+    echoContent yellow "6.$(t MENU_TUIC)"
+
+    echoContent skyBlue "-------------------------$(t MENU_TOOL_MGMT)-----------------------------"
+    echoContent yellow "7.$(t MENU_USER)"
+    echoContent yellow "8.$(t MENU_DISGUISE)"
+    echoContent yellow "9.$(t MENU_CERT)"
+    echoContent yellow "10.$(t MENU_CDN)"
+    echoContent yellow "11.$(t MENU_ROUTING)"
+    echoContent yellow "12.$(t MENU_ADD_PORT)"
+    echoContent yellow "13.$(t MENU_BT)"
+    echoContent yellow "15.$(t MENU_BLACKLIST)"
+    echoContent skyBlue "-------------------------$(t MENU_VERSION_MGMT)-----------------------------"
+    echoContent yellow "16.$(t MENU_CORE)"
+    echoContent yellow "17.$(t MENU_UPDATE_SCRIPT)"
+    echoContent yellow "18.$(t MENU_BBR)"
+    echoContent skyBlue "-------------------------$(t MENU_SCRIPT_MGMT)-----------------------------"
+    echoContent yellow "20.$(t MENU_UNINSTALL)"
+    echoContent yellow "21.切换语言 / Switch Language"
+    echoContent yellow "22.$(t MENU_SCRIPT_VERSION)"
     echoContent red "=============================================================="
     mkdirTools
     aliasInstall
-    read -r -p "请选择:" selectInstallType
+    read -r -p "$(t PROMPT_SELECT):" selectInstallType
     case ${selectInstallType} in
     1)
         selectCoreInstall
@@ -9589,9 +15840,9 @@ menu() {
     2)
         selectCoreInstall
         ;;
-        #    3)
-        #        initXrayFrontingConfig 1
-        #        ;;
+    3)
+        chainProxyMenu
+        ;;
     4)
         manageHysteria
         ;;
@@ -9640,7 +15891,17 @@ menu() {
     20)
         unInstall 1
         ;;
+    21)
+        switchLanguage
+        ;;
+    22)
+        scriptVersionMenu
+        ;;
     esac
 }
+
+# 启动时检查更新（使用短超时，避免阻塞太久）
+checkForUpdates 2>/dev/null
+
 cronFunction
 menu

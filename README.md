@@ -1,70 +1,86 @@
-# v2ray-agent
-
-- [感谢 JetBrains 提供的非商业开源软件开发授权](https://www.jetbrains.com/?from=v2ray-agent)
-
+# Proxy-agent
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
-[![Telegram Channel](https://img.shields.io/badge/Telegram-Channel-blue)](https://t.me/v2rayAgentChannel)
-[![Telegram Group](https://img.shields.io/badge/Telegram-Group-blue)](https://t.me/technologyshare)
-[![Official Website](https://img.shields.io/badge/Website-v2ray--agent.com-blue)](https://www.v2ray-agent.com/)
-[![English Version](https://img.shields.io/badge/English-Version-blue)](documents/en/README_EN.md)
+[![GitHub Release](https://img.shields.io/github/v/release/Lynthar/Proxy-agent?label=Release)](https://github.com/Lynthar/Proxy-agent/releases)
+[![Tests](https://img.shields.io/badge/Tests-68%20passed-brightgreen)]()
+[![English](https://img.shields.io/badge/English-README-blue)](documents/en/README_EN.md)
 
-Xray-core/sing-box 一键脚本快速安装
+Xray-core / sing-box 多协议代理一键安装脚本，基于 [v2ray-agent](https://github.com/mack-a/v2ray-agent) 修改而来，感谢@mack-a的贡献。
 
-## 功能
+## 快速安装
 
-*   **多核心支持:** 支持 Xray-core 和 sing-box.
-*   **多协议支持:** 支持 VLESS, VMess, Trojan, Hysteria2, Tuic, NaiveProxy 等多种协议.
-*   **自动TLS:** 自动申请和续订 SSL 证书.
-*   **易于管理:** 提供简单的菜单来管理用户、端口和配置.
-*   **订阅支持:** 生成和管理订阅链接.
-*   **分流管理:** 提供wireguard、IPv6、Socks5、DNS、VMess(ws)、SNI反向代理，可用于解锁流媒体、规避IP验证等作用.
-*   **目标域名管理:** 提供域名黑名单管理，可用于禁止访问指定网站.
-*   **BT下载管理:** 可用于禁止下载P2P相关内容.
-*   **更多内容请访问[官方网站](https://www.v2ray-agent.com/categories/jiao-cheng)、[备用](https://www.592083.com/categories/jiao-cheng)、[X](https://x.com/v2rayagent)**
-
-## 快速开始
-
-### 安装
-
-```
-wget -P /root -N --no-check-certificate "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/install.sh" && chmod 700 /root/install.sh && /root/install.sh
+```bash
+wget -P /root -N https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/install.sh && chmod 700 /root/install.sh && /root/install.sh
 ```
 
-### 使用
+**安装后使用 `pasly` 命令打开管理菜单**
 
-安装后，运行以下命令可再次打开管理菜单:
+更详细的[使用指南](documents/user-guide.md)；
+
+如果你想自定义修改或开发，可以参考[开发指南](documents/developer-guide.md)，它可以帮助你更快的理解该项目；
+
+
+## 支持协议
+
+| 协议 | 传输方式 | TLS | 说明 |
+|------|----------|-----|------|
+| VLESS | TCP/Vision, WS, XHTTP | TLS/Reality | 推荐 |
+| VMess | WebSocket, HTTPUpgrade | TLS | CDN 友好 |
+| Trojan | TCP | TLS | 伪装 HTTPS |
+| Hysteria2 | QUIC | 自签名 | 高速 UDP |
+| TUIC | QUIC | TLS | 低延迟 UDP |
+| NaiveProxy | HTTP/2 | TLS | 抗检测 |
+| Shadowsocks 2022 | - | - | 链式代理 |
+
+### 主要改进
+
+- 模块化设计：constants, utils, json-utils, system-detect, service-control, protocol-registry, config-reader, i18n
+- 增强的链式代理功能，包括入口节点分流功能和支持外部节点作为出口
+- 统一的协议注册表和配置读取接口
+- 原子化 JSON 操作，防止配置损坏
+- Reality shortIds 改为随机生成，移除空值
+- 添加完整的单元测试和集成测试
+- 统一错误处理和日志输出
+- 添加i18n，中英双语
+- 脚本版本管理功能
+- 移除部分冗余文件并精简部分代码
+
+## 功能列表
 
 ```
-vasma
+1.安装/重新安装        2.任意组合安装        3.链式代理管理
+4.Hysteria2 管理       5.REALITY 管理        6.TUIC 管理
+7.用户管理             8.伪装站管理          9.证书管理
+10.CDN 节点管理        11.分流工具           12.添加新端口
+13.BT 下载管理         15.域名黑名单         16.Core 管理
+17.更新脚本            18.安装 BBR           20.卸载脚本
+21.切换语言
 ```
 
-## 文档和指南
+## 系统要求
 
-*   [八合一脚本从入门到精通](https://www.v2ray-agent.com/archives/1710141233)
-*   [脚本快速搭建教程](https://www.v2ray-agent.com/archives/1682491479771)
-*   [脚本使用注意事项](https://www.v2ray-agent.com/archives/1679931532764)
-*   [脚本异常处理](https://www.v2ray-agent.com/archives/1684115970026)   
-*   [VPS选购攻略](https://www.v2ray-agent.com/archives/1679975663984)
-*   [垃圾VPS大救星，hysteria2最新协议一键搭建](https://www.v2ray-agent.com/archives/1697162969693)
-*   [RackNerd低价 联通AS4837套餐，年付10美起](https://www.v2ray-agent.com/archives/racknerdtao-can-zheng-li-nian-fu-10mei-yuan)
-*   [搬瓦工优质套餐推荐](https://www.v2ray-agent.com/archives/2023nian-ban-wa-gong-ji-fang-tui-jian)
-*   [DMIT优质套餐推荐](https://www.v2ray-agent.com/archives/1679159868033)
+- **系统**: Debian 9+, Ubuntu 16+, CentOS 7+, Alpine 3+
+- **架构**: amd64, arm64
+- **权限**: root
 
-## 社区与支持
+```
 
-*   **Telegram:** [频道](https://t.me/v2rayAgentChannel) | [群组](https://t.me/technologyshare)
-*   **网站:** [官网](https://www.v2ray-agent.com/) | [备用](https://www.592083.xyz/)
-*   **反馈:** [提交 issue](https://github.com/mack-a/v2ray-agent/issues)
-*   **X:** [链接](https://x.com/v2rayagent)
+## 语言切换
 
-## 捐赠
+```bash
+# 菜单切换 (推荐)
+pasly  # 选择 21
 
-感谢您对开源项目的关注和支持。如果您觉得这个项目对您有帮助，欢迎通过以下方式进行捐赠。
+# 环境变量
+V2RAY_LANG=en pasly
+```
 
-*   [购买VPS捐赠](https://www.v2ray-agent.com/categories/vps)
-*   [通过虚拟币向我捐赠](https://www.v2ray-agent.com/1679123834836)
+## 致谢
+
+- [mack-a/v2ray-agent](https://github.com/mack-a/v2ray-agent)
+- [XTLS/Xray-core](https://github.com/XTLS/Xray-core)
+- [SagerNet/sing-box](https://github.com/SagerNet/sing-box)
 
 ## 许可证
 
-本项根据 [AGPL-3.0 许可证](LICENSE) 授权.
+[AGPL-3.0](LICENSE)
