@@ -528,6 +528,7 @@ MSG_TCP_BRUTAL_INIT="初始化 TCP_Brutal 配置"
 # =============================================================================
 # 链式代理 - Chain Proxy Messages
 # =============================================================================
+MSG_CHAIN_INFO_WRITE_FAIL="状态文件写入失败: %s"
 MSG_CHAIN_CODE="配置码"
 MSG_CHAIN_EXIT_IP="出口节点 IP"
 MSG_CHAIN_EXIT_PORT="出口节点端口"
