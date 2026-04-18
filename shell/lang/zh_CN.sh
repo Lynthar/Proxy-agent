@@ -11,6 +11,7 @@ MSG_SYS_NOT_SUPPORTED="本脚本不支持此系统，请将下方日志反馈给
 MSG_SYS_CPU_NOT_SUPPORTED="不支持此 CPU 架构"
 MSG_SYS_CPU_DEFAULT_AMD64="无法识别 CPU 架构，默认使用 amd64/x86_64"
 MSG_SYS_NON_ROOT="检测到非 root 用户，将使用 sudo 执行命令..."
+MSG_SYS_ROOT_REQUIRED="此操作需要 root 权限，请使用 sudo 或切换到 root 用户后重试"
 MSG_SYS_SELINUX_NOTICE="检测到 SELinux 已启用，请手动禁用（在 /etc/selinux/config 设置 SELINUX=disabled 并重启）"
 
 # =============================================================================
@@ -139,6 +140,14 @@ MSG_UPDATE_COMPLETE="更新完成"
 MSG_UPDATE_ABANDON="放弃更新"
 MSG_UPDATE_REINSTALL_ABANDON="放弃重新安装"
 MSG_UPDATE_ROLLBACK_ABANDON="放弃回退版本"
+MSG_UPDATE_SHA256_CHECKING="校验脚本完整性 (SHA256)..."
+MSG_UPDATE_SHA256_OK="SHA256 校验通过"
+MSG_UPDATE_SHA256_SKIP=" ---> 跳过 SHA256 校验 (%s)"
+MSG_UPDATE_SHA256_FAIL="SHA256 校验失败，下载的脚本可能被损坏或篡改，正在恢复备份"
+MSG_UPDATE_SHA256_RESTORED="已从备份恢复: %s"
+MSG_UPDATE_SHA256_REASON_NOTAG="未获取到 Release 版本，无法定位校验文件"
+MSG_UPDATE_SHA256_REASON_NOASSET="未找到 Release 的 SHA256 资产 (可能是旧版本 Release)"
+MSG_UPDATE_SHA256_REASON_BADFORMAT="SHA256 文件格式异常"
 
 # =============================================================================
 # 核心/协议 - Core/Protocol Messages

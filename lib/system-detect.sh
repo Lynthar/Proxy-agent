@@ -151,10 +151,9 @@ checkCPUVendor() {
 
 checkRoot() {
     if [[ "$(id -u)" -ne 0 ]]; then
-        echoContent yellow "检测到非 Root 用户，部分操作可能需要 sudo 权限"
-        return 1
+        echoContent red "$(t SYS_ROOT_REQUIRED)"
+        exit 1
     fi
-    return 0
 }
 
 # ============================================================================

@@ -369,8 +369,9 @@ jsonWriteFile() {
         cp "${file}" "${file}.bak.$(date +%s)" 2>/dev/null
     fi
 
-    # 写入临时文件
-    local tmpFile="${JSON_TMP_PREFIX}_$$_$(date +%s)"
+    # 写入临时文件（mktemp 保证并发安全；保留前缀以便 jsonCleanupTmp 回收）
+    local tmpFile
+    tmpFile=$(mktemp "${JSON_TMP_PREFIX}_XXXXXXXX") || return 1
     if ! echo "${content}" | jq . > "${tmpFile}" 2>/dev/null; then
         rm -f "${tmpFile}"
         return 1
@@ -409,8 +410,9 @@ jsonModifyFile() {
         cp "${file}" "${file}.bak.$(date +%s)" 2>/dev/null
     fi
 
-    # 写入临时文件
-    local tmpFile="${JSON_TMP_PREFIX}_$$_$(date +%s)"
+    # 写入临时文件（mktemp 保证并发安全；保留前缀以便 jsonCleanupTmp 回收）
+    local tmpFile
+    tmpFile=$(mktemp "${JSON_TMP_PREFIX}_XXXXXXXX") || return 1
     if ! jq "${filter}" "${file}" > "${tmpFile}" 2>/dev/null; then
         rm -f "${tmpFile}"
         return 1

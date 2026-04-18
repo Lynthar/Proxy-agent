@@ -472,6 +472,49 @@ extractSingBoxHash() {
     fi
 }
 
+# 校验已下载的 install.sh 完整性
+# 参数: $1 - 已下载文件路径
+#       $2 - 对应 GitHub Release tag (空则跳过校验)
+# 返回: 0=通过或软降级跳过, 1=校验失败
+# 校验文件来自 Release 资产: install.sh.sha256 (由 create_release.yml 生成)
+# 降级策略: 无 tag、无资产、无 sha256sum 工具时跳过并警告，不阻断旧版本升级
+verifyInstallSHA256() {
+    local file="$1"
+    local tag="$2"
+
+    if [[ -z "${tag}" ]]; then
+        echoContent yellow "$(t UPDATE_SHA256_SKIP "$(t UPDATE_SHA256_REASON_NOTAG)")"
+        return 0
+    fi
+
+    local sha256Url="https://github.com/Lynthar/Proxy-agent/releases/download/${tag}/install.sh.sha256"
+    local sha256File
+    sha256File=$(mktemp)
+
+    if ! wget -q --timeout=10 --tries=2 -O "${sha256File}" "${sha256Url}" 2>/dev/null || [[ ! -s "${sha256File}" ]]; then
+        rm -f "${sha256File}"
+        echoContent yellow "$(t UPDATE_SHA256_SKIP "$(t UPDATE_SHA256_REASON_NOASSET)")"
+        return 0
+    fi
+
+    local expectedHash
+    expectedHash=$(awk '{print $1}' "${sha256File}" | head -1)
+    rm -f "${sha256File}"
+
+    if [[ ${#expectedHash} -ne 64 ]]; then
+        echoContent yellow "$(t UPDATE_SHA256_SKIP "$(t UPDATE_SHA256_REASON_BADFORMAT)")"
+        return 0
+    fi
+
+    echoContent yellow " ---> $(t UPDATE_SHA256_CHECKING)"
+    if verifySHA256 "${file}" "${expectedHash}"; then
+        echoContent green " ---> $(t UPDATE_SHA256_OK)"
+        return 0
+    else
+        return 1
+    fi
+}
+
 # TLS证书与私钥匹配验证函数
 # 用法: verifyCertKeyMatch <证书文件路径> <私钥文件路径>
 # 返回: 0=匹配成功, 1=匹配失败或文件不存在
@@ -7070,16 +7113,25 @@ removeUser() {
         if [[ "${coreInstallType}" == "1" ]]; then
             jq -r -c '(.inbounds[0].settings.clients // .inbounds[1].settings.clients)[]?|.email' ${configPath}${userConfigType}.json | awk '{print NR""":"$0}'
             read -r -p "请选择要删除的用户编号[仅支持单个删除]:" delUserIndex
-            if [[ $(jq -r '(.inbounds[0].settings.clients // .inbounds[1].settings.clients)?|length' ${configPath}${userConfigType}.json) -lt ${delUserIndex} ]]; then
+            # 必须是正整数；非法输入直接清空，跳过后续删除分支，避免注入进 jq 过滤器
+            if ! [[ "${delUserIndex}" =~ ^[1-9][0-9]*$ ]]; then
+                echoContent red " ---> 用户编号必须为正整数"
+                delUserIndex=
+            elif [[ $(jq -r '(.inbounds[0].settings.clients // .inbounds[1].settings.clients)?|length' ${configPath}${userConfigType}.json) -lt ${delUserIndex} ]]; then
                 echoContent red " ---> 选择错误"
+                delUserIndex=
             else
                 delUserIndex=$((delUserIndex - 1))
             fi
         elif [[ "${coreInstallType}" == "2" ]]; then
             jq -r -c .inbounds[0].users[].name//.inbounds[0].users[].username ${configPath}${userConfigType}.json | awk '{print NR""":"$0}'
             read -r -p "请选择要删除的用户编号[仅支持单个删除]:" delUserIndex
-            if [[ $(jq -r '.inbounds[0].users|length' ${configPath}${userConfigType}.json) -lt ${delUserIndex} ]]; then
+            if ! [[ "${delUserIndex}" =~ ^[1-9][0-9]*$ ]]; then
+                echoContent red " ---> 用户编号必须为正整数"
+                delUserIndex=
+            elif [[ $(jq -r '.inbounds[0].users|length' ${configPath}${userConfigType}.json) -lt ${delUserIndex} ]]; then
                 echoContent red " ---> 选择错误"
+                delUserIndex=
             else
                 delUserIndex=$((delUserIndex - 1))
             fi
@@ -7088,14 +7140,15 @@ removeUser() {
 
     if [[ -n "${delUserIndex}" ]]; then
 
+        # 以下 jq 调用统一使用 --argjson idx 传入用户编号，避免过滤器字符串拼接
         if echo ${currentInstallProtocolType} | grep -q ",0,"; then
             local vlessVision
-            vlessVision=$(jq -r 'del(.inbounds[0].settings.clients['${delUserIndex}']//.inbounds[0].users['${delUserIndex}'])' ${configPath}02_VLESS_TCP_inbounds.json)
+            vlessVision=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].settings.clients[$idx]//.inbounds[0].users[$idx])' ${configPath}02_VLESS_TCP_inbounds.json)
             echo "${vlessVision}" | jq . >${configPath}02_VLESS_TCP_inbounds.json
         fi
         if echo ${currentInstallProtocolType} | grep -q ",1,"; then
             local vlessWSResult
-            vlessWSResult=$(jq -r 'del(.inbounds[0].settings.clients['${delUserIndex}'])' ${configPath}03_VLESS_WS_inbounds.json)
+            vlessWSResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].settings.clients[$idx])' ${configPath}03_VLESS_WS_inbounds.json)
             echo "${vlessWSResult}" | jq . >${configPath}03_VLESS_WS_inbounds.json
         fi
 
@@ -7103,7 +7156,7 @@ removeUser() {
 
         if echo ${currentInstallProtocolType} | grep -q ",3,"; then
             local vmessWSResult
-            vmessWSResult=$(jq -r 'del(.inbounds[0].settings.clients['${delUserIndex}']//.inbounds[0].users['${delUserIndex}'])' ${configPath}05_VMess_WS_inbounds.json)
+            vmessWSResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].settings.clients[$idx]//.inbounds[0].users[$idx])' ${configPath}05_VMess_WS_inbounds.json)
             echo "${vmessWSResult}" | jq . >${configPath}05_VMess_WS_inbounds.json
         fi
 
@@ -7111,43 +7164,43 @@ removeUser() {
 
         if echo ${currentInstallProtocolType} | grep -q ",4,"; then
             local trojanTCPResult
-            trojanTCPResult=$(jq -r 'del(.inbounds[0].settings.clients['${delUserIndex}']//.inbounds[0].users['${delUserIndex}'])' ${configPath}04_trojan_TCP_inbounds.json)
+            trojanTCPResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].settings.clients[$idx]//.inbounds[0].users[$idx])' ${configPath}04_trojan_TCP_inbounds.json)
             echo "${trojanTCPResult}" | jq . >${configPath}04_trojan_TCP_inbounds.json
         fi
 
         if echo ${currentInstallProtocolType} | grep -q ",7,"; then
             local vlessRealityResult
-            vlessRealityResult=$(jq -r 'del(.inbounds[0].settings.clients['${delUserIndex}']//.inbounds[1].settings.clients['${delUserIndex}']//.inbounds[0].users['${delUserIndex}'])' ${configPath}07_VLESS_vision_reality_inbounds.json)
+            vlessRealityResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].settings.clients[$idx]//.inbounds[1].settings.clients[$idx]//.inbounds[0].users[$idx])' ${configPath}07_VLESS_vision_reality_inbounds.json)
             echo "${vlessRealityResult}" | jq . >${configPath}07_VLESS_vision_reality_inbounds.json
         fi
         # VLESS Reality gRPC - 已移除
 
         if echo ${currentInstallProtocolType} | grep -q ",6,"; then
             local hysteriaResult
-            hysteriaResult=$(jq -r 'del(.inbounds[0].users['${delUserIndex}']//.inbounds[0].users['${delUserIndex}'])' "${singBoxConfigPath}06_hysteria2_inbounds.json")
+            hysteriaResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].users[$idx]//.inbounds[0].users[$idx])' "${singBoxConfigPath}06_hysteria2_inbounds.json")
             echo "${hysteriaResult}" | jq . >"${singBoxConfigPath}06_hysteria2_inbounds.json"
         fi
         if echo ${currentInstallProtocolType} | grep -q ",9,"; then
             local tuicResult
-            tuicResult=$(jq -r 'del(.inbounds[0].users['${delUserIndex}']//.inbounds[0].users['${delUserIndex}'])' "${singBoxConfigPath}09_tuic_inbounds.json")
+            tuicResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].users[$idx]//.inbounds[0].users[$idx])' "${singBoxConfigPath}09_tuic_inbounds.json")
             echo "${tuicResult}" | jq . >"${singBoxConfigPath}09_tuic_inbounds.json"
         fi
         if echo ${currentInstallProtocolType} | grep -q ",10,"; then
             local naiveResult
-            naiveResult=$(jq -r 'del(.inbounds[0].users['${delUserIndex}']//.inbounds[0].users['${delUserIndex}'])' "${singBoxConfigPath}10_naive_inbounds.json")
+            naiveResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].users[$idx]//.inbounds[0].users[$idx])' "${singBoxConfigPath}10_naive_inbounds.json")
             echo "${naiveResult}" | jq . >"${singBoxConfigPath}10_naive_inbounds.json"
         fi
         # VMess HTTPUpgrade
         if echo ${currentInstallProtocolType} | grep -q ",11,"; then
             local vmessHTTPUpgradeResult
-            vmessHTTPUpgradeResult=$(jq -r 'del(.inbounds[0].users['${delUserIndex}']//.inbounds[0].users['${delUserIndex}'])' "${singBoxConfigPath}11_VMess_HTTPUpgrade_inbounds.json")
+            vmessHTTPUpgradeResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].users[$idx]//.inbounds[0].users[$idx])' "${singBoxConfigPath}11_VMess_HTTPUpgrade_inbounds.json")
             echo "${vmessHTTPUpgradeResult}" | jq . >"${singBoxConfigPath}11_VMess_HTTPUpgrade_inbounds.json"
             echo "${vmessHTTPUpgradeResult}" | jq . >${configPath}11_VMess_HTTPUpgrade_inbounds.json
         fi
         # Shadowsocks 2022
         if echo ${currentInstallProtocolType} | grep -q ",14,"; then
             local ss2022Result
-            ss2022Result=$(jq -r 'del(.inbounds[0].users['${delUserIndex}'])' "${singBoxConfigPath}14_ss2022_inbounds.json")
+            ss2022Result=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].users[$idx])' "${singBoxConfigPath}14_ss2022_inbounds.json")
             echo "${ss2022Result}" | jq . >"${singBoxConfigPath}14_ss2022_inbounds.json"
         fi
         reloadCore
@@ -7522,11 +7575,13 @@ updateV2RayAgent() {
         latestVersion=""
     fi
 
-    # 更新前自动备份当前版本
+    # 更新前自动备份当前版本，捕获路径用于 SHA256 校验失败时回滚
     echoContent yellow " ---> 备份当前版本..."
-    if backupScript "update"; then
-        echoContent green " ---> 备份完成"
+    local backupPath=""
+    if backupPath=$(backupScript "update"); then
+        echoContent green " ---> 备份完成: ${backupPath}"
     else
+        backupPath=""
         echoContent yellow " ---> 备份跳过 (首次安装或备份失败)"
     fi
 
@@ -7558,6 +7613,21 @@ updateV2RayAgent() {
         echoContent yellow "请手动执行: wget -P /root -N ${rawBase}/install.sh"
         exit 1
     fi
+
+    # 校验 SHA256。失败则从备份恢复 install.sh，避免 pasly 指向损坏文件
+    if ! verifyInstallSHA256 "${installDir}/install.sh" "${latestVersion}"; then
+        echoContent red " ---> $(t UPDATE_SHA256_FAIL)"
+        rm -f "${installDir}/install.sh"
+        if [[ -n "${backupPath}" && -f "${backupPath}/install.sh" ]]; then
+            cp -f "${backupPath}/install.sh" "${installDir}/install.sh"
+            chmod 700 "${installDir}/install.sh"
+            echoContent green " ---> $(t UPDATE_SHA256_RESTORED "${backupPath}")"
+        else
+            echoContent red " ---> 无可用备份，请手动重装: wget -P /root -N ${rawBase}/install.sh"
+        fi
+        exit 1
+    fi
+
     chmod 700 "${installDir}/install.sh"
 
     # 下载/更新 lib 目录模块

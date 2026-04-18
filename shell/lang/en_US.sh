@@ -11,6 +11,7 @@ MSG_SYS_NOT_SUPPORTED="This script does not support this system. Please provide 
 MSG_SYS_CPU_NOT_SUPPORTED="This CPU architecture is not supported"
 MSG_SYS_CPU_DEFAULT_AMD64="Unable to identify CPU architecture, defaulting to amd64/x86_64"
 MSG_SYS_NON_ROOT="Non-root user detected, will use sudo to execute commands..."
+MSG_SYS_ROOT_REQUIRED="This operation requires root privileges. Please run as root or with sudo and try again."
 MSG_SYS_SELINUX_NOTICE="SELinux is enabled. Please disable it manually (set SELINUX=disabled in /etc/selinux/config and reboot)"
 
 # =============================================================================
@@ -139,6 +140,14 @@ MSG_UPDATE_COMPLETE="Update complete"
 MSG_UPDATE_ABANDON="Update cancelled"
 MSG_UPDATE_REINSTALL_ABANDON="Reinstall cancelled"
 MSG_UPDATE_ROLLBACK_ABANDON="Rollback cancelled"
+MSG_UPDATE_SHA256_CHECKING="Verifying script integrity (SHA256)..."
+MSG_UPDATE_SHA256_OK="SHA256 verification passed"
+MSG_UPDATE_SHA256_SKIP=" ---> Skipping SHA256 verification (%s)"
+MSG_UPDATE_SHA256_FAIL="SHA256 verification failed. The downloaded script may be corrupted or tampered. Restoring from backup"
+MSG_UPDATE_SHA256_RESTORED="Restored from backup: %s"
+MSG_UPDATE_SHA256_REASON_NOTAG="no Release tag available"
+MSG_UPDATE_SHA256_REASON_NOASSET="no SHA256 asset in this Release (likely a pre-feature release)"
+MSG_UPDATE_SHA256_REASON_BADFORMAT="SHA256 file format invalid"
 
 # =============================================================================
 # Core/Protocol Messages

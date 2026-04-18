@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck lib/ and tests/
+        # lib/ and tests/ are small and tractable — block on errors.
+        run: |
+          shellcheck --version
+          shellcheck --severity=error --shell=bash \
+            lib/*.sh tests/*.sh
+
+      - name: shellcheck install.sh (report-only)
+        # install.sh is ~16k lines of legacy bash; this job surfaces real
+        # errors but does not block PRs. Tighten to blocking once the
+        # backlog is cleared.
+        continue-on-error: true
+        run: |
+          shellcheck --severity=error --shell=bash install.sh
+
+  tests:
+    name: unit + integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: module unit tests
+        run: bash tests/test_modules.sh
+
+      - name: integration tests (mocked VPS tree)
+        run: bash tests/test_integration.sh
+
+  lang-parity:
+    name: bilingual MSG_ key parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: diff keys between zh_CN and en_US
+        run: |
+          zh=$(mktemp) ; en=$(mktemp)
+          grep -oE '^MSG_[A-Z0-9_]+=' shell/lang/zh_CN.sh | sed 's/=$//' | sort -u > "$zh"
+          grep -oE '^MSG_[A-Z0-9_]+=' shell/lang/en_US.sh | sed 's/=$//' | sort -u > "$en"
+          if ! diff -u "$zh" "$en"; then
+            echo "::error::MSG_ keys differ between shell/lang/zh_CN.sh and shell/lang/en_US.sh"
+            echo "left = zh_CN, right = en_US. Keep them in sync."
+            exit 1
+          fi
+          echo "OK: $(wc -l < "$zh") keys match."
+
+  syntax:
+    name: bash -n syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: syntax check all shell scripts
+        run: |
+          set -e
+          bash -n install.sh
+          for f in lib/*.sh shell/lang/*.sh tests/*.sh; do
+            bash -n "$f"
+          done

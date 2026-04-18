@@ -71,7 +71,16 @@ _load_i18n() {
 # =============================================================================
 t() {
     local key="MSG_$1"
-    local text="${!key:-$1}"  # 如果找不到则显示 key 本身
+    local text="${!key-}"
+    if [[ -z "${text}" ]]; then
+        # 找不到翻译：回退到 key 名，便于定位
+        text="$1"
+        # 仅在调试模式下记录缺失键，避免正常运行写磁盘
+        if [[ -n "${V2RAY_I18N_DEBUG:-}" ]]; then
+            local logFile="${V2RAY_I18N_LOG:-/tmp/proxy-agent-i18n-missing.log}"
+            echo "$(date +%FT%T) ${CURRENT_LANG:-?} MSG_$1" >>"${logFile}" 2>/dev/null || true
+        fi
+    fi
     shift
 
     if [[ $# -gt 0 ]]; then
