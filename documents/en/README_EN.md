@@ -57,6 +57,8 @@ A fork of [v2ray-agent](https://github.com/mack-a/v2ray-agent), providing one-cl
 wget -P /root -N https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/install.sh && chmod 700 /root/install.sh && /root/install.sh
 ```
 
+> **Alpine users: run `apk add bash wget` first.** Alpine does not ship bash by default, and the script requires bash to run. After that, run the command above.
+
 ### Management
 
 After installation, run the following command to open the management menu:
