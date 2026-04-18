@@ -528,6 +528,7 @@ MSG_TCP_BRUTAL_INIT="Initializing TCP_Brutal configuration"
 # =============================================================================
 # Chain Proxy Messages
 # =============================================================================
+MSG_CHAIN_INFO_WRITE_FAIL="Failed to write state file: %s"
 MSG_CHAIN_CODE="Config code"
 MSG_CHAIN_EXIT_IP="Exit node IP"
 MSG_CHAIN_EXIT_PORT="Exit node port"

@@ -4710,6 +4710,21 @@ singBoxSS2022Install() {
     showAccounts 4
 }
 
+# 原子写入 chain/external 状态 JSON
+# 参数: $1=目标路径  $2=完整 JSON 内容
+# 行为: 通过 lib/json-utils.sh::jsonWriteFile 验证 + 写 tmp + 原子 rename
+#       backup=false, 避免 /etc/Proxy-agent/sing-box/conf/ 堆积 .bak 文件
+# 返回: 0=成功, 1=JSON 非法或写入失败 (旧文件保持不变)
+writeChainInfoAtomic() {
+    local file="$1"
+    local content="$2"
+    if jsonWriteFile "${file}" "${content}" false; then
+        return 0
+    fi
+    echoContent red " ---> $(t CHAIN_INFO_WRITE_FAIL "${file}")"
+    return 1
+}
+
 # 合并config
 singBoxMergeConfig() {
     rm /etc/Proxy-agent/sing-box/conf/config.json >/dev/null 2>&1
@@ -9132,8 +9147,9 @@ EOF
 }
 EOF
 
-    # 保存配置信息用于生成配置码（包含网络策略）
-    cat <<EOF >/etc/Proxy-agent/sing-box/conf/chain_exit_info.json
+    # 保存配置信息用于生成配置码（包含网络策略），原子写入避免半写入
+    local __chainExitInfo
+    __chainExitInfo=$(cat <<EOF
 {
     "role": "exit",
     "ip": "${publicIP}",
@@ -9144,6 +9160,8 @@ EOF
     "domain_strategy": "${domainStrategy}"
 }
 EOF
+)
+    writeChainInfoAtomic "/etc/Proxy-agent/sing-box/conf/chain_exit_info.json" "${__chainExitInfo}" || return 1
 
     # 开放防火墙端口
     if [[ -n "${allowedIP}" ]]; then
@@ -9155,7 +9173,7 @@ EOF
     fi
 
     # 合并配置并重启
-    mergeSingBoxConfig
+    singBoxMergeConfig
     reloadCore
 
     # 生成并显示配置码
@@ -9574,8 +9592,9 @@ EOF
         --argjson downstream "${chainHops}" \
         '[{ip: $ip, port: $port, key: $key, method: $method}] + $downstream')
 
-    # 保存配置信息
-    cat <<EOF >/etc/Proxy-agent/sing-box/conf/chain_relay_info.json
+    # 保存配置信息（原子写入）
+    local __chainRelayInfo
+    __chainRelayInfo=$(cat <<EOF
 {
     "role": "relay",
     "ip": "${publicIP}",
@@ -9586,13 +9605,15 @@ EOF
     "total_hops": $((chainHopCount + 1))
 }
 EOF
+)
+    writeChainInfoAtomic "/etc/Proxy-agent/sing-box/conf/chain_relay_info.json" "${__chainRelayInfo}" || return 1
 
     # 开放防火墙端口
     allowPort "${chainPort}" "tcp"
     echoContent green " ---> 已开放端口 ${chainPort}"
 
     # 合并配置并重启
-    mergeSingBoxConfig
+    singBoxMergeConfig
     handleSingBox stop >/dev/null 2>&1
     handleSingBox start
 
@@ -9777,8 +9798,9 @@ EOF
 EOF
     fi
 
-    # 保存配置信息
-    cat <<EOF >/etc/Proxy-agent/sing-box/conf/chain_entry_info.json
+    # 保存配置信息（原子写入）
+    local __chainEntryInfo
+    __chainEntryInfo=$(cat <<EOF
 {
     "role": "entry",
     "mode": "multi_hop",
@@ -9788,6 +9810,8 @@ EOF
     "has_xray": ${hasXrayProtocols}
 }
 EOF
+)
+    writeChainInfoAtomic "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json" "${__chainEntryInfo}" || return 1
 
     # 合并 sing-box 配置
     echoContent yellow "正在合并 sing-box 配置..."
@@ -10022,8 +10046,9 @@ EOF
 EOF
     fi
 
-    # 保存配置信息
-    cat <<EOF >/etc/Proxy-agent/sing-box/conf/chain_entry_info.json
+    # 保存配置信息（原子写入）
+    local __chainEntryInfo
+    __chainEntryInfo=$(cat <<EOF
 {
     "role": "entry",
     "exit_ip": "${exitIP}",
@@ -10034,6 +10059,8 @@ EOF
     "has_xray": ${hasXrayProtocols}
 }
 EOF
+)
+    writeChainInfoAtomic "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json" "${__chainEntryInfo}" || return 1
 
     # 合并 sing-box 配置
     echoContent yellow "正在合并 sing-box 配置..."
@@ -10498,23 +10525,33 @@ updateChainKey() {
         local newKey
         newKey=$(generateChainKey)
 
-        # 更新入站配置 - 使用安全的临时文件
+        # 更新入站配置 - 使用安全的临时文件（校验 jq 成功且产物是合法 JSON 再 mv，避免半写入）
         local tmpInboundFile
-        tmpInboundFile=$(mktemp)
+        tmpInboundFile=$(mktemp) || return 1
         chmod 600 "${tmpInboundFile}"
-        jq --arg key "${newKey}" '.inbounds[0].password = $key' \
-            /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json > "${tmpInboundFile}"
+        if ! jq --arg key "${newKey}" '.inbounds[0].password = $key' \
+                /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json > "${tmpInboundFile}" 2>/dev/null \
+            || ! jq -e . "${tmpInboundFile}" >/dev/null 2>&1; then
+            rm -f "${tmpInboundFile}"
+            echoContent red " ---> $(t CHAIN_INFO_WRITE_FAIL "/etc/Proxy-agent/sing-box/conf/config/chain_inbound.json")"
+            return 1
+        fi
         mv "${tmpInboundFile}" /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
 
-        # 更新信息文件 - 使用安全的临时文件
+        # 更新信息文件 - 使用安全的临时文件（同上校验）
         local tmpInfoFile
-        tmpInfoFile=$(mktemp)
+        tmpInfoFile=$(mktemp) || return 1
         chmod 600 "${tmpInfoFile}"
-        jq --arg key "${newKey}" '.password = $key' \
-            /etc/Proxy-agent/sing-box/conf/chain_exit_info.json > "${tmpInfoFile}"
+        if ! jq --arg key "${newKey}" '.password = $key' \
+                /etc/Proxy-agent/sing-box/conf/chain_exit_info.json > "${tmpInfoFile}" 2>/dev/null \
+            || ! jq -e . "${tmpInfoFile}" >/dev/null 2>&1; then
+            rm -f "${tmpInfoFile}"
+            echoContent red " ---> $(t CHAIN_INFO_WRITE_FAIL "/etc/Proxy-agent/sing-box/conf/chain_exit_info.json")"
+            return 1
+        fi
         mv "${tmpInfoFile}" /etc/Proxy-agent/sing-box/conf/chain_exit_info.json
 
-        mergeSingBoxConfig
+        singBoxMergeConfig
         reloadCore
 
         echoContent green " ---> 密钥已更新"
@@ -10558,26 +10595,36 @@ updateChainPort() {
         return 1
     fi
 
-    # 更新入站配置 - 使用安全的临时文件
+    # 更新入站配置 - 使用安全的临时文件（校验 jq 成功且产物是合法 JSON 再 mv）
     local tmpInboundFile
-    tmpInboundFile=$(mktemp)
+    tmpInboundFile=$(mktemp) || return 1
     chmod 600 "${tmpInboundFile}"
-    jq --argjson port "${newPort}" '.inbounds[0].listen_port = $port' \
-        /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json > "${tmpInboundFile}"
+    if ! jq --argjson port "${newPort}" '.inbounds[0].listen_port = $port' \
+            /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json > "${tmpInboundFile}" 2>/dev/null \
+        || ! jq -e . "${tmpInboundFile}" >/dev/null 2>&1; then
+        rm -f "${tmpInboundFile}"
+        echoContent red " ---> $(t CHAIN_INFO_WRITE_FAIL "/etc/Proxy-agent/sing-box/conf/config/chain_inbound.json")"
+        return 1
+    fi
     mv "${tmpInboundFile}" /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
 
-    # 更新信息文件 - 使用安全的临时文件
+    # 更新信息文件 - 使用安全的临时文件（同上校验）
     local tmpInfoFile
-    tmpInfoFile=$(mktemp)
+    tmpInfoFile=$(mktemp) || return 1
     chmod 600 "${tmpInfoFile}"
-    jq --argjson port "${newPort}" '.port = $port' \
-        "${infoFile}" > "${tmpInfoFile}"
+    if ! jq --argjson port "${newPort}" '.port = $port' \
+            "${infoFile}" > "${tmpInfoFile}" 2>/dev/null \
+        || ! jq -e . "${tmpInfoFile}" >/dev/null 2>&1; then
+        rm -f "${tmpInfoFile}"
+        echoContent red " ---> $(t CHAIN_INFO_WRITE_FAIL "${infoFile}")"
+        return 1
+    fi
     mv "${tmpInfoFile}" "${infoFile}"
 
     # 更新防火墙
     allowPort "${newPort}" "tcp"
 
-    mergeSingBoxConfig
+    singBoxMergeConfig
     reloadCore
 
     echoContent green " ---> 端口已更新为 ${newPort}"
@@ -10703,7 +10750,7 @@ EOF
     fi
 
     # 重新合并 sing-box 配置
-    mergeSingBoxConfig
+    singBoxMergeConfig
     reloadCore
 
     echoContent green " ---> 链式代理已卸载"
@@ -10915,7 +10962,7 @@ configureProtocolChainRouting() {
 
     # 重载 sing-box 配置
     echoContent yellow " ---> $(t CHAIN_PROTOCOL_RELOADING)"
-    mergeSingBoxConfig
+    singBoxMergeConfig
 
     if ! reloadCore; then
         echoContent red " ---> $(t CHAIN_PROTOCOL_RELOAD_FAILED)"
@@ -10924,21 +10971,6 @@ configureProtocolChainRouting() {
 
     echoContent green " ---> $(t CHAIN_PROTOCOL_SUCCESS)"
 }
-
-# 合并 sing-box 配置 (如果函数不存在则定义)
-# 注意：此函数与 singBoxMergeConfig 保持一致，用于链式代理独立运行场景
-if ! type mergeSingBoxConfig >/dev/null 2>&1; then
-    mergeSingBoxConfig() {
-        if [[ -d "/etc/Proxy-agent/sing-box/conf/config/" ]]; then
-            # 先删除旧配置，再合并生成新配置
-            rm -f /etc/Proxy-agent/sing-box/conf/config.json >/dev/null 2>&1
-            # 使用 sing-box 合并配置（与 singBoxMergeConfig 保持一致）
-            if [[ -f "/etc/Proxy-agent/sing-box/sing-box" ]]; then
-                /etc/Proxy-agent/sing-box/sing-box merge config.json -C /etc/Proxy-agent/sing-box/conf/config/ -D /etc/Proxy-agent/sing-box/conf/ >/dev/null 2>&1
-            fi
-        fi
-    }
-fi
 
 # ======================= 多链路分流功能 =======================
 
@@ -11158,8 +11190,9 @@ setupMultiChainInteractive() {
     local chainCount=0
     local continueAdding="y"
 
-    # 初始化多链路信息文件
-    cat <<EOF >/etc/Proxy-agent/sing-box/conf/chain_multi_info.json
+    # 初始化多链路信息文件（原子写入）
+    local __chainMultiInit
+    __chainMultiInit=$(cat <<'EOF'
 {
     "role": "entry",
     "mode": "multi_chain",
@@ -11170,6 +11203,8 @@ setupMultiChainInteractive() {
     "has_xray": false
 }
 EOF
+)
+    writeChainInfoAtomic "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" "${__chainMultiInit}" || return 1
 
     while [[ "${continueAdding}" == "y" ]]; do
         ((chainCount++))
@@ -11233,8 +11268,9 @@ setupMultiChainBatch() {
     echoContent yellow "$(t CHAIN_BATCH_HINT)"
     echoContent yellow "$(t CHAIN_BATCH_END_HINT)\n"
 
-    # 初始化多链路信息文件
-    cat <<EOF >/etc/Proxy-agent/sing-box/conf/chain_multi_info.json
+    # 初始化多链路信息文件（原子写入）
+    local __chainMultiInit
+    __chainMultiInit=$(cat <<'EOF'
 {
     "role": "entry",
     "mode": "multi_chain",
@@ -11245,6 +11281,8 @@ setupMultiChainBatch() {
     "has_xray": false
 }
 EOF
+)
+    writeChainInfoAtomic "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" "${__chainMultiInit}" || return 1
 
     local chainIndex=0
     local line
@@ -12114,7 +12152,7 @@ EOF
 
     # 合并配置
     echoContent yellow "$(t CHAIN_MERGING_SINGBOX)"
-    mergeSingBoxConfig
+    singBoxMergeConfig
 
     # 启动 sing-box
     echoContent yellow "$(t CHAIN_STARTING_SINGBOX)"
@@ -12618,7 +12656,7 @@ multiChainAdvancedMenu() {
         addSingleChainOutbound
         if [[ $? -eq 0 ]]; then
             generateMultiChainRouteConfig
-            mergeSingBoxConfig
+            singBoxMergeConfig
             reloadCore
             echoContent green " ---> 配置已更新"
         fi
@@ -12629,7 +12667,7 @@ multiChainAdvancedMenu() {
     3)
         configureMultiChainRules
         generateMultiChainRouteConfig
-        mergeSingBoxConfig
+        singBoxMergeConfig
         reloadCore
         echoContent green " ---> 配置已更新"
         ;;
@@ -12723,7 +12761,7 @@ removeMultiChainOutbound() {
 
     # 重新生成路由配置
     generateMultiChainRouteConfig
-    mergeSingBoxConfig
+    singBoxMergeConfig
     reloadCore
 
     echoContent green " ---> 链路 [${selectedChain}] 已删除"
@@ -12784,7 +12822,7 @@ setDefaultChain() {
 
     # 重新生成路由配置
     generateMultiChainRouteConfig
-    mergeSingBoxConfig
+    singBoxMergeConfig
     reloadCore
 
     echoContent green " ---> 默认链路已设置为: ${newDefault}"
@@ -12829,7 +12867,8 @@ initExternalNodeFile() {
     mkdir -p "${confDir}"
 
     if [[ ! -f "${EXTERNAL_NODE_FILE}" ]]; then
-        echo '{"nodes": []}' > "${EXTERNAL_NODE_FILE}"
+        # 原子写入，避免中断导致半写文件被下游 jq 读到
+        writeChainInfoAtomic "${EXTERNAL_NODE_FILE}" '{"nodes": []}' || return 1
         chmod 600 "${EXTERNAL_NODE_FILE}"
     fi
 }
@@ -12852,24 +12891,46 @@ getExternalNodeCount() {
 }
 
 # 添加外部节点到配置文件
+# 原子写入: mktemp + jq 返回码检查 + 结果 JSON 语法验证 + 原子 rename
+# 失败时保留原文件不变并返回 1
 addExternalNodeToFile() {
     local nodeJson="$1"
-    initExternalNodeFile
+    initExternalNodeFile || return 1
 
-    local tempFile="${EXTERNAL_NODE_FILE}.tmp"
-    jq --argjson node "${nodeJson}" '.nodes += [$node]' "${EXTERNAL_NODE_FILE}" > "${tempFile}"
-    mv "${tempFile}" "${EXTERNAL_NODE_FILE}"
+    local tempFile
+    tempFile=$(mktemp "${EXTERNAL_NODE_FILE}.XXXXXX") || return 1
+    if ! jq --argjson node "${nodeJson}" '.nodes += [$node]' "${EXTERNAL_NODE_FILE}" > "${tempFile}" 2>/dev/null; then
+        rm -f "${tempFile}"
+        echoContent red " ---> $(t CHAIN_INFO_WRITE_FAIL "${EXTERNAL_NODE_FILE}")"
+        return 1
+    fi
+    if ! jq -e . "${tempFile}" >/dev/null 2>&1; then
+        rm -f "${tempFile}"
+        echoContent red " ---> $(t CHAIN_INFO_WRITE_FAIL "${EXTERNAL_NODE_FILE}")"
+        return 1
+    fi
+    mv "${tempFile}" "${EXTERNAL_NODE_FILE}" || return 1
     chmod 600 "${EXTERNAL_NODE_FILE}"
 }
 
-# 删除外部节点
+# 删除外部节点（与 addExternalNodeToFile 同样的原子保障）
 removeExternalNodeFromFile() {
     local nodeId="$1"
-    initExternalNodeFile
+    initExternalNodeFile || return 1
 
-    local tempFile="${EXTERNAL_NODE_FILE}.tmp"
-    jq --arg id "${nodeId}" '.nodes = [.nodes[] | select(.id != $id)]' "${EXTERNAL_NODE_FILE}" > "${tempFile}"
-    mv "${tempFile}" "${EXTERNAL_NODE_FILE}"
+    local tempFile
+    tempFile=$(mktemp "${EXTERNAL_NODE_FILE}.XXXXXX") || return 1
+    if ! jq --arg id "${nodeId}" '.nodes = [.nodes[] | select(.id != $id)]' "${EXTERNAL_NODE_FILE}" > "${tempFile}" 2>/dev/null; then
+        rm -f "${tempFile}"
+        echoContent red " ---> $(t CHAIN_INFO_WRITE_FAIL "${EXTERNAL_NODE_FILE}")"
+        return 1
+    fi
+    if ! jq -e . "${tempFile}" >/dev/null 2>&1; then
+        rm -f "${tempFile}"
+        echoContent red " ---> $(t CHAIN_INFO_WRITE_FAIL "${EXTERNAL_NODE_FILE}")"
+        return 1
+    fi
+    mv "${tempFile}" "${EXTERNAL_NODE_FILE}" || return 1
     chmod 600 "${EXTERNAL_NODE_FILE}"
 }
 
@@ -13638,8 +13699,9 @@ setupExternalAsSingleExit() {
 }
 EOF
 
-    # 保存外部节点入口信息
-    cat <<EOF > "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json"
+    # 保存外部节点入口信息（原子写入）
+    local __chainEntryInfo
+    __chainEntryInfo=$(cat <<EOF
 {
     "role": "entry",
     "mode": "external_single",
@@ -13647,9 +13709,11 @@ EOF
     "external_node_name": "${nodeName}"
 }
 EOF
+)
+    writeChainInfoAtomic "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json" "${__chainEntryInfo}" || return 1
 
     # 合并配置
-    mergeSingBoxConfig
+    singBoxMergeConfig
 
     # 重启服务
     reloadCore
