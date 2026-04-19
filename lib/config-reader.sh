@@ -592,7 +592,10 @@ initConfigReaderGlobals() {
 
     if echo "${status}" | jq -e '.installed' >/dev/null 2>&1; then
         # 设置全局变量（如果它们未定义）
-        : "${coreInstallType:=$(echo "${status}" | jq -r '.coreType')}"
+        # coreKind: 1=xray-core, 2=sing-box（持久化 JSON 字段名仍是 coreType）
+        : "${coreKind:=$(echo "${status}" | jq -r '.coreType')}"
+        # 兼容层：旧名 coreInstallType 仍同步赋值，预计下一版本移除
+        coreInstallType="${coreKind}"
         : "${configPath:=$(echo "${status}" | jq -r '.configPath')}"
         : "${currentInstallProtocolType:=$(echo "${status}" | jq -r '.protocols')}"
         : "${currentHost:=$(echo "${status}" | jq -r '.host // empty')}"
