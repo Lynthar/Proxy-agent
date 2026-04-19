@@ -604,30 +604,21 @@ xrayGetTLSDomain() {
 }
 
 # 读取 Xray Reality 配置
-# 用法: eval "$(xrayGetRealityConfig "/path/to/config.json" 1)"
-#       echo $realityServerName $realityPublicKey
+# 直接写入全局变量（避免 eval 注入面）；调用方约定 realityXXX 作为输出名
+# 用法:
+#   xrayGetRealityConfig "/path/to/config.json" 1
+#   echo "${realityServerName} ${realityPublicKey}"
+# 破坏性变更：不再输出 eval 文本；旧 `eval "$(xrayGetRealityConfig ...)"` 调用改为直接调用即可
 xrayGetRealityConfig() {
     local file="$1"
     local index="${2:-1}"
 
-    local serverName publicKey privateKey target mldsa65Seed mldsa65Verify
-
-    serverName=$(jsonGetValue "${file}" ".inbounds[${index}].streamSettings.realitySettings.serverNames[0]")
-    publicKey=$(jsonGetValue "${file}" ".inbounds[${index}].streamSettings.realitySettings.publicKey")
-    privateKey=$(jsonGetValue "${file}" ".inbounds[${index}].streamSettings.realitySettings.privateKey")
-    target=$(jsonGetValue "${file}" ".inbounds[${index}].streamSettings.realitySettings.target")
-    mldsa65Seed=$(jsonGetValue "${file}" ".inbounds[${index}].streamSettings.realitySettings.mldsa65Seed")
-    mldsa65Verify=$(jsonGetValue "${file}" ".inbounds[${index}].streamSettings.realitySettings.mldsa65Verify")
-
-    # 输出为可 eval 的格式
-    cat <<EOF
-realityServerName="${serverName}"
-realityPublicKey="${publicKey}"
-realityPrivateKey="${privateKey}"
-realityTarget="${target}"
-realityMldsa65Seed="${mldsa65Seed}"
-realityMldsa65Verify="${mldsa65Verify}"
-EOF
+    realityServerName=$(jsonGetValue "${file}" ".inbounds[${index}].streamSettings.realitySettings.serverNames[0]")
+    realityPublicKey=$(jsonGetValue "${file}" ".inbounds[${index}].streamSettings.realitySettings.publicKey")
+    realityPrivateKey=$(jsonGetValue "${file}" ".inbounds[${index}].streamSettings.realitySettings.privateKey")
+    realityTarget=$(jsonGetValue "${file}" ".inbounds[${index}].streamSettings.realitySettings.target")
+    realityMldsa65Seed=$(jsonGetValue "${file}" ".inbounds[${index}].streamSettings.realitySettings.mldsa65Seed")
+    realityMldsa65Verify=$(jsonGetValue "${file}" ".inbounds[${index}].streamSettings.realitySettings.mldsa65Verify")
 }
 
 # 读取 Xray 流设置中的路径
@@ -702,24 +693,19 @@ singboxGetTLSServerName() {
 }
 
 # 读取 sing-box Reality 配置
-# 用法: eval "$(singboxGetRealityConfig "/path/to/config.json")"
+# 直接写入全局变量；输出名前缀 singboxReality*
+# 用法:
+#   singboxGetRealityConfig "/path/to/config.json" 0
+#   echo "${singboxRealityServerName}"
+# 破坏性变更：同 xrayGetRealityConfig
 singboxGetRealityConfig() {
     local file="$1"
     local index="${2:-0}"
 
-    local serverName privateKey handshakeServer handshakePort
-
-    serverName=$(jsonGetValue "${file}" ".inbounds[${index}].tls.server_name")
-    privateKey=$(jsonGetValue "${file}" ".inbounds[${index}].tls.reality.private_key")
-    handshakeServer=$(jsonGetValue "${file}" ".inbounds[${index}].tls.reality.handshake.server")
-    handshakePort=$(jsonGetValue "${file}" ".inbounds[${index}].tls.reality.handshake.server_port")
-
-    cat <<EOF
-singboxRealityServerName="${serverName}"
-singboxRealityPrivateKey="${privateKey}"
-singboxRealityHandshakeServer="${handshakeServer}"
-singboxRealityHandshakePort="${handshakePort}"
-EOF
+    singboxRealityServerName=$(jsonGetValue "${file}" ".inbounds[${index}].tls.server_name")
+    singboxRealityPrivateKey=$(jsonGetValue "${file}" ".inbounds[${index}].tls.reality.private_key")
+    singboxRealityHandshakeServer=$(jsonGetValue "${file}" ".inbounds[${index}].tls.reality.handshake.server")
+    singboxRealityHandshakePort=$(jsonGetValue "${file}" ".inbounds[${index}].tls.reality.handshake.server_port")
 }
 
 # 读取 sing-box 传输路径
@@ -732,37 +718,29 @@ singboxGetTransportPath() {
 }
 
 # 读取 Hysteria2 配置
-# 用法: eval "$(singboxGetHysteria2Config "/path/to/config.json")"
+# 直接写入全局变量；输出名前缀 hysteria2*
+# 用法:
+#   singboxGetHysteria2Config "/path/to/config.json"
+#   echo "${hysteria2Port} ${hysteria2UpMbps}"
+# 破坏性变更：不再输出 eval 文本
 singboxGetHysteria2Config() {
     local file="$1"
 
-    local port upMbps downMbps obfsPassword
-
-    port=$(jsonGetValue "${file}" ".inbounds[0].listen_port")
-    upMbps=$(jsonGetValue "${file}" ".inbounds[0].up_mbps")
-    downMbps=$(jsonGetValue "${file}" ".inbounds[0].down_mbps")
-    obfsPassword=$(jsonGetValue "${file}" ".inbounds[0].obfs.password")
-
-    cat <<EOF
-hysteria2Port="${port}"
-hysteria2UpMbps="${upMbps}"
-hysteria2DownMbps="${downMbps}"
-hysteria2ObfsPassword="${obfsPassword}"
-EOF
+    hysteria2Port=$(jsonGetValue "${file}" ".inbounds[0].listen_port")
+    hysteria2UpMbps=$(jsonGetValue "${file}" ".inbounds[0].up_mbps")
+    hysteria2DownMbps=$(jsonGetValue "${file}" ".inbounds[0].down_mbps")
+    hysteria2ObfsPassword=$(jsonGetValue "${file}" ".inbounds[0].obfs.password")
 }
 
 # 读取 TUIC 配置
-# 用法: eval "$(singboxGetTuicConfig "/path/to/config.json")"
+# 直接写入全局变量；输出名前缀 tuic*
+# 用法:
+#   singboxGetTuicConfig "/path/to/config.json"
+#   echo "${tuicPort} ${tuicAlgorithm}"
+# 破坏性变更：不再输出 eval 文本
 singboxGetTuicConfig() {
     local file="$1"
 
-    local port algorithm
-
-    port=$(jsonGetValue "${file}" ".inbounds[0].listen_port")
-    algorithm=$(jsonGetValue "${file}" ".inbounds[0].congestion_control")
-
-    cat <<EOF
-tuicPort="${port}"
-tuicAlgorithm="${algorithm}"
-EOF
+    tuicPort=$(jsonGetValue "${file}" ".inbounds[0].listen_port")
+    tuicAlgorithm=$(jsonGetValue "${file}" ".inbounds[0].congestion_control")
 }
