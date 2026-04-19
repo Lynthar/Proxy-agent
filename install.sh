@@ -951,7 +951,7 @@ initVar() {
     localIP=
 
     # 定时任务执行任务名称 RenewTLS-更新证书 UpdateGeo-更新geo文件
-    cronName=$1
+    cronName=${1:-}
 
     # tls安装失败后尝试的次数
     installTLSCount=
@@ -1564,7 +1564,7 @@ allowPort() {
 # 获取公网IP
 getPublicIP() {
     local type=4
-    if [[ -n "$1" ]]; then
+    if [[ -n "${1:-}" ]]; then
         type=$1
     fi
     if [[ -n "${currentHost}" && -z "$1" ]] && [[ "${singBoxVLESSRealityVisionServerName}" == "${currentHost}" || "${singBoxVLESSRealityGRPCServerName}" == "${currentHost}" || "${xrayVLESSRealityServerName}" == "${currentHost}" ]]; then
@@ -1856,7 +1856,7 @@ cleanUp() {
         rm -rf /etc/Proxy-agent/sing-box/conf/config/* >/dev/null 2>&1
     fi
 }
-initVar "$1"
+initVar "${1:-}"
 checkSystem
 checkCPUVendor
 
@@ -2700,7 +2700,7 @@ customPortFunction() {
 
 # 检测端口是否占用
 checkPort() {
-    if [[ -n "$1" ]] && lsof -i "tcp:$1" | grep -q LISTEN; then
+    if [[ -n "${1:-}" ]] && lsof -i "tcp:$1" | grep -q LISTEN; then
         echoContent red "\n ---> $1端口被占用，请手动关闭后安装\n"
         lsof -i "tcp:$1" | grep LISTEN
         exit 1
@@ -2899,7 +2899,7 @@ randomNum() {
 }
 # Nginx伪装博客
 nginxBlog() {
-    if [[ -n "$1" ]]; then
+    if [[ -n "${1:-}" ]]; then
         echoContent skyBlue "\n进度 $1/${totalProgress} : 添加伪装站点"
     else
         echoContent yellow "\n开始添加伪装站点"
@@ -3413,7 +3413,7 @@ updateXray() {
     readInstallType
 
     if [[ -z "${coreKind}" || "${coreKind}" != "1" ]]; then
-        if [[ -n "$1" ]]; then
+        if [[ -n "${1:-}" ]]; then
             version=$1
         else
             version=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=5" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
@@ -3438,13 +3438,13 @@ updateXray() {
 
         echoContent green " ---> 最新版本:${remoteVersion}"
 
-        if [[ -n "$1" ]]; then
+        if [[ -n "${1:-}" ]]; then
             version=$1
         else
             version=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=10" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
         fi
 
-        if [[ -n "$1" ]]; then
+        if [[ -n "${1:-}" ]]; then
             read -r -p "回退版本为${version}，是否继续？[y/n]:" rollbackXrayStatus
             if [[ "${rollbackXrayStatus}" == "y" ]]; then
                 echoContent green " ---> 当前Xray-core版本:$(/etc/Proxy-agent/xray/xray --version | awk '{print $2}' | head -1)"
@@ -4975,7 +4975,7 @@ EOF
 	]
 }
 EOF
-    elif [[ -z "$3" ]]; then
+    elif [[ -z "${3:-}" ]]; then
         rm /etc/Proxy-agent/xray/conf/04_trojan_TCP_inbounds.json >/dev/null 2>&1
     fi
 
@@ -5006,7 +5006,7 @@ EOF
 ]
 }
 EOF
-    elif [[ -z "$3" ]]; then
+    elif [[ -z "${3:-}" ]]; then
         rm /etc/Proxy-agent/xray/conf/03_VLESS_WS_inbounds.json >/dev/null 2>&1
     fi
     # VLESS_Reality_XHTTP_TLS
@@ -5059,7 +5059,7 @@ EOF
 ]
 }
 EOF
-    elif [[ -z "$3" ]]; then
+    elif [[ -z "${3:-}" ]]; then
         rm /etc/Proxy-agent/xray/conf/12_VLESS_XHTTP_inbounds.json >/dev/null 2>&1
     fi
     if echo "${selectCustomInstallType}" | grep -q ",3," || [[ "$1" == "all" ]]; then
@@ -5087,12 +5087,12 @@ EOF
     ]
 }
 EOF
-    elif [[ -z "$3" ]]; then
+    elif [[ -z "${3:-}" ]]; then
         rm /etc/Proxy-agent/xray/conf/05_VMess_WS_inbounds.json >/dev/null 2>&1
     fi
     # VLESS_gRPC - 已移除，推荐使用XHTTP
     # gRPC协议已废弃，清理旧配置文件
-    if [[ -z "$3" ]]; then
+    if [[ -z "${3:-}" ]]; then
         rm /etc/Proxy-agent/xray/conf/06_VLESS_gRPC_inbounds.json >/dev/null 2>&1
     fi
 
@@ -5133,7 +5133,7 @@ EOF
     ]
 }
 EOF
-    elif [[ -z "$3" ]]; then
+    elif [[ -z "${3:-}" ]]; then
         rm /etc/Proxy-agent/xray/conf/02_VLESS_TCP_inbounds.json >/dev/null 2>&1
     fi
 
@@ -5228,12 +5228,12 @@ EOF
 }
 EOF
         # VLESS_Reality_gRPC - 已移除，推荐使用XHTTP
-    elif [[ -z "$3" ]]; then
+    elif [[ -z "${3:-}" ]]; then
         rm /etc/Proxy-agent/xray/conf/07_VLESS_vision_reality_inbounds.json >/dev/null 2>&1
         rm /etc/Proxy-agent/xray/conf/08_VLESS_vision_gRPC_inbounds.json >/dev/null 2>&1
     fi
     installSniffing
-    if [[ -z "$3" ]]; then
+    if [[ -z "${3:-}" ]]; then
         removeXrayOutbound wireguard_out_IPv4_route
         removeXrayOutbound wireguard_out_IPv6_route
         removeXrayOutbound wireguard_outbound
@@ -5347,7 +5347,7 @@ initSingBoxConfig() {
     ]
 }
 EOF
-    elif [[ -z "$3" ]]; then
+    elif [[ -z "${3:-}" ]]; then
         rm /etc/Proxy-agent/sing-box/conf/config/02_VLESS_TCP_inbounds.json >/dev/null 2>&1
     fi
 
@@ -5388,7 +5388,7 @@ EOF
     ]
 }
 EOF
-    elif [[ -z "$3" ]]; then
+    elif [[ -z "${3:-}" ]]; then
         rm /etc/Proxy-agent/sing-box/conf/config/03_VLESS_WS_inbounds.json >/dev/null 2>&1
     fi
 
@@ -5429,7 +5429,7 @@ EOF
     ]
 }
 EOF
-    elif [[ -z "$3" ]]; then
+    elif [[ -z "${3:-}" ]]; then
         rm /etc/Proxy-agent/sing-box/conf/config/05_VMess_WS_inbounds.json >/dev/null 2>&1
     fi
 
@@ -5472,13 +5472,13 @@ EOF
   ]
 }
 EOF
-    elif [[ -z "$3" ]]; then
+    elif [[ -z "${3:-}" ]]; then
         rm /etc/Proxy-agent/sing-box/conf/config/07_VLESS_vision_reality_inbounds.json >/dev/null 2>&1
     fi
 
     # VLESS+Reality+gRPC - 已移除，推荐使用XHTTP
     # 清理旧配置文件
-    if [[ -z "$3" ]]; then
+    if [[ -z "${3:-}" ]]; then
         rm /etc/Proxy-agent/sing-box/conf/config/08_VLESS_vision_gRPC_inbounds.json >/dev/null 2>&1
     fi
 
@@ -5522,7 +5522,7 @@ EOF
     ]
 }
 EOF
-    elif [[ -z "$3" ]]; then
+    elif [[ -z "${3:-}" ]]; then
         rm /etc/Proxy-agent/sing-box/conf/config/06_hysteria2_inbounds.json >/dev/null 2>&1
     fi
 
@@ -5550,7 +5550,7 @@ EOF
     ]
 }
 EOF
-    elif [[ -z "$3" ]]; then
+    elif [[ -z "${3:-}" ]]; then
         rm /etc/Proxy-agent/sing-box/conf/config/04_trojan_TCP_inbounds.json >/dev/null 2>&1
     fi
 
@@ -5587,7 +5587,7 @@ EOF
     ]
 }
 EOF
-    elif [[ -z "$3" ]]; then
+    elif [[ -z "${3:-}" ]]; then
         rm /etc/Proxy-agent/sing-box/conf/config/09_tuic_inbounds.json >/dev/null 2>&1
     fi
 
@@ -5616,7 +5616,7 @@ EOF
     ]
 }
 EOF
-    elif [[ -z "$3" ]]; then
+    elif [[ -z "${3:-}" ]]; then
         rm /etc/Proxy-agent/sing-box/conf/config/10_naive_inbounds.json >/dev/null 2>&1
     fi
     if echo "${selectCustomInstallType}" | grep -q ",11," || [[ "$1" == "all" ]]; then
@@ -5651,7 +5651,7 @@ EOF
     ]
 }
 EOF
-    elif [[ -z "$3" ]]; then
+    elif [[ -z "${3:-}" ]]; then
         rm /etc/Proxy-agent/sing-box/conf/config/11_VMess_HTTPUpgrade_inbounds.json >/dev/null 2>&1
     fi
 
@@ -5680,7 +5680,7 @@ EOF
     ]
 }
 EOF
-    elif [[ -z "$3" ]]; then
+    elif [[ -z "${3:-}" ]]; then
         rm /etc/Proxy-agent/sing-box/conf/config/13_anytls_inbounds.json >/dev/null 2>&1
     fi
 
@@ -5709,11 +5709,11 @@ EOF
 }
 EOF
         echoContent green " ---> Shadowsocks 2022配置完成"
-    elif [[ -z "$3" ]]; then
+    elif [[ -z "${3:-}" ]]; then
         rm /etc/Proxy-agent/sing-box/conf/config/14_ss2022_inbounds.json >/dev/null 2>&1
     fi
 
-    if [[ -z "$3" ]]; then
+    if [[ -z "${3:-}" ]]; then
         removeSingBoxConfig wireguard_endpoints_IPv4_route
         removeSingBoxConfig wireguard_endpoints_IPv6_route
         removeSingBoxConfig wireguard_endpoints_IPv4

@@ -20,7 +20,7 @@ _detect_language() {
     local langFile="/etc/Proxy-agent/lang_pref"
 
     # 优先级1: 环境变量 V2RAY_LANG
-    if [[ -n "${V2RAY_LANG}" ]]; then
+    if [[ -n "${V2RAY_LANG:-}" ]]; then
         lang="${V2RAY_LANG}"
     # 优先级2: 持久化语言配置文件
     elif [[ -f "${langFile}" ]]; then
