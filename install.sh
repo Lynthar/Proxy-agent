@@ -406,6 +406,68 @@ isValidDomain() {
     return 0
 }
 
+# 读取并校验端口输入（统一入口，杜绝"先动手再校验"）
+# 用法:
+#   readValidPort "端口: " port                          必输，默认范围 1-65535
+#   readValidPort "端口: " port 443                      回车采用 443
+#   readValidPort "端口: " port "RANDOM" 10000 30000      回车随机生成
+#   readValidPort "起点: " portStart "" 30000 40000        必输，限定范围
+# 成功将值写入 <out-var> 返回 0；空 + 无 default 或越界返回 1，错误经 echoContent + i18n
+readValidPort() {
+    local prompt="$1"
+    local -n __rvp_out="$2"
+    local default="${3:-}"
+    local min="${4:-1}"
+    local max="${5:-65535}"
+    local __rvp_input
+    read -r -p "${prompt}" __rvp_input
+    if [[ -z "${__rvp_input}" ]]; then
+        if [[ "${default}" == "RANDOM" ]]; then
+            __rvp_out=$(randomNum "${min}" "${max}")
+            return 0
+        elif [[ -n "${default}" ]]; then
+            __rvp_out="${default}"
+            return 0
+        fi
+        echoContent red " ---> $(t ERR_PORT_EMPTY)"
+        return 1
+    fi
+    # 拒绝前导 0 / 0 本身 / 非数字；再做范围检查
+    if [[ ! "${__rvp_input}" =~ ^[1-9][0-9]*$ ]] || (( __rvp_input < min || __rvp_input > max )); then
+        echoContent red " ---> $(t ERR_PORT_RANGE "${min}" "${max}")"
+        return 1
+    fi
+    __rvp_out="${__rvp_input}"
+    return 0
+}
+
+# 读取并校验域名输入
+# 用法:
+#   readValidDomain "域名: " domain                       必输
+#   readValidDomain "域名: " domain "${currentHost}"        回车沿用旧值
+# 域名校验复用本文件的 isValidDomain（含命令注入字符过滤）
+readValidDomain() {
+    local prompt="$1"
+    local -n __rvd_out="$2"
+    local default="${3:-}"
+    local __rvd_input
+    read -r -p "${prompt}" __rvd_input
+    if [[ -z "${__rvd_input}" ]]; then
+        if [[ -n "${default}" ]]; then
+            __rvd_out="${default}"
+            return 0
+        fi
+        echoContent red " ---> $(t ERR_DOMAIN_EMPTY)"
+        return 1
+    fi
+    if ! isValidDomain "${__rvd_input}"; then
+        echoContent red " ---> $(t ERR_DOMAIN_INVALID)"
+        return 1
+    fi
+    __rvd_out="${__rvd_input}"
+    return 0
+}
+
 # URL/重定向地址验证函数 - 防止命令注入
 isValidRedirectUrl() {
     local url="$1"
@@ -2215,6 +2277,7 @@ EOF
 initTLSNginxConfig() {
     handleNginx stop
     echoContent skyBlue "\n进度  $1/${totalProgress} : 初始化Nginx申请证书配置"
+    # 域名采集：复用 readValidDomain 做"输入即校验"，失败统一回到本函数自身重试
     if [[ -n "${currentHost}" && -z "${lastInstallationConfig}" ]]; then
         echo
         read -r -p "读取到上次安装记录，是否使用上次安装时的域名 ？[y/n]:" historyDomainStatus
@@ -2224,31 +2287,35 @@ initTLSNginxConfig() {
         else
             echo
             echoContent yellow "请输入要配置的域名 例: example.com --->"
-            read -r -p "域名:" domain
+            if ! readValidDomain "域名:" domain; then
+                initTLSNginxConfig 3
+                return
+            fi
         fi
     elif [[ -n "${currentHost}" && -n "${lastInstallationConfig}" ]]; then
         domain=${currentHost}
     else
         echo
         echoContent yellow "请输入要配置的域名 例: example.com --->"
-        read -r -p "域名:" domain
+        if ! readValidDomain "域名:" domain; then
+            initTLSNginxConfig 3
+            return
+        fi
     fi
 
-    if [[ -z ${domain} ]]; then
-        echoContent red "  域名不可为空--->"
-        initTLSNginxConfig 3
-    elif ! isValidDomain "${domain}"; then
+    # 沿用历史域名时再做一次校验（防止历史值被外部篡改）
+    if ! isValidDomain "${domain}"; then
         echoContent red "  域名格式无效或包含不安全字符--->"
-        echoContent yellow "  域名只能包含字母、数字、连字符和点"
         initTLSNginxConfig 3
-    else
-        dnsTLSDomain=$(echo "${domain}" | awk -F "." '{$1="";print $0}' | sed 's/^[[:space:]]*//' | sed 's/ /./g')
-        if [[ "${selectCoreType}" == "1" ]]; then
-            customPortFunction
-        fi
-        # 修改配置
-        handleNginx stop
+        return
     fi
+
+    dnsTLSDomain=$(echo "${domain}" | awk -F "." '{$1="";print $0}' | sed 's/^[[:space:]]*//' | sed 's/ /./g')
+    if [[ "${selectCoreType}" == "1" ]]; then
+        customPortFunction
+    fi
+    # 修改配置
+    handleNginx stop
 }
 
 # 删除nginx默认的配置
@@ -2600,38 +2667,24 @@ customPortFunction() {
 
         if [[ -n "${btDomain}" ]]; then
             echoContent yellow "请输入端口[不可与BT Panel/1Panel端口相同，回车随机]"
-            read -r -p "端口:" port
-            if [[ -z "${port}" ]]; then
-                port=$(randomNum 10000 30000)
-            fi
+            # 回车随机生成 10000-30000；输入需为合法端口
+            readValidPort "端口:" port "RANDOM" 10000 30000 || exit 1
         else
             echo
             echoContent yellow "请输入端口[默认: 443]，可自定义端口[回车使用默认]"
-            read -r -p "端口:" port
-            if [[ -z "${port}" ]]; then
-                port=443
-            fi
+            # 回车默认 443；输入需为合法端口
+            readValidPort "端口:" port 443 || exit 1
             if [[ "${port}" == "${xrayVLESSRealityPort}" ]]; then
                 handleXray stop
             fi
         fi
 
-        if [[ -n "${port}" ]]; then
-            if ((port >= 1 && port <= 65535)); then
-                allowPort "${port}"
-                echoContent yellow "\n ---> 端口: ${port}"
-                if [[ -z "${btDomain}" ]]; then
-                    checkDNSIP "${domain}"
-                    removeNginxDefaultConf
-                    checkPortOpen "${port}" "${domain}"
-                fi
-            else
-                echoContent red " ---> 端口输入错误"
-                exit 1
-            fi
-        else
-            echoContent red " ---> 端口不可为空"
-            exit 1
+        allowPort "${port}"
+        echoContent yellow "\n ---> 端口: ${port}"
+        if [[ -z "${btDomain}" ]]; then
+            checkDNSIP "${domain}"
+            removeNginxDefaultConf
+            checkPortOpen "${port}" "${domain}"
         fi
     fi
 }
@@ -2796,6 +2849,13 @@ randomPathFunction() {
             initRandomPath
             currentPath=${customPath}
         else
+            # 格式校验：URL path 片段只允许字母数字与 -_，长度 1-32
+            # customPath 会嵌入 JSON（.path）与 Nginx location、fallback path 多处字符串，
+            # 禁用引号/斜杠/空白/jq-shell 元字符以阻断 JSON 破坏与下游注入
+            if ! [[ "${customPath}" =~ ^[A-Za-z0-9_-]{1,32}$ ]]; then
+                echoContent red " ---> 路径格式非法，仅允许字母数字及 _ -，长度 1-32"
+                exit 1
+            fi
             if [[ "${customPath: -2}" == "ws" ]]; then
                 echo
                 echoContent red " ---> 自定义path结尾不可用ws结尾，否则无法区分分流路径"
@@ -3883,17 +3943,11 @@ initHysteriaPort() {
 
     if [[ -z "${hysteriaPort}" ]]; then
         echoContent yellow "请输入Hysteria端口[回车随机10000-30000]，不可与其他服务重复"
-        read -r -p "端口:" hysteriaPort
-        if [[ -z "${hysteriaPort}" ]]; then
-            hysteriaPort=$(randomNum 10000 30000)
+        # 回车随机；非法/越界 → 重新提示
+        if ! readValidPort "端口:" hysteriaPort "RANDOM" 10000 30000; then
+            initHysteriaPort "$2"
+            return
         fi
-    fi
-    if [[ -z ${hysteriaPort} ]]; then
-        echoContent red " ---> 端口不可为空"
-        initHysteriaPort "$2"
-    elif ((hysteriaPort < 1 || hysteriaPort > 65535)); then
-        echoContent red " ---> 端口不合法"
-        initHysteriaPort "$2"
     fi
     allowPort "${hysteriaPort}"
     allowPort "${hysteriaPort}" "udp"
@@ -3944,10 +3998,8 @@ initSS2022Config() {
 
     if [[ -z "${ss2022Port}" ]]; then
         echoContent yellow "请输入Shadowsocks 2022端口[回车随机10000-30000]"
-        read -r -p "端口:" ss2022Port
-        if [[ -z "${ss2022Port}" ]]; then
-            ss2022Port=$(randomNum 10000 30000)
-        fi
+        # 回车随机；非法直接退出（无递归调用方）
+        readValidPort "端口:" ss2022Port "RANDOM" 10000 30000 || exit 1
         echoContent green "\n ---> 端口: ${ss2022Port}"
     fi
 
@@ -4763,18 +4815,11 @@ initSingBoxPort() {
         echo "${port}"
     fi
     if [[ -z "${port}" ]]; then
-        read -r -p '请输入自定义端口[需合法]，端口不可重复，[回车]随机端口:' port
-        if [[ -z "${port}" ]]; then
-            port=$(randomNum 10000 60000)
-        fi
-        if ((port >= 1 && port <= 65535)); then
-            allowPort "${port}"
-            allowPort "${port}" "udp"
-            echo "${port}"
-        else
-            echoContent red " ---> 端口输入错误"
-            exit 1
-        fi
+        # 回车随机 10000-60000；输入需合法
+        readValidPort '请输入自定义端口[需合法]，端口不可重复，[回车]随机端口:' port "RANDOM" 10000 60000 || exit 1
+        allowPort "${port}"
+        allowPort "${port}" "udp"
+        echo "${port}"
     fi
 }
 
@@ -6746,8 +6791,14 @@ EOF
     elif [[ "${selectNewPortType}" == "3" ]]; then
         find ${configPath} -name "*dokodemodoor*" | grep -v "hysteria" | awk -F "[c][o][n][f][/]" '{print $2}' | awk -F "[_]" '{print $4}' | awk -F "[.]" '{print ""NR""":"$1}'
         read -r -p "请输入要删除的端口编号:" portIndex
+        # 编号必须是正整数：非法输入拦在 grep 模式之外，避免 regex 元字符误匹配
+        if ! [[ "${portIndex}" =~ ^[1-9][0-9]*$ ]]; then
+            echoContent red "\n ---> 编号必须为正整数"
+            addCorePort
+            return
+        fi
         local dokoConfig
-        dokoConfig=$(find ${configPath} -name "*dokodemodoor*" | grep -v "hysteria" | awk -F "[c][o][n][f][/]" '{print $2}' | awk -F "[_]" '{print $4}' | awk -F "[.]" '{print ""NR""":"$1}' | grep "${portIndex}:")
+        dokoConfig=$(find ${configPath} -name "*dokodemodoor*" | grep -v "hysteria" | awk -F "[c][o][n][f][/]" '{print $2}' | awk -F "[_]" '{print $4}' | awk -F "[.]" '{print ""NR""":"$1}' | grep -F "${portIndex}:")
         if [[ -n "${dokoConfig}" ]]; then
             rm "${configPath}02_dokodemodoor_inbounds_$(echo "${dokoConfig}" | awk -F "[:]" '{print $2}').json"
             local hysteriaDokodemodoorFilePath=
@@ -6903,6 +6954,12 @@ customUUID() {
         echoContent yellow "uuid：${currentCustomUUID}\n"
 
     else
+        # 格式校验：UUID v1-v5 通用 8-4-4-4-12 十六进制
+        # 防止特殊字符进入 JSON 构造 / jq 过滤器 / grep 模式等下游
+        if ! [[ "${currentCustomUUID}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            echoContent red " ---> UUID 格式非法，需 8-4-4-4-12 位十六进制（例：550e8400-e29b-41d4-a716-446655440000）"
+            exit 1
+        fi
         local checkUUID=
         if [[ "${coreInstallType}" == "1" ]]; then
             checkUUID=$(jq -r --arg currentUUID "$currentCustomUUID" ".inbounds[0].settings.clients[] | select(.uuid | index(\$currentUUID) != null) | .name" ${configPath}${frontingType}.json)
@@ -6925,6 +6982,13 @@ customUserEmail() {
         currentCustomEmail="${currentCustomUUID}"
         echoContent yellow "email: ${currentCustomEmail}\n"
     else
+        # 格式校验：只允许字母数字与 . _ @ + -，长度 1-64
+        # 此值下游会嵌入 JSON 字符串（user.email/user.name）并经 jq 过滤器处理；
+        # 禁用 " \ 空白与 shell/jq 元字符可阻断注入与 JSON 破坏
+        if ! [[ "${currentCustomEmail}" =~ ^[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}$ ]]; then
+            echoContent red " ---> email 格式非法，仅允许字母数字及 . _ @ + -，长度 1-64"
+            exit 1
+        fi
         local checkEmail=
         if [[ "${coreInstallType}" == "1" ]]; then
             local frontingTypeConfig="${frontingType}"
@@ -7894,8 +7958,13 @@ checkLog() {
 
     updateRealityLogShow() {
         if [[ -n ${realityStatus} ]]; then
+            # 仅允许布尔字面量传入，避免 $1 拼接进 jq 过滤器；随后以 --argjson 送值
+            if [[ "${1}" != "true" && "${1}" != "false" ]]; then
+                echoContent red " ---> updateRealityLogShow: invalid arg '${1}'"
+                return 1
+            fi
             local vlessVisionRealityInbounds
-            vlessVisionRealityInbounds=$(jq -r ".inbounds[0].streamSettings.realitySettings.show=${1}" ${configPath}07_VLESS_vision_reality_inbounds.json)
+            vlessVisionRealityInbounds=$(jq -r --argjson show "${1}" '.inbounds[0].streamSettings.realitySettings.show = $show' ${configPath}07_VLESS_vision_reality_inbounds.json)
             echo "${vlessVisionRealityInbounds}" | jq . >${configPath}07_VLESS_vision_reality_inbounds.json
         fi
     }
@@ -8354,47 +8423,59 @@ blacklist() {
     reloadCore
 }
 # 添加routing配置
+# 全量使用 jq --arg/--argjson 传值，避免 tag/domain 拼接进过滤器
 addXrayRouting() {
 
-    local tag=$1    # warp-socks
-    local type=$2   # outboundTag/inboundTag
-    local domain=$3 # 域名
+    local tag=$1    # warp-socks 等内部 outboundTag
+    local type=$2   # outboundTag/inboundTag（作为 jq key 名称）
+    local domain=$3 # 域名列表（逗号分隔）
 
     if [[ -z "${tag}" || -z "${type}" || -z "${domain}" ]]; then
         echoContent red " ---> 参数错误"
         exit 1
     fi
+    # tag 形式校验：字母数字 _ - 长度 1-64，防止嵌入 JSON / jq 时破坏结构
+    if ! [[ "${tag}" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then
+        echoContent red " ---> addXrayRouting: tag 非法 '${tag}'"
+        exit 1
+    fi
+    # type 必须是已知 jq key 之一（后续会作为 .[$k] 访问），白名单防注入
+    case "${type}" in
+        outboundTag|inboundTag) ;;
+        *)
+            echoContent red " ---> addXrayRouting: type 非法 '${type}'"
+            exit 1
+            ;;
+    esac
 
     local routingRule=
     if [[ ! -f "${configPath}09_routing.json" ]]; then
-        cat <<EOF >${configPath}09_routing.json
-{
-    "routing":{
-        "type": "field",
-        "rules": [
-            {
-                "type": "field",
-                "domain": [
-                ],
-            "outboundTag": "${tag}"
-          }
-        ]
-  }
-}
-EOF
+        # 初始骨架：用 jq -n 安全构造
+        jq -n --arg tag "${tag}" \
+            '{routing:{type:"field",rules:[{type:"field",domain:[],outboundTag:$tag}]}}' \
+            > ${configPath}09_routing.json
     fi
     local routingRule=
-    routingRule=$(jq -r ".routing.rules[]|select(.outboundTag==\"${tag}\" and (.protocol == null))" ${configPath}09_routing.json)
+    # outboundTag 是固定 key，tag 作为值用 --arg
+    routingRule=$(jq -r --arg tag "${tag}" \
+        '.routing.rules[]|select(.outboundTag==$tag and (.protocol == null))' \
+        ${configPath}09_routing.json)
 
     if [[ -z "${routingRule}" ]]; then
-        routingRule="{\"type\": \"field\",\"domain\": [],\"outboundTag\": \"${tag}\"}"
+        routingRule=$(jq -n --arg tag "${tag}" \
+            '{type:"field",domain:[],outboundTag:$tag}')
     fi
 
     while read -r line; do
         if [[ -z "${line}" ]]; then
             continue
         fi
-        if echo "${routingRule}" | grep -q "${line}"; then
+        # 放行一般 geosite 标识（字母数字 _ - .），拒绝其他（避免 URL/过滤器污染）
+        if ! [[ "${line}" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
+            echoContent yellow " ---> 跳过非法域名条目: ${line}"
+            continue
+        fi
+        if echo "${routingRule}" | grep -qF "${line}"; then
             echoContent yellow " ---> ${line}已存在，跳过"
         else
             local geositeStatus
@@ -8405,9 +8486,9 @@ EOF
             # 如果API返回空(文件存在)，使用geosite格式
             # 如果API失败或返回错误消息，回退到domain格式
             if [[ -z "${geositeStatus}" ]]; then
-                routingRule=$(echo "${routingRule}" | jq -r '.domain += ["geosite:'"${line}"'"]')
+                routingRule=$(echo "${routingRule}" | jq -r --arg line "${line}" '.domain += ["geosite:" + $line]')
             else
-                routingRule=$(echo "${routingRule}" | jq -r '.domain += ["domain:'"${line}"'"]')
+                routingRule=$(echo "${routingRule}" | jq -r --arg line "${line}" '.domain += ["domain:" + $line]')
             fi
         fi
     done < <(echo "${domain}" | tr ',' '\n')
@@ -8415,11 +8496,12 @@ EOF
     unInstallRouting "${tag}" "${type}"
     if ! grep -q "gstatic.com" ${configPath}09_routing.json && [[ "${tag}" == "blackhole_out" ]]; then
         local routing=
-        routing=$(jq -r ".routing.rules += [{\"type\": \"field\",\"domain\": [\"gstatic.com\"],\"outboundTag\": \"direct\"}]" ${configPath}09_routing.json)
+        routing=$(jq -r '.routing.rules += [{"type":"field","domain":["gstatic.com"],"outboundTag":"direct"}]' ${configPath}09_routing.json)
         echo "${routing}" | jq . >${configPath}09_routing.json
     fi
 
-    routing=$(jq -r ".routing.rules += [${routingRule}]" ${configPath}09_routing.json)
+    # routingRule 本身是 jq 产物的合法 JSON，改用 --argjson 明示
+    routing=$(jq -r --argjson rule "${routingRule}" '.routing.rules += [$rule]' ${configPath}09_routing.json)
     echo "${routing}" | jq . >${configPath}09_routing.json
 }
 # 根据tag卸载Routing
@@ -8428,13 +8510,26 @@ unInstallRouting() {
     local type=$2
     local protocol=$3
 
+    # type 必须是已知 jq key；用 .[$k] 动态访问，tag/protocol 作值传入
+    case "${type}" in
+        outboundTag|inboundTag) ;;
+        *)
+            echoContent red " ---> unInstallRouting: type 非法 '${type}'"
+            return 1
+            ;;
+    esac
+
     if [[ -f "${configPath}09_routing.json" ]]; then
         local routing=
         if [[ -n "${protocol}" ]]; then
-            routing=$(jq -r "del(.routing.rules[] | select(.${type} == \"${tag}\" and (.protocol | index(\"${protocol}\"))))" ${configPath}09_routing.json)
+            routing=$(jq -r --arg key "${type}" --arg tag "${tag}" --arg proto "${protocol}" \
+                'del(.routing.rules[] | select(.[$key] == $tag and (.protocol | index($proto))))' \
+                ${configPath}09_routing.json)
             echo "${routing}" | jq . >${configPath}09_routing.json
         else
-            routing=$(jq -r "del(.routing.rules[] | select(.${type} == \"${tag}\" and (.protocol == null )))" ${configPath}09_routing.json)
+            routing=$(jq -r --arg key "${type}" --arg tag "${tag}" \
+                'del(.routing.rules[] | select(.[$key] == $tag and (.protocol == null )))' \
+                ${configPath}09_routing.json)
             echo "${routing}" | jq . >${configPath}09_routing.json
         fi
     fi
