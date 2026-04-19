@@ -26,7 +26,7 @@
 
 - **语言**：Bash 4+
 - **依赖**：`jq` · `curl` · `wget` · `openssl`
-- **支持核心**：Xray-core · sing-box
+- **支持核心**：Xray-core · sing-box（最低 1.11，由 `lib/constants.sh::SINGBOX_MIN_VERSION` 锁定，`installSingBox` 安装后会校验，低版本拒绝继续）
 - **支持系统**：Debian / Ubuntu · CentOS / RHEL · Alpine Linux
 
 ### 1.2 架构原则
@@ -407,6 +407,28 @@ singBoxMergeConfig        # 调 sing-box merge，合并 conf/config/*.json 到 c
 ```
 
 **sing-box 服务启动前必须合并**：`handleSingBox start` 已自动先调 `singBoxMergeConfig` 再启动。
+
+### 6.5 sing-box 域名嗅探（1.11+）
+
+sing-box **1.11** 引入路由级 `action` 字段（参见官方迁移文档 <https://sing-box.sagernet.org/migration/>），1.12 移除了 inbound 上的 `sniff` / `sniff_override_destination` / `domain_strategy` 字段。本脚本统一使用路由级实现，与上游 mack-a/v2ray-agent v3.5.10 同款：
+
+```jsonc
+// inbound 不再带 sniff
+{"type":"shadowsocks","tag":"chain_inbound","listen":"::","listen_port":12345, "method":"...","password":"..."}
+
+// 路由顺序：sniff → resolve → 业务规则 → final
+// 显式绑定 inbound + timeout 1s（上游模式 / 官方推荐）
+{"route":{"rules":[
+    {"inbound":"chain_bridge_in","action":"sniff","timeout":"1s"},
+    {"inbound":"chain_bridge_in","action":"resolve","strategy":"prefer_ipv4"},
+    {"inbound":["chain_bridge_in"],"outbound":"chain_outbound"}
+],"final":"chain_outbound"}}
+```
+
+约定：
+- `{"inbound":"<tag>","action":"sniff","timeout":"1s"}` 嗅探指定 inbound 的连接，等价于旧 inbound 的 `sniff: true` + `sniff_override_destination: true`
+- `{"inbound":"<tag>","action":"resolve","strategy":"<策略>"}` 用嗅探到的域名重新解析；替代旧 inbound 的 `domain_strategy`，可选策略：`prefer_ipv4` / `prefer_ipv6` / `ipv4_only` / `ipv6_only`
+- 中继节点不重解析（沿用上游已嗅探到的域名），只 prepend sniff 即可
 
 ### 6.5 链式代理状态文件
 

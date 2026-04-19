@@ -3208,6 +3208,18 @@ installSingBox() {
             mv "/etc/Proxy-agent/sing-box/sing-box-${version/v/}${singBoxCoreCPUVendor}/sing-box" /etc/Proxy-agent/sing-box/sing-box
             rm -rf /etc/Proxy-agent/sing-box/sing-box-*
             chmod 655 /etc/Proxy-agent/sing-box/sing-box
+
+            # 版本守门：本脚本配置使用 1.11+ 引入的路由级 sniff/resolve action
+            # 参见 https://sing-box.sagernet.org/migration/#migrate-legacy-inbound-fields-to-rule-actions
+            # 1.11 以下不识别 action 字段，会启动失败；1.12+ 必须用 action（inbound 级 sniff 已移除）
+            local installedSingBoxVer
+            installedSingBoxVer=$(/etc/Proxy-agent/sing-box/sing-box version 2>/dev/null | head -1 | awk '{print $3}')
+            if [[ -n "${installedSingBoxVer}" ]] && ! versionGreaterOrEqual "${installedSingBoxVer}" "${SINGBOX_MIN_VERSION}"; then
+                echoContent red " ---> 已安装的 sing-box 版本 (${installedSingBoxVer}) 低于本脚本要求的最低版本 ${SINGBOX_MIN_VERSION}"
+                echoContent yellow " ---> 路由级 sniff/resolve action 在 sing-box 1.11 引入；旧版本会启动失败"
+                echoContent yellow " ---> 请安装 ≥ ${SINGBOX_MIN_VERSION} 版本后重试"
+                exit 1
+            fi
         fi
     else
         echoContent green " ---> 当前版本:v$(/etc/Proxy-agent/sing-box/sing-box version | grep "sing-box version" | awk '{print $3}')"
@@ -9329,9 +9341,8 @@ setupChainExit() {
     echoContent green " ---> 网络策略: ${strategyDesc}"
 
     # 创建入站配置
-    # 启用 sniff 嗅探 TLS/HTTP 域名，配合 domain_strategy 进行智能路由
-    if [[ -n "${domainStrategy}" ]]; then
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
+    # sniff/resolve 通过路由级 action 实现（见下方 chain_route.json），inbound 不再带 sniff 字段
+    cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
 {
     "inbounds": [
         {
@@ -9343,36 +9354,11 @@ setupChainExit() {
             "password": "${chainKey}",
             "multiplex": {
                 "enabled": true
-            },
-            "sniff": true,
-            "sniff_override_destination": true,
-            "domain_strategy": "${domainStrategy}"
+            }
         }
     ]
 }
 EOF
-    else
-        # 双栈自动模式：不设置 domain_strategy
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
-{
-    "inbounds": [
-        {
-            "type": "shadowsocks",
-            "tag": "chain_inbound",
-            "listen": "::",
-            "listen_port": ${chainPort},
-            "method": "${chainMethod}",
-            "password": "${chainKey}",
-            "multiplex": {
-                "enabled": true
-            },
-            "sniff": true,
-            "sniff_override_destination": true
-        }
-    ]
-}
-EOF
-    fi
 
     # 同步更新 direct 出站配置
     if [[ -n "${domainStrategy}" ]]; then
@@ -9401,19 +9387,34 @@ EOF
     fi
 
     # 创建路由配置 (让链式入站流量走直连)
-    cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
+    # sing-box 1.11+ 路由级 action：先 sniff 嗅探域名，再按 domainStrategy 重新解析
+    # 显式绑定 inbound + timeout 与上游 mack-a/v2ray-agent v3.5.10 一致
+    if [[ -n "${domainStrategy}" ]]; then
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
 {
     "route": {
         "rules": [
-            {
-                "inbound": ["chain_inbound"],
-                "outbound": "direct"
-            }
+            { "inbound": "chain_inbound", "action": "sniff", "timeout": "1s" },
+            { "inbound": "chain_inbound", "action": "resolve", "strategy": "${domainStrategy}" },
+            { "inbound": ["chain_inbound"], "outbound": "direct" }
         ],
         "final": "direct"
     }
 }
 EOF
+    else
+        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
+{
+    "route": {
+        "rules": [
+            { "inbound": "chain_inbound", "action": "sniff", "timeout": "1s" },
+            { "inbound": ["chain_inbound"], "outbound": "direct" }
+        ],
+        "final": "direct"
+    }
+}
+EOF
+    fi
 
     # 保存配置信息用于生成配置码（包含网络策略），原子写入避免半写入
     local __chainExitInfo
@@ -9748,7 +9749,7 @@ setupChainRelay() {
     echoContent yellow "\n步骤 3/3: 生成配置..."
 
     # 创建入站配置 (接收上游流量)
-    # 启用 sniff 嗅探域名用于日志记录（中继节点不设置 domain_strategy，由出口节点决定）
+    # sniff 通过路由级 action 实现（见 chain_route.json）
     cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
 {
     "inbounds": [
@@ -9761,8 +9762,7 @@ setupChainRelay() {
             "password": "${chainKey}",
             "multiplex": {
                 "enabled": true
-            },
-            "sniff": true
+            }
         }
     ]
 }
@@ -9839,14 +9839,13 @@ EOF
     echo "{\"outbounds\": ${outboundsJson}}" | jq . > /etc/Proxy-agent/sing-box/conf/config/chain_outbound.json
 
     # 创建路由配置
+    # sing-box 1.11+ 路由级 sniff（中继节点不重解析，沿用上游已嗅探到的域名）
     cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
 {
     "route": {
         "rules": [
-            {
-                "inbound": ["chain_inbound"],
-                "outbound": "chain_outbound"
-            }
+            { "inbound": "chain_inbound", "action": "sniff", "timeout": "1s" },
+            { "inbound": ["chain_inbound"], "outbound": "chain_outbound" }
         ],
         "final": "direct"
     }
@@ -10024,7 +10023,7 @@ setupChainEntryMultiHop() {
     echo "{\"outbounds\": ${outboundsJson}}" | jq . > /etc/Proxy-agent/sing-box/conf/config/chain_outbound.json
 
     # 如果有 Xray 代理协议，创建 SOCKS5 桥接入站
-    # 启用 sniff 嗅探域名并用 prefer_ipv4 重新解析，解决出口机无 IPv6 的问题
+    # sniff/resolve 通过路由级 action 实现（解决出口机无 IPv6 的问题）
     if [[ "${hasXrayProtocols}" == "true" ]]; then
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json
 {
@@ -10033,23 +10032,19 @@ setupChainEntryMultiHop() {
             "type": "socks",
             "tag": "chain_bridge_in",
             "listen": "127.0.0.1",
-            "listen_port": ${chainBridgePort},
-            "sniff": true,
-            "sniff_override_destination": true,
-            "domain_strategy": "prefer_ipv4"
+            "listen_port": ${chainBridgePort}
         }
     ]
 }
 EOF
-        # 路由：桥接入站流量走链式出站
+        # 路由：先 sniff 嗅探域名，再 prefer_ipv4 重解析（替代 inbound 上的 domain_strategy）
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
 {
     "route": {
         "rules": [
-            {
-                "inbound": ["chain_bridge_in"],
-                "outbound": "chain_outbound"
-            }
+            { "inbound": "chain_bridge_in", "action": "sniff", "timeout": "1s" },
+            { "inbound": "chain_bridge_in", "action": "resolve", "strategy": "prefer_ipv4" },
+            { "inbound": ["chain_bridge_in"], "outbound": "chain_outbound" }
         ],
         "final": "chain_outbound"
     }
@@ -10263,7 +10258,7 @@ setupChainEntry() {
 EOF
 
     # 如果有 Xray 代理协议，创建 SOCKS5 桥接入站
-    # 启用 sniff 嗅探域名并用 prefer_ipv4 重新解析，解决出口机无 IPv6 的问题
+    # sniff/resolve 通过路由级 action 实现（解决出口机无 IPv6 的问题）
     if [[ "${hasXrayProtocols}" == "true" ]]; then
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json
 {
@@ -10272,23 +10267,19 @@ EOF
             "type": "socks",
             "tag": "chain_bridge_in",
             "listen": "127.0.0.1",
-            "listen_port": ${chainBridgePort},
-            "sniff": true,
-            "sniff_override_destination": true,
-            "domain_strategy": "prefer_ipv4"
+            "listen_port": ${chainBridgePort}
         }
     ]
 }
 EOF
-        # 路由：桥接入站流量走链式出站
+        # 路由：先 sniff 嗅探域名，再 prefer_ipv4 重解析（替代 inbound 上的 domain_strategy）
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
 {
     "route": {
         "rules": [
-            {
-                "inbound": ["chain_bridge_in"],
-                "outbound": "chain_outbound"
-            }
+            { "inbound": "chain_bridge_in", "action": "sniff", "timeout": "1s" },
+            { "inbound": "chain_bridge_in", "action": "resolve", "strategy": "prefer_ipv4" },
+            { "inbound": ["chain_bridge_in"], "outbound": "chain_outbound" }
         ],
         "final": "chain_outbound"
     }
@@ -12381,6 +12372,7 @@ finalizeMultiChainConfig() {
     generateMultiChainRouteConfig
 
     # 如果有 Xray，创建 SOCKS5 桥接入站
+    # sniff/resolve 在 generateMultiChainRouteConfig 路由配置中以 action 形式注入
     local chainBridgePort=31111
     if [[ "${hasXrayProtocols}" == "true" ]]; then
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json
@@ -12390,10 +12382,7 @@ finalizeMultiChainConfig() {
             "type": "socks",
             "tag": "chain_bridge_in",
             "listen": "127.0.0.1",
-            "listen_port": ${chainBridgePort},
-            "sniff": true,
-            "sniff_override_destination": true,
-            "domain_strategy": "prefer_ipv4"
+            "listen_port": ${chainBridgePort}
         }
     ]
 }
@@ -12445,16 +12434,21 @@ generateMultiChainRouteConfig() {
     hasXray=$(jq -r '.has_xray' "${infoFile}")
 
     # 开始构建路由配置
+    # sing-box 1.11+ 路由级 sniff/resolve action 替代 inbound 上的 sniff 字段
+    # 仅当存在 chain_bridge_in（has_xray=true）时才在 chain_route 中加 sniff/resolve；
+    # 否则留空（其他协议入站如有需要应自行 sniff）
     local routeRules="[]"
     local ruleSetDefs="[]"
     local usedRuleSets=""
 
-    # 如果有 SOCKS5 桥接入站，添加对应路由规则
+    # 如果有 SOCKS5 桥接入站（来自 Xray 的流量）
+    # 顺序：先 sniff 嗅探，再 prefer_ipv4 重解析，最后桥接到默认链路
     if [[ "${hasXray}" == "true" ]]; then
-        routeRules=$(echo "${routeRules}" | jq '. + [{
-            "inbound": ["chain_bridge_in"],
-            "outbound": "'"${defaultChain}"'"
-        }]')
+        routeRules=$(echo "${routeRules}" | jq '. + [
+            {"inbound":"chain_bridge_in","action":"sniff","timeout":"1s"},
+            {"inbound":"chain_bridge_in","action":"resolve","strategy":"prefer_ipv4"},
+            {"inbound":["chain_bridge_in"],"outbound":"'"${defaultChain}"'"}
+        ]')
     fi
 
     # 处理预设规则
