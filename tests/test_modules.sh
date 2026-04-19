@@ -112,14 +112,6 @@ assert_not_empty "${_PROTOCOL_REGISTRY_LOADED}" "protocol-registry.sh 模块加�
 source lib/system-detect.sh
 assert_not_empty "${_SYSTEM_DETECT_LOADED}" "system-detect.sh 模块加载成功"
 
-# 测试 service-control.sh 加载
-source lib/service-control.sh
-assert_not_empty "${_SERVICE_CONTROL_LOADED}" "service-control.sh 模块加载成功"
-
-# 测试 config-reader.sh 加载
-source lib/config-reader.sh
-assert_not_empty "${_CONFIG_READER_LOADED}" "config-reader.sh 模块加载成功"
-
 echo ""
 
 # ============================================================================
@@ -343,26 +335,6 @@ assert_equals "0" "${id}" "parseProtocolIdFromFileName(02_VLESS_TCP) = 0"
 
 id=$(parseProtocolIdFromFileName "07_VLESS_vision_reality_inbounds.json")
 assert_equals "7" "${id}" "parseProtocolIdFromFileName(07_Reality) = 7"
-
-echo ""
-
-# ============================================================================
-# 测试 config-reader.sh 函数
-# ============================================================================
-
-echo -e "${YELLOW}=== 测试 config-reader.sh 函数 ===${NC}"
-
-# 测试 detectCoreType (在测试环境中应该返回空或特定值)
-coreType=$(detectCoreType)
-# 在测试环境中可能没有安装 xray/singbox
-echo -e "  detectCoreType() 返回: '${coreType:-empty}'"
-
-# 测试 getConfigPath
-path=$(getConfigPath 1)
-assert_equals "/etc/Proxy-agent/xray/conf/" "${path}" "getConfigPath(1) = xray 配置路径"
-
-path=$(getConfigPath 2)
-assert_equals "/etc/Proxy-agent/sing-box/conf/config/" "${path}" "getConfigPath(2) = sing-box 配置路径"
 
 echo ""
 

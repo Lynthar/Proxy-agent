@@ -1,18 +1,14 @@
 #!/usr/bin/env bash
 # ============================================================================
-# protocol-registry.sh - 协议注册表管理
+# protocol-registry.sh - 协议注册表
 #
-# 集中管理协议ID、配置文件映射、协议检测等功能
-# 减少重复代码，提供统一的协议操作接口
+# 集中管理协议 ID、配置文件映射、协议属性查询
+# 依赖 constants.sh 先加载
 # ============================================================================
 
 # 防止重复加载
 [[ -n "${_PROTOCOL_REGISTRY_LOADED:-}" ]] && return 0
 readonly _PROTOCOL_REGISTRY_LOADED=1
-
-# ============================================================================
-# 注意: 协议ID常量定义在 constants.sh 中，本模块依赖其先加载
-# ============================================================================
 
 # ============================================================================
 # 协议配置文件名映射
@@ -104,7 +100,7 @@ getProtocolDisplayName() {
     esac
 }
 
-# 获取协议短名称（用于订阅链接）
+# 获取协议短名称（用于订阅链接/URL）
 # 参数: $1 - 协议ID
 getProtocolShortName() {
     local protocolId="$1"
@@ -157,18 +153,17 @@ getProtocolInboundTag() {
 # 协议属性查询
 # ============================================================================
 
-# 检查协议是否需要TLS证书
-# 参数: $1 - 协议ID
+# 检查协议是否需要 TLS 证书
 # 返回: 0=需要, 1=不需要
 protocolRequiresTLS() {
     local protocolId="$1"
 
     case "${protocolId}" in
         0|1|2|3|4|5|10|11|13)
-            return 0  # 需要TLS
+            return 0
             ;;
         6|7|8|9|12|14|20)
-            return 1  # 不需要TLS（Reality/UDP/自签名）
+            return 1  # Reality / UDP / 自签
             ;;
         *)
             return 1
@@ -176,57 +171,38 @@ protocolRequiresTLS() {
     esac
 }
 
-# 检查协议是否使用Reality
-# 参数: $1 - 协议ID
-# 返回: 0=是, 1=否
+# 检查协议是否使用 Reality
 protocolUsesReality() {
     local protocolId="$1"
 
     case "${protocolId}" in
-        7|8|12)
-            return 0  # Reality协议
-            ;;
-        *)
-            return 1
-            ;;
+        7|8|12) return 0 ;;
+        *) return 1 ;;
     esac
 }
 
-# 检查协议是否使用UDP
-# 参数: $1 - 协议ID
-# 返回: 0=是, 1=否
+# 检查协议是否使用 UDP
 protocolUsesUDP() {
     local protocolId="$1"
 
     case "${protocolId}" in
-        6|9)
-            return 0  # Hysteria2, TUIC使用UDP
-            ;;
-        *)
-            return 1
-            ;;
+        6|9) return 0 ;;  # Hysteria2, TUIC
+        *) return 1 ;;
     esac
 }
 
-# 检查协议是否支持CDN
-# 参数: $1 - 协议ID
-# 返回: 0=支持, 1=不支持
+# 检查协议是否支持 CDN
 protocolSupportsCDN() {
     local protocolId="$1"
 
     case "${protocolId}" in
-        1|3|5|11|12)
-            return 0  # WS/gRPC/HTTPUpgrade/XHTTP支持CDN
-            ;;
-        *)
-            return 1
-            ;;
+        1|3|5|11|12) return 0 ;;  # WS / gRPC / HTTPUpgrade / XHTTP
+        *) return 1 ;;
     esac
 }
 
 # 获取协议传输类型
-# 参数: $1 - 协议ID
-# 输出: tcp/ws/grpc/http/quic
+# 输出: tcp / ws / grpc / httpupgrade / xhttp / quic / http2 / anytls / shadowsocks / socks5
 getProtocolTransport() {
     local protocolId="$1"
 
@@ -246,51 +222,8 @@ getProtocolTransport() {
 }
 
 # ============================================================================
-# 协议检测函数
+# 协议检测与路径
 # ============================================================================
-
-# 检查协议是否已安装
-# 参数: $1 - 协议ID
-#       $2 - 配置目录路径 (可选，默认使用全局configPath)
-# 返回: 0=已安装, 1=未安装
-isProtocolInstalled() {
-    local protocolId="$1"
-    local cfgPath="${2:-${configPath}}"
-
-    # 方法1: 检查全局变量（如果已设置）
-    if [[ -n "${currentInstallProtocolType}" ]]; then
-        echo "${currentInstallProtocolType}" | grep -q ",${protocolId}," && return 0
-    fi
-
-    # 方法2: 检查配置文件是否存在
-    local configFile
-    configFile=$(getProtocolConfigFileName "${protocolId}")
-    [[ -n "${configFile}" && -f "${cfgPath}${configFile}" ]] && return 0
-
-    return 1
-}
-
-# 检查多个协议是否已安装（任意一个）
-# 参数: 协议ID列表
-# 返回: 0=至少一个已安装, 1=全部未安装
-isAnyProtocolInstalled() {
-    local id
-    for id in "$@"; do
-        isProtocolInstalled "${id}" && return 0
-    done
-    return 1
-}
-
-# 检查多个协议是否全部已安装
-# 参数: 协议ID列表
-# 返回: 0=全部已安装, 1=有未安装的
-areAllProtocolsInstalled() {
-    local id
-    for id in "$@"; do
-        isProtocolInstalled "${id}" || return 1
-    done
-    return 0
-}
 
 # 扫描已安装的协议
 # 参数: $1 - 配置目录路径
@@ -312,32 +245,9 @@ scanInstalledProtocols() {
     echo "${result}"
 }
 
-# 获取已安装协议列表（数组形式）
-# 参数: $1 - 配置目录路径 (可选)
-# 输出: 每行一个协议ID
-getInstalledProtocolList() {
-    local cfgPath="${1:-${configPath}}"
-    local protocols
-
-    protocols=$(scanInstalledProtocols "${cfgPath}")
-    echo "${protocols}" | tr ',' '\n' | grep -v '^$' | sort -n
-}
-
-# 统计已安装协议数量
-# 参数: $1 - 配置目录路径 (可选)
-# 输出: 协议数量
-countInstalledProtocols() {
-    local cfgPath="${1:-${configPath}}"
-    getInstalledProtocolList "${cfgPath}" | wc -l | tr -d ' '
-}
-
-# ============================================================================
-# 协议配置路径获取
-# ============================================================================
-
 # 获取协议配置文件完整路径
 # 参数: $1 - 协议ID
-#       $2 - 配置目录路径 (可选)
+#       $2 - 配置目录路径 (可选，默认 ${configPath})
 # 输出: 完整文件路径
 getProtocolConfigPath() {
     local protocolId="$1"
@@ -348,176 +258,4 @@ getProtocolConfigPath() {
     [[ -z "${fileName}" ]] && return 1
 
     echo "${cfgPath}${fileName}"
-}
-
-# 获取协议客户端配置路径（jq路径）
-# 参数: $1 - 协议ID
-#       $2 - 核心类型 (1=xray, 2=sing-box)
-# 输出: jq路径表达式
-getProtocolClientsPath() {
-    local protocolId="$1"
-    local coreType="${2:-1}"
-
-    if [[ "${coreType}" == "1" ]]; then
-        # Xray格式
-        echo ".inbounds[0].settings.clients"
-    else
-        # sing-box格式
-        echo ".inbounds[0].users"
-    fi
-}
-
-# ============================================================================
-# 协议分组
-# ============================================================================
-
-# 获取所有TLS协议
-getAllTLSProtocols() {
-    echo "0 1 2 3 4 5 10 11 13"
-}
-
-# 获取所有Reality协议
-getAllRealityProtocols() {
-    echo "7 8 12"
-}
-
-# 获取所有UDP协议
-getAllUDPProtocols() {
-    echo "6 9"
-}
-
-# 获取所有CDN支持协议
-getAllCDNProtocols() {
-    echo "1 3 5 11 12"
-}
-
-# 获取Xray支持的协议
-getXrayProtocols() {
-    echo "0 1 2 3 4 5 7 8 12"
-}
-
-# 获取sing-box支持的协议
-getSingBoxProtocols() {
-    echo "0 1 3 6 7 9 10 11 13 14"
-}
-
-# ============================================================================
-# 协议选择辅助
-# ============================================================================
-
-# 解析用户选择的协议字符串
-# 参数: $1 - 用户输入 (如 "0,1,3" 或 "7")
-# 输出: 标准化的协议字符串 (如 ",0,1,3,")
-parseProtocolSelection() {
-    local input="$1"
-    local result
-
-    # 移除空格
-    input=$(echo "${input}" | tr -d ' ')
-
-    # 确保有前后逗号
-    if [[ "${input:0:1}" != "," ]]; then
-        input=",${input}"
-    fi
-    if [[ "${input: -1}" != "," ]]; then
-        input="${input},"
-    fi
-
-    echo "${input}"
-}
-
-# 检查协议选择是否包含指定协议
-# 参数: $1 - 协议选择字符串 (如 ",0,1,3,")
-#       $2 - 要检查的协议ID
-# 返回: 0=包含, 1=不包含
-isProtocolSelected() {
-    local selection="$1"
-    local protocolId="$2"
-
-    echo "${selection}" | grep -q ",${protocolId},"
-}
-
-# 向协议选择添加协议
-# 参数: $1 - 当前选择字符串
-#       $2 - 要添加的协议ID
-# 输出: 更新后的选择字符串
-addProtocolToSelection() {
-    local selection="$1"
-    local protocolId="$2"
-
-    if ! isProtocolSelected "${selection}" "${protocolId}"; then
-        selection="${selection}${protocolId},"
-    fi
-
-    echo "${selection}"
-}
-
-# 从协议选择移除协议
-# 参数: $1 - 当前选择字符串
-#       $2 - 要移除的协议ID
-# 输出: 更新后的选择字符串
-removeProtocolFromSelection() {
-    local selection="$1"
-    local protocolId="$2"
-
-    echo "${selection}" | sed "s/,${protocolId},/,/g"
-}
-
-# ============================================================================
-# 显示辅助函数
-# ============================================================================
-
-# 显示已安装协议状态
-# 参数: $1 - 配置目录路径 (可选)
-displayInstalledProtocols() {
-    local cfgPath="${1:-${configPath}}"
-    local protocols
-    local count=0
-    local id displayName
-
-    protocols=$(getInstalledProtocolList "${cfgPath}")
-
-    if [[ -z "${protocols}" ]]; then
-        echo "未安装任何协议"
-        return 1
-    fi
-
-    echo -n "已安装协议: "
-    while IFS= read -r id; do
-        [[ -z "${id}" ]] && continue
-        displayName=$(getProtocolDisplayName "${id}")
-        echo -n "${displayName} "
-        ((count++))
-    done <<< "${protocols}"
-    echo ""
-    echo "共 ${count} 个协议"
-}
-
-# 获取协议安装菜单项
-# 参数: $1 - 协议ID
-# 输出: 菜单显示文本
-getProtocolMenuItem() {
-    local protocolId="$1"
-    local displayName
-    local recommend=""
-
-    displayName=$(getProtocolDisplayName "${protocolId}")
-
-    # 添加推荐标记
-    case "${protocolId}" in
-        0|7)
-            recommend="[推荐]"
-            ;;
-        1|3|5)
-            recommend="[仅CDN推荐]"
-            ;;
-        4)
-            recommend="[不推荐]"
-            ;;
-        12)
-            recommend="[CDN可用]"
-            ;;
-    esac
-
-    echo "${protocolId}.${displayName}${recommend}"
 }
