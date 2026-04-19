@@ -8647,7 +8647,11 @@ blacklist() {
 
             addSingBoxRouteRule "cn_block_outbound" "cn" "cn_block_route"
 
-            addSingBoxRouteRule "01_direct_outbound" "googleapis.com,googleapis.cn,xn--ngstr-lra8j.com,gstatic.com" "cn_01_google_play_route"
+            # Google Play 服务域名虽然在 geosite:cn 里，但必须直连（apk 更新走这些端点）
+            # outbound 必须是 "direct"（base 出站的规范 tag），而不是文件名 "01_direct_outbound"
+            # 之前用文件名是因为旧代码靠 addSingBoxOutbound "01_direct_outbound" 副作用把 base tag 污染成了 "01_direct_outbound"
+            # ensureDirectOutbound 修复污染后，rule 首参必须同步改为规范 tag
+            addSingBoxRouteRule "direct" "googleapis.com,googleapis.cn,xn--ngstr-lra8j.com,gstatic.com" "cn_01_google_play_route"
 
             addSingBoxOutbound "cn_block_outbound"
             ensureDirectOutbound
