@@ -5,3 +5,11 @@ fodder/.DS_Store
 .DS_Store
 GEMINI.md
 GEMINI.zh-CN.md
+
+# AI assistant local context / session state — keep local
+.claude/
+CLAUDE.md
+REVIEW.md
+
+# SMB filesystem tombstones (NAS / network mount)
+.smbdelete*
