@@ -188,6 +188,9 @@ if ! type t &>/dev/null; then
     MSG_MENU_CHAIN_PROXY="链式代理管理"
     MSG_MENU_HYSTERIA2="Hysteria2 管理"
     MSG_MENU_REALITY="REALITY 管理"
+    MSG_MENU_REALITY_QUICK="一键无域名 Reality 安装"
+    MSG_REALITY_QUICK_TITLE="一键无域名 Reality 安装"
+    MSG_REALITY_QUICK_CORE_SELECT="请选择核心：1.Xray-core  2.sing-box"
     MSG_MENU_TUIC="Tuic 管理"
     MSG_MENU_USER="用户管理"
     MSG_MENU_DISGUISE="伪装站管理"
@@ -1735,8 +1738,9 @@ readConfigHostPathUUID() {
             if [[ -z "${currentPath}" ]]; then
                 dest=$(jq -r -c '.inbounds[0].settings.fallbacks[]|select(.alpn)|.dest' ${configPath}${frontingType}.json | head -1)
                 if [[ "${dest}" == "31302" || "${dest}" == "31304" ]]; then
-                    checkBTPanel
-                    check1Panel
+                    # 上游 mack-a/v2ray-agent d64843b (v3.5.12) 移除：BT Panel / 1Panel 自身已修补端口冲突检测，本仓兼容层不再主动调用
+                    # checkBTPanel
+                    # check1Panel
                     if grep -q "trojangrpc {" <${nginxConfigPath}alone.conf; then
                         currentPath=$(grep "trojangrpc {" <${nginxConfigPath}alone.conf | awk -F "[/]" '{print $2}' | awk -F "[t][r][o][j][a][n]" '{print $1}')
                     elif grep -q "grpc {" <${nginxConfigPath}alone.conf; then
@@ -3165,6 +3169,16 @@ installSingBox() {
 
         echoContent green " ---> 最新版本:${version}"
 
+        # 前置版本守门：下载前就拒绝 < 1.11，避免低版本二进制落盘后再退出留残留
+        # （兜底的 post-extract 版本检查保留，作为 belt-and-suspenders）
+        local _targetVer="${version#v}"
+        if [[ -n "${_targetVer}" ]] && ! versionGreaterOrEqual "${_targetVer}" "${SINGBOX_MIN_VERSION}"; then
+            echoContent red " ---> 目标 sing-box 版本 ${version} 低于本脚本要求的最低版本 ${SINGBOX_MIN_VERSION}"
+            echoContent yellow " ---> 路由级 sniff/resolve action 在 sing-box 1.11 引入；旧版本会启动失败"
+            echoContent yellow " ---> 参见 https://sing-box.sagernet.org/migration/"
+            exit 1
+        fi
+
         local singBoxTarFile="/etc/Proxy-agent/sing-box/sing-box-${version/v/}${singBoxCoreCPUVendor}.tar.gz"
         local singBoxChecksumFile="/etc/Proxy-agent/sing-box/sing-box_${version/v/}_checksums.txt"
         local singBoxTarFileName="sing-box-${version/v/}${singBoxCoreCPUVendor}.tar.gz"
@@ -3209,12 +3223,16 @@ installSingBox() {
             rm -rf /etc/Proxy-agent/sing-box/sing-box-*
             chmod 655 /etc/Proxy-agent/sing-box/sing-box
 
-            # 版本守门：本脚本配置使用 1.11+ 引入的路由级 sniff/resolve action
+            # 版本守门（兜底）：本脚本配置使用 1.11+ 引入的路由级 sniff/resolve action
+            # 前面已在下载前按 ${version} tag 检查过一次，这里再用实际二进制版本验证一次。
             # 参见 https://sing-box.sagernet.org/migration/#migrate-legacy-inbound-fields-to-rule-actions
             # 1.11 以下不识别 action 字段，会启动失败；1.12+ 必须用 action（inbound 级 sniff 已移除）
             local installedSingBoxVer
             installedSingBoxVer=$(/etc/Proxy-agent/sing-box/sing-box version 2>/dev/null | head -1 | awk '{print $3}')
-            if [[ -n "${installedSingBoxVer}" ]] && ! versionGreaterOrEqual "${installedSingBoxVer}" "${SINGBOX_MIN_VERSION}"; then
+            if [[ -z "${installedSingBoxVer}" ]]; then
+                # 解析格式变化会让守门被静默跳过——显式告警让这种情况可见
+                echoContent yellow " ---> 无法解析 sing-box 版本号（格式可能已变），跳过兜底版本校验"
+            elif ! versionGreaterOrEqual "${installedSingBoxVer}" "${SINGBOX_MIN_VERSION}"; then
                 echoContent red " ---> 已安装的 sing-box 版本 (${installedSingBoxVer}) 低于本脚本要求的最低版本 ${SINGBOX_MIN_VERSION}"
                 echoContent yellow " ---> 路由级 sniff/resolve action 在 sing-box 1.11 引入；旧版本会启动失败"
                 echoContent yellow " ---> 请安装 ≥ ${SINGBOX_MIN_VERSION} 版本后重试"
@@ -4437,6 +4455,28 @@ removeSingBoxRouteRule() {
 }
 
 # 添加sing-box出站
+# 确保基础 direct 出站存在（tag 固定为 "direct"）
+# 背景：install 期在 L5746 写入 01_direct_outbound.json 时使用 "tag": "direct"；
+# 但 addSingBoxOutbound 对任何含 "direct" 字样的 tag 都会写出 "tag": "${tag}"——
+# 直接调 addSingBoxOutbound "01_direct_outbound" 会把 tag 覆盖成 "01_direct_outbound"，
+# 链式代理 / 分流配置里 "outbound":"direct" / "final":"direct" 全部失效。
+# 这个 helper 把 base file 内容用单一权威来源重建，让所有 "需要确保 direct 存在"的代码路径走统一出口。
+ensureDirectOutbound() {
+    if [[ -z "${singBoxConfigPath}" ]]; then
+        return 1
+    fi
+    cat <<'EOF' >"${singBoxConfigPath}01_direct_outbound.json"
+{
+    "outbounds": [
+        {
+            "type": "direct",
+            "tag": "direct"
+        }
+    ]
+}
+EOF
+}
+
 addSingBoxOutbound() {
     local tag=$1
     local type="ipv4"
@@ -4621,9 +4661,7 @@ EOF
       "streamSettings": {
         "network": "ws",
         "security": "tls",
-        "tlsSettings": {
-          "allowInsecure": false
-        },
+        "tlsSettings": {},
         "wsSettings": {
           "path": "${setVMessWSTLSPath}"
         }
@@ -5803,11 +5841,11 @@ EOF
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40${currentHost}%3A${port}%3Fencryption%3Dnone%26fp%3Dchrome%26security%3Dtls%26type%3Dtcp%26${currentHost}%3D${currentHost}%26headerType%3Dnone%26sni%3D${currentHost}%26flow%3Dxtls-rprx-vision%23${email}\n"
 
     elif [[ "${type}" == "vmessws" ]]; then
-        qrCodeBase64Default=$(echo -n "{\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"ws\",\"add\":\"${add}\",\"allowInsecure\":0,\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}" | base64 -w 0)
+        qrCodeBase64Default=$(echo -n "{\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"ws\",\"add\":\"${add}\",\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}" | base64 -w 0)
         qrCodeBase64Default="${qrCodeBase64Default// /}"
 
         echoContent yellow " ---> 通用json(VMess+WS+TLS)"
-        echoContent green "    {\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"ws\",\"add\":\"${add}\",\"allowInsecure\":0,\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}\n"
+        echoContent green "    {\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"ws\",\"add\":\"${add}\",\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}\n"
         echoContent yellow " ---> 通用vmess(VMess+WS+TLS)链接"
         echoContent green "    vmess://${qrCodeBase64Default}\n"
         echoContent yellow " ---> 二维码 vmess(VMess+WS+TLS)"
@@ -6181,11 +6219,11 @@ EOF
         echoContent yellow " ---> 二维码 Naive(TLS)"
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=naive%2Bhttps%3A%2F%2F${email}%3A${id}%40${currentHost}%3A${port}%3Fpadding%3Dtrue%23${email}\n"
     elif [[ "${type}" == "vmessHTTPUpgrade" ]]; then
-        qrCodeBase64Default=$(echo -n "{\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"httpupgrade\",\"add\":\"${add}\",\"allowInsecure\":0,\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}" | base64 -w 0)
+        qrCodeBase64Default=$(echo -n "{\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"httpupgrade\",\"add\":\"${add}\",\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}" | base64 -w 0)
         qrCodeBase64Default="${qrCodeBase64Default// /}"
 
         echoContent yellow " ---> 通用json(VMess+HTTPUpgrade+TLS)"
-        echoContent green "    {\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"httpupgrade\",\"add\":\"${add}\",\"allowInsecure\":0,\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}\n"
+        echoContent green "    {\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"httpupgrade\",\"add\":\"${add}\",\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}\n"
         echoContent yellow " ---> 通用vmess(VMess+HTTPUpgrade+TLS)链接"
         echoContent green "    vmess://${qrCodeBase64Default}\n"
         echoContent yellow " ---> 二维码 vmess(VMess+HTTPUpgrade+TLS)"
@@ -6871,7 +6909,8 @@ unInstall() {
         menu
         exit 0
     fi
-    checkBTPanel
+    # 上游 mack-a/v2ray-agent d64843b (v3.5.12) 移除
+    # checkBTPanel
     echoContent yellow " ---> 脚本不会删除acme相关配置，删除请手动执行 [rm -rf /root/.acme.sh]"
     handleNginx stop
     if [[ -z $(pgrep -f "nginx") ]]; then
@@ -8378,7 +8417,7 @@ ipv6Routing() {
 
         if [[ -n "${singBoxConfigPath}" ]]; then
             addSingBoxRouteRule "IPv6_out" "${domainList}" "IPv6_route"
-            addSingBoxOutbound 01_direct_outbound
+            ensureDirectOutbound
             addSingBoxOutbound IPv6_out
             addSingBoxOutbound IPv4_out
         fi
@@ -8442,7 +8481,7 @@ ipv6Routing() {
         if [[ -n "${singBoxConfigPath}" ]]; then
             removeSingBoxConfig IPv6_out
             removeSingBoxConfig "IPv6_route"
-            addSingBoxOutbound "01_direct_outbound"
+            ensureDirectOutbound
         fi
 
         echoContent green " ---> IPv6分流卸载成功"
@@ -8590,7 +8629,7 @@ blacklist() {
         if [[ -n "${singBoxConfigPath}" ]]; then
             addSingBoxRouteRule "block_domain_outbound" "${domainList}" "block_domain_route"
             addSingBoxOutbound "block_domain_outbound"
-            addSingBoxOutbound "01_direct_outbound"
+            ensureDirectOutbound
         fi
         echoContent green " ---> 添加完毕"
 
@@ -8608,10 +8647,14 @@ blacklist() {
 
             addSingBoxRouteRule "cn_block_outbound" "cn" "cn_block_route"
 
-            addSingBoxRouteRule "01_direct_outbound" "googleapis.com,googleapis.cn,xn--ngstr-lra8j.com,gstatic.com" "cn_01_google_play_route"
+            # Google Play 服务域名虽然在 geosite:cn 里，但必须直连（apk 更新走这些端点）
+            # outbound 必须是 "direct"（base 出站的规范 tag），而不是文件名 "01_direct_outbound"
+            # 之前用文件名是因为旧代码靠 addSingBoxOutbound "01_direct_outbound" 副作用把 base tag 污染成了 "01_direct_outbound"
+            # ensureDirectOutbound 修复污染后，rule 首参必须同步改为规范 tag
+            addSingBoxRouteRule "direct" "googleapis.com,googleapis.cn,xn--ngstr-lra8j.com,gstatic.com" "cn_01_google_play_route"
 
             addSingBoxOutbound "cn_block_outbound"
-            addSingBoxOutbound "01_direct_outbound"
+            ensureDirectOutbound
         fi
 
         echoContent green " ---> 屏蔽大陆域名完毕"
@@ -8861,7 +8904,7 @@ addWireGuardRoute() {
         addSingBoxRouteRule "wireguard_endpoints_${type}" "${domainList}" "wireguard_endpoints_${type}_route"
         # addSingBoxOutbound "wireguard_out_${type}" "wireguard_out"
         if [[ -n "${domainList}" ]]; then
-            addSingBoxOutbound "01_direct_outbound"
+            ensureDirectOutbound
         fi
 
         # outbound
@@ -9018,7 +9061,7 @@ warpRoutingReg() {
             removeSingBoxConfig "wireguard_endpoints_${type}_route"
 
             removeSingBoxConfig "wireguard_endpoints_${type}"
-            addSingBoxOutbound "01_direct_outbound"
+            ensureDirectOutbound
         fi
 
         echoContent green " ---> 卸载WARP ${type}分流完毕"
@@ -14456,7 +14499,7 @@ setUnlockDNS() {
         fi
 
         if [[ -n "${singBoxConfigPath}" ]]; then
-            addSingBoxOutbound 01_direct_outbound
+            ensureDirectOutbound
             addSingBoxDNSConfig "${setDNS}" "${domainList}"
         fi
 
@@ -14657,8 +14700,9 @@ customXrayInstall() {
 
         readLastInstallationConfig
         unInstallSubscribe
-        checkBTPanel
-        check1Panel
+        # 上游 mack-a/v2ray-agent d64843b (v3.5.12) 移除
+        # checkBTPanel
+        # check1Panel
         totalProgress=12
         installTools 1
         if [[ -n "${btDomain}" ]]; then
@@ -14743,12 +14787,64 @@ selectCoreInstall() {
     esac
 }
 
+# 一键无域名 Reality 安装（参考上游 mack-a/v2ray-agent 773b1b7 v3.5.9）
+# 仅安装 VLESS+Reality+Vision (协议 7)；跳过域名/TLS 申请
+installXrayRealityOnly() {
+    selectCustomInstallType=",7,"
+    readLastInstallationConfig
+    unInstallSubscribe
+    totalProgress=6
+    installTools 1
+    handleNginx stop
+    installXray 2 false
+    installXrayService 3
+    initXrayConfig custom 4
+    cleanUp singBoxDel
+    handleXray stop
+    handleXray start
+    checkGFWStatue 5
+    showAccounts 6
+}
+
+installSingBoxRealityOnly() {
+    selectCustomInstallType=",7,"
+    readLastInstallationConfig
+    unInstallSubscribe
+    totalProgress=6
+    installTools 1
+    installSingBox 2
+    installSingBoxService 3
+    initSingBoxConfig custom 4
+    cleanUp xrayDel
+    handleSingBox stop
+    handleSingBox start
+    checkGFWStatue 5
+    showAccounts 6
+}
+
+# 一键无域名 Reality 核心选择
+selectRealityCoreInstall() {
+    echoContent skyBlue "\n$(t REALITY_QUICK_TITLE)"
+    echoContent red "=============================================================="
+    echoContent yellow "$(t REALITY_QUICK_CORE_SELECT)"
+    read -r -p "$(t PROMPT_SELECT):" realityCoreType
+    case ${realityCoreType} in
+        1) installXrayRealityOnly ;;
+        2) installSingBoxRealityOnly ;;
+        *)
+            echoContent red ' ---> 选择错误，重新选择'
+            selectRealityCoreInstall
+            ;;
+    esac
+}
+
 # xray-core 安装
 xrayCoreInstall() {
     readLastInstallationConfig
     unInstallSubscribe
-    checkBTPanel
-    check1Panel
+    # 上游 mack-a/v2ray-agent d64843b (v3.5.12) 移除
+    # checkBTPanel
+    # check1Panel
     selectCustomInstallType=
     totalProgress=12
     installTools 2
@@ -14792,8 +14888,9 @@ xrayCoreInstall() {
 singBoxInstall() {
     readLastInstallationConfig
     unInstallSubscribe
-    checkBTPanel
-    check1Panel
+    # 上游 mack-a/v2ray-agent d64843b (v3.5.12) 移除
+    # checkBTPanel
+    # check1Panel
     selectCustomInstallType=
     totalProgress=8
     installTools 2
@@ -16236,6 +16333,7 @@ menu() {
     echoContent yellow "16.$(t MENU_CORE)"
     echoContent yellow "17.$(t MENU_UPDATE_SCRIPT)"
     echoContent yellow "18.$(t MENU_BBR)"
+    echoContent yellow "19.$(t MENU_REALITY_QUICK)"
     echoContent skyBlue "-------------------------$(t MENU_SCRIPT_MGMT)-----------------------------"
     echoContent yellow "20.$(t MENU_UNINSTALL)"
     echoContent yellow "21.切换语言 / Switch Language"
@@ -16298,6 +16396,9 @@ menu() {
         ;;
     18)
         bbrInstall
+        ;;
+    19)
+        selectRealityCoreInstall
         ;;
     20)
         unInstall 1
