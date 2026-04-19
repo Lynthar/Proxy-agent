@@ -188,6 +188,9 @@ if ! type t &>/dev/null; then
     MSG_MENU_CHAIN_PROXY="链式代理管理"
     MSG_MENU_HYSTERIA2="Hysteria2 管理"
     MSG_MENU_REALITY="REALITY 管理"
+    MSG_MENU_REALITY_QUICK="一键无域名 Reality 安装"
+    MSG_REALITY_QUICK_TITLE="一键无域名 Reality 安装"
+    MSG_REALITY_QUICK_CORE_SELECT="请选择核心：1.Xray-core  2.sing-box"
     MSG_MENU_TUIC="Tuic 管理"
     MSG_MENU_USER="用户管理"
     MSG_MENU_DISGUISE="伪装站管理"
@@ -3166,6 +3169,16 @@ installSingBox() {
 
         echoContent green " ---> 最新版本:${version}"
 
+        # 前置版本守门：下载前就拒绝 < 1.11，避免低版本二进制落盘后再退出留残留
+        # （兜底的 post-extract 版本检查保留，作为 belt-and-suspenders）
+        local _targetVer="${version#v}"
+        if [[ -n "${_targetVer}" ]] && ! versionGreaterOrEqual "${_targetVer}" "${SINGBOX_MIN_VERSION}"; then
+            echoContent red " ---> 目标 sing-box 版本 ${version} 低于本脚本要求的最低版本 ${SINGBOX_MIN_VERSION}"
+            echoContent yellow " ---> 路由级 sniff/resolve action 在 sing-box 1.11 引入；旧版本会启动失败"
+            echoContent yellow " ---> 参见 https://sing-box.sagernet.org/migration/"
+            exit 1
+        fi
+
         local singBoxTarFile="/etc/Proxy-agent/sing-box/sing-box-${version/v/}${singBoxCoreCPUVendor}.tar.gz"
         local singBoxChecksumFile="/etc/Proxy-agent/sing-box/sing-box_${version/v/}_checksums.txt"
         local singBoxTarFileName="sing-box-${version/v/}${singBoxCoreCPUVendor}.tar.gz"
@@ -3210,12 +3223,16 @@ installSingBox() {
             rm -rf /etc/Proxy-agent/sing-box/sing-box-*
             chmod 655 /etc/Proxy-agent/sing-box/sing-box
 
-            # 版本守门：本脚本配置使用 1.11+ 引入的路由级 sniff/resolve action
+            # 版本守门（兜底）：本脚本配置使用 1.11+ 引入的路由级 sniff/resolve action
+            # 前面已在下载前按 ${version} tag 检查过一次，这里再用实际二进制版本验证一次。
             # 参见 https://sing-box.sagernet.org/migration/#migrate-legacy-inbound-fields-to-rule-actions
             # 1.11 以下不识别 action 字段，会启动失败；1.12+ 必须用 action（inbound 级 sniff 已移除）
             local installedSingBoxVer
             installedSingBoxVer=$(/etc/Proxy-agent/sing-box/sing-box version 2>/dev/null | head -1 | awk '{print $3}')
-            if [[ -n "${installedSingBoxVer}" ]] && ! versionGreaterOrEqual "${installedSingBoxVer}" "${SINGBOX_MIN_VERSION}"; then
+            if [[ -z "${installedSingBoxVer}" ]]; then
+                # 解析格式变化会让守门被静默跳过——显式告警让这种情况可见
+                echoContent yellow " ---> 无法解析 sing-box 版本号（格式可能已变），跳过兜底版本校验"
+            elif ! versionGreaterOrEqual "${installedSingBoxVer}" "${SINGBOX_MIN_VERSION}"; then
                 echoContent red " ---> 已安装的 sing-box 版本 (${installedSingBoxVer}) 低于本脚本要求的最低版本 ${SINGBOX_MIN_VERSION}"
                 echoContent yellow " ---> 路由级 sniff/resolve action 在 sing-box 1.11 引入；旧版本会启动失败"
                 echoContent yellow " ---> 请安装 ≥ ${SINGBOX_MIN_VERSION} 版本后重试"
@@ -4438,6 +4455,28 @@ removeSingBoxRouteRule() {
 }
 
 # 添加sing-box出站
+# 确保基础 direct 出站存在（tag 固定为 "direct"）
+# 背景：install 期在 L5746 写入 01_direct_outbound.json 时使用 "tag": "direct"；
+# 但 addSingBoxOutbound 对任何含 "direct" 字样的 tag 都会写出 "tag": "${tag}"——
+# 直接调 addSingBoxOutbound "01_direct_outbound" 会把 tag 覆盖成 "01_direct_outbound"，
+# 链式代理 / 分流配置里 "outbound":"direct" / "final":"direct" 全部失效。
+# 这个 helper 把 base file 内容用单一权威来源重建，让所有 "需要确保 direct 存在"的代码路径走统一出口。
+ensureDirectOutbound() {
+    if [[ -z "${singBoxConfigPath}" ]]; then
+        return 1
+    fi
+    cat <<'EOF' >"${singBoxConfigPath}01_direct_outbound.json"
+{
+    "outbounds": [
+        {
+            "type": "direct",
+            "tag": "direct"
+        }
+    ]
+}
+EOF
+}
+
 addSingBoxOutbound() {
     local tag=$1
     local type="ipv4"
@@ -8378,7 +8417,7 @@ ipv6Routing() {
 
         if [[ -n "${singBoxConfigPath}" ]]; then
             addSingBoxRouteRule "IPv6_out" "${domainList}" "IPv6_route"
-            addSingBoxOutbound 01_direct_outbound
+            ensureDirectOutbound
             addSingBoxOutbound IPv6_out
             addSingBoxOutbound IPv4_out
         fi
@@ -8442,7 +8481,7 @@ ipv6Routing() {
         if [[ -n "${singBoxConfigPath}" ]]; then
             removeSingBoxConfig IPv6_out
             removeSingBoxConfig "IPv6_route"
-            addSingBoxOutbound "01_direct_outbound"
+            ensureDirectOutbound
         fi
 
         echoContent green " ---> IPv6分流卸载成功"
@@ -8567,35 +8606,12 @@ blacklist() {
     echoContent yellow "2.添加域名"
     echoContent yellow "3.屏蔽大陆域名"
     echoContent yellow "4.卸载黑名单"
-    echoContent yellow "5.添加白名单域名（直连）"
     echoContent red "=============================================================="
 
     read -r -p "请选择:" blacklistStatus
     if [[ "${blacklistStatus}" == "1" ]]; then
         jq -r -c '.routing.rules[]|select (.outboundTag=="blackhole_out")|.domain' ${configPath}09_routing.json | jq -r
         exit 0
-    elif [[ "${blacklistStatus}" == "5" ]]; then
-        # 参考上游 mack-a/v2ray-agent 77a39bd 中"添加域名白名单"思路（仅做最小子集）
-        # 把域名加入 direct 出站，让指定域名跳过黑名单/分流规则直连
-        echoContent red "=============================================================="
-        echoContent yellow "# 注意事项\n"
-        echoContent yellow "1.白名单优先级高于其他规则；列出的域名总是直连"
-        echoContent yellow "2.录入示例:dl.google.com,microsoft.com,bing.com\n"
-        read -r -p "请按照上面示例录入白名单域名:" whitelistDomainList
-        if [[ -z "${whitelistDomainList}" ]]; then
-            echoContent red " ---> 域名不可为空"
-            exit 1
-        fi
-        if [[ "${coreKind}" == "1" ]]; then
-            addXrayRouting allow_domain_direct outboundTag "${whitelistDomainList}"
-        fi
-        if [[ -n "${singBoxConfigPath}" ]]; then
-            addSingBoxRouteRule "01_direct_outbound" "${whitelistDomainList}" "00_allow_domain_route"
-            addSingBoxOutbound "01_direct_outbound"
-        fi
-        echoContent green " ---> 白名单添加完毕"
-        reloadCore
-        return 0
     elif [[ "${blacklistStatus}" == "2" ]]; then
         echoContent red "=============================================================="
         echoContent yellow "# 注意事项\n"
@@ -8613,7 +8629,7 @@ blacklist() {
         if [[ -n "${singBoxConfigPath}" ]]; then
             addSingBoxRouteRule "block_domain_outbound" "${domainList}" "block_domain_route"
             addSingBoxOutbound "block_domain_outbound"
-            addSingBoxOutbound "01_direct_outbound"
+            ensureDirectOutbound
         fi
         echoContent green " ---> 添加完毕"
 
@@ -8634,7 +8650,7 @@ blacklist() {
             addSingBoxRouteRule "01_direct_outbound" "googleapis.com,googleapis.cn,xn--ngstr-lra8j.com,gstatic.com" "cn_01_google_play_route"
 
             addSingBoxOutbound "cn_block_outbound"
-            addSingBoxOutbound "01_direct_outbound"
+            ensureDirectOutbound
         fi
 
         echoContent green " ---> 屏蔽大陆域名完毕"
@@ -8884,7 +8900,7 @@ addWireGuardRoute() {
         addSingBoxRouteRule "wireguard_endpoints_${type}" "${domainList}" "wireguard_endpoints_${type}_route"
         # addSingBoxOutbound "wireguard_out_${type}" "wireguard_out"
         if [[ -n "${domainList}" ]]; then
-            addSingBoxOutbound "01_direct_outbound"
+            ensureDirectOutbound
         fi
 
         # outbound
@@ -9041,7 +9057,7 @@ warpRoutingReg() {
             removeSingBoxConfig "wireguard_endpoints_${type}_route"
 
             removeSingBoxConfig "wireguard_endpoints_${type}"
-            addSingBoxOutbound "01_direct_outbound"
+            ensureDirectOutbound
         fi
 
         echoContent green " ---> 卸载WARP ${type}分流完毕"
@@ -14479,7 +14495,7 @@ setUnlockDNS() {
         fi
 
         if [[ -n "${singBoxConfigPath}" ]]; then
-            addSingBoxOutbound 01_direct_outbound
+            ensureDirectOutbound
             addSingBoxDNSConfig "${setDNS}" "${domainList}"
         fi
 
@@ -14773,7 +14789,7 @@ installXrayRealityOnly() {
     selectCustomInstallType=",7,"
     readLastInstallationConfig
     unInstallSubscribe
-    totalProgress=7
+    totalProgress=6
     installTools 1
     handleNginx stop
     installXray 2 false
@@ -14790,7 +14806,7 @@ installSingBoxRealityOnly() {
     selectCustomInstallType=",7,"
     readLastInstallationConfig
     unInstallSubscribe
-    totalProgress=7
+    totalProgress=6
     installTools 1
     installSingBox 2
     installSingBoxService 3
