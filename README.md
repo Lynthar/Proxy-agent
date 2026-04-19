@@ -43,6 +43,7 @@ wget -P /root -N https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/in
 - **系统**：Debian 9+、Ubuntu 16+、CentOS 7+、Alpine 3+
 - **架构**：amd64、arm64
 - **权限**：root
+- **sing-box**：≥ 1.11（脚本默认拉最新版自动满足；本脚本配置使用 1.11 引入的路由级 sniff/resolve action）
 
 ## 语言切换
 

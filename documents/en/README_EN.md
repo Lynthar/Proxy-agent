@@ -43,6 +43,7 @@ After install, launch the management menu with `pasly`.
 - **Arch**: amd64, arm64
 - **Memory**: 512 MB+
 - **Privilege**: root
+- **sing-box**: ≥ 1.11 (auto-satisfied by the installer's "always pull latest" policy; the script's config uses route-level sniff/resolve actions introduced in 1.11)
 
 ## Language Selection
 
