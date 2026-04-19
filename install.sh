@@ -7298,6 +7298,12 @@ removeUser() {
             echo "${vmessHTTPUpgradeResult}" | jq . >"${singBoxConfigPath}11_VMess_HTTPUpgrade_inbounds.json"
             echo "${vmessHTTPUpgradeResult}" | jq . >${configPath}11_VMess_HTTPUpgrade_inbounds.json
         fi
+        # AnyTLS（与 SS2022 同为 sing-box 专属，shape 一致；上游 mack-a/v2ray-agent f33a59b 修复同款）
+        if echo ${currentInstallProtocolType} | grep -q ",13,"; then
+            local anytlsResult
+            anytlsResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].users[$idx])' "${singBoxConfigPath}13_anytls_inbounds.json")
+            echo "${anytlsResult}" | jq . >"${singBoxConfigPath}13_anytls_inbounds.json"
+        fi
         # Shadowsocks 2022
         if echo ${currentInstallProtocolType} | grep -q ",14,"; then
             local ss2022Result
