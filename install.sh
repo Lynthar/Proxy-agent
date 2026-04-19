@@ -46,9 +46,9 @@ _LIB_DIR="${_SCRIPT_DIR}/lib"
 if [[ -d "${_LIB_DIR}" ]]; then
     # 加载顺序很重要：
     # Phase 1: i18n (国际化，最先加载)
-    # Phase 2: constants -> utils -> system-detect -> service-control
-    # Phase 3: json-utils -> protocol-registry -> config-reader
-    for _module in i18n constants utils json-utils system-detect service-control protocol-registry config-reader; do
+    # Phase 2: constants -> utils -> system-detect
+    # Phase 3: json-utils -> protocol-registry
+    for _module in i18n constants utils json-utils system-detect protocol-registry; do
         if [[ -f "${_LIB_DIR}/${_module}.sh" ]]; then
             # shellcheck source=/dev/null
             source "${_LIB_DIR}/${_module}.sh"
@@ -7655,7 +7655,7 @@ rollbackScript() {
         echoContent yellow " ---> 下载模块文件..."
         mkdir -p "${installDir}/lib"
         local failedModules=()
-        for module in i18n constants utils json-utils system-detect service-control protocol-registry config-reader; do
+        for module in i18n constants utils json-utils system-detect protocol-registry; do
             if ! wget -c -q -O "${installDir}/lib/${module}.sh" "${rawBase}/${version}/lib/${module}.sh"; then
                 failedModules+=("${module}")
             fi
@@ -7853,7 +7853,7 @@ updateV2RayAgent() {
     mkdir -p "${installDir}/lib"
     local moduleCount=0
     local failedModules=()
-    for module in i18n constants utils json-utils system-detect service-control protocol-registry config-reader; do
+    for module in i18n constants utils json-utils system-detect protocol-registry; do
         if wget -c -q -O "${installDir}/lib/${module}.sh" "${rawBase}/lib/${module}.sh"; then
             ((moduleCount++))
         else

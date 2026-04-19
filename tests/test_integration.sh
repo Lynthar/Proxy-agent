@@ -350,7 +350,6 @@ source lib/utils.sh
 source lib/json-utils.sh
 source lib/protocol-registry.sh
 source lib/system-detect.sh
-source lib/service-control.sh
 
 # 定义测试路径变量
 _TEST_V2RAY_AGENT_DIR="${MOCK_ROOT}/etc/Proxy-agent"
