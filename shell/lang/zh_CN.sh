@@ -148,6 +148,9 @@ MSG_UPDATE_SHA256_RESTORED="已从备份恢复: %s"
 MSG_UPDATE_SHA256_REASON_NOTAG="未获取到 Release 版本，无法定位校验文件"
 MSG_UPDATE_SHA256_REASON_NOASSET="未找到 Release 的 SHA256 资产 (可能是旧版本 Release)"
 MSG_UPDATE_SHA256_REASON_BADFORMAT="SHA256 文件格式异常"
+MSG_UPDATE_MODULE_DOWNLOAD_FAIL="lib 模块下载失败 (%s)，已中止更新；旧版本未受影响"
+MSG_UPDATE_LANG_DOWNLOAD_FAIL="语言文件下载失败 (%s)，已中止更新；旧版本未受影响"
+MSG_INSTALL_STAGE_FAIL="复制 %s 到 /etc/Proxy-agent/ 失败，请检查权限或磁盘空间"
 
 # =============================================================================
 # 核心/协议 - Core/Protocol Messages

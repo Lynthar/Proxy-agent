@@ -148,6 +148,9 @@ MSG_UPDATE_SHA256_RESTORED="Restored from backup: %s"
 MSG_UPDATE_SHA256_REASON_NOTAG="no Release tag available"
 MSG_UPDATE_SHA256_REASON_NOASSET="no SHA256 asset in this Release (likely a pre-feature release)"
 MSG_UPDATE_SHA256_REASON_BADFORMAT="SHA256 file format invalid"
+MSG_UPDATE_MODULE_DOWNLOAD_FAIL="Failed to download lib modules (%s); update aborted, previous version untouched"
+MSG_UPDATE_LANG_DOWNLOAD_FAIL="Failed to download language files (%s); update aborted, previous version untouched"
+MSG_INSTALL_STAGE_FAIL="Failed to copy %s into /etc/Proxy-agent/; check permissions or disk space"
 
 # =============================================================================
 # Core/Protocol Messages
