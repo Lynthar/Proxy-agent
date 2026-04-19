@@ -5,3 +5,6 @@ fodder/.DS_Store
 .DS_Store
 GEMINI.md
 GEMINI.zh-CN.md
+
+# SMB filesystem tombstones (NAS / network mount)
+.smbdelete*

@@ -7293,8 +7293,72 @@ removeUser() {
 
 # ======================= 脚本版本管理 =======================
 
+# 配置快照：把运行时配置（xray/sing-box/tls/lang_pref）拷贝到 destDir
+# 用于 backupScript 和 rollback 时的"当前配置预快照"
+# 参数: $1 - 目标目录（不存在则创建）
+# 返回: 0 = 至少有一项被快照，1 = 全部源缺失或目标不可写
+backupConfigSnapshot() {
+    local destDir="$1"
+    local installDir="/etc/Proxy-agent"
+    [[ -z "${destDir}" ]] && return 1
+    mkdir -p "${destDir}" || return 1
+
+    local copied=0
+    # xray 配置目录（含 inbound/routing 片段）
+    if [[ -d "${installDir}/xray/conf" ]]; then
+        mkdir -p "${destDir}/xray"
+        cp -rf "${installDir}/xray/conf" "${destDir}/xray/" 2>/dev/null && copied=1
+    fi
+    # sing-box 配置目录的整个父目录（含 conf/config/ 片段 + chain_*_info.json + external_node_info.json）
+    if [[ -d "${installDir}/sing-box/conf" ]]; then
+        mkdir -p "${destDir}/sing-box"
+        cp -rf "${installDir}/sing-box/conf" "${destDir}/sing-box/" 2>/dev/null && copied=1
+    fi
+    # TLS 证书与 acme 账户状态
+    if [[ -d "${installDir}/tls" ]]; then
+        cp -rf "${installDir}/tls" "${destDir}/" 2>/dev/null && copied=1
+    fi
+    # 语言偏好
+    if [[ -f "${installDir}/lang_pref" ]]; then
+        cp -f "${installDir}/lang_pref" "${destDir}/" 2>/dev/null && copied=1
+    fi
+
+    [[ ${copied} -eq 1 ]]
+}
+
+# 配置快照恢复：把 sourceDir 内容覆盖回 /etc/Proxy-agent/
+# 调用方需自行 stop/start 服务。失败时已替换的部分不会自动回滚 —— 调用方应预先做 pre-restore snapshot
+# 参数: $1 - 来源目录（即 backup/<ver>/config 或类似路径）
+# 返回: 0 = 成功（至少一项），1 = sourceDir 不存在或全部源缺失
+restoreConfigSnapshot() {
+    local sourceDir="$1"
+    local installDir="/etc/Proxy-agent"
+    [[ -z "${sourceDir}" || ! -d "${sourceDir}" ]] && return 1
+
+    local restored=0
+    if [[ -d "${sourceDir}/xray/conf" ]]; then
+        mkdir -p "${installDir}/xray"
+        rm -rf "${installDir}/xray/conf"
+        cp -rf "${sourceDir}/xray/conf" "${installDir}/xray/" 2>/dev/null && restored=1
+    fi
+    if [[ -d "${sourceDir}/sing-box/conf" ]]; then
+        mkdir -p "${installDir}/sing-box"
+        rm -rf "${installDir}/sing-box/conf"
+        cp -rf "${sourceDir}/sing-box/conf" "${installDir}/sing-box/" 2>/dev/null && restored=1
+    fi
+    if [[ -d "${sourceDir}/tls" ]]; then
+        rm -rf "${installDir}/tls"
+        cp -rf "${sourceDir}/tls" "${installDir}/" 2>/dev/null && restored=1
+    fi
+    if [[ -f "${sourceDir}/lang_pref" ]]; then
+        cp -f "${sourceDir}/lang_pref" "${installDir}/" 2>/dev/null && restored=1
+    fi
+
+    [[ ${restored} -eq 1 ]]
+}
+
 # 备份脚本
-# 参数: $1 - 备份原因 (update/manual)
+# 参数: $1 - 备份原因 (update/manual/rollback)
 backupScript() {
     local reason="${1:-manual}"
     local installDir="/etc/Proxy-agent"
@@ -7335,13 +7399,21 @@ backupScript() {
         cp -rf "${installDir}/shell/lang" "${backupPath}/shell/"
     fi
 
+    # 配置快照（xray/sing-box/tls/lang_pref）。stderr 走 /dev/null
+    # 失败不阻断脚本备份本身——首装、未配置等场景全源缺失是正常的
+    local hasConfig="false"
+    if backupConfigSnapshot "${backupPath}/config" 2>/dev/null; then
+        hasConfig="true"
+    fi
+
     # 记录备份信息
     cat > "${backupPath}/backup_info.json" << EOF
 {
     "version": "${currentVersion}",
     "timestamp": "${timestamp}",
     "reason": "${reason}",
-    "date": "$(date '+%Y-%m-%d %H:%M:%S')"
+    "date": "$(date '+%Y-%m-%d %H:%M:%S')",
+    "has_config": ${hasConfig}
 }
 EOF
 
@@ -7392,7 +7464,12 @@ listScriptVersions() {
                     backupReason=$(jq -r '.reason // "unknown"' "${backup}/backup_info.json" 2>/dev/null)
                     backupInfo=" [${backupDate}] (${backupReason})"
                 fi
-                echoContent yellow "${index}. ${backupName}${backupInfo}"
+                # 标记是否包含配置快照（旧版备份没有 config/，回退时不会触发配置恢复提示）
+                local configMark=""
+                if [[ -d "${backup}/config" ]]; then
+                    configMark=" [+config]"
+                fi
+                echoContent yellow "${index}. ${backupName}${backupInfo}${configMark}"
                 backupList+=("local:${backup}")
                 ((index++))
             fi
@@ -7503,6 +7580,39 @@ rollbackScript() {
         fi
 
         echoContent green "\n ---> $(t SCRIPT_ROLLBACK_SUCCESS)!"
+
+        # 可选：同步恢复配置快照（仅本地备份分支；GitHub 分支无配置可恢复）
+        if [[ -d "${sourcePath}/config" ]]; then
+            echoContent yellow "\n$(t SCRIPT_ROLLBACK_CONFIG_PROMPT)"
+            local restoreConfig
+            read -r -p "[y/n]: " restoreConfig
+            if [[ "${restoreConfig}" == "y" ]]; then
+                # 在覆盖前先把"当前配置"快照到本次回退创建的备份目录里，让回退本身可逆
+                local preRestoreSnapshot="${backupPath}/pre_rollback_config"
+                if backupConfigSnapshot "${preRestoreSnapshot}" 2>/dev/null; then
+                    echoContent green " ---> $(t SCRIPT_ROLLBACK_CONFIG_SAVED): ${preRestoreSnapshot}"
+                fi
+
+                # 释放服务对配置文件的句柄
+                handleXray stop >/dev/null 2>&1
+                handleSingBox stop >/dev/null 2>&1
+
+                if restoreConfigSnapshot "${sourcePath}/config"; then
+                    echoContent green " ---> $(t SCRIPT_ROLLBACK_CONFIG_RESTORED)"
+                    # 提醒：恢复的 TLS 证书可能已临近过期，下次 cron 续签时会更新
+                    if [[ -d "${installDir}/tls" ]]; then
+                        echoContent yellow " ---> $(t SCRIPT_ROLLBACK_TLS_NOTICE)"
+                    fi
+                    # sing-box 配置由片段合并而来，重启前必须 merge 一次
+                    if [[ -f "${installDir}/sing-box/sing-box" ]]; then
+                        singBoxMergeConfig >/dev/null 2>&1
+                    fi
+                    reloadCore
+                else
+                    echoContent red " ---> $(t SCRIPT_ROLLBACK_CONFIG_FAILED)"
+                fi
+            fi
+        fi
 
     elif [[ "${sourceType}" == "github" ]]; then
         # 从 GitHub 下载指定版本
