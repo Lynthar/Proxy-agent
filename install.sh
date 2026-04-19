@@ -1735,8 +1735,9 @@ readConfigHostPathUUID() {
             if [[ -z "${currentPath}" ]]; then
                 dest=$(jq -r -c '.inbounds[0].settings.fallbacks[]|select(.alpn)|.dest' ${configPath}${frontingType}.json | head -1)
                 if [[ "${dest}" == "31302" || "${dest}" == "31304" ]]; then
-                    checkBTPanel
-                    check1Panel
+                    # 上游 mack-a/v2ray-agent d64843b (v3.5.12) 移除：BT Panel / 1Panel 自身已修补端口冲突检测，本仓兼容层不再主动调用
+                    # checkBTPanel
+                    # check1Panel
                     if grep -q "trojangrpc {" <${nginxConfigPath}alone.conf; then
                         currentPath=$(grep "trojangrpc {" <${nginxConfigPath}alone.conf | awk -F "[/]" '{print $2}' | awk -F "[t][r][o][j][a][n]" '{print $1}')
                     elif grep -q "grpc {" <${nginxConfigPath}alone.conf; then
@@ -4621,9 +4622,7 @@ EOF
       "streamSettings": {
         "network": "ws",
         "security": "tls",
-        "tlsSettings": {
-          "allowInsecure": false
-        },
+        "tlsSettings": {},
         "wsSettings": {
           "path": "${setVMessWSTLSPath}"
         }
@@ -5803,11 +5802,11 @@ EOF
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40${currentHost}%3A${port}%3Fencryption%3Dnone%26fp%3Dchrome%26security%3Dtls%26type%3Dtcp%26${currentHost}%3D${currentHost}%26headerType%3Dnone%26sni%3D${currentHost}%26flow%3Dxtls-rprx-vision%23${email}\n"
 
     elif [[ "${type}" == "vmessws" ]]; then
-        qrCodeBase64Default=$(echo -n "{\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"ws\",\"add\":\"${add}\",\"allowInsecure\":0,\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}" | base64 -w 0)
+        qrCodeBase64Default=$(echo -n "{\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"ws\",\"add\":\"${add}\",\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}" | base64 -w 0)
         qrCodeBase64Default="${qrCodeBase64Default// /}"
 
         echoContent yellow " ---> 通用json(VMess+WS+TLS)"
-        echoContent green "    {\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"ws\",\"add\":\"${add}\",\"allowInsecure\":0,\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}\n"
+        echoContent green "    {\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"ws\",\"add\":\"${add}\",\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}\n"
         echoContent yellow " ---> 通用vmess(VMess+WS+TLS)链接"
         echoContent green "    vmess://${qrCodeBase64Default}\n"
         echoContent yellow " ---> 二维码 vmess(VMess+WS+TLS)"
@@ -6181,11 +6180,11 @@ EOF
         echoContent yellow " ---> 二维码 Naive(TLS)"
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=naive%2Bhttps%3A%2F%2F${email}%3A${id}%40${currentHost}%3A${port}%3Fpadding%3Dtrue%23${email}\n"
     elif [[ "${type}" == "vmessHTTPUpgrade" ]]; then
-        qrCodeBase64Default=$(echo -n "{\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"httpupgrade\",\"add\":\"${add}\",\"allowInsecure\":0,\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}" | base64 -w 0)
+        qrCodeBase64Default=$(echo -n "{\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"httpupgrade\",\"add\":\"${add}\",\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}" | base64 -w 0)
         qrCodeBase64Default="${qrCodeBase64Default// /}"
 
         echoContent yellow " ---> 通用json(VMess+HTTPUpgrade+TLS)"
-        echoContent green "    {\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"httpupgrade\",\"add\":\"${add}\",\"allowInsecure\":0,\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}\n"
+        echoContent green "    {\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"httpupgrade\",\"add\":\"${add}\",\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}\n"
         echoContent yellow " ---> 通用vmess(VMess+HTTPUpgrade+TLS)链接"
         echoContent green "    vmess://${qrCodeBase64Default}\n"
         echoContent yellow " ---> 二维码 vmess(VMess+HTTPUpgrade+TLS)"
@@ -6871,7 +6870,8 @@ unInstall() {
         menu
         exit 0
     fi
-    checkBTPanel
+    # 上游 mack-a/v2ray-agent d64843b (v3.5.12) 移除
+    # checkBTPanel
     echoContent yellow " ---> 脚本不会删除acme相关配置，删除请手动执行 [rm -rf /root/.acme.sh]"
     handleNginx stop
     if [[ -z $(pgrep -f "nginx") ]]; then
@@ -8567,12 +8567,35 @@ blacklist() {
     echoContent yellow "2.添加域名"
     echoContent yellow "3.屏蔽大陆域名"
     echoContent yellow "4.卸载黑名单"
+    echoContent yellow "5.添加白名单域名（直连）"
     echoContent red "=============================================================="
 
     read -r -p "请选择:" blacklistStatus
     if [[ "${blacklistStatus}" == "1" ]]; then
         jq -r -c '.routing.rules[]|select (.outboundTag=="blackhole_out")|.domain' ${configPath}09_routing.json | jq -r
         exit 0
+    elif [[ "${blacklistStatus}" == "5" ]]; then
+        # 参考上游 mack-a/v2ray-agent 77a39bd 中"添加域名白名单"思路（仅做最小子集）
+        # 把域名加入 direct 出站，让指定域名跳过黑名单/分流规则直连
+        echoContent red "=============================================================="
+        echoContent yellow "# 注意事项\n"
+        echoContent yellow "1.白名单优先级高于其他规则；列出的域名总是直连"
+        echoContent yellow "2.录入示例:dl.google.com,microsoft.com,bing.com\n"
+        read -r -p "请按照上面示例录入白名单域名:" whitelistDomainList
+        if [[ -z "${whitelistDomainList}" ]]; then
+            echoContent red " ---> 域名不可为空"
+            exit 1
+        fi
+        if [[ "${coreKind}" == "1" ]]; then
+            addXrayRouting allow_domain_direct outboundTag "${whitelistDomainList}"
+        fi
+        if [[ -n "${singBoxConfigPath}" ]]; then
+            addSingBoxRouteRule "01_direct_outbound" "${whitelistDomainList}" "00_allow_domain_route"
+            addSingBoxOutbound "01_direct_outbound"
+        fi
+        echoContent green " ---> 白名单添加完毕"
+        reloadCore
+        return 0
     elif [[ "${blacklistStatus}" == "2" ]]; then
         echoContent red "=============================================================="
         echoContent yellow "# 注意事项\n"
@@ -14657,8 +14680,9 @@ customXrayInstall() {
 
         readLastInstallationConfig
         unInstallSubscribe
-        checkBTPanel
-        check1Panel
+        # 上游 mack-a/v2ray-agent d64843b (v3.5.12) 移除
+        # checkBTPanel
+        # check1Panel
         totalProgress=12
         installTools 1
         if [[ -n "${btDomain}" ]]; then
@@ -14743,12 +14767,64 @@ selectCoreInstall() {
     esac
 }
 
+# 一键无域名 Reality 安装（参考上游 mack-a/v2ray-agent 773b1b7 v3.5.9）
+# 仅安装 VLESS+Reality+Vision (协议 7)；跳过域名/TLS 申请
+installXrayRealityOnly() {
+    selectCustomInstallType=",7,"
+    readLastInstallationConfig
+    unInstallSubscribe
+    totalProgress=7
+    installTools 1
+    handleNginx stop
+    installXray 2 false
+    installXrayService 3
+    initXrayConfig custom 4
+    cleanUp singBoxDel
+    handleXray stop
+    handleXray start
+    checkGFWStatue 5
+    showAccounts 6
+}
+
+installSingBoxRealityOnly() {
+    selectCustomInstallType=",7,"
+    readLastInstallationConfig
+    unInstallSubscribe
+    totalProgress=7
+    installTools 1
+    installSingBox 2
+    installSingBoxService 3
+    initSingBoxConfig custom 4
+    cleanUp xrayDel
+    handleSingBox stop
+    handleSingBox start
+    checkGFWStatue 5
+    showAccounts 6
+}
+
+# 一键无域名 Reality 核心选择
+selectRealityCoreInstall() {
+    echoContent skyBlue "\n$(t REALITY_QUICK_TITLE)"
+    echoContent red "=============================================================="
+    echoContent yellow "$(t REALITY_QUICK_CORE_SELECT)"
+    read -r -p "$(t PROMPT_SELECT):" realityCoreType
+    case ${realityCoreType} in
+        1) installXrayRealityOnly ;;
+        2) installSingBoxRealityOnly ;;
+        *)
+            echoContent red ' ---> 选择错误，重新选择'
+            selectRealityCoreInstall
+            ;;
+    esac
+}
+
 # xray-core 安装
 xrayCoreInstall() {
     readLastInstallationConfig
     unInstallSubscribe
-    checkBTPanel
-    check1Panel
+    # 上游 mack-a/v2ray-agent d64843b (v3.5.12) 移除
+    # checkBTPanel
+    # check1Panel
     selectCustomInstallType=
     totalProgress=12
     installTools 2
@@ -14792,8 +14868,9 @@ xrayCoreInstall() {
 singBoxInstall() {
     readLastInstallationConfig
     unInstallSubscribe
-    checkBTPanel
-    check1Panel
+    # 上游 mack-a/v2ray-agent d64843b (v3.5.12) 移除
+    # checkBTPanel
+    # check1Panel
     selectCustomInstallType=
     totalProgress=8
     installTools 2
@@ -16236,6 +16313,7 @@ menu() {
     echoContent yellow "16.$(t MENU_CORE)"
     echoContent yellow "17.$(t MENU_UPDATE_SCRIPT)"
     echoContent yellow "18.$(t MENU_BBR)"
+    echoContent yellow "19.$(t MENU_REALITY_QUICK)"
     echoContent skyBlue "-------------------------$(t MENU_SCRIPT_MGMT)-----------------------------"
     echoContent yellow "20.$(t MENU_UNINSTALL)"
     echoContent yellow "21.切换语言 / Switch Language"
@@ -16298,6 +16376,9 @@ menu() {
         ;;
     18)
         bbrInstall
+        ;;
+    19)
+        selectRealityCoreInstall
         ;;
     20)
         unInstall 1
