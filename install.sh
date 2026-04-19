@@ -2858,11 +2858,12 @@ randomPathFunction() {
             initRandomPath
             currentPath=${customPath}
         else
-            # 格式校验：URL path 片段只允许字母数字与 -_，长度 1-32
+            # 格式校验：URL path 片段只允许字母数字与 . _ -，长度 1-32
+            # 放点号是为了兼容像 "api.v1" 这种习惯；点号对 Nginx path matching 无影响
             # customPath 会嵌入 JSON（.path）与 Nginx location、fallback path 多处字符串，
             # 禁用引号/斜杠/空白/jq-shell 元字符以阻断 JSON 破坏与下游注入
-            if ! [[ "${customPath}" =~ ^[A-Za-z0-9_-]{1,32}$ ]]; then
-                echoContent red " ---> 路径格式非法，仅允许字母数字及 _ -，长度 1-32"
+            if ! [[ "${customPath}" =~ ^[A-Za-z0-9._-]{1,32}$ ]]; then
+                echoContent red " ---> 路径格式非法，仅允许字母数字及 . _ -，长度 1-32"
                 exit 1
             fi
             if [[ "${customPath: -2}" == "ws" ]]; then
