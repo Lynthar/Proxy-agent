@@ -384,9 +384,8 @@ assert_contains "${clients}" "user1-VLESS_TCP" "读取 Xray 客户端列表"
 wsPath=$(xrayGetStreamPath "${_TEST_XRAY_CONFIG_DIR}/03_VLESS_WS_inbounds.json" "ws")
 assert_equals "/testpath123ws" "${wsPath}" "读取 Xray WebSocket 路径"
 
-# 测试读取 Xray Reality 配置
-realityResult=$(xrayGetRealityConfig "${_TEST_XRAY_CONFIG_DIR}/07_VLESS_vision_reality_inbounds.json" 1)
-eval "${realityResult}"
+# 测试读取 Xray Reality 配置（直接调用，全局变量自动赋值）
+xrayGetRealityConfig "${_TEST_XRAY_CONFIG_DIR}/07_VLESS_vision_reality_inbounds.json" 1
 assert_equals "www.microsoft.com" "${realityServerName}" "读取 Reality serverName"
 assert_equals "O3gPFZ1Tc0FBi0VYRzfhkEAhVPZs1_n5hH_Df3eDOT0" "${realityPublicKey}" "读取 Reality publicKey"
 assert_equals "WDrcaQ0SVSc0nh1SVrPmQsBkIjPQgXwZb8_z8L5kGGw" "${realityPrivateKey}" "读取 Reality privateKey"
@@ -400,23 +399,20 @@ echo ""
 
 echo -e "${YELLOW}=== 测试 sing-box 配置读取 ===${NC}"
 
-# 测试读取 Hysteria2 配置
-hysteria2Result=$(singboxGetHysteria2Config "${_TEST_SINGBOX_CONFIG_DIR}/06_hysteria2_inbounds.json")
-eval "${hysteria2Result}"
+# 测试读取 Hysteria2 配置（直接调用，全局变量自动赋值）
+singboxGetHysteria2Config "${_TEST_SINGBOX_CONFIG_DIR}/06_hysteria2_inbounds.json"
 assert_equals "8844" "${hysteria2Port}" "读取 Hysteria2 端口"
 assert_equals "100" "${hysteria2UpMbps}" "读取 Hysteria2 上行速度"
 assert_equals "50" "${hysteria2DownMbps}" "读取 Hysteria2 下行速度"
 assert_equals "obfspassword456" "${hysteria2ObfsPassword}" "读取 Hysteria2 混淆密码"
 
-# 测试读取 TUIC 配置
-tuicResult=$(singboxGetTuicConfig "${_TEST_SINGBOX_CONFIG_DIR}/09_tuic_inbounds.json")
-eval "${tuicResult}"
+# 测试读取 TUIC 配置（直接调用，全局变量自动赋值）
+singboxGetTuicConfig "${_TEST_SINGBOX_CONFIG_DIR}/09_tuic_inbounds.json"
 assert_equals "8845" "${tuicPort}" "读取 TUIC 端口"
 assert_equals "bbr" "${tuicAlgorithm}" "读取 TUIC 拥塞控制算法"
 
-# 测试读取 sing-box Reality 配置
-singboxRealityResult=$(singboxGetRealityConfig "${_TEST_SINGBOX_CONFIG_DIR}/07_VLESS_vision_reality_inbounds.json" 0)
-eval "${singboxRealityResult}"
+# 测试读取 sing-box Reality 配置（直接调用，全局变量自动赋值）
+singboxGetRealityConfig "${_TEST_SINGBOX_CONFIG_DIR}/07_VLESS_vision_reality_inbounds.json" 0
 assert_equals "www.google.com" "${singboxRealityServerName}" "读取 sing-box Reality serverName"
 assert_equals "SingboxPrivateKey123" "${singboxRealityPrivateKey}" "读取 sing-box Reality privateKey"
 assert_equals "443" "${singboxRealityHandshakePort}" "读取 sing-box Reality handshake port"
