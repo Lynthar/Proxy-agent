@@ -5883,6 +5883,30 @@ EOF
         cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
 vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality&type=xhttp&sni=${xrayVLESSRealityXHTTPServerName}&fp=chrome&path=${path}&pbk=${currentRealityXHTTPPublicKey}&sid=${currentRealityXHTTPShortId}#${email}
 EOF
+
+        # clashMeta（mihomo）订阅：参考上游 mack-a/v2ray-agent d64843b (v3.5.12)
+        # 我们的实现增加了 reality-opts (publicKey + shortId)；上游缺这两项 clashMeta 客户端无法连 Reality
+        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
+  - name: "${email}"
+    type: vless
+    server: $(getPublicIP)
+    port: ${port}
+    uuid: ${id}
+    udp: true
+    tls: true
+    network: xhttp
+    client-fingerprint: chrome
+    alpn:
+      - h2
+    servername: ${xrayVLESSRealityXHTTPServerName}
+    reality-opts:
+      public-key: ${currentRealityXHTTPPublicKey}
+      short-id: ${currentRealityXHTTPShortId}
+    xhttp-opts:
+      path: ${path}
+      host: ${xrayVLESSRealityXHTTPServerName}
+EOF
+
         echoContent yellow " ---> 二维码 VLESS(VLESS+reality+XHTTP)"
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40$(getPublicIP)%3A${port}%3Fencryption%3Dnone%26security%3Dreality%26type%3Dxhttp%26sni%3D${xrayVLESSRealityXHTTPServerName}%26fp%3Dchrome%26path%3D${path}%26host%3D${xrayVLESSRealityXHTTPServerName}%26pbk%3D${currentRealityXHTTPPublicKey}%26sid%3D${currentRealityXHTTPShortId}%23${email}\n"
 
@@ -15778,7 +15802,10 @@ checkRealityDest() {
 
 # 初始化客户端可用的ServersName
 initRealityClientServersName() {
-    local realityDestDomainList="gateway.icloud.com,itunes.apple.com,swdist.apple.com,swcdn.apple.com,updates.cdn-apple.com,mensura.cdn-apple.com,osxapps.itunes.apple.com,aod.itunes.apple.com,download-installer.cdn.mozilla.net,addons.mozilla.org,s0.awsstatic.com,d1.awsstatic.com,cdn-dynmedia-1.microsoft.com,images-na.ssl-images-amazon.com,m.media-amazon.com,player.live-video.net,one-piece.com,lol.secure.dyn.riotcdn.net,www.lovelive-anime.jp,academy.nvidia.com,software.download.prss.microsoft.com,dl.google.com,www.google-analytics.com,www.caltech.edu,www.calstatela.edu,www.suny.edu,www.suffolk.edu,www.python.org,vuejs-jp.org,vuejs.org,zh-hk.vuejs.org,react.dev,www.java.com,www.oracle.com,www.mysql.com,www.mongodb.com,redis.io,cname.vercel-dns.com,vercel-dns.com,www.swift.com,academy.nvidia.com,www.swift.com,www.cisco.com,www.asus.com,www.samsung.com,www.amd.com,www.umcg.nl,www.fom-international.com,www.u-can.co.jp,github.io"
+    # Reality 默认 serverName 候选列表
+    # 上游 mack-a/v2ray-agent e376117 (v3.5.10) 移除了 Apple/MS 系 10 个域名
+    # 原因：这些端点近期 TLS 握手行为变化，Reality 伪装失败率上升
+    local realityDestDomainList="download-installer.cdn.mozilla.net,addons.mozilla.org,s0.awsstatic.com,d1.awsstatic.com,images-na.ssl-images-amazon.com,m.media-amazon.com,player.live-video.net,one-piece.com,lol.secure.dyn.riotcdn.net,www.lovelive-anime.jp,academy.nvidia.com,dl.google.com,www.google-analytics.com,www.caltech.edu,www.calstatela.edu,www.suny.edu,www.suffolk.edu,www.python.org,vuejs-jp.org,vuejs.org,zh-hk.vuejs.org,react.dev,www.java.com,www.oracle.com,www.mysql.com,www.mongodb.com,redis.io,cname.vercel-dns.com,vercel-dns.com,www.swift.com,www.cisco.com,www.asus.com,www.samsung.com,www.amd.com,www.umcg.nl,www.fom-international.com,www.u-can.co.jp,github.io"
     if [[ -n "${realityServerName}" && -z "${lastInstallationConfig}" ]]; then
         if echo ${realityDestDomainList} | grep -q "${realityServerName}"; then
             read -r -p "读取到上次安装设置的Reality域名，是否使用？[y/n]:" realityServerNameStatus
