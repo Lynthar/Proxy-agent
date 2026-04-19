@@ -2,10 +2,10 @@
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![GitHub Release](https://img.shields.io/github/v/release/Lynthar/Proxy-agent?label=Release)](https://github.com/Lynthar/Proxy-agent/releases)
-[![Tests](https://img.shields.io/badge/Tests-68%20passed-brightgreen)]()
+[![Tests](https://img.shields.io/badge/Tests-passing-brightgreen)]()
 [![English](https://img.shields.io/badge/English-README-blue)](documents/en/README_EN.md)
 
-Xray-core / sing-box 多协议代理一键安装脚本，基于 [v2ray-agent](https://github.com/mack-a/v2ray-agent) 修改而来，感谢@mack-a的贡献。
+Xray-core / sing-box 多协议代理一键安装脚本。基于 [v2ray-agent](https://github.com/mack-a/v2ray-agent) 修改而来，感谢 @mack-a 的贡献。
 
 ## 快速安装
 
@@ -13,69 +13,49 @@ Xray-core / sing-box 多协议代理一键安装脚本，基于 [v2ray-agent](ht
 wget -P /root -N https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/install.sh && chmod 700 /root/install.sh && /root/install.sh
 ```
 
-> **Alpine 用户请先执行 `apk add bash wget`**：Alpine 默认不包含 bash，脚本依赖 bash 运行。完成后再运行上述命令。
+> **Alpine 用户请先执行 `apk add bash wget`**（脚本依赖 bash）。
 
-**安装后使用 `pasly` 命令打开管理菜单**
-
-更详细的[使用指南](documents/user-guide.md)；
-
-如果你想自定义修改或开发，可以参考[开发指南](documents/developer-guide.md)，它可以帮助你更快的理解该项目；
-
+安装完成后使用 `pasly` 命令打开管理菜单。
 
 ## 支持协议
 
-| 协议 | 传输方式 | TLS | 说明 |
-|------|----------|-----|------|
-| VLESS | TCP/Vision, WS, XHTTP | TLS/Reality | 推荐 |
-| VMess | WebSocket, HTTPUpgrade | TLS | CDN 友好 |
-| Trojan | TCP | TLS | 伪装 HTTPS |
-| Hysteria2 | QUIC | 自签名 | 高速 UDP |
-| TUIC | QUIC | TLS | 低延迟 UDP |
-| NaiveProxy | HTTP/2 | TLS | 抗检测 |
-| Shadowsocks 2022 | - | - | 链式代理 |
+| 协议 | 传输 | 说明 |
+|---|---|---|
+| VLESS | TCP/Vision · WS · XHTTP · Reality | 推荐 |
+| VMess | WS · HTTPUpgrade | CDN 友好 |
+| Trojan | TCP | HTTPS 伪装 |
+| Hysteria2 | QUIC | 高速 UDP |
+| TUIC | QUIC | 低延迟 UDP |
+| NaiveProxy | HTTP/2 | 抗检测 |
+| AnyTLS · Shadowsocks 2022 | — | 通用 |
 
-### 主要改进
+## 主要特性
 
-- 模块化设计：constants, utils, json-utils, system-detect, service-control, protocol-registry, config-reader, i18n
-- 增强的链式代理功能，包括入口节点分流功能和支持外部节点作为出口
-- 统一的协议注册表和配置读取接口
-- 原子化 JSON 操作，防止配置损坏
-- Reality shortIds 改为随机生成，移除空值
-- 添加完整的单元测试和集成测试
-- 统一错误处理和日志输出
-- 添加i18n，中英双语
-- 脚本版本管理功能
-- 移除部分冗余文件并精简部分代码
-
-## 功能列表
-
-```
-1.安装/重新安装        2.任意组合安装        3.链式代理管理
-4.Hysteria2 管理       5.REALITY 管理        6.TUIC 管理
-7.用户管理             8.伪装站管理          9.证书管理
-10.CDN 节点管理        11.分流工具           12.添加新端口
-13.BT 下载管理         15.域名黑名单         16.Core 管理
-17.更新脚本            18.安装 BBR           20.卸载脚本
-21.切换语言
-```
+- 双核心支持（Xray-core / sing-box），自动识别与切换
+- 链式代理：支持出口/中继/入口多跳，多链路分流，Xray + sing-box 混合出站
+- 外部节点：可将第三方 SS/Trojan/SOCKS5 节点接入链式代理作为出口
+- 原子化 JSON 写入 + 配置快照式备份与回滚
+- 自更新 SHA256 校验 + 失败自动回滚
+- 中英双语，支持菜单切换与环境变量覆盖
 
 ## 系统要求
 
-- **系统**: Debian 9+, Ubuntu 16+, CentOS 7+, Alpine 3+
-- **架构**: amd64, arm64
-- **权限**: root
-
-```
+- **系统**：Debian 9+、Ubuntu 16+、CentOS 7+、Alpine 3+
+- **架构**：amd64、arm64
+- **权限**：root
 
 ## 语言切换
 
 ```bash
-# 菜单切换 (推荐)
-pasly  # 选择 21
-
-# 环境变量
-V2RAY_LANG=en pasly
+pasly                     # 菜单内选择 21
+V2RAY_LANG=en pasly       # 环境变量临时覆盖
 ```
+
+## 文档
+
+- [使用指南](documents/user-guide.md)
+- [开发指南](documents/developer-guide.md)
+- [English README](documents/en/README_EN.md)
 
 ## 致谢
 
