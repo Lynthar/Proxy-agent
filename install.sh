@@ -72,7 +72,28 @@ fi
 #   PROXY_AGENT_BOOTSTRAP_REF=<ref>   raw 模式改用指定 git ref（默认 master）
 #   PROXY_AGENT_BOOTSTRAP_MODE=auto|release|raw
 #                                     选模式（默认 auto = 先 release 后 raw）
-if [[ ! -f "${_LIB_DIR}/utils.sh" && -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
+# 触发条件：任意一个核心 lib 文件缺失，或者文件存在但 bash -n 不通过（损坏）。
+# 后者（损坏触发）保护用户不被先前 buggy 的"17. 更新脚本"流程残留的坏文件锁死——
+# 只看文件存在性会让 bootstrap 误以为已装好，跳过后 source 损坏文件直接崩。
+_lib_health_ok=1
+if [[ -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
+    for _f in i18n constants utils json-utils system-detect protocol-registry; do
+        if [[ ! -f "${_LIB_DIR}/${_f}.sh" ]] || ! bash -n "${_LIB_DIR}/${_f}.sh" 2>/dev/null; then
+            _lib_health_ok=
+            break
+        fi
+    done
+fi
+if [[ -z "${_lib_health_ok}" && -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
+    # 删除可能残留的损坏文件，确保 bootstrap 后是干净状态（避免半新半旧混合）
+    if [[ -d "${_LIB_DIR}" ]]; then
+        for _f in i18n constants utils json-utils system-detect protocol-registry; do
+            if [[ -f "${_LIB_DIR}/${_f}.sh" ]] && ! bash -n "${_LIB_DIR}/${_f}.sh" 2>/dev/null; then
+                printf '\033[33m[bootstrap] 检测到损坏的 %s/%s.sh，将重新下载\033[0m\n' "${_LIB_DIR}" "${_f}" >&2
+                rm -f "${_LIB_DIR}/${_f}.sh"
+            fi
+        done
+    fi
     _bootstrap_libs() {
         local ref="${PROXY_AGENT_BOOTSTRAP_REF:-master}"
         local mode="${PROXY_AGENT_BOOTSTRAP_MODE:-auto}"
@@ -235,6 +256,9 @@ if [[ ! -f "${_LIB_DIR}/utils.sh" && -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
             for f in "${langFiles[@]}"; do
                 _fetch_one shell/lang "${f}" || { unset -f _fetch_one; return 1; }
             done
+            # VERSION 是 best-effort：拉到就部署，拉不到就让 _load_version 走 API 兜底，
+            # 不让它失败把整个 raw 流程拖死。release 模式自带 VERSION 在 tarball 里。
+            _fetch_to_file "${rawBase}/VERSION" "${tmpDir}/VERSION" 2>/dev/null || true
             unset -f _fetch_one
             return 0
         }
@@ -292,6 +316,15 @@ if [[ ! -f "${_LIB_DIR}/utils.sh" && -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
             fi
         done
 
+        # VERSION：release tarball 自带，raw 模式 best-effort 单拉。
+        # 部署到 /etc/Proxy-agent/VERSION，让 _load_version 走第二档（本地文件）
+        # 而不是每次启动都打 GitHub API releases/latest 拿版本号。
+        # 部署失败不致命——_load_version 还有 API 兜底，只是慢一点。
+        if [[ -f "${tmpDir}/VERSION" ]]; then
+            mkdir -p /etc/Proxy-agent 2>/dev/null
+            mv -f "${tmpDir}/VERSION" /etc/Proxy-agent/VERSION 2>/dev/null || true
+        fi
+
         rm -rf "${tmpDir}"
         unset -f _fetch_to_file _fetch_to_stdout _try_release_bundle _try_raw_files
         printf '\033[32m[bootstrap] 拉取完成（%s 模式）：%d 个 lib + %d 个 lang 文件已部署\033[0m\n' \
@@ -346,7 +379,7 @@ if [[ ${#_missing_lib_fns[@]} -gt 0 ]]; then
 fi
 
 # 清理临时变量
-unset _LIB_DIR _LIB_FALLBACK_DIR _LANG_FALLBACK_DIR _SCRIPT_PATH _module _fn _required_lib_fns _missing_lib_fns
+unset _LIB_DIR _LIB_FALLBACK_DIR _LANG_FALLBACK_DIR _SCRIPT_PATH _module _fn _required_lib_fns _missing_lib_fns _lib_health_ok _f
 
 # ============================================================================
 # 版本号管理
@@ -7875,10 +7908,12 @@ rollbackScript() {
         fi
 
         # 下载语言文件（同上要求全部成功）
+        # 注：loader 已在 v1.2.2 删除，此处不再拉取；shell/lang/loader.sh 仅作为 v1.2.0-v1.2.4
+        # 旧 install.sh 的兼容占位文件保留在仓库里，不应被新代码下载或 source。
         echoContent yellow " ---> 下载语言文件..."
         mkdir -p "${installDir}/shell/lang"
         local failedLangs=()
-        for langFile in zh_CN en_US loader; do
+        for langFile in zh_CN en_US; do
             if ! wget -c -q -O "${installDir}/shell/lang/${langFile}.sh" "${rawBase}/${version}/shell/lang/${langFile}.sh"; then
                 failedLangs+=("${langFile}")
             fi
@@ -8013,10 +8048,13 @@ updateV2RayAgent() {
     echoContent yellow " ---> 下载脚本文件..."
     rm -rf "${installDir}/install.sh"
 
+    # 注：不能用 -c 续传——本地若残留旧版本文件，wget 会从已有大小处续传，
+    # 拼接成 [旧前 N 字节][新文件后续字节] 的损坏文件，bash 解析时报 syntax error。
+    # 上一行已经 rm -rf install.sh，所以这里走的是全新下载。
     if [[ "${release}" == "alpine" ]]; then
-        wget -c -q -P "${installDir}/" -N "${rawBase}/install.sh"
+        wget -q -P "${installDir}/" -N "${rawBase}/install.sh"
     else
-        wget -c -q ${wgetShowProgressStatus} -P "${installDir}/" -N "${rawBase}/install.sh"
+        wget -q ${wgetShowProgressStatus} -P "${installDir}/" -N "${rawBase}/install.sh"
     fi
 
     # 如果从 Release tag 下载失败，回退到 master 分支
@@ -8055,16 +8093,22 @@ updateV2RayAgent() {
     chmod 700 "${installDir}/install.sh"
 
     # 下载/更新 lib 目录模块（必须全部成功；失败则从备份回滚 install.sh + 退出）
-    # 之前的 2>/dev/null 把 wget 的错误信息（404 / DNS / 超时）一并吞掉，导致 lib/ 半替换后仍继续，
-    # 用户下次进 pasly 会看到 "function not found" 类怪错。现在显式收集失败列表 + 报错。
+    # 关键修复：
+    #   - 不用 wget -c：本地有旧版本时续传会拼接出损坏文件（之前用户实测 bug 来源）
+    #   - 先下到 ${dst}.new，bash -n 验证语法后才 mv 覆盖，确保不留半截 / 错误页
+    #   - 验证失败的算下载失败，跟 wget 错误同等处理
     echoContent yellow " ---> 下载模块文件..."
     mkdir -p "${installDir}/lib"
     local moduleCount=0
     local failedModules=()
     for module in i18n constants utils json-utils system-detect protocol-registry; do
-        if wget -c -q -O "${installDir}/lib/${module}.sh" "${rawBase}/lib/${module}.sh"; then
+        local _dst="${installDir}/lib/${module}.sh"
+        local _tmp="${_dst}.new"
+        if wget -q -O "${_tmp}" "${rawBase}/lib/${module}.sh" && bash -n "${_tmp}" 2>/dev/null; then
+            mv -f "${_tmp}" "${_dst}"
             ((moduleCount++))
         else
+            rm -f "${_tmp}"
             failedModules+=("${module}")
         fi
     done
@@ -8080,11 +8124,17 @@ updateV2RayAgent() {
     echoContent green " ---> 已下载 ${moduleCount} 个模块"
 
     # 下载/更新语言文件（同上要求全部成功；i18n 缺失会让用户菜单全是裸 MSG_ 字符串）
+    # 注：loader 已在 v1.2.2 删除，旧版本曾在循环里拉它会写入 GitHub 404 页面；现在仅 zh_CN/en_US。
     echoContent yellow " ---> 下载语言文件..."
     mkdir -p "${installDir}/shell/lang"
     local failedLangs=()
-    for langFile in zh_CN en_US loader; do
-        if ! wget -c -q -O "${installDir}/shell/lang/${langFile}.sh" "${rawBase}/shell/lang/${langFile}.sh"; then
+    for langFile in zh_CN en_US; do
+        local _dst="${installDir}/shell/lang/${langFile}.sh"
+        local _tmp="${_dst}.new"
+        if wget -q -O "${_tmp}" "${rawBase}/shell/lang/${langFile}.sh" && bash -n "${_tmp}" 2>/dev/null; then
+            mv -f "${_tmp}" "${_dst}"
+        else
+            rm -f "${_tmp}"
             failedLangs+=("${langFile}")
         fi
     done
@@ -8106,7 +8156,8 @@ updateV2RayAgent() {
         echo "${latestVersion#v}" > "${installDir}/VERSION"
     else
         # 从 master 分支下载 VERSION 文件（VERSION 失败不致命，仅记日志，旧 VERSION 留底）
-        if ! wget -c -q -O "${installDir}/VERSION" "${rawBase}/VERSION"; then
+        # 不用 -c：旧 VERSION 文件大小不同会导致续传拼接，得到无效内容
+        if ! wget -q -O "${installDir}/VERSION" "${rawBase}/VERSION"; then
             echoContent yellow " ---> VERSION 文件下载失败，保留旧版本号"
         fi
     fi
@@ -9346,19 +9397,38 @@ EOF
 EOF
     fi
 
-    # 确保直连出站存在（使用 prefer_ipv4 策略，优先IPv4但保留IPv6兼容）
+    # 确保直连出站存在
+    # 注：早期版本写过 "domain_strategy": "prefer_ipv4"，1.12 起在 dial fields 里
+    # 该字段已 deprecated（1.16 移除）。chain proxy 流量在路由级 resolve action 里已
+    # 按 prefer_ipv4 解析（chain_route.json）；非 chain 流量由客户端送 IP 进来，
+    # outbound 自身不会发起域名解析。所以删掉 domain_strategy，不影响行为。
+    # 详见 https://sing-box.sagernet.org/migration/
     if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json" ]]; then
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
 {
     "outbounds": [
         {
             "type": "direct",
-            "tag": "direct",
-            "domain_strategy": "prefer_ipv4"
+            "tag": "direct"
         }
     ]
 }
 EOF
+    fi
+
+    # 已有 01_direct_outbound.json 含 domain_strategy 时自动剥离（in-place migration）。
+    # 1.13 仅打 deprecation 警告，1.16 会 FATAL；现在剥掉避免后续踩坑 + 让 sing-box 启动
+    # 日志干净。
+    local _directOut="/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json"
+    if [[ -f "${_directOut}" ]] && jq -e . "${_directOut}" >/dev/null 2>&1; then
+        if jq -e '[.outbounds[]? | has("domain_strategy")] | any' "${_directOut}" >/dev/null 2>&1; then
+            echoContent yellow " ---> 检测到旧版 01_direct_outbound.json 含 domain_strategy（1.16 移除），自动剥离"
+            local _migrated
+            _migrated=$(jq '.outbounds |= map(del(.domain_strategy))' "${_directOut}" 2>/dev/null)
+            if [[ -n "${_migrated}" ]]; then
+                echo "${_migrated}" > "${_directOut}"
+            fi
+        fi
     fi
 
     # 已有 chain_route.json 缺 default_domain_resolver 时自动补全。
@@ -9588,20 +9658,11 @@ setupChainExit() {
 EOF
 
     # 同步更新 direct 出站配置
-    if [[ -n "${domainStrategy}" ]]; then
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
-{
-    "outbounds": [
-        {
-            "type": "direct",
-            "tag": "direct",
-            "domain_strategy": "${domainStrategy}"
-        }
-    ]
-}
-EOF
-    else
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
+    # 不再写 domain_strategy（dial fields 中的该字段 1.12 deprecated、1.16 移除）。
+    # 用户选的 ${domainStrategy} 仍通过下方 chain_route.json 的 `action: resolve,
+    # strategy: ${domainStrategy}` 路由级 action 落地——chain inbound 的流量在路由
+    # 阶段就按 IPv4/IPv6 偏好解析过，outbound 不需要再设。
+    cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
 {
     "outbounds": [
         {
@@ -9611,7 +9672,6 @@ EOF
     ]
 }
 EOF
-    fi
 
     # 创建路由配置 (让链式入站流量走直连)
     # sing-box 1.11+ 路由级 action：先 sniff 嗅探域名，再按 domainStrategy 重新解析
@@ -12796,15 +12856,14 @@ generateMultiChainRouteConfig() {
         fi
     done <<< "${rules}"
 
-    # 确保 direct 出站存在
+    # 确保 direct 出站存在（不写 domain_strategy，详见 ensureSingBoxInstalled 注释）
     if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json" ]]; then
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
 {
     "outbounds": [
         {
             "type": "direct",
-            "tag": "direct",
-            "domain_strategy": "prefer_ipv4"
+            "tag": "direct"
         }
     ]
 }
