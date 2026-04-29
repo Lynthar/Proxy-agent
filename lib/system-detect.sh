@@ -12,17 +12,16 @@ readonly _SYSTEM_DETECT_LOADED=1
 
 # ============================================================================
 # 检查 SELinux 状态 (CentOS)
-# 如果 SELinux 处于 enforcing 模式，需要调整策略
+# enforcing 时直接 exit 1（与历史 install.sh 行为一致：脚本不允许在
+# enforcing 模式下继续——nginx / xray socket binding 会被 SELinux 阻断）
 # ============================================================================
 
 checkCentosSELinux() {
-    if [[ -f "/etc/selinux/config" ]]; then
-        local selinuxStatus
-        selinuxStatus=$(sestatus 2>/dev/null | grep "Current mode" | awk '{print $3}')
-        if [[ "${selinuxStatus}" == "enforcing" ]]; then
-            echoContent yellow " ---> 检测到 SELinux 为 enforcing 模式"
-            echoContent yellow " ---> 建议设置为 permissive 模式以避免潜在问题"
-        fi
+    if command -v getenforce >/dev/null 2>&1 && [[ "$(getenforce)" == "Enforcing" ]]; then
+        echoContent yellow "# $(t NOTICE)"
+        echoContent yellow "$(t SYS_SELINUX_NOTICE)"
+        echoContent yellow "https://github.com/Lynthar/Proxy-agent/blob/master/documents/selinux.md"
+        exit 1
     fi
 }
 
@@ -93,10 +92,10 @@ checkSystem() {
 
     # 检查是否支持
     if [[ -z "${release}" ]]; then
-        echoContent red "\n本脚本不支持此系统，请将下方日志反馈给开发者\n"
+        echoContent red "\n$(t SYS_NOT_SUPPORTED)\n"
         echoContent yellow "$(cat /etc/issue 2>/dev/null)"
         echoContent yellow "$(cat /proc/version 2>/dev/null)"
-        exit 0
+        exit 1
     fi
 }
 
@@ -132,13 +131,13 @@ checkCPUVendor() {
                 singBoxCoreCPUVendor="-linux-armv7"
                 ;;
             *)
-                echoContent red "  不支持此CPU架构: $(uname -m)"
+                echoContent red "  $(t SYS_CPU_NOT_SUPPORTED): $(uname -m)"
                 exit 1
                 ;;
             esac
         fi
     else
-        echoContent yellow "  无法识别CPU架构，默认使用 amd64/x86_64"
+        echoContent yellow "  $(t SYS_CPU_DEFAULT_AMD64)"
         cpuVendor="amd64"
         xrayCoreCPUVendor="Xray-linux-64"
         singBoxCoreCPUVendor="-linux-amd64"
@@ -163,6 +162,11 @@ checkRoot() {
 # ============================================================================
 
 checkWgetShowProgress() {
+    # Alpine 的 BusyBox wget 不支持 --show-progress，跳过探测
+    if [[ "${release:-}" == "alpine" ]]; then
+        wgetShowProgressStatus=""
+        return
+    fi
     if wget --help 2>&1 | grep -q "show-progress"; then
         wgetShowProgressStatus="--show-progress"
     else
@@ -172,30 +176,50 @@ checkWgetShowProgress() {
 
 # ============================================================================
 # 获取公网IP地址
-# 设置全局变量:
-#   - publicIP: 公网IP地址
+# 调用约定（与 install.sh 历史调用方式兼容）：
+#   getPublicIP        → echo IPv4，失败回退 IPv6
+#   getPublicIP 4      → 强制 IPv4
+#   getPublicIP 6      → 强制 IPv6
+# Reality 短路：当 currentHost 与 Reality 的 serverName 相同（且未显式指定
+# type）时，直接 echo currentHost，省去一次外网探测。install.sh 在 Reality
+# 场景下大量调用 $(getPublicIP)，这条短路保留性能。
 # ============================================================================
 
 getPublicIP() {
-    local ipv4
-    local ipv6
+    local type="${1:-4}"
 
-    # 尝试多个服务获取IPv4
-    ipv4=$(curl -4 -s --connect-timeout 5 ip.sb 2>/dev/null || \
-           curl -4 -s --connect-timeout 5 ifconfig.me 2>/dev/null || \
-           curl -4 -s --connect-timeout 5 ipinfo.io/ip 2>/dev/null)
-
-    # 尝试获取IPv6
-    ipv6=$(curl -6 -s --connect-timeout 5 ip.sb 2>/dev/null)
-
-    if [[ -n "${ipv4}" ]]; then
-        publicIP="${ipv4}"
-    elif [[ -n "${ipv6}" ]]; then
-        publicIP="${ipv6}"
-    else
-        echoContent red " ---> 无法获取公网IP地址"
-        return 1
+    if [[ -z "${1:-}" && -n "${currentHost:-}" ]] && [[ \
+        "${singBoxVLESSRealityVisionServerName:-}" == "${currentHost}" || \
+        "${singBoxVLESSRealityGRPCServerName:-}" == "${currentHost}" || \
+        "${xrayVLESSRealityServerName:-}" == "${currentHost}" ]]; then
+        echo "${currentHost}"
+        return 0
     fi
+
+    # cf 自家 trace 优先（更稳定 + 单次响应里可同时拿到 ip 字段）；
+    # 失败再走 ip.sb / ifconfig.me / ipinfo.io。每个源 5s 超时，
+    # 总最坏耗时 ≈ 4 * 5s = 20s。
+    local ip=
+    ip="$(curl -s "-${type}" --connect-timeout 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null \
+          | sed -n 's/^ip=//p')"
+    if [[ -z "${ip}" ]]; then
+        ip="$(curl -s "-${type}" --connect-timeout 5 ip.sb 2>/dev/null)"
+    fi
+    if [[ -z "${ip}" ]]; then
+        ip="$(curl -s "-${type}" --connect-timeout 5 ifconfig.me 2>/dev/null)"
+    fi
+    if [[ -z "${ip}" ]]; then
+        ip="$(curl -s "-${type}" --connect-timeout 5 ipinfo.io/ip 2>/dev/null)"
+    fi
+
+    # IPv4 全部失败 + 没显式指定 type 时，再尝试 IPv6（与 inline 历史行为一致）
+    if [[ -z "${ip}" && -z "${1:-}" ]]; then
+        ip="$(curl -s -6 --connect-timeout 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null \
+              | sed -n 's/^ip=//p')"
+    fi
+
+    echo "${ip}"
+    [[ -n "${ip}" ]]
 }
 
 # ============================================================================

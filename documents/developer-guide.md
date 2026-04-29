@@ -71,8 +71,7 @@ Proxy-agent/
 │
 ├── shell/lang/                 # 语言文件（双语对齐）
 │   ├── zh_CN.sh
-│   ├── en_US.sh
-│   └── loader.sh
+│   └── en_US.sh
 │
 ├── documents/                  # 使用与开发文档（本文件所在）
 ├── tests/
@@ -153,7 +152,7 @@ i18n → constants → utils → json-utils → system-detect → protocol-regis
 |------|------|---------|
 | `i18n.sh` | 国际化 | `t`（翻译查询，支持 `printf` 占位符） |
 | `constants.sh` | 常量定义 | `PROTOCOL_*` ID、`PROXY_AGENT_DIR`、`XRAY_CONFIG_DIR`、服务单元路径等 |
-| `utils.sh` | 通用工具 | `echoContent` · `randomNum` · `randomPort` · `timestamp` · `isValidPort` · `isValidUUID` · `trim` · `stripAnsi` · `base64Encode/Decode` · `versionGreaterThan` · `validateJsonFile` |
+| `utils.sh` | 通用工具 | `echoContent` · `randomNum` · `randomPort` · `timestamp` · `isValidPort` · `isValidUUID` · `trim` · `stripAnsi` · `base64Encode/Decode` · `versionGreaterThan` |
 | `json-utils.sh` | JSON 读写 | `jsonValidateFile` · `jsonGetValue` · `jsonGetArray` · `jsonGetArrayLength` · `jsonArrayAppend` · `jsonWriteFile` · `jsonModifyFile` · 13 个协议专用读取器（见 §4.4） |
 | `system-detect.sh` | 系统探测 | `checkSystem` · `checkCPUVendor` · `checkRoot` · `checkCentosSELinux` · `checkWgetShowProgress` · `getPublicIP` · `getSystemMemoryMB` · `getCPUCores` · `commandExists` · `getOSInfo` |
 | `protocol-registry.sh` | 协议元数据 | `getProtocolConfigFileName` · `parseProtocolIdFromFileName` · `getProtocolDisplayName` · `getProtocolShortName` · `getProtocolInboundTag` · `protocolRequiresTLS` · `protocolUsesReality/UsesUDP/SupportsCDN` · `getProtocolTransport` · `scanInstalledProtocols` · `getProtocolConfigPath` |
