@@ -9361,6 +9361,22 @@ EOF
 EOF
     fi
 
+    # 已有 chain_route.json 缺 default_domain_resolver 时自动补全。
+    # sing-box 1.13 起没有 default_domain_resolver / outbound.domain_resolver 直接 FATAL。
+    # 后续 chainExit/chainRelay/chainEntry 等流程会重写 chain_route.json，但用户如果只是
+    # "重启 sing-box" 而不重跑配置流程，就会卡住——这里先做一次 in-place 迁移兜底。
+    local _chainRoute="/etc/Proxy-agent/sing-box/conf/config/chain_route.json"
+    if [[ -f "${_chainRoute}" ]] && jq -e . "${_chainRoute}" >/dev/null 2>&1; then
+        if ! jq -e '.route | has("default_domain_resolver")' "${_chainRoute}" >/dev/null 2>&1; then
+            echoContent yellow " ---> 检测到旧版 chain_route.json 缺 default_domain_resolver，自动补全"
+            local _migrated
+            _migrated=$(jq '.route.default_domain_resolver = "google"' "${_chainRoute}" 2>/dev/null)
+            if [[ -n "${_migrated}" ]]; then
+                echo "${_migrated}" > "${_chainRoute}"
+            fi
+        fi
+    fi
+
     # 确保 systemd 服务已安装且路径正确（修复：链式代理需要服务才能启动）
     # 检查服务文件是否存在，以及是否指向正确的路径
     local needUpdateService=false
@@ -9600,6 +9616,9 @@ EOF
     # 创建路由配置 (让链式入站流量走直连)
     # sing-box 1.11+ 路由级 action：先 sniff 嗅探域名，再按 domainStrategy 重新解析
     # 显式绑定 inbound + timeout 与上游 mack-a/v2ray-agent v3.5.10 一致
+    # default_domain_resolver 指向 01_dns.json 里的 google tag——sing-box 1.12 起，
+    # outbound 解析域名必须有显式 DNS server 来源，1.13 没设直接 FATAL 拒绝启动。
+    # 详见 https://sing-box.sagernet.org/migration/#migrate-outbound-dns-rule-items-to-domain-resolver
     if [[ -n "${domainStrategy}" ]]; then
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
 {
@@ -9609,7 +9628,8 @@ EOF
             { "inbound": "chain_inbound", "action": "resolve", "strategy": "${domainStrategy}" },
             { "inbound": ["chain_inbound"], "outbound": "direct" }
         ],
-        "final": "direct"
+        "final": "direct",
+        "default_domain_resolver": "google"
     }
 }
 EOF
@@ -9621,7 +9641,8 @@ EOF
             { "inbound": "chain_inbound", "action": "sniff", "timeout": "1s" },
             { "inbound": ["chain_inbound"], "outbound": "direct" }
         ],
-        "final": "direct"
+        "final": "direct",
+        "default_domain_resolver": "google"
     }
 }
 EOF
@@ -10051,6 +10072,7 @@ EOF
 
     # 创建路由配置
     # sing-box 1.11+ 路由级 sniff（中继节点不重解析，沿用上游已嗅探到的域名）
+    # default_domain_resolver 见 chainExit 注释，1.13 起必填
     cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
 {
     "route": {
@@ -10058,7 +10080,8 @@ EOF
             { "inbound": "chain_inbound", "action": "sniff", "timeout": "1s" },
             { "inbound": ["chain_inbound"], "outbound": "chain_outbound" }
         ],
-        "final": "direct"
+        "final": "direct",
+        "default_domain_resolver": "google"
     }
 }
 EOF
@@ -10249,6 +10272,7 @@ setupChainEntryMultiHop() {
 }
 EOF
         # 路由：先 sniff 嗅探域名，再 prefer_ipv4 重解析（替代 inbound 上的 domain_strategy）
+        # default_domain_resolver 见 chainExit 注释，1.13 起必填
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
 {
     "route": {
@@ -10257,7 +10281,8 @@ EOF
             { "inbound": "chain_bridge_in", "action": "resolve", "strategy": "prefer_ipv4" },
             { "inbound": ["chain_bridge_in"], "outbound": "chain_outbound" }
         ],
-        "final": "chain_outbound"
+        "final": "chain_outbound",
+        "default_domain_resolver": "google"
     }
 }
 EOF
@@ -10266,7 +10291,8 @@ EOF
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
 {
     "route": {
-        "final": "chain_outbound"
+        "final": "chain_outbound",
+        "default_domain_resolver": "google"
     }
 }
 EOF
@@ -10484,6 +10510,7 @@ EOF
 }
 EOF
         # 路由：先 sniff 嗅探域名，再 prefer_ipv4 重解析（替代 inbound 上的 domain_strategy）
+        # default_domain_resolver 见 chainExit 注释，1.13 起必填
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
 {
     "route": {
@@ -10492,7 +10519,8 @@ EOF
             { "inbound": "chain_bridge_in", "action": "resolve", "strategy": "prefer_ipv4" },
             { "inbound": ["chain_bridge_in"], "outbound": "chain_outbound" }
         ],
-        "final": "chain_outbound"
+        "final": "chain_outbound",
+        "default_domain_resolver": "google"
     }
 }
 EOF
@@ -10501,7 +10529,8 @@ EOF
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
 {
     "route": {
-        "final": "chain_outbound"
+        "final": "chain_outbound",
+        "default_domain_resolver": "google"
     }
 }
 EOF
@@ -11229,6 +11258,7 @@ generateProtocolChainRoute() {
 
     if [[ "${hasBridge}" == "true" ]]; then
         # 包含 bridge inbound 的路由配置
+        # default_domain_resolver 见 chainExit 注释，1.13 起必填
         routeConfig=$(cat <<EOF
 {
     "route": {
@@ -11242,7 +11272,8 @@ generateProtocolChainRoute() {
                 "outbound": "chain_outbound"
             }
         ],
-        "final": "direct"
+        "final": "direct",
+        "default_domain_resolver": "google"
     }
 }
 EOF
@@ -11258,7 +11289,8 @@ EOF
                 "outbound": "chain_outbound"
             }
         ],
-        "final": "direct"
+        "final": "direct",
+        "default_domain_resolver": "google"
     }
 }
 EOF
@@ -12783,6 +12815,7 @@ EOF
     local finalOutbound="${defaultChain}"
 
     # 构建完整的路由配置 JSON
+    # default_domain_resolver 见 chainExit 注释，1.13 起必填
     local routeConfig
     routeConfig=$(jq -n \
         --argjson rules "${routeRules}" \
@@ -12793,7 +12826,8 @@ EOF
                 "rule_set": $ruleSets,
                 "rules": $rules,
                 "final": $final,
-                "auto_detect_interface": true
+                "auto_detect_interface": true,
+                "default_domain_resolver": "google"
             }
         }')
 
@@ -14145,11 +14179,13 @@ setupExternalAsSingleExit() {
     echo "{\"outbounds\": [${outboundConfig}]}" | jq . > "${configDir}/chain_outbound.json"
 
     # 生成路由配置 - 所有流量走外部节点
+    # default_domain_resolver 见 chainExit 注释，1.13 起必填
     cat <<EOF > "${configDir}/chain_route.json"
 {
     "route": {
         "rules": [],
-        "final": "chain_external_outbound"
+        "final": "chain_external_outbound",
+        "default_domain_resolver": "google"
     }
 }
 EOF
