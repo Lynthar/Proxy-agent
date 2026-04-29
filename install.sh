@@ -39,8 +39,270 @@ trap '_cleanup' EXIT
 # 这允许逐步重构而保持向后兼容
 # ============================================================================
 
-_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 解析符号链接：pasly 是 /usr/bin/pasly → /etc/Proxy-agent/install.sh 的
+# symlink。不解析的话 _SCRIPT_DIR 会停在 /usr/bin，找不到 lib/。
+# readlink -f 在 BusyBox（Alpine）和 GNU coreutils 上都默认支持。
+_SCRIPT_PATH="${BASH_SOURCE[0]}"
+if command -v readlink >/dev/null 2>&1; then
+    _SCRIPT_PATH="$(readlink -f "${_SCRIPT_PATH}" 2>/dev/null || echo "${_SCRIPT_PATH}")"
+fi
+_SCRIPT_DIR="$(cd "$(dirname "${_SCRIPT_PATH}")" && pwd)"
+
+# lib/ 优先与 install.sh 同级；否则回退到运行时安装根下的 lib/。
+# 让"pasly 调用"和"用户重新 wget /root/install.sh 但本机已装过一次"
+# 这两条路径都能找到模块。
+_LIB_FALLBACK_DIR="/etc/Proxy-agent/lib"
+_LANG_FALLBACK_DIR="/etc/Proxy-agent/shell/lang"
 _LIB_DIR="${_SCRIPT_DIR}/lib"
+if [[ ! -d "${_LIB_DIR}" && -d "${_LIB_FALLBACK_DIR}" ]]; then
+    _LIB_DIR="${_LIB_FALLBACK_DIR}"
+fi
+
+# 自举下载：lib/ 与 shell/lang/ 在本机彻底找不到时，从 GitHub 拉一份
+# 到 _LIB_FALLBACK_DIR / _LANG_FALLBACK_DIR。这样：
+#   - README 的 wget 单文件安装命令仍能用（不必改 README）
+#   - pasly 的后续调用直接命中 fallback 路径
+# 优先级：
+#   1. release tarball + SHA256（强校验）—— release.yml 发出的 lib_bundle.tar.gz
+#   2. raw 单文件下载（弱校验，仅 bash -n）—— 用于 release 还没发资产的旧版本
+# 目标位置：固定 _LIB_FALLBACK_DIR / _LANG_FALLBACK_DIR，
+#   先全部下到 mktemp 临时目录、校验通过再原子 mv，失败时目标位置零污染。
+# env 旁路:
+#   PROXY_AGENT_NO_BOOTSTRAP=1        跳过自举，让 self-check 走 fatal 路径
+#   PROXY_AGENT_BOOTSTRAP_REF=<ref>   raw 模式改用指定 git ref（默认 master）
+#   PROXY_AGENT_BOOTSTRAP_MODE=auto|release|raw
+#                                     选模式（默认 auto = 先 release 后 raw）
+if [[ ! -f "${_LIB_DIR}/utils.sh" && -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
+    _bootstrap_libs() {
+        local ref="${PROXY_AGENT_BOOTSTRAP_REF:-master}"
+        local mode="${PROXY_AGENT_BOOTSTRAP_MODE:-auto}"
+        local rawBase="https://raw.githubusercontent.com/Lynthar/Proxy-agent/${ref}"
+        local apiUrl="https://api.github.com/repos/Lynthar/Proxy-agent/releases/latest"
+        local libDst="${_LIB_FALLBACK_DIR}"
+        local langDst="${_LANG_FALLBACK_DIR}"
+        local libFiles=(i18n.sh constants.sh utils.sh json-utils.sh system-detect.sh protocol-registry.sh)
+        local langFiles=(zh_CN.sh en_US.sh)
+        local fetcher tmpDir
+
+        if command -v curl >/dev/null 2>&1; then
+            fetcher=curl
+        elif command -v wget >/dev/null 2>&1; then
+            fetcher=wget
+        else
+            printf '\033[31m[FATAL] lib/ 缺失，且本机既无 curl 也无 wget，无法自举下载\033[0m\n' >&2
+            printf '\033[31m[FATAL] lib/ missing; neither curl nor wget available for bootstrap\033[0m\n' >&2
+            return 1
+        fi
+
+        printf '\033[36m[bootstrap] lib/ 不存在，开始拉取依赖文件（mode=%s）...\033[0m\n' "${mode}" >&2
+
+        if ! tmpDir="$(mktemp -d -t proxy-agent-bootstrap-XXXXXX 2>/dev/null)"; then
+            printf '\033[31m[FATAL] 无法创建临时目录用于自举下载\033[0m\n' >&2
+            return 1
+        fi
+
+        # 内层 helper：URL → 文件
+        _fetch_to_file() {
+            local _url="$1" _dst="$2"
+            if [[ "${fetcher}" == curl ]]; then
+                curl -fsSL --connect-timeout 10 -m 60 -o "${_dst}" "${_url}" 2>/dev/null
+            else
+                wget -q --timeout=15 -O "${_dst}" "${_url}" 2>/dev/null
+            fi
+        }
+
+        # 内层 helper：URL → stdout（用于抓 GitHub API 响应）
+        _fetch_to_stdout() {
+            local _url="$1"
+            if [[ "${fetcher}" == curl ]]; then
+                curl -fsSL --connect-timeout 10 -m 30 "${_url}" 2>/dev/null
+            else
+                wget -q --timeout=15 -O - "${_url}" 2>/dev/null
+            fi
+        }
+
+        # ----------------------------------------------------------------
+        # 模式 1：尝试 release tarball + SHA256（强校验）
+        # 把 lib/ 与 shell/lang/ 树解到 tmpDir 下，成功 return 0，失败 return 1
+        # ----------------------------------------------------------------
+        _try_release_bundle() {
+            local releaseInfo bundleUrl shaUrl
+            local bundleFile="${tmpDir}/lib_bundle.tar.gz"
+            local shaFile="${tmpDir}/lib_bundle.tar.gz.sha256"
+            local expectedHash actualHash
+
+            printf '\033[36m[bootstrap] 探测最新 release 的 lib_bundle.tar.gz...\033[0m\n' >&2
+
+            releaseInfo="$(_fetch_to_stdout "${apiUrl}")" || {
+                printf '\033[33m[bootstrap] 抓不到 release 元信息（API 不可达或限流）\033[0m\n' >&2
+                return 1
+            }
+
+            # 从 GitHub API JSON 抓 browser_download_url——尾随 lib_bundle.tar.gz 的取 bundle，
+            # 尾随 .sha256 的取 sha 文件。sed 一行一行匹配，head -1 防多 release 历史资产串入。
+            bundleUrl="$(printf '%s' "${releaseInfo}" | sed -n 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*lib_bundle\.tar\.gz\)".*/\1/p' | head -1)"
+            shaUrl="$(printf '%s' "${releaseInfo}" | sed -n 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*lib_bundle\.tar\.gz\.sha256\)".*/\1/p' | head -1)"
+
+            if [[ -z "${bundleUrl}" || -z "${shaUrl}" ]]; then
+                printf '\033[33m[bootstrap] 当前 release 没有 lib_bundle 资产（旧 release / pre-release）\033[0m\n' >&2
+                return 1
+            fi
+
+            if ! _fetch_to_file "${bundleUrl}" "${bundleFile}"; then
+                printf '\033[33m[bootstrap] 下载 lib_bundle.tar.gz 失败\033[0m\n' >&2
+                return 1
+            fi
+            if ! _fetch_to_file "${shaUrl}" "${shaFile}"; then
+                printf '\033[33m[bootstrap] 下载 lib_bundle.tar.gz.sha256 失败\033[0m\n' >&2
+                return 1
+            fi
+
+            # SHA256 文件格式："<64-hex>  lib_bundle.tar.gz"，取第一列
+            expectedHash="$(awk '{print $1}' "${shaFile}" 2>/dev/null)"
+            if [[ ! "${expectedHash}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+                printf '\033[31m[bootstrap] sha256 文件内容异常（不是 64 位 hex）\033[0m\n' >&2
+                return 1
+            fi
+            if ! command -v sha256sum >/dev/null 2>&1; then
+                printf '\033[33m[bootstrap] 缺少 sha256sum 命令，无法做强校验\033[0m\n' >&2
+                return 1
+            fi
+            actualHash="$(sha256sum "${bundleFile}" 2>/dev/null | awk '{print $1}')"
+            if [[ "${actualHash}" != "${expectedHash}" ]]; then
+                printf '\033[31m[FATAL] tarball SHA256 不匹配，丢弃\033[0m\n' >&2
+                printf '\033[31m  expected: %s\033[0m\n' "${expectedHash}" >&2
+                printf '\033[31m  actual:   %s\033[0m\n' "${actualHash}" >&2
+                return 1
+            fi
+
+            if ! tar -xzf "${bundleFile}" -C "${tmpDir}" 2>/dev/null; then
+                printf '\033[31m[bootstrap] 解压 tarball 失败\033[0m\n' >&2
+                return 1
+            fi
+
+            # 验证：解压结果包含期望的目录结构 + 关键文件能 bash -n
+            local f
+            for f in "${libFiles[@]}"; do
+                if [[ ! -f "${tmpDir}/lib/${f}" ]]; then
+                    printf '\033[31m[bootstrap] tarball 缺少 lib/%s\033[0m\n' "${f}" >&2
+                    return 1
+                fi
+                if ! bash -n "${tmpDir}/lib/${f}" 2>/dev/null; then
+                    printf '\033[31m[bootstrap] tarball 内 lib/%s 语法不合法\033[0m\n' "${f}" >&2
+                    return 1
+                fi
+            done
+            for f in "${langFiles[@]}"; do
+                if [[ ! -f "${tmpDir}/shell/lang/${f}" ]]; then
+                    printf '\033[31m[bootstrap] tarball 缺少 shell/lang/%s\033[0m\n' "${f}" >&2
+                    return 1
+                fi
+                if ! bash -n "${tmpDir}/shell/lang/${f}" 2>/dev/null; then
+                    printf '\033[31m[bootstrap] tarball 内 shell/lang/%s 语法不合法\033[0m\n' "${f}" >&2
+                    return 1
+                fi
+            done
+
+            rm -f "${bundleFile}" "${shaFile}"
+            printf '\033[32m[bootstrap] release tarball 校验通过（SHA256 匹配）\033[0m\n' >&2
+            return 0
+        }
+
+        # ----------------------------------------------------------------
+        # 模式 2：raw 单文件下载（弱校验，仅 bash -n）
+        # ----------------------------------------------------------------
+        _try_raw_files() {
+            printf '\033[36m[bootstrap] 从 GitHub raw @ %s 单文件下载...\033[0m\n' "${ref}" >&2
+            local _subdir _name _url _dst
+            _fetch_one() {
+                _subdir="$1" _name="$2"
+                _url="${rawBase}/${_subdir}/${_name}"
+                _dst="${tmpDir}/${_subdir}/${_name}"
+                mkdir -p "$(dirname "${_dst}")" || return 1
+                if ! _fetch_to_file "${_url}" "${_dst}"; then
+                    printf '\033[31m[bootstrap] 下载 %s/%s 失败 (%s)\033[0m\n' "${_subdir}" "${_name}" "${_url}" >&2
+                    return 1
+                fi
+                if ! bash -n "${_dst}" 2>/dev/null; then
+                    printf '\033[31m[bootstrap] %s/%s 内容不是合法 bash 脚本（可能是 GitHub 错误页）\033[0m\n' "${_subdir}" "${_name}" >&2
+                    return 1
+                fi
+            }
+            local f
+            for f in "${libFiles[@]}"; do
+                _fetch_one lib "${f}" || { unset -f _fetch_one; return 1; }
+            done
+            for f in "${langFiles[@]}"; do
+                _fetch_one shell/lang "${f}" || { unset -f _fetch_one; return 1; }
+            done
+            unset -f _fetch_one
+            return 0
+        }
+
+        # 主流程：按 mode 串起 release / raw
+        local got=
+        case "${mode}" in
+            release)
+                _try_release_bundle && got=release
+                ;;
+            raw)
+                _try_raw_files && got=raw
+                ;;
+            auto|*)
+                if _try_release_bundle; then
+                    got=release
+                else
+                    # release 失败时清掉 tmpDir 里可能残留的部分文件后再尝试 raw
+                    rm -rf "${tmpDir}"/lib "${tmpDir}"/shell 2>/dev/null
+                    if _try_raw_files; then
+                        got=raw
+                    fi
+                fi
+                ;;
+        esac
+
+        if [[ -z "${got}" ]]; then
+            rm -rf "${tmpDir}"
+            unset -f _fetch_to_file _fetch_to_stdout _try_release_bundle _try_raw_files
+            return 1
+        fi
+
+        # 部署：tmpDir/lib/* → libDst，tmpDir/shell/lang/* → langDst
+        if ! mkdir -p "${libDst}" "${langDst}"; then
+            printf '\033[31m[FATAL] 无法创建 %s 或 %s（请确认 root 权限）\033[0m\n' "${libDst}" "${langDst}" >&2
+            rm -rf "${tmpDir}"
+            unset -f _fetch_to_file _fetch_to_stdout _try_release_bundle _try_raw_files
+            return 1
+        fi
+        local f
+        for f in "${libFiles[@]}"; do
+            if ! mv -f "${tmpDir}/lib/${f}" "${libDst}/${f}"; then
+                printf '\033[31m[FATAL] 部署 lib/%s 到 %s 失败\033[0m\n' "${f}" "${libDst}" >&2
+                rm -rf "${tmpDir}"
+                unset -f _fetch_to_file _fetch_to_stdout _try_release_bundle _try_raw_files
+                return 1
+            fi
+        done
+        for f in "${langFiles[@]}"; do
+            if ! mv -f "${tmpDir}/shell/lang/${f}" "${langDst}/${f}"; then
+                printf '\033[31m[FATAL] 部署 shell/lang/%s 到 %s 失败\033[0m\n' "${f}" "${langDst}" >&2
+                rm -rf "${tmpDir}"
+                unset -f _fetch_to_file _fetch_to_stdout _try_release_bundle _try_raw_files
+                return 1
+            fi
+        done
+
+        rm -rf "${tmpDir}"
+        unset -f _fetch_to_file _fetch_to_stdout _try_release_bundle _try_raw_files
+        printf '\033[32m[bootstrap] 拉取完成（%s 模式）：%d 个 lib + %d 个 lang 文件已部署\033[0m\n' \
+            "${got}" "${#libFiles[@]}" "${#langFiles[@]}" >&2
+    }
+
+    if _bootstrap_libs; then
+        _LIB_DIR="${_LIB_FALLBACK_DIR}"
+    fi
+    unset -f _bootstrap_libs
+fi
 
 # 加载模块（如果存在）
 if [[ -d "${_LIB_DIR}" ]]; then
@@ -56,8 +318,35 @@ if [[ -d "${_LIB_DIR}" ]]; then
     done
 fi
 
+# 模块加载自检：install.sh 直接调用、且无 inline 兜底的 lib 函数清单。
+# 这些缺一个，脚本就会在中后段以"版本过低"/"链式信息写入失败"/"协议列表为空"
+# 等误导性消息崩溃。在源头先打出明确诊断，避免后续让人误判。
+_required_lib_fns=(
+    versionGreaterOrEqual
+    jsonWriteFile
+    parseProtocolIdFromFileName
+    getProtocolDisplayName
+    getProtocolInboundTag
+)
+_missing_lib_fns=()
+for _fn in "${_required_lib_fns[@]}"; do
+    if ! declare -F "${_fn}" >/dev/null 2>&1; then
+        _missing_lib_fns+=("${_fn}")
+    fi
+done
+if [[ ${#_missing_lib_fns[@]} -gt 0 ]]; then
+    # echoContent 在本文件后段才定义；这里用裸 printf，确保自检在任何
+    # 加载状态下都能打印诊断。
+    printf '\033[31m[FATAL] 未能加载 lib/ 模块，缺失关键函数: %s\033[0m\n' "${_missing_lib_fns[*]}" >&2
+    printf '\033[31m[FATAL] Failed to load lib/ modules. Missing required functions: %s\033[0m\n' "${_missing_lib_fns[*]}" >&2
+    printf '\033[33m已查找路径 / Tried paths:\n  - %s/lib\n  - %s\033[0m\n' "${_SCRIPT_DIR}" "${_LIB_FALLBACK_DIR}" >&2
+    printf '\033[33m请确认 lib/ 目录与 install.sh 同级，或位于 %s。\033[0m\n' "${_LIB_FALLBACK_DIR}" >&2
+    printf '\033[33mEnsure lib/ is co-located with install.sh, or installed under %s.\033[0m\n' "${_LIB_FALLBACK_DIR}" >&2
+    exit 1
+fi
+
 # 清理临时变量
-unset _LIB_DIR _module
+unset _LIB_DIR _LIB_FALLBACK_DIR _LANG_FALLBACK_DIR _SCRIPT_PATH _module _fn _required_lib_fns _missing_lib_fns
 
 # ============================================================================
 # 版本号管理
@@ -674,34 +963,9 @@ verifyCertExpiry() {
     return 0
 }
 
-echoContent() {
-    case $1 in
-    # 红色
-    "red")
-        # shellcheck disable=SC2154
-        ${echoType} "\033[31m${printN}$2 \033[0m"
-        ;;
-        # 天蓝色
-    "skyBlue")
-        ${echoType} "\033[1;36m${printN}$2 \033[0m"
-        ;;
-        # 绿色
-    "green")
-        ${echoType} "\033[32m${printN}$2 \033[0m"
-        ;;
-        # 白色
-    "white")
-        ${echoType} "\033[37m${printN}$2 \033[0m"
-        ;;
-    "magenta")
-        ${echoType} "\033[31m${printN}$2 \033[0m"
-        ;;
-        # 黄色
-    "yellow")
-        ${echoType} "\033[33m${printN}$2 \033[0m"
-        ;;
-    esac
-}
+# echoContent 由 lib/utils.sh 提供（colors: red green yellow blue purple skyBlue white）。
+# 旧 inline 版本依赖 ${echoType}（initVar 才赋值）和未定义的 ${printN}，启动早期
+# 调用时实际是空命令；lib 版用裸 echo -e，不依赖任何先前初始化。
 
 # 验证IP地址格式
 # 参数1: IP地址字符串
@@ -730,93 +994,10 @@ isValidIP() {
 }
 
 # 检查SELinux状态（使用运行时检测）
-checkCentosSELinux() {
-    if command -v getenforce >/dev/null 2>&1 && [[ "$(getenforce)" == "Enforcing" ]]; then
-        echoContent yellow "# $(t NOTICE)"
-        echoContent yellow "$(t SYS_SELINUX_NOTICE)"
-        echoContent yellow "https://github.com/Lynthar/Proxy-agent/blob/master/documents/selinux.md"
-        exit 1
-    fi
-}
-checkSystem() {
-    if [[ -n $(find /etc -name "redhat-release") ]] || grep </proc/version -q -i "centos"; then
-        mkdir -p /etc/yum.repos.d
-
-        if [[ -f "/etc/centos-release" ]]; then
-            centosVersion=$(rpm -q centos-release | awk -F "[-]" '{print $3}' | awk -F "[.]" '{print $1}')
-
-            if [[ -z "${centosVersion}" ]] && grep </etc/centos-release -q -i "release 8"; then
-                centosVersion=8
-            fi
-        fi
-
-        release="centos"
-        installType='yum -y install'
-        removeType='yum -y remove'
-        upgrade="yum update -y --skip-broken"
-        checkCentosSELinux
-    elif { [[ -f "/etc/issue" ]] && grep -qi "Alpine" /etc/issue; } || { [[ -f "/proc/version" ]] && grep -qi "Alpine" /proc/version; }; then
-        release="alpine"
-        installType='apk add'
-        upgrade="apk update"
-        removeType='apk del'
-        nginxConfigPath=/etc/nginx/http.d/
-    elif { [[ -f "/etc/issue" ]] && grep -qi "debian" /etc/issue; } || { [[ -f "/proc/version" ]] && grep -qi "debian" /proc/version; } || { [[ -f "/etc/os-release" ]] && grep -qi "ID=debian" /etc/issue; }; then
-        release="debian"
-        installType='apt -y install'
-        upgrade="apt update"
-        updateReleaseInfoChange='apt-get --allow-releaseinfo-change update'
-        removeType='apt -y autoremove'
-
-    elif { [[ -f "/etc/issue" ]] && grep -qi "ubuntu" /etc/issue; } || { [[ -f "/proc/version" ]] && grep -qi "ubuntu" /proc/version; }; then
-        release="ubuntu"
-        installType='apt -y install'
-        upgrade="apt update"
-        updateReleaseInfoChange='apt-get --allow-releaseinfo-change update'
-        removeType='apt -y autoremove'
-        if grep </etc/issue -q -i "16."; then
-            release=
-        fi
-    fi
-
-    if [[ -z ${release} ]]; then
-        echoContent red "\n$(t SYS_NOT_SUPPORTED)\n"
-        echoContent yellow "$(cat /etc/issue)"
-        echoContent yellow "$(cat /proc/version)"
-        exit 1
-    fi
-}
-
-# 检查CPU提供商
-checkCPUVendor() {
-    if [[ -n $(which uname) ]]; then
-        if [[ "$(uname)" == "Linux" ]]; then
-            case "$(uname -m)" in
-            'amd64' | 'x86_64')
-                xrayCoreCPUVendor="Xray-linux-64"
-                #                v2rayCoreCPUVendor="v2ray-linux-64"
-                warpRegCoreCPUVendor="main-linux-amd64"
-                singBoxCoreCPUVendor="-linux-amd64"
-                ;;
-            'armv8' | 'aarch64')
-                cpuVendor="arm"
-                xrayCoreCPUVendor="Xray-linux-arm64-v8a"
-                #                v2rayCoreCPUVendor="v2ray-linux-arm64-v8a"
-                warpRegCoreCPUVendor="main-linux-arm64"
-                singBoxCoreCPUVendor="-linux-arm64"
-                ;;
-            *)
-                echo "  $(t SYS_CPU_NOT_SUPPORTED)--->"
-                exit 1
-                ;;
-            esac
-        fi
-    else
-        echoContent red "  $(t SYS_CPU_DEFAULT_AMD64)--->"
-        xrayCoreCPUVendor="Xray-linux-64"
-        #        v2rayCoreCPUVendor="v2ray-linux-64"
-    fi
-}
+# checkCentosSELinux / checkSystem / checkCPUVendor 由 lib/system-detect.sh 提供
+# （已 port inline 历史行为：i18n 错误消息、SELinux enforcing 时 exit 1、
+# checkSystem 失败时 exit 1，并修复 inline 的几处缺陷——amd64 cpuVendor 漏赋
+# 值、debian 检测看错文件等）。
 
 # 初始化全局变量
 initVar() {
@@ -1035,19 +1216,7 @@ initVar() {
 
 }
 
-stripAnsi() {
-    echo -e "$1" | sed $'s/\x1b\[[0-9;]*[a-zA-Z]//g'
-}
-
-validateJsonFile() {
-
-    local jsonPath=$1
-    if ! jq -e . "${jsonPath}" >/dev/null 2>&1; then
-        echoContent red " ---> ${jsonPath} 解析失败，已移除，请检查上方录入并重试"
-        rm -f "${jsonPath}"
-        exit 1
-    fi
-}
+# stripAnsi 由 lib/utils.sh 提供（同样的 [a-zA-Z] 宽匹配）。
 
 readCredentialBySource() {
 
@@ -1564,24 +1733,8 @@ allowPort() {
         fi
     fi
 }
-# 获取公网IP
-getPublicIP() {
-    local type=4
-    if [[ -n "${1:-}" ]]; then
-        type=$1
-    fi
-    if [[ -n "${currentHost}" && -z "$1" ]] && [[ "${singBoxVLESSRealityVisionServerName}" == "${currentHost}" || "${singBoxVLESSRealityGRPCServerName}" == "${currentHost}" || "${xrayVLESSRealityServerName}" == "${currentHost}" ]]; then
-        echo "${currentHost}"
-    else
-        local currentIP=
-        currentIP=$(curl -s "-${type}" https://www.cloudflare.com/cdn-cgi/trace | grep "ip" | awk -F "[=]" '{print $2}')
-        if [[ -z "${currentIP}" && -z "$1" ]]; then
-            currentIP=$(curl -s "-6" https://www.cloudflare.com/cdn-cgi/trace | grep "ip" | awk -F "[=]" '{print $2}')
-        fi
-        echo "${currentIP}"
-    fi
-
-}
+# getPublicIP 由 lib/system-detect.sh 提供（同样的接口：默认 IPv4，
+# 第一参数可指定 4/6；保留 currentHost==Reality serverName 时短路返回 currentHost）。
 
 # 输出ufw端口开放状态
 checkUFWAllowPort() {
@@ -1909,13 +2062,9 @@ mkdirTools() {
 
     mkdir -p /usr/share/nginx/html/
 }
-# 检测root
-checkRoot() {
-    if [ "$(id -u)" -ne 0 ]; then
-        #        sudoCMD="sudo"
-        echo "检测到非 Root 用户，将使用 sudo 执行命令..."
-    fi
-}
+# checkRoot 由 lib/system-detect.sh 提供（非 root 直接 exit 1；
+# 旧 inline 仅打印不退出是隐藏 bug——后续大量写 /etc/、systemctl 操作必然失败）。
+
 # 安装工具包
 installTools() {
     echoContent skyBlue "\n$(t PROGRESS_STEP "$1" "${totalProgress}") : $(t PROG_INSTALL_TOOLS)"
@@ -2147,7 +2296,9 @@ EOF
 
 # 安装warp
 installWarp() {
-    if [[ "${cpuVendor}" == "arm" ]]; then
+    # cpuVendor 取值：amd64 / arm64 / armv7（旧 inline 实现把 aarch64 统一记作 "arm"，
+    # 新 lib 实现细分成 arm64 和 armv7；用 arm* 通配兼容两种命名）
+    if [[ "${cpuVendor}" == arm* ]]; then
         echoContent red " ---> 官方WARP客户端不支持ARM架构"
         exit 1
     fi
@@ -2882,26 +3033,8 @@ randomPathFunction() {
     echoContent yellow "\n path:${currentPath}"
     echoContent skyBlue "\n----------------------------"
 }
-# 随机数 - 使用更安全的随机源
-# 用法: randomNum min max
-randomNum() {
-    local min="${1:-0}"
-    local max="${2:-65535}"
-    local range=$((max - min + 1))
+# randomNum / randomPort 由 lib/utils.sh 提供（实现完全一致）。
 
-    # 优先使用 /dev/urandom（更安全）
-    if [[ -r /dev/urandom ]]; then
-        local random_bytes
-        random_bytes=$(od -An -tu4 -N4 /dev/urandom | tr -d ' ')
-        echo $((random_bytes % range + min))
-    # 回退到 shuf（如果可用，常见于 Alpine）
-    elif command -v shuf &>/dev/null; then
-        shuf -i "${min}-${max}" -n 1
-    # 最后回退到 $RANDOM
-    else
-        echo $((RANDOM % range + min))
-    fi
-}
 # Nginx伪装博客
 nginxBlog() {
     if [[ -n "${1:-}" ]]; then
@@ -3260,14 +3393,8 @@ installSingBox() {
 
 }
 
-# 检查wget showProgress
-checkWgetShowProgress() {
-    if [[ "${release}" != "alpine" ]]; then
-        if find /usr/bin /usr/sbin | grep -q "/wget" && wget --help | grep -q show-progress; then
-            wgetShowProgressStatus="--show-progress"
-        fi
-    fi
-}
+# checkWgetShowProgress 由 lib/system-detect.sh 提供（Alpine 上跳过探测的语义已 port）。
+
 # 安装xray
 installXray() {
     readInstallType

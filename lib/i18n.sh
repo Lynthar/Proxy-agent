@@ -9,7 +9,16 @@
 # =============================================================================
 
 # 语言文件目录
-_I18N_DIR="${_SCRIPT_DIR:-$(dirname "${BASH_SOURCE[0]}")/..}/shell/lang"
+# 优先用 install.sh 设的 ${_SCRIPT_DIR}/shell/lang；当主脚本与 lib/ 不同源时
+# （例如 lib/ 从 /etc/Proxy-agent/lib fallback 加载、_SCRIPT_DIR 仍指向 /root），
+# 退回到 lib/i18n.sh 自身位置上一级的 shell/lang/，与 lib/ 配套。
+# 旧的 ${_SCRIPT_DIR:-fallback} 写法只在 _SCRIPT_DIR 为空时才走 fallback，
+# _SCRIPT_DIR 设到了错误目录时反而不会兜底。
+if [[ -n "${_SCRIPT_DIR:-}" && -d "${_SCRIPT_DIR}/shell/lang" ]]; then
+    _I18N_DIR="${_SCRIPT_DIR}/shell/lang"
+else
+    _I18N_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/shell/lang"
+fi
 
 # =============================================================================
 # 语言检测 - Language Detection

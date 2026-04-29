@@ -17,12 +17,24 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Read version from install.sh
+      - name: Read version from VERSION file
         id: version
         run: |
-          FILE_VERSION=$(grep -oP '当前版本：v[0-9]+\.[0-9]+\.[0-9]+' install.sh | sed 's/当前版本：//')
+          # Source of truth is the VERSION file. The old "grep '当前版本：v...'
+          # install.sh" line broke silently when commit 8c6f5d6 moved version
+          # tracking into _load_version() — FILE_VERSION had been empty since.
+          if [[ ! -f VERSION ]]; then
+            echo "::error::VERSION file is missing"
+            exit 1
+          fi
+          RAW="$(tr -d '[:space:]' < VERSION)"
+          if [[ ! "$RAW" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::VERSION content is not semver (got: '$RAW')"
+            exit 1
+          fi
+          FILE_VERSION="v$RAW"
           echo "file_version=$FILE_VERSION" >> $GITHUB_OUTPUT
-          echo $FILE_VERSION
+          echo "Read version: $FILE_VERSION"
 
       - name: Get latest release
         id: latest
@@ -44,6 +56,19 @@ jobs:
           # can `awk '{print $1}'` to extract the hash.
           echo "${HASH}  install.sh" > install.sh.sha256
           echo "Computed SHA256: ${HASH}"
+
+      - name: Build lib_bundle.tar.gz + SHA256
+        if: ${{ steps.version.outputs.file_version != steps.latest.outputs.tag }}
+        run: |
+          # Bundle lib/, shell/lang/, and VERSION into a single tarball that
+          # install.sh's _bootstrap_libs can fetch when lib/ is missing locally.
+          # SHA256 is published alongside so bootstrap can do strong verification
+          # (matches the install.sh.sha256 pattern above).
+          tar czf lib_bundle.tar.gz lib/ shell/lang/ VERSION
+          BUNDLE_HASH=$(sha256sum lib_bundle.tar.gz | awk '{print $1}')
+          echo "${BUNDLE_HASH}  lib_bundle.tar.gz" > lib_bundle.tar.gz.sha256
+          echo "Bundle SHA256: ${BUNDLE_HASH}"
+          echo "Bundle size: $(stat -c %s lib_bundle.tar.gz) bytes"
 
       - name: Create release, upload assets, cleanup old ones
         if: ${{ steps.version.outputs.file_version != steps.latest.outputs.tag }}
@@ -74,21 +99,33 @@ jobs:
               return;
             }
 
-            // Attach SHA256 checksum as a release asset.
-            // install.sh pulls this at update time via verifyInstallSHA256.
-            try {
-              const sha256Content = fs.readFileSync('install.sh.sha256');
-              await github.rest.repos.uploadReleaseAsset({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                release_id: release.id,
-                name: 'install.sh.sha256',
-                data: sha256Content
-              });
-              console.log(`✓ Uploaded install.sh.sha256 for ${tag}`);
-            } catch (err) {
-              console.log(`⚠ Failed to upload sha256 asset: ${err.message}`);
+            // Helper: upload one file as a release asset, log + swallow errors.
+            // We don't want a single asset upload failure to abort the rest of
+            // the release pipeline (e.g. install.sh.sha256 should still attach
+            // even if lib_bundle had a transient upload glitch, and vice versa).
+            async function uploadAsset(filename, label) {
+              try {
+                const data = fs.readFileSync(filename);
+                await github.rest.repos.uploadReleaseAsset({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  release_id: release.id,
+                  name: filename,
+                  data: data
+                });
+                console.log(`✓ Uploaded ${label} for ${tag}`);
+              } catch (err) {
+                console.log(`⚠ Failed to upload ${label}: ${err.message}`);
+              }
             }
+
+            // install.sh.sha256 — used by verifyInstallSHA256 during self-update.
+            await uploadAsset('install.sh.sha256', 'install.sh.sha256');
+
+            // lib_bundle.tar.gz + .sha256 — used by install.sh's _bootstrap_libs
+            // to grab lib/ + shell/lang/ when they're missing on first run.
+            await uploadAsset('lib_bundle.tar.gz', 'lib_bundle.tar.gz');
+            await uploadAsset('lib_bundle.tar.gz.sha256', 'lib_bundle.tar.gz.sha256');
 
             const { data: releases } = await github.rest.repos.listReleases({
               owner: context.repo.owner,

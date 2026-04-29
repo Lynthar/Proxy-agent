@@ -37,7 +37,9 @@ echoContent() {
             echo -e "\033[35m${content}\033[0m"
             ;;
         skyBlue)
-            echo -e "\033[36m${content}\033[0m"
+            # 粗体青（[1;36m）与历史 inline 版本一致；视觉上比普通青更突出，
+            # 适合标题/分隔符。改这个会让全脚本所有 skyBlue 输出加粗。
+            echo -e "\033[1;36m${content}\033[0m"
             ;;
         white)
             echo -e "\033[37m${content}\033[0m"
@@ -54,8 +56,10 @@ echoContent() {
 
 # 移除 ANSI 控制字符
 # 用法: cleanText=$(stripAnsi "$coloredText")
+# 终止符匹配 [a-zA-Z]（不仅 m/J/K），覆盖 cursor 移动等更多 ANSI 序列；
+# install.sh 用它清洗用户粘贴的凭据，宽匹配更稳。
 stripAnsi() {
-    echo -e "$@" | sed 's/\x1B\[[0-9;]*[JKmsu]//g'
+    echo -e "$@" | sed 's/\x1B\[[0-9;]*[a-zA-Z]//g'
 }
 
 # 去除字符串首尾空格
@@ -118,20 +122,6 @@ randomPort() {
 isValidPort() {
     local port="$1"
     [[ "${port}" =~ ^[0-9]+$ ]] && ((port >= 1 && port <= 65535))
-}
-
-# ============================================================================
-# JSON 处理函数
-# ============================================================================
-
-# 验证 JSON 文件格式
-# 用法: if validateJsonFile "/path/to/file.json"; then ...
-validateJsonFile() {
-    local file="$1"
-    if [[ ! -f "${file}" ]]; then
-        return 1
-    fi
-    jq empty "${file}" 2>/dev/null
 }
 
 # ============================================================================
