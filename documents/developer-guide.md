@@ -344,7 +344,9 @@ V2RAY_I18N_DEBUG=1 pasly
 
 ### 5.5 语言检测优先级
 
-`V2RAY_LANG` > `/etc/Proxy-agent/lang_pref` > `$LANGUAGE` > `$LANG` > `zh_CN`。
+`V2RAY_LANG` > `/etc/Proxy-agent/lang_pref` > `zh_CN`（默认）。
+
+不查 `$LANGUAGE` / `$LANG`：`install.sh` 顶部 `export LANG=en_US.UTF-8`（为子进程 grep/sort 锁定 locale）会污染 i18n 检测，让默认强制变英文，所以这一档已移除。
 
 ---
 

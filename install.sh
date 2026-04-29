@@ -72,7 +72,28 @@ fi
 #   PROXY_AGENT_BOOTSTRAP_REF=<ref>   raw 模式改用指定 git ref（默认 master）
 #   PROXY_AGENT_BOOTSTRAP_MODE=auto|release|raw
 #                                     选模式（默认 auto = 先 release 后 raw）
-if [[ ! -f "${_LIB_DIR}/utils.sh" && -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
+# 触发条件：任意一个核心 lib 文件缺失，或者文件存在但 bash -n 不通过（损坏）。
+# 后者（损坏触发）保护用户不被先前 buggy 的"17. 更新脚本"流程残留的坏文件锁死——
+# 只看文件存在性会让 bootstrap 误以为已装好，跳过后 source 损坏文件直接崩。
+_lib_health_ok=1
+if [[ -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
+    for _f in i18n constants utils json-utils system-detect protocol-registry; do
+        if [[ ! -f "${_LIB_DIR}/${_f}.sh" ]] || ! bash -n "${_LIB_DIR}/${_f}.sh" 2>/dev/null; then
+            _lib_health_ok=
+            break
+        fi
+    done
+fi
+if [[ -z "${_lib_health_ok}" && -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
+    # 删除可能残留的损坏文件，确保 bootstrap 后是干净状态（避免半新半旧混合）
+    if [[ -d "${_LIB_DIR}" ]]; then
+        for _f in i18n constants utils json-utils system-detect protocol-registry; do
+            if [[ -f "${_LIB_DIR}/${_f}.sh" ]] && ! bash -n "${_LIB_DIR}/${_f}.sh" 2>/dev/null; then
+                printf '\033[33m[bootstrap] 检测到损坏的 %s/%s.sh，将重新下载\033[0m\n' "${_LIB_DIR}" "${_f}" >&2
+                rm -f "${_LIB_DIR}/${_f}.sh"
+            fi
+        done
+    fi
     _bootstrap_libs() {
         local ref="${PROXY_AGENT_BOOTSTRAP_REF:-master}"
         local mode="${PROXY_AGENT_BOOTSTRAP_MODE:-auto}"
@@ -358,7 +379,7 @@ if [[ ${#_missing_lib_fns[@]} -gt 0 ]]; then
 fi
 
 # 清理临时变量
-unset _LIB_DIR _LIB_FALLBACK_DIR _LANG_FALLBACK_DIR _SCRIPT_PATH _module _fn _required_lib_fns _missing_lib_fns
+unset _LIB_DIR _LIB_FALLBACK_DIR _LANG_FALLBACK_DIR _SCRIPT_PATH _module _fn _required_lib_fns _missing_lib_fns _lib_health_ok _f
 
 # ============================================================================
 # 版本号管理
@@ -8025,10 +8046,13 @@ updateV2RayAgent() {
     echoContent yellow " ---> 下载脚本文件..."
     rm -rf "${installDir}/install.sh"
 
+    # 注：不能用 -c 续传——本地若残留旧版本文件，wget 会从已有大小处续传，
+    # 拼接成 [旧前 N 字节][新文件后续字节] 的损坏文件，bash 解析时报 syntax error。
+    # 上一行已经 rm -rf install.sh，所以这里走的是全新下载。
     if [[ "${release}" == "alpine" ]]; then
-        wget -c -q -P "${installDir}/" -N "${rawBase}/install.sh"
+        wget -q -P "${installDir}/" -N "${rawBase}/install.sh"
     else
-        wget -c -q ${wgetShowProgressStatus} -P "${installDir}/" -N "${rawBase}/install.sh"
+        wget -q ${wgetShowProgressStatus} -P "${installDir}/" -N "${rawBase}/install.sh"
     fi
 
     # 如果从 Release tag 下载失败，回退到 master 分支
@@ -8067,16 +8091,22 @@ updateV2RayAgent() {
     chmod 700 "${installDir}/install.sh"
 
     # 下载/更新 lib 目录模块（必须全部成功；失败则从备份回滚 install.sh + 退出）
-    # 之前的 2>/dev/null 把 wget 的错误信息（404 / DNS / 超时）一并吞掉，导致 lib/ 半替换后仍继续，
-    # 用户下次进 pasly 会看到 "function not found" 类怪错。现在显式收集失败列表 + 报错。
+    # 关键修复：
+    #   - 不用 wget -c：本地有旧版本时续传会拼接出损坏文件（之前用户实测 bug 来源）
+    #   - 先下到 ${dst}.new，bash -n 验证语法后才 mv 覆盖，确保不留半截 / 错误页
+    #   - 验证失败的算下载失败，跟 wget 错误同等处理
     echoContent yellow " ---> 下载模块文件..."
     mkdir -p "${installDir}/lib"
     local moduleCount=0
     local failedModules=()
     for module in i18n constants utils json-utils system-detect protocol-registry; do
-        if wget -c -q -O "${installDir}/lib/${module}.sh" "${rawBase}/lib/${module}.sh"; then
+        local _dst="${installDir}/lib/${module}.sh"
+        local _tmp="${_dst}.new"
+        if wget -q -O "${_tmp}" "${rawBase}/lib/${module}.sh" && bash -n "${_tmp}" 2>/dev/null; then
+            mv -f "${_tmp}" "${_dst}"
             ((moduleCount++))
         else
+            rm -f "${_tmp}"
             failedModules+=("${module}")
         fi
     done
@@ -8092,11 +8122,17 @@ updateV2RayAgent() {
     echoContent green " ---> 已下载 ${moduleCount} 个模块"
 
     # 下载/更新语言文件（同上要求全部成功；i18n 缺失会让用户菜单全是裸 MSG_ 字符串）
+    # 注：loader 已在 v1.2.2 删除，旧版本曾在循环里拉它会写入 GitHub 404 页面；现在仅 zh_CN/en_US。
     echoContent yellow " ---> 下载语言文件..."
     mkdir -p "${installDir}/shell/lang"
     local failedLangs=()
-    for langFile in zh_CN en_US loader; do
-        if ! wget -c -q -O "${installDir}/shell/lang/${langFile}.sh" "${rawBase}/shell/lang/${langFile}.sh"; then
+    for langFile in zh_CN en_US; do
+        local _dst="${installDir}/shell/lang/${langFile}.sh"
+        local _tmp="${_dst}.new"
+        if wget -q -O "${_tmp}" "${rawBase}/shell/lang/${langFile}.sh" && bash -n "${_tmp}" 2>/dev/null; then
+            mv -f "${_tmp}" "${_dst}"
+        else
+            rm -f "${_tmp}"
             failedLangs+=("${langFile}")
         fi
     done
@@ -8118,7 +8154,8 @@ updateV2RayAgent() {
         echo "${latestVersion#v}" > "${installDir}/VERSION"
     else
         # 从 master 分支下载 VERSION 文件（VERSION 失败不致命，仅记日志，旧 VERSION 留底）
-        if ! wget -c -q -O "${installDir}/VERSION" "${rawBase}/VERSION"; then
+        # 不用 -c：旧 VERSION 文件大小不同会导致续传拼接，得到无效内容
+        if ! wget -q -O "${installDir}/VERSION" "${rawBase}/VERSION"; then
             echoContent yellow " ---> VERSION 文件下载失败，保留旧版本号"
         fi
     fi

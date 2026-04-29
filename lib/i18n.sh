@@ -22,21 +22,21 @@ fi
 
 # =============================================================================
 # 语言检测 - Language Detection
-# 优先级: V2RAY_LANG > 持久配置文件 > LANGUAGE > LANG > 默认中文
+# 优先级: V2RAY_LANG > 持久配置文件 > 默认中文
+# 注：不再 fallback 到 $LANGUAGE / $LANG。install.sh 顶部 export LANG=en_US.UTF-8
+# （用于 grep / sort 等子进程一致输出），会让"默认值"被强制走英文。脚本主面向
+# 中文用户，没有显式声明时一律走 zh_CN；想用英文：V2RAY_LANG=en 或菜单 21 切换。
 # =============================================================================
 _detect_language() {
     local lang=""
     local langFile="/etc/Proxy-agent/lang_pref"
 
-    # 优先级1: 环境变量 V2RAY_LANG
+    # 优先级 1: 环境变量 V2RAY_LANG
     if [[ -n "${V2RAY_LANG:-}" ]]; then
         lang="${V2RAY_LANG}"
-    # 优先级2: 持久化语言配置文件
+    # 优先级 2: 持久化语言配置文件
     elif [[ -f "${langFile}" ]]; then
         lang=$(cat "${langFile}" 2>/dev/null)
-    # 优先级3: 系统环境变量
-    else
-        lang="${LANGUAGE:-${LANG:-zh_CN}}"
     fi
 
     case "${lang}" in
