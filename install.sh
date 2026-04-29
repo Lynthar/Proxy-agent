@@ -9315,19 +9315,30 @@ ensureSingBoxInstalled() {
 EOF
     fi
 
-    # 确保 DNS 配置存在 (使用 sing-box 1.12+ 兼容格式)
-    if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config/01_dns.json" ]]; then
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_dns.json
+    # 确保 DNS 配置存在（sing-box 1.12+ 新格式：必须带 type，且字段从 address 改为 server）
+    # 旧 legacy 格式 ({tag,address}) 1.12 deprecated、1.13 默认拒绝合并，详见
+    # https://sing-box.sagernet.org/migration/#migrate-to-new-dns-server-formats
+    # 已有 legacy 格式的旧机器（含 address 但无 type）需要自动迁移，否则
+    # singBoxMergeConfig 会以 ENABLE_DEPRECATED_LEGACY_DNS_SERVERS 为由 FATAL。
+    local _dnsConf="/etc/Proxy-agent/sing-box/conf/config/01_dns.json"
+    if [[ ! -f "${_dnsConf}" ]] || \
+       { grep -q '"address"' "${_dnsConf}" 2>/dev/null && ! grep -q '"type"' "${_dnsConf}" 2>/dev/null; }; then
+        if [[ -f "${_dnsConf}" ]]; then
+            echoContent yellow " ---> 检测到旧版 sing-box DNS 格式（1.11 legacy），自动迁移到 1.12+ 格式"
+        fi
+        cat <<EOF >"${_dnsConf}"
 {
     "dns": {
         "servers": [
             {
+                "type": "udp",
                 "tag": "google",
-                "address": "8.8.8.8"
+                "server": "8.8.8.8"
             },
             {
+                "type": "udp",
                 "tag": "cloudflare",
-                "address": "1.1.1.1"
+                "server": "1.1.1.1"
             }
         ]
     }
