@@ -235,6 +235,9 @@ if [[ ! -f "${_LIB_DIR}/utils.sh" && -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
             for f in "${langFiles[@]}"; do
                 _fetch_one shell/lang "${f}" || { unset -f _fetch_one; return 1; }
             done
+            # VERSION 是 best-effort：拉到就部署，拉不到就让 _load_version 走 API 兜底，
+            # 不让它失败把整个 raw 流程拖死。release 模式自带 VERSION 在 tarball 里。
+            _fetch_to_file "${rawBase}/VERSION" "${tmpDir}/VERSION" 2>/dev/null || true
             unset -f _fetch_one
             return 0
         }
@@ -291,6 +294,15 @@ if [[ ! -f "${_LIB_DIR}/utils.sh" && -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
                 return 1
             fi
         done
+
+        # VERSION：release tarball 自带，raw 模式 best-effort 单拉。
+        # 部署到 /etc/Proxy-agent/VERSION，让 _load_version 走第二档（本地文件）
+        # 而不是每次启动都打 GitHub API releases/latest 拿版本号。
+        # 部署失败不致命——_load_version 还有 API 兜底，只是慢一点。
+        if [[ -f "${tmpDir}/VERSION" ]]; then
+            mkdir -p /etc/Proxy-agent 2>/dev/null
+            mv -f "${tmpDir}/VERSION" /etc/Proxy-agent/VERSION 2>/dev/null || true
+        fi
 
         rm -rf "${tmpDir}"
         unset -f _fetch_to_file _fetch_to_stdout _try_release_bundle _try_raw_files
@@ -9346,19 +9358,38 @@ EOF
 EOF
     fi
 
-    # 确保直连出站存在（使用 prefer_ipv4 策略，优先IPv4但保留IPv6兼容）
+    # 确保直连出站存在
+    # 注：早期版本写过 "domain_strategy": "prefer_ipv4"，1.12 起在 dial fields 里
+    # 该字段已 deprecated（1.16 移除）。chain proxy 流量在路由级 resolve action 里已
+    # 按 prefer_ipv4 解析（chain_route.json）；非 chain 流量由客户端送 IP 进来，
+    # outbound 自身不会发起域名解析。所以删掉 domain_strategy，不影响行为。
+    # 详见 https://sing-box.sagernet.org/migration/
     if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json" ]]; then
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
 {
     "outbounds": [
         {
             "type": "direct",
-            "tag": "direct",
-            "domain_strategy": "prefer_ipv4"
+            "tag": "direct"
         }
     ]
 }
 EOF
+    fi
+
+    # 已有 01_direct_outbound.json 含 domain_strategy 时自动剥离（in-place migration）。
+    # 1.13 仅打 deprecation 警告，1.16 会 FATAL；现在剥掉避免后续踩坑 + 让 sing-box 启动
+    # 日志干净。
+    local _directOut="/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json"
+    if [[ -f "${_directOut}" ]] && jq -e . "${_directOut}" >/dev/null 2>&1; then
+        if jq -e '[.outbounds[]? | has("domain_strategy")] | any' "${_directOut}" >/dev/null 2>&1; then
+            echoContent yellow " ---> 检测到旧版 01_direct_outbound.json 含 domain_strategy（1.16 移除），自动剥离"
+            local _migrated
+            _migrated=$(jq '.outbounds |= map(del(.domain_strategy))' "${_directOut}" 2>/dev/null)
+            if [[ -n "${_migrated}" ]]; then
+                echo "${_migrated}" > "${_directOut}"
+            fi
+        fi
     fi
 
     # 已有 chain_route.json 缺 default_domain_resolver 时自动补全。
@@ -9588,20 +9619,11 @@ setupChainExit() {
 EOF
 
     # 同步更新 direct 出站配置
-    if [[ -n "${domainStrategy}" ]]; then
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
-{
-    "outbounds": [
-        {
-            "type": "direct",
-            "tag": "direct",
-            "domain_strategy": "${domainStrategy}"
-        }
-    ]
-}
-EOF
-    else
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
+    # 不再写 domain_strategy（dial fields 中的该字段 1.12 deprecated、1.16 移除）。
+    # 用户选的 ${domainStrategy} 仍通过下方 chain_route.json 的 `action: resolve,
+    # strategy: ${domainStrategy}` 路由级 action 落地——chain inbound 的流量在路由
+    # 阶段就按 IPv4/IPv6 偏好解析过，outbound 不需要再设。
+    cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
 {
     "outbounds": [
         {
@@ -9611,7 +9633,6 @@ EOF
     ]
 }
 EOF
-    fi
 
     # 创建路由配置 (让链式入站流量走直连)
     # sing-box 1.11+ 路由级 action：先 sniff 嗅探域名，再按 domainStrategy 重新解析
@@ -12796,15 +12817,14 @@ generateMultiChainRouteConfig() {
         fi
     done <<< "${rules}"
 
-    # 确保 direct 出站存在
+    # 确保 direct 出站存在（不写 domain_strategy，详见 ensureSingBoxInstalled 注释）
     if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json" ]]; then
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
 {
     "outbounds": [
         {
             "type": "direct",
-            "tag": "direct",
-            "domain_strategy": "prefer_ipv4"
+            "tag": "direct"
         }
     ]
 }
