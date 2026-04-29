@@ -7908,10 +7908,12 @@ rollbackScript() {
         fi
 
         # 下载语言文件（同上要求全部成功）
+        # 注：loader 已在 v1.2.2 删除，此处不再拉取；shell/lang/loader.sh 仅作为 v1.2.0-v1.2.4
+        # 旧 install.sh 的兼容占位文件保留在仓库里，不应被新代码下载或 source。
         echoContent yellow " ---> 下载语言文件..."
         mkdir -p "${installDir}/shell/lang"
         local failedLangs=()
-        for langFile in zh_CN en_US loader; do
+        for langFile in zh_CN en_US; do
             if ! wget -c -q -O "${installDir}/shell/lang/${langFile}.sh" "${rawBase}/${version}/shell/lang/${langFile}.sh"; then
                 failedLangs+=("${langFile}")
             fi

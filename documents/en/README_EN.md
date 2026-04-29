@@ -91,8 +91,10 @@ The selection is persisted to `/etc/Proxy-agent/lang_pref` and auto-loaded on su
 16. Core Management          Upgrade / switch
 17. Update Script            Checked against SHA256, auto-rollback on failure
 18. BBR
+19. One-click No-domain Reality install
 20. Uninstall
 21. Switch Language
+22. Script Version Management   Backup / rollback / list snapshots
 ==============================================================
 ```
 
@@ -100,7 +102,6 @@ The selection is persisted to `/etc/Proxy-agent/lang_pref` and auto-loaded on su
 
 - [User Guide](../user-guide.md)
 - [Developer Guide](../developer-guide.md)
-- [Nginx Proxy](../nginx_proxy.md)
 - [SELinux Notes](../selinux.md)
 
 ## Contributing
