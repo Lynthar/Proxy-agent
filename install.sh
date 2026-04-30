@@ -1055,9 +1055,6 @@ initVar() {
     # 2 = sing-box
     # （v2ray-core / v2ray[xtls] 早期值已下线，旧脚本无 3 路径）
     coreKind=
-    # 兼容别名：旧脚本用 coreInstallType；新代码统一读 coreKind
-    # 预计下一版本移除该别名
-    coreInstallType=
 
     # 核心安装path
     # coreInstallPath=
@@ -1368,10 +1365,8 @@ readNginxSubscribe() {
 
 # 检测安装方式
 # coreKind: 1=xray-core, 2=sing-box, 空=未安装
-# 旧名 coreInstallType 在每次赋值后同步镜像，作为兼容层（计划下一版本移除）
 readInstallType() {
     coreKind=
-    coreInstallType=
     configPath=
     singBoxConfigPath=
 
@@ -1384,7 +1379,6 @@ readInstallType() {
                 configPath=/etc/Proxy-agent/xray/conf/
                 ctlPath=/etc/Proxy-agent/xray/xray
                 coreKind=1
-                coreInstallType=1
                 if [[ -f "${configPath}07_VLESS_vision_reality_inbounds.json" ]]; then
                     realityStatus=1
                 fi
@@ -1396,7 +1390,6 @@ readInstallType() {
             # 检测sing-box
             ctlPath=/etc/Proxy-agent/sing-box/sing-box
             coreKind=2
-            coreInstallType=2
             configPath=/etc/Proxy-agent/sing-box/conf/config/
             singBoxConfigPath=/etc/Proxy-agent/sing-box/conf/config/
         fi
@@ -3787,43 +3780,6 @@ EOF
     fi
 }
 
-# 操作Hysteria
-handleHysteria() {
-    local startResult=0
-
-    # shellcheck disable=SC2010
-    if find /bin /usr/bin | grep -q systemctl && ls /etc/systemd/system/ | grep -q hysteria.service; then
-        if [[ -z $(pgrep -f "hysteria/hysteria") ]] && [[ "$1" == "start" ]]; then
-            systemctl start hysteria.service || startResult=$?
-        elif [[ -n $(pgrep -f "hysteria/hysteria") ]] && [[ "$1" == "stop" ]]; then
-            systemctl stop hysteria.service
-        fi
-    fi
-    sleep 1.5
-
-    if [[ "$1" == "start" ]]; then
-        if [[ -n $(pgrep -f "hysteria/hysteria") ]]; then
-            echoContent green " ---> Hysteria启动成功"
-        else
-            echoContent red "Hysteria启动失败 (systemctl 返回码: ${startResult})"
-            if [[ -f "/etc/systemd/system/hysteria.service" ]]; then
-                echoContent yellow "\n ---> systemd 服务状态:"
-                systemctl status hysteria.service --no-pager -l 2>&1 | head -20
-            fi
-            echoContent yellow "\n请手动执行【/etc/Proxy-agent/hysteria/hysteria --log-level debug -c /etc/Proxy-agent/hysteria/conf/config.json server】查看详细错误日志"
-            exit 1
-        fi
-    elif [[ "$1" == "stop" ]]; then
-        if [[ -z $(pgrep -f "hysteria/hysteria") ]]; then
-            echoContent green " ---> Hysteria关闭成功"
-        else
-            echoContent red "Hysteria关闭失败"
-            echoContent red "请手动执行【ps -ef|grep -v grep|grep hysteria|awk '{print \$2}'|xargs kill -9】"
-            exit 1
-        fi
-    fi
-}
-
 # 操作sing-box
 handleSingBox() {
     local startResult=0
@@ -5529,6 +5485,11 @@ EOF
   }
 }
 EOF
+        # 上方 routing.rules 的 inboundTag "dokodemo-in" 与实际 inbound tag "dokodemo-in-VLESSReality" 不匹配
+        # （Xray 是精确字符串匹配），两条规则永远不会命中。继承自上游 mack-a/v2ray-agent commit 1e890619，
+        # 本 fork 既未引入也未修复。详见 documents/developer-guide.md 附录 D.1：
+        # Reality 协议靠内层 realitySettings.target 兜底无指纹反代到真实伪装站，dead routing 是无害噪声；
+        # 改成命中反而会让 Reality 鉴权失败或暴露 fingerprint，不是改进。等上游决定怎么办再跟进。
         # VLESS_Reality_gRPC - 已移除，推荐使用XHTTP
     elif [[ -z "${3:-}" ]]; then
         rm /etc/Proxy-agent/xray/conf/07_VLESS_vision_reality_inbounds.json >/dev/null 2>&1

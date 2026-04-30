@@ -448,7 +448,6 @@ sing-box **1.11** 引入路由级 `action` 字段（参见官方迁移文档 <ht
 |------|------|------|
 | `handleXray start\|stop` | install.sh | Xray 启停 + pgrep 验证 + 失败时打印 systemctl status / journalctl 诊断 |
 | `handleSingBox start\|stop` | install.sh | sing-box 启停 + **自动合并配置** + 10×0.5s 等待退出循环 |
-| `handleHysteria start\|stop` | install.sh | Hysteria 独立服务（老版本兼容层） |
 | `handleNginx start\|stop` | install.sh | Nginx 启停 + Reality-only 场景跳过 + CentOS SELinux 自动修复 |
 | `reloadCore` | install.sh | 根据 `${coreKind}` 和 `currentInstallProtocolType` 决定重启 xray / sing-box |
 
@@ -783,15 +782,14 @@ reloadCore
 ### 11.6 向后兼容
 
 ```bash
-# 老变量名保留一版作为 mirror alias
-coreKind=1
-coreInstallType=1   # 计划下一个主版本移除
-
 # 老代码路径保护
 if [[ -f "/old/path/config.json" ]]; then
     mv "/old/path/config.json" "/new/path/config.json"
 fi
 ```
+
+> 早先版本曾保留 `coreInstallType` 作为 `coreKind` 的 mirror alias，
+> v1.2.8 已确认无读端后移除。新代码统一读 `coreKind`。
 
 ---
 
