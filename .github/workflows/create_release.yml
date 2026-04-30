@@ -127,23 +127,7 @@ jobs:
             await uploadAsset('lib_bundle.tar.gz', 'lib_bundle.tar.gz');
             await uploadAsset('lib_bundle.tar.gz.sha256', 'lib_bundle.tar.gz.sha256');
 
-            const { data: releases } = await github.rest.repos.listReleases({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              per_page: 100
-            });
-
-            const oldReleases = releases.slice(3);
-            for (const rel of oldReleases) {
-              console.log(`🗑 Deleting old release ${rel.tag_name} (id=${rel.id})`);
-              await github.rest.repos.deleteRelease({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                release_id: rel.id
-              }).catch(err => console.log(`Skip release ${rel.id}: ${err.message}`));
-              await github.rest.git.deleteRef({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                ref: `tags/${rel.tag_name}`
-              }).catch(err => console.log(`Skip tag ${rel.tag_name}: ${err.message}`));
-            }
+            // Old releases and tags are intentionally retained — manual cleanup only.
+            // Tag deletion would orphan history references (issues, git log v1.x..v2.y),
+            // and removing release assets breaks self-update SHA256 verification for any
+            // user who pinned an older version.
