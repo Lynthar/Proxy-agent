@@ -6269,7 +6269,12 @@ EOF
             obfsUrlParamEncode="obfs%3Dsamalander%26obfs-password%3D${hysteria2ObfsPassword}%26"
             clashMetaObfs="    obfs: salamander
     obfs-password: ${hysteria2ObfsPassword}"
-            singBoxObfs=",\"obfs\":{\"type\":\"salamander\",\"password\":\"${hysteria2ObfsPassword}\"}"
+            # 与 initSingBoxHysteria2Config / initSingBoxConfig 同款：用 jq -Rs 把密码
+            # 转成合法 JSON string literal（含外层引号），避免密码含 " 或 \ 时破坏后续
+            # 拼到 6296 行 jq filter 的 JSON 语法 → 订阅文件被覆盖成空/错误内容。
+            local _obfsPwJson
+            _obfsPwJson=$(printf '%s' "${hysteria2ObfsPassword}" | jq -Rs '.')
+            singBoxObfs=',"obfs":{"type":"salamander","password":'"${_obfsPwJson}"'}'
         fi
 
         echoContent green "    hysteria2://${id}@${currentHost}:${singBoxHysteria2Port}?${multiPort}${obfsUrlParam}peer=${currentHost}&insecure=0&sni=${currentHost}&alpn=h3#${email}\n"
@@ -8113,34 +8118,64 @@ updateV2RayAgent() {
     fi
 
     # 下载新版本脚本
+    # 与 lib/lang 模块的下载（见下方）同款：先下到 .new 文件、bash -n 校验语法，
+    # 通过后再原子 mv 到 live install.sh。两层防线：
+    #   1. bash -n 拦下"GitHub 200 OK 但内容是 HTML 错误页"这种半成功（HTML 不合法 bash）。
+    #   2. 与 1896940 commit 同步：不用 wget -c（残留半截文件会触发拼接破坏）。
+    # 之所以原本只对 lib/lang 做了 .new 模式而 install.sh 用直接覆盖+SHA256 校验，
+    # 是因为 verifyInstallSHA256 对 master 分支软降级；master 用户实际无任何完整性
+    # 校验，被错误页直接覆盖到 live 文件。.new + bash -n 给 master 用户也补上一层。
     echoContent yellow " ---> 下载脚本文件..."
-    rm -rf "${installDir}/install.sh"
+    local _scriptTmp="${installDir}/install.sh.new"
+    rm -f "${_scriptTmp}"
 
-    # 注：不能用 -c 续传——本地若残留旧版本文件，wget 会从已有大小处续传，
-    # 拼接成 [旧前 N 字节][新文件后续字节] 的损坏文件，bash 解析时报 syntax error。
-    # 上一行已经 rm -rf install.sh，所以这里走的是全新下载。
     if [[ "${release}" == "alpine" ]]; then
-        wget -q -P "${installDir}/" -N "${rawBase}/install.sh"
+        wget -q -O "${_scriptTmp}" "${rawBase}/install.sh" 2>/dev/null
     else
-        wget -q ${wgetShowProgressStatus} -P "${installDir}/" -N "${rawBase}/install.sh"
+        wget -q ${wgetShowProgressStatus} -O "${_scriptTmp}" "${rawBase}/install.sh" 2>/dev/null
     fi
 
-    # 如果从 Release tag 下载失败，回退到 master 分支
-    if [[ ! -f "${installDir}/install.sh" && -n "${latestVersion}" ]]; then
-        echoContent yellow " ---> Release ${latestVersion} 下载失败，尝试从 master 分支下载..."
-        rawBase="https://raw.githubusercontent.com/Lynthar/Proxy-agent/master"
-        latestVersion=""  # 清空版本号，避免版本号与代码不一致
+    # 如果从 Release tag 下载失败或文件不合法，回退到 master 分支
+    if [[ ! -s "${_scriptTmp}" ]] || ! bash -n "${_scriptTmp}" 2>/dev/null; then
+        rm -f "${_scriptTmp}"
+        if [[ -n "${latestVersion}" ]]; then
+            echoContent yellow " ---> Release ${latestVersion} 下载失败或语法不合法，尝试从 master 分支下载..."
+            rawBase="https://raw.githubusercontent.com/Lynthar/Proxy-agent/master"
+            latestVersion=""  # 清空版本号，避免版本号与代码不一致
 
-        if [[ "${release}" == "alpine" ]]; then
-            wget -c -q -P "${installDir}/" -N "${rawBase}/install.sh"
-        else
-            wget -c -q ${wgetShowProgressStatus} -P "${installDir}/" -N "${rawBase}/install.sh"
+            if [[ "${release}" == "alpine" ]]; then
+                wget -q -O "${_scriptTmp}" "${rawBase}/install.sh" 2>/dev/null
+            else
+                wget -q ${wgetShowProgressStatus} -O "${_scriptTmp}" "${rawBase}/install.sh" 2>/dev/null
+            fi
         fi
     fi
 
-    if [[ ! -f "${installDir}/install.sh" ]]; then
-        echoContent red " ---> 下载脚本失败!"
-        echoContent yellow "请手动执行: wget -P /root -N ${rawBase}/install.sh"
+    # 最终校验：文件非空且语法合法
+    if [[ ! -s "${_scriptTmp}" ]] || ! bash -n "${_scriptTmp}" 2>/dev/null; then
+        rm -f "${_scriptTmp}"
+        echoContent red " ---> 下载脚本失败或语法不合法!"
+        if [[ -n "${backupPath}" && -f "${backupPath}/install.sh" ]]; then
+            cp -f "${backupPath}/install.sh" "${installDir}/install.sh"
+            chmod 700 "${installDir}/install.sh"
+            echoContent green " ---> $(t UPDATE_SHA256_RESTORED "${backupPath}")"
+        else
+            echoContent yellow "请手动执行: wget -P /root -N ${rawBase}/install.sh"
+        fi
+        exit 1
+    fi
+
+    # 原子 mv 替换 live install.sh。在此之前 live 文件保持旧版本不动，
+    # 即使本进程崩溃，pasly 仍可工作。
+    rm -f "${installDir}/install.sh"
+    if ! mv -f "${_scriptTmp}" "${installDir}/install.sh"; then
+        rm -f "${_scriptTmp}"
+        echoContent red " ---> 替换 install.sh 失败!"
+        if [[ -n "${backupPath}" && -f "${backupPath}/install.sh" ]]; then
+            cp -f "${backupPath}/install.sh" "${installDir}/install.sh"
+            chmod 700 "${installDir}/install.sh"
+            echoContent green " ---> $(t UPDATE_SHA256_RESTORED "${backupPath}")"
+        fi
         exit 1
     fi
 
