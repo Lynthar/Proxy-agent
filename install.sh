@@ -5014,23 +5014,55 @@ writeChainInfoAtomic() {
 }
 
 # 合并config
+# 设计要点（与 lib/json-utils.sh::jsonWriteFile 同款原子写入语义）：
+#   1. 不先 rm 现有 config.json —— sing-box merge (cmd_merge.go) 内部用
+#      os.WriteFile，自带 O_TRUNC；先 rm 反而制造"merge 失败 → 文件丢失"
+#      窗口，后续 systemd Restart=on-failure 会陷入 restart loop。
+#   2. 输出到 mktemp，校验通过再原子 mv 到目标位置。任何失败保留旧 config。
+#   3. sing-box check 比单纯 merge 多一层运行时校验（端口冲突 / tag 唯一性等）。
 singBoxMergeConfig() {
-    rm /etc/Proxy-agent/sing-box/conf/config.json >/dev/null 2>&1
+    local targetFile="/etc/Proxy-agent/sing-box/conf/config.json"
+    local fragmentDir="/etc/Proxy-agent/sing-box/conf/config/"
+    local tmpFile mergeOutput mergeResult checkOutput checkResult
 
-    local mergeOutput mergeResult
-    mergeOutput=$(/etc/Proxy-agent/sing-box/sing-box merge config.json -C /etc/Proxy-agent/sing-box/conf/config/ -D /etc/Proxy-agent/sing-box/conf/ 2>&1)
+    if ! tmpFile=$(mktemp /tmp/Proxy-agent-singbox-merge-XXXXXX.json); then
+        echoContent red " ---> sing-box 配置合并失败：无法创建临时文件"
+        return 1
+    fi
+
+    # sing-box merge 接受绝对输出路径；省 -D 避免它把相对名拼到 conf/ 根。
+    mergeOutput=$(/etc/Proxy-agent/sing-box/sing-box merge "${tmpFile}" -C "${fragmentDir}" 2>&1)
     mergeResult=$?
 
     if [[ ${mergeResult} -ne 0 ]]; then
         echoContent red " ---> sing-box 配置合并失败"
         echoContent red " ---> 错误信息:"
         echo "${mergeOutput}" | head -20
+        rm -f "${tmpFile}"
         return 1
     fi
 
-    # 验证合并后的配置文件存在且有效
-    if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config.json" ]]; then
-        echoContent red " ---> sing-box 配置文件生成失败"
+    if [[ ! -s "${tmpFile}" ]]; then
+        echoContent red " ---> sing-box 配置合并失败：临时文件为空"
+        rm -f "${tmpFile}"
+        return 1
+    fi
+
+    # 运行时校验：sing-box check 检查端口冲突、tag 唯一性、协议字段一致性
+    # 等 merge 不查的项。失败保留旧 config.json，不替换。
+    checkOutput=$(/etc/Proxy-agent/sing-box/sing-box check -c "${tmpFile}" 2>&1)
+    checkResult=$?
+    if [[ ${checkResult} -ne 0 ]]; then
+        echoContent red " ---> sing-box 配置校验失败（保留旧配置）"
+        echoContent red " ---> 错误信息:"
+        echo "${checkOutput}" | head -20
+        rm -f "${tmpFile}"
+        return 1
+    fi
+
+    if ! mv "${tmpFile}" "${targetFile}"; then
+        echoContent red " ---> sing-box 配置写入失败：无法替换 ${targetFile}"
+        rm -f "${tmpFile}"
         return 1
     fi
 
@@ -7876,9 +7908,23 @@ rollbackScript() {
                     if [[ -d "${installDir}/tls" ]]; then
                         echoContent yellow " ---> $(t SCRIPT_ROLLBACK_TLS_NOTICE)"
                     fi
-                    # sing-box 配置由片段合并而来，重启前必须 merge 一次
+                    # sing-box 配置由片段合并而来，重启前必须 merge 一次。
+                    # 不能吞错：跨大版本回滚时，旧片段对新 sing-box 二进制可能 schema 不兼容，
+                    # merge 失败若被忽略 → reloadCore 启动到无配置状态 → systemd restart loop。
+                    # 失败时回退回滚操作本身：从 pre_rollback_config 恢复回滚前快照，让用户停在"还能跑"的状态。
                     if [[ -f "${installDir}/sing-box/sing-box" ]]; then
-                        singBoxMergeConfig >/dev/null 2>&1
+                        if ! singBoxMergeConfig; then
+                            echoContent red " ---> $(t SCRIPT_ROLLBACK_CONFIG_FAILED)"
+                            if [[ -d "${preRestoreSnapshot}" ]]; then
+                                echoContent yellow " ---> 自动撤销回滚的配置变更..."
+                                if restoreConfigSnapshot "${preRestoreSnapshot}" >/dev/null 2>&1; then
+                                    singBoxMergeConfig >/dev/null 2>&1 || true
+                                    echoContent yellow " ---> 已恢复回滚前的配置"
+                                fi
+                            fi
+                            reloadCore
+                            return 1
+                        fi
                     fi
                     reloadCore
                 else
@@ -9731,9 +9777,11 @@ EOF
     fi
 
     # 保存配置信息用于生成配置码（包含网络策略），原子写入避免半写入
+    # schema_version: 1 是当前字段集；未来字段调整请提升此版本号，并在读取端按版本兼容
     local __chainExitInfo
     __chainExitInfo=$(cat <<EOF
 {
+    "schema_version": 1,
     "role": "exit",
     "ip": "${publicIP}",
     "port": ${chainPort},
@@ -9756,7 +9804,9 @@ EOF
     fi
 
     # 合并配置并重启
-    singBoxMergeConfig
+    if ! singBoxMergeConfig; then
+        return 1
+    fi
     reloadCore
 
     # 生成并显示配置码
@@ -9765,8 +9815,12 @@ EOF
     echoContent green "=============================================================="
     echoContent yellow "\n链式代理配置码 (请复制到入口节点):\n"
 
-    local chainCode
-    chainCode="chain://ss2022@${publicIP}:${chainPort}?key=$(echo -n "${chainKey}" | base64 | tr -d '\n')&method=${chainMethod}"
+    # IPv6 字面地址必须用 [host]:port 包裹，否则入口的 host:port 拆分（依赖最后一个 `:`）会切错
+    local chainCode hostInCode="${publicIP}"
+    if [[ "${publicIP}" == *:* ]]; then
+        hostInCode="[${publicIP}]"
+    fi
+    chainCode="chain://ss2022@${hostInCode}:${chainPort}?key=$(echo -n "${chainKey}" | base64 | tr -d '\n')&method=${chainMethod}"
     echoContent skyBlue "${chainCode}"
 
     echoContent yellow "\n或手动配置:"
@@ -9795,8 +9849,12 @@ showExistingChainCode() {
     echoContent green "现有出口节点配置"
     echoContent green "=============================================================="
 
-    local chainCode
-    chainCode="chain://ss2022@${publicIP}:${port}?key=$(echo -n "${password}" | base64 | tr -d '\n')&method=${method}"
+    # IPv6 字面地址同样需要 [host]:port 包裹
+    local chainCode hostInCode="${publicIP}"
+    if [[ "${publicIP}" == *:* ]]; then
+        hostInCode="[${publicIP}]"
+    fi
+    chainCode="chain://ss2022@${hostInCode}:${port}?key=$(echo -n "${password}" | base64 | tr -d '\n')&method=${method}"
     echoContent yellow "\n配置码:\n"
     echoContent skyBlue "${chainCode}"
 
@@ -9807,10 +9865,88 @@ showExistingChainCode() {
     echoContent green "  加密方式: ${method}"
 }
 
+# SS2022 method 白名单 + 对应 base64-key 长度（解码一次后字节长度）
+# - 16 字节 → base64 22 chars + "==" padding 共 24
+# - 32 字节 → base64 43 chars + "=" padding 共 44
+# 注意：传输层会对 password（24 chars 的 base64）再做一层 base64 给 URL 用，所以
+# parseChainCode 在 URL 层 base64 -d 一次拿到的就是这个 24-char 字符串本身。
+# 这里校验的就是 24/44 chars 这一层（即 sing-box password 字段值）。
+_chainSS2022PasswordOK() {
+    local method="$1" key="$2"
+    case "${method}" in
+        2022-blake3-aes-128-gcm)
+            [[ "${key}" =~ ^[A-Za-z0-9+/]{22}==$ ]]
+            ;;
+        2022-blake3-aes-256-gcm|2022-blake3-chacha20-poly1305)
+            [[ "${key}" =~ ^[A-Za-z0-9+/]{43}=$ ]]
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# 把 URL-safe base64（"_-" 替换 "+/"，可能缺 padding）规范化成标准 base64
+# 容忍 IM/链接预览常见的 URL 转码（%2B、%2F 已经被 cut 解析、_/- 字符替换、丢 padding）
+_chainNormalizeBase64() {
+    local s="$1"
+    # URL-safe → standard
+    s="${s//-/+}"
+    s="${s//_//}"
+    # 补齐 padding
+    local mod=$(( ${#s} % 4 ))
+    if [[ ${mod} -eq 2 ]]; then
+        s="${s}=="
+    elif [[ ${mod} -eq 3 ]]; then
+        s="${s}="
+    elif [[ ${mod} -eq 1 ]]; then
+        # base64 解码后 1-mod 不合法，直接返回让上游识别错误
+        echo "${s}"
+        return 1
+    fi
+    echo "${s}"
+}
+
+# 从 host:port 字符串拆出 host/port，处理 IPv6 [host]:port 与 IPv4 host:port
+# 输出到全局变量 _chainParsedHost / _chainParsedPort（caller 取用）
+_chainSplitHostPort() {
+    local s="$1"
+    _chainParsedHost=""
+    _chainParsedPort=""
+    if [[ "${s}" == \[* ]]; then
+        # IPv6: [2001:db8::1]:443
+        _chainParsedHost="${s#[}"
+        _chainParsedHost="${_chainParsedHost%%]:*}"
+        _chainParsedPort="${s##*]:}"
+    else
+        # IPv4 / 域名: 1.2.3.4:443
+        _chainParsedHost="${s%:*}"
+        _chainParsedPort="${s##*:}"
+    fi
+    [[ -n "${_chainParsedHost}" && -n "${_chainParsedPort}" ]]
+}
+
+# 从 query string 中按 key 取 value（POSIX 工具，跨 grep 实现兼容）
+# 例：_chainQueryGet "key=A&method=B" "method" → "B"
+# Alpine BusyBox grep 没有 -P，旧版 parseChainCode 用 grep -oP 在 Alpine 上失效。
+_chainQueryGet() {
+    local query="$1" wantKey="$2"
+    awk -F= -v k="${wantKey}" 'BEGIN{RS="&"} $1==k {print substr($0, length(k)+2); exit}' <<< "${query}"
+}
+
 # 解析配置码 (支持 V1 单跳和 V2 多跳格式)
-# V1 格式: chain://ss2022@IP:PORT?key=xxx&method=xxx
+# V1 格式: chain://ss2022@IP:PORT?key=xxx&method=xxx          （IPv4 / 域名）
+#          chain://ss2022@[IPv6]:PORT?key=xxx&method=xxx     （IPv6）
 # V2 格式: chain://v2@BASE64_JSON_ARRAY
 # 输出: chainHops 数组 (JSON), chainHopCount 跳数
+#
+# 校验策略：
+#   - IP/host 走 isValidIP（IPv4/IPv6）或域名形态（含 `.` 的字符串）
+#   - 端口必须是 [1, 65535]
+#   - method 严格白名单（SS2022 三种之一），不接受 silent fallback
+#   - key 解码后长度按 method 校验
+#   - 不再让"key 解码失败 → 用原 base64 当 key"的 fallback 通过
+#   - V2 base64 体积上限 64 KiB，解码后 jq 解析，跳数上限 8
 parseChainCode() {
     local code=$1
 
@@ -9825,12 +9961,25 @@ parseChainCode() {
     # V2 多跳格式
     if [[ "${code}" =~ ^chain://v2@ ]]; then
         local base64Data
-        base64Data=$(echo "${code}" | sed 's/chain:\/\/v2@//')
+        base64Data="${code#chain://v2@}"
+
+        # 体积上限：8 跳 * 200 字节字段 + JSON 包装 远小于 64 KiB
+        if [[ ${#base64Data} -gt 65536 ]]; then
+            echoContent red " ---> V2 配置码体积超限（>64KiB）"
+            return 1
+        fi
+
+        # URL-safe → standard，再补 padding
+        local normalized
+        if ! normalized=$(_chainNormalizeBase64 "${base64Data}"); then
+            echoContent red " ---> V2 配置码 base64 长度无效"
+            return 1
+        fi
 
         # 解码 Base64
-        chainHops=$(echo "${base64Data}" | base64 -d 2>/dev/null)
+        chainHops=$(echo "${normalized}" | base64 -d 2>/dev/null)
         if [[ -z "${chainHops}" ]] || ! echo "${chainHops}" | jq empty 2>/dev/null; then
-            echoContent red " ---> V2 配置码解析失败，JSON格式错误"
+            echoContent red " ---> V2 配置码解析失败，JSON 格式错误"
             return 1
         fi
 
@@ -9839,12 +9988,47 @@ parseChainCode() {
             echoContent red " ---> 配置码不包含任何跳转节点"
             return 1
         fi
+        if [[ "${chainHopCount}" -gt 8 ]]; then
+            echoContent red " ---> 配置码跳数超限（${chainHopCount} > 8）"
+            return 1
+        fi
+
+        # 逐跳校验：ip/port/method/key 都必须合规，否则拒绝整个配置码
+        local i=1
+        while [[ $i -le ${chainHopCount} ]]; do
+            local hopIP hopPort hopKey hopMethod
+            hopIP=$(echo "${chainHops}" | jq -r ".[$((i-1))].ip // empty")
+            hopPort=$(echo "${chainHops}" | jq -r ".[$((i-1))].port // empty")
+            hopKey=$(echo "${chainHops}" | jq -r ".[$((i-1))].key // empty")
+            hopMethod=$(echo "${chainHops}" | jq -r ".[$((i-1))].method // empty")
+
+            if [[ -z "${hopIP}" || -z "${hopPort}" || -z "${hopKey}" || -z "${hopMethod}" ]]; then
+                echoContent red " ---> V2 配置码第 ${i} 跳缺少必要字段"
+                return 1
+            fi
+            # IP/host 校验：允许 IPv4/IPv6 或域名（带 . 的非空字符串）
+            if ! isValidIP "${hopIP}" && [[ ! "${hopIP}" =~ ^[A-Za-z0-9.-]+$ ]]; then
+                echoContent red " ---> V2 配置码第 ${i} 跳 host 非法: ${hopIP}"
+                return 1
+            fi
+            # port：1-65535
+            if ! [[ "${hopPort}" =~ ^[0-9]+$ ]] || (( hopPort < 1 || hopPort > 65535 )); then
+                echoContent red " ---> V2 配置码第 ${i} 跳端口非法: ${hopPort}"
+                return 1
+            fi
+            # method/key 严格白名单 + 长度匹配
+            if ! _chainSS2022PasswordOK "${hopMethod}" "${hopKey}"; then
+                echoContent red " ---> V2 配置码第 ${i} 跳 method/key 不匹配 SS2022 规范"
+                return 1
+            fi
+            ((i++))
+        done
 
         echoContent green " ---> V2 多跳配置码解析成功"
         echoContent green "  总跳数: ${chainHopCount}"
 
         # 显示链路
-        local i=1
+        i=1
         while [[ $i -le ${chainHopCount} ]]; do
             local hopIP hopPort
             hopIP=$(echo "${chainHops}" | jq -r ".[$((i-1))].ip")
@@ -9868,33 +10052,67 @@ parseChainCode() {
 
     # V1 单跳格式
     if [[ "${code}" =~ ^chain://ss2022@ ]]; then
-        # 提取 IP:PORT
-        local ipPort
-        ipPort=$(echo "${code}" | sed 's/chain:\/\/ss2022@//' | cut -d'?' -f1)
-        chainExitIP=$(echo "${ipPort}" | cut -d':' -f1)
-        chainExitPort=$(echo "${ipPort}" | cut -d':' -f2)
+        # 拆 host:port?params
+        local hostPart paramPart
+        hostPart="${code#chain://ss2022@}"
+        if [[ "${hostPart}" == *\?* ]]; then
+            paramPart="${hostPart#*\?}"
+            hostPart="${hostPart%%\?*}"
+        else
+            paramPart=""
+        fi
 
-        # 提取参数
-        local params
-        params=$(echo "${code}" | cut -d'?' -f2)
+        # 处理 IPv4/IPv6 host:port 拆分（IPv6 用 [host]:port）
+        if ! _chainSplitHostPort "${hostPart}"; then
+            echoContent red " ---> 配置码 host:port 解析失败: ${hostPart}"
+            return 1
+        fi
+        chainExitIP="${_chainParsedHost}"
+        chainExitPort="${_chainParsedPort}"
+        unset _chainParsedHost _chainParsedPort
 
-        # 提取 key (Base64 编码的密钥需要解码)
+        # 校验 host
+        if ! isValidIP "${chainExitIP}" && [[ ! "${chainExitIP}" =~ ^[A-Za-z0-9.-]+$ ]]; then
+            echoContent red " ---> 配置码 host 非法: ${chainExitIP}"
+            return 1
+        fi
+        # 校验 port
+        if ! [[ "${chainExitPort}" =~ ^[0-9]+$ ]] || (( chainExitPort < 1 || chainExitPort > 65535 )); then
+            echoContent red " ---> 配置码端口非法: ${chainExitPort}"
+            return 1
+        fi
+
+        # 提取 key（POSIX awk 抽取，避免 grep -oP 在 Alpine BusyBox grep 上失效）
         local keyBase64
-        keyBase64=$(echo "${params}" | grep -oP 'key=\K[^&]+')
-        chainExitKey=$(echo "${keyBase64}" | base64 -d 2>/dev/null)
+        keyBase64=$(_chainQueryGet "${paramPart}" "key")
+        if [[ -z "${keyBase64}" ]]; then
+            echoContent red " ---> 配置码缺少 key 参数"
+            return 1
+        fi
+
+        # URL-safe → standard，再 base64 -d；解码失败拒绝（不再 fallback）
+        local normalizedKey
+        if ! normalizedKey=$(_chainNormalizeBase64 "${keyBase64}"); then
+            echoContent red " ---> 配置码 key 编码无效"
+            return 1
+        fi
+        chainExitKey=$(echo "${normalizedKey}" | base64 -d 2>/dev/null)
         if [[ -z "${chainExitKey}" ]]; then
-            chainExitKey="${keyBase64}"
+            echoContent red " ---> 配置码 key base64 解码失败"
+            return 1
         fi
 
-        # 提取 method
-        chainExitMethod=$(echo "${params}" | grep -oP 'method=\K[^&]+')
+        # 提取 method（必填，不再 silent fallback）
+        chainExitMethod=$(_chainQueryGet "${paramPart}" "method")
         if [[ -z "${chainExitMethod}" ]]; then
-            chainExitMethod="2022-blake3-aes-128-gcm"
+            echoContent red " ---> 配置码缺少 method 参数"
+            return 1
         fi
 
-        # 验证提取结果
-        if [[ -z "${chainExitIP}" ]] || [[ -z "${chainExitPort}" ]] || [[ -z "${chainExitKey}" ]]; then
-            echoContent red " ---> 配置码解析失败"
+        # method/key 长度联合校验
+        if ! _chainSS2022PasswordOK "${chainExitMethod}" "${chainExitKey}"; then
+            echoContent red " ---> 配置码 method/key 不匹配 SS2022 规范"
+            echoContent red "      method=${chainExitMethod}, key 长度=${#chainExitKey}"
             return 1
         fi
 
@@ -10147,6 +10365,7 @@ EOF
     local __chainRelayInfo
     __chainRelayInfo=$(cat <<EOF
 {
+    "schema_version": 1,
     "role": "relay",
     "ip": "${publicIP}",
     "port": ${chainPort},
@@ -10164,7 +10383,9 @@ EOF
     echoContent green " ---> 已开放端口 ${chainPort}"
 
     # 合并配置并重启
-    singBoxMergeConfig
+    if ! singBoxMergeConfig; then
+        return 1
+    fi
     handleSingBox stop >/dev/null 2>&1
     handleSingBox start
 
@@ -10320,6 +10541,7 @@ EOF
     local __chainEntryInfo
     __chainEntryInfo=$(cat <<EOF
 {
+    "schema_version": 1,
     "role": "entry",
     "mode": "multi_hop",
     "hop_count": ${chainHopCount},
@@ -10566,6 +10788,7 @@ EOF
     local __chainEntryInfo
     __chainEntryInfo=$(cat <<EOF
 {
+    "schema_version": 1,
     "role": "entry",
     "exit_ip": "${exitIP}",
     "exit_port": ${exitPort},
@@ -11082,13 +11305,18 @@ updateChainKey() {
         fi
         mv "${tmpInfoFile}" /etc/Proxy-agent/sing-box/conf/chain_exit_info.json
 
-        singBoxMergeConfig
+        if ! singBoxMergeConfig; then
+            return 1
+        fi
         reloadCore
 
         echoContent green " ---> 密钥已更新"
         echoContent yellow "\n新配置码:\n"
-        local chainCode
-        chainCode="chain://ss2022@${publicIP}:${port}?key=$(echo -n "${newKey}" | base64 | tr -d '\n')&method=${method}"
+        local chainCode hostInCode="${publicIP}"
+        if [[ "${publicIP}" == *:* ]]; then
+            hostInCode="[${publicIP}]"
+        fi
+        chainCode="chain://ss2022@${hostInCode}:${port}?key=$(echo -n "${newKey}" | base64 | tr -d '\n')&method=${method}"
         echoContent skyBlue "${chainCode}"
         echoContent red "\n请更新入口节点配置！"
 
@@ -11155,7 +11383,9 @@ updateChainPort() {
     # 更新防火墙
     allowPort "${newPort}" "tcp"
 
-    singBoxMergeConfig
+    if ! singBoxMergeConfig; then
+        return 1
+    fi
     reloadCore
 
     echoContent green " ---> 端口已更新为 ${newPort}"
@@ -11281,7 +11511,11 @@ EOF
     fi
 
     # 重新合并 sing-box 配置
-    singBoxMergeConfig
+    # 卸载语义：清理动作已完成（链式相关片段都已 rm），merge 失败说明还有别的片段问题，
+    # 但用户的主目标"移除链式代理"已经达到，只警告不 return 1。
+    if ! singBoxMergeConfig; then
+        echoContent yellow " ---> 警告：sing-box 配置合并失败，请检查其他片段"
+    fi
     reloadCore
 
     echoContent green " ---> 链式代理已卸载"
@@ -11496,7 +11730,10 @@ configureProtocolChainRouting() {
 
     # 重载 sing-box 配置
     echoContent yellow " ---> $(t CHAIN_PROTOCOL_RELOADING)"
-    singBoxMergeConfig
+    if ! singBoxMergeConfig; then
+        echoContent red " ---> $(t CHAIN_PROTOCOL_RELOAD_FAILED)"
+        return 1
+    fi
 
     if ! reloadCore; then
         echoContent red " ---> $(t CHAIN_PROTOCOL_RELOAD_FAILED)"
@@ -11728,6 +11965,7 @@ setupMultiChainInteractive() {
     local __chainMultiInit
     __chainMultiInit=$(cat <<'EOF'
 {
+    "schema_version": 1,
     "role": "entry",
     "mode": "multi_chain",
     "chains": [],
@@ -11806,6 +12044,7 @@ setupMultiChainBatch() {
     local __chainMultiInit
     __chainMultiInit=$(cat <<'EOF'
 {
+    "schema_version": 1,
     "role": "entry",
     "mode": "multi_chain",
     "chains": [],
@@ -12704,7 +12943,9 @@ EOF
 
     # 合并配置
     echoContent yellow "$(t CHAIN_MERGING_SINGBOX)"
-    singBoxMergeConfig
+    if ! singBoxMergeConfig; then
+        return 1
+    fi
 
     # 启动 sing-box
     echoContent yellow "$(t CHAIN_STARTING_SINGBOX)"
@@ -13216,9 +13457,12 @@ multiChainAdvancedMenu() {
         addSingleChainOutbound
         if [[ $? -eq 0 ]]; then
             generateMultiChainRouteConfig
-            singBoxMergeConfig
-            reloadCore
-            echoContent green " ---> 配置已更新"
+            if singBoxMergeConfig; then
+                reloadCore
+                echoContent green " ---> 配置已更新"
+            else
+                echoContent red " ---> 配置合并失败，链路未生效"
+            fi
         fi
         ;;
     2)
@@ -13227,9 +13471,12 @@ multiChainAdvancedMenu() {
     3)
         configureMultiChainRules
         generateMultiChainRouteConfig
-        singBoxMergeConfig
-        reloadCore
-        echoContent green " ---> 配置已更新"
+        if singBoxMergeConfig; then
+            reloadCore
+            echoContent green " ---> 配置已更新"
+        else
+            echoContent red " ---> 配置合并失败，规则未生效"
+        fi
         ;;
     4)
         setDefaultChain
@@ -13321,7 +13568,10 @@ removeMultiChainOutbound() {
 
     # 重新生成路由配置
     generateMultiChainRouteConfig
-    singBoxMergeConfig
+    # 删除语义：物理删除已完成，merge 失败说明剩余配置仍有问题，告警不阻断
+    if ! singBoxMergeConfig; then
+        echoContent yellow " ---> 警告：sing-box 配置合并失败，链路记录已删除但配置未刷新"
+    fi
     reloadCore
 
     echoContent green " ---> 链路 [${selectedChain}] 已删除"
@@ -13382,7 +13632,10 @@ setDefaultChain() {
 
     # 重新生成路由配置
     generateMultiChainRouteConfig
-    singBoxMergeConfig
+    if ! singBoxMergeConfig; then
+        echoContent red " ---> 配置合并失败，默认链路设置未生效"
+        return 1
+    fi
     reloadCore
 
     echoContent green " ---> 默认链路已设置为: ${newDefault}"
@@ -14305,6 +14558,7 @@ EOF
     local __chainEntryInfo
     __chainEntryInfo=$(cat <<EOF
 {
+    "schema_version": 1,
     "role": "entry",
     "mode": "external_single",
     "external_node_id": "${nodeId}",
@@ -14315,7 +14569,9 @@ EOF
     writeChainInfoAtomic "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json" "${__chainEntryInfo}" || return 1
 
     # 合并配置
-    singBoxMergeConfig
+    if ! singBoxMergeConfig; then
+        return 1
+    fi
 
     # 重启服务
     reloadCore
