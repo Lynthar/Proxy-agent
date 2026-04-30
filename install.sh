@@ -3960,183 +3960,224 @@ handleXray() {
 }
 
 # 读取Xray用户数据并初始化
+# 把 currentClients 数组的现有用户重新映射到目标协议格式，并可选追加一个新用户。
+# 与 §11.3 保持一致：所有 jq 操作走 --arg/--argjson，不做字符串拼接。
+# 修复历史 bug：
+#   - 旧实现首块 "if [[ -n newUUID ]]" 用 ${uuid}（依赖父作用域泄漏）而非参数 ${newUUID}
+#   - 旧实现协议 0 分支用 grep -q "0"（无逗号），会被 ",10," / ",20," 误命中
+#   - 旧实现循环里 uuid/email/currentUser 未声明 local，会污染父作用域变量
 initXrayClients() {
     local type=",$1,"
-    local newUUID=$2
-    local newEmail=$3
+    local newUUID="$2"
+    local newEmail="$3"
+
     if [[ -n "${newUUID}" ]]; then
-        local newUser=
-        newUser="{\"id\":\"${uuid}\",\"flow\":\"xtls-rprx-vision\",\"email\":\"${newEmail}-VLESS_TCP/TLS_Vision\"}"
-        currentClients=$(echo "${currentClients}" | jq -r ". +=[${newUser}]")
+        currentClients=$(echo "${currentClients}" | jq \
+            --arg id "${newUUID}" \
+            --arg email "${newEmail}-VLESS_TCP/TLS_Vision" \
+            '. += [{id: $id, flow: "xtls-rprx-vision", email: $email}]')
     fi
-    local users=
-    users=[]
+
+    local users="[]"
+    local user uuid email
     while read -r user; do
-        uuid=$(echo "${user}" | jq -r .id//.uuid)
-        email=$(echo "${user}" | jq -r .email//.name | awk -F "[-]" '{print $1}')
-        currentUser=
-        if echo "${type}" | grep -q "0"; then
-            currentUser="{\"id\":\"${uuid}\",\"flow\":\"xtls-rprx-vision\",\"email\":\"${email}-VLESS_TCP/TLS_Vision\"}"
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
+        uuid=$(echo "${user}" | jq -r '.id // .uuid')
+        email=$(echo "${user}" | jq -r '.email // .name' | awk -F '-' '{print $1}')
+
+        # VLESS+TCP+Vision (id 0)
+        if [[ "${type}" == *",0,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg id "${uuid}" \
+                --arg email "${email}-VLESS_TCP/TLS_Vision" \
+                '. += [{id: $id, flow: "xtls-rprx-vision", email: $email}]')
         fi
-
-        # VLESS WS
-        if echo "${type}" | grep -q ",1,"; then
-            currentUser="{\"id\":\"${uuid}\",\"email\":\"${email}-VLESS_WS\"}"
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
+        # VLESS WS (id 1)
+        if [[ "${type}" == *",1,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg id "${uuid}" \
+                --arg email "${email}-VLESS_WS" \
+                '. += [{id: $id, email: $email}]')
         fi
-        # VLESS XHTTP
-        if echo "${type}" | grep -q ",12,"; then
-            currentUser="{\"id\":\"${uuid}\",\"email\":\"${email}-VLESS_Reality_XHTTP\"}"
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
+        # VLESS XHTTP (id 12)
+        if [[ "${type}" == *",12,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg id "${uuid}" \
+                --arg email "${email}-VLESS_Reality_XHTTP" \
+                '. += [{id: $id, email: $email}]')
         fi
-        # trojan grpc
-        if echo "${type}" | grep -q ",2,"; then
-            currentUser="{\"password\":\"${uuid}\",\"email\":\"${email}-Trojan_gRPC\"}"
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
+        # Trojan gRPC (id 2, 已废弃)
+        if [[ "${type}" == *",2,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg password "${uuid}" \
+                --arg email "${email}-Trojan_gRPC" \
+                '. += [{password: $password, email: $email}]')
         fi
-        # VMess WS
-        if echo "${type}" | grep -q ",3,"; then
-            currentUser="{\"id\":\"${uuid}\",\"email\":\"${email}-VMess_WS\",\"alterId\": 0}"
-
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
+        # VMess WS (id 3)
+        if [[ "${type}" == *",3,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg id "${uuid}" \
+                --arg email "${email}-VMess_WS" \
+                '. += [{id: $id, email: $email, alterId: 0}]')
         fi
-
-        # trojan tcp
-        if echo "${type}" | grep -q ",4,"; then
-            currentUser="{\"password\":\"${uuid}\",\"email\":\"${email}-trojan_tcp\"}"
-
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
+        # Trojan TCP (id 4)
+        if [[ "${type}" == *",4,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg password "${uuid}" \
+                --arg email "${email}-trojan_tcp" \
+                '. += [{password: $password, email: $email}]')
         fi
-
-        # vless grpc
-        if echo "${type}" | grep -q ",5,"; then
-            currentUser="{\"id\":\"${uuid}\",\"email\":\"${email}-vless_grpc\"}"
-
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
+        # VLESS gRPC (id 5, 已废弃)
+        if [[ "${type}" == *",5,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg id "${uuid}" \
+                --arg email "${email}-vless_grpc" \
+                '. += [{id: $id, email: $email}]')
         fi
-
-        # hysteria
-        if echo "${type}" | grep -q ",6,"; then
-            currentUser="{\"password\":\"${uuid}\",\"name\":\"${email}-singbox_hysteria2\"}"
-
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
+        # Hysteria2 (id 6) -- 历史上 Xray 路径也写过这个分支，保留原 schema
+        if [[ "${type}" == *",6,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg password "${uuid}" \
+                --arg name "${email}-singbox_hysteria2" \
+                '. += [{password: $password, name: $name}]')
         fi
-
-        # vless reality vision
-        if echo "${type}" | grep -q ",7,"; then
-            currentUser="{\"id\":\"${uuid}\",\"email\":\"${email}-vless_reality_vision\",\"flow\":\"xtls-rprx-vision\"}"
-
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
+        # VLESS Reality Vision (id 7)
+        if [[ "${type}" == *",7,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg id "${uuid}" \
+                --arg email "${email}-vless_reality_vision" \
+                '. += [{id: $id, email: $email, flow: "xtls-rprx-vision"}]')
         fi
-
-        # vless reality grpc
-        if echo "${type}" | grep -q ",8,"; then
-            currentUser="{\"id\":\"${uuid}\",\"email\":\"${email}-vless_reality_grpc\",\"flow\":\"\"}"
-
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
+        # VLESS Reality gRPC (id 8, 已废弃)
+        if [[ "${type}" == *",8,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg id "${uuid}" \
+                --arg email "${email}-vless_reality_grpc" \
+                '. += [{id: $id, email: $email, flow: ""}]')
         fi
-        # tuic
-        if echo "${type}" | grep -q ",9,"; then
-            currentUser="{\"uuid\":\"${uuid}\",\"password\":\"${uuid}\",\"name\":\"${email}-singbox_tuic\"}"
-
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
+        # TUIC (id 9) -- Xray 路径与 sing-box 共用 currentClients，保留原 schema
+        if [[ "${type}" == *",9,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg uuid "${uuid}" \
+                --arg name "${email}-singbox_tuic" \
+                '. += [{uuid: $uuid, password: $uuid, name: $name}]')
         fi
-
     done < <(echo "${currentClients}" | jq -c '.[]')
     echo "${users}"
 }
-# 读取singbox用户数据并初始化
+# 读取 sing-box 用户数据并初始化
+# 把 currentClients 数组的现有用户重新映射到目标协议格式，并可选追加一个新用户。
+# 与 §11.3 对齐：所有 jq 操作走 --arg/--argjson，不做字符串拼接（与 initXrayClients
+# 同步改造；本函数原本就没有 initXrayClients 那两个隐藏 bug——4075 用 ${newUUID}
+# 而非 ${uuid}，每个 grep 都带逗号边界——所以这里只做 string-concat 一项改造）。
+# 用户字段集已对照 sing-box 官方 docs 逐个核对：
+#   - VLESS/VMess/Trojan/Hysteria2/TUIC/AnyTLS/SS2022 → name + (uuid|password) [+flow|alterId]
+#   - Naive → username + password
+#   - SOCKS5 (inbound) → username + password (内部用，无 name)
+# 不实现协议 8（VLESS Reality gRPC，已废弃，sing-box 路径未启用）
 initSingBoxClients() {
     local type=",$1,"
-    local newUUID=$2
-    local newName=$3
+    local newUUID="$2"
+    local newName="$3"
 
     if [[ -n "${newUUID}" ]]; then
-        local newUser=
-        newUser="{\"uuid\":\"${newUUID}\",\"flow\":\"xtls-rprx-vision\",\"name\":\"${newName}-VLESS_TCP/TLS_Vision\"}"
-        currentClients=$(echo "${currentClients}" | jq -r ". +=[${newUser}]")
+        currentClients=$(echo "${currentClients}" | jq \
+            --arg uuid "${newUUID}" \
+            --arg name "${newName}-VLESS_TCP/TLS_Vision" \
+            '. += [{uuid: $uuid, flow: "xtls-rprx-vision", name: $name}]')
     fi
-    local users=
-    users=[]
+
+    local users="[]"
+    local user uuid name
     while read -r user; do
-        uuid=$(echo "${user}" | jq -r .uuid//.id//.password)
-        name=$(echo "${user}" | jq -r .name//.email//.username | awk -F "[-]" '{print $1}')
-        currentUser=
-        # VLESS Vision
-        if echo "${type}" | grep -q ",0,"; then
-            currentUser="{\"uuid\":\"${uuid}\",\"flow\":\"xtls-rprx-vision\",\"name\":\"${name}-VLESS_TCP/TLS_Vision\"}"
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
-        fi
-        # VLESS WS
-        if echo "${type}" | grep -q ",1,"; then
-            currentUser="{\"uuid\":\"${uuid}\",\"name\":\"${name}-VLESS_WS\"}"
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
-        fi
-        # VMess ws
-        if echo "${type}" | grep -q ",3,"; then
-            currentUser="{\"uuid\":\"${uuid}\",\"name\":\"${name}-VMess_WS\",\"alterId\": 0}"
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
-        fi
+        uuid=$(echo "${user}" | jq -r '.uuid // .id // .password')
+        name=$(echo "${user}" | jq -r '.name // .email // .username' | awk -F '-' '{print $1}')
 
-        # trojan
-        if echo "${type}" | grep -q ",4,"; then
-            currentUser="{\"password\":\"${uuid}\",\"name\":\"${name}-Trojan_TCP\"}"
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
+        # VLESS+TCP+Vision (id 0)
+        if [[ "${type}" == *",0,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg uuid "${uuid}" \
+                --arg name "${name}-VLESS_TCP/TLS_Vision" \
+                '. += [{uuid: $uuid, flow: "xtls-rprx-vision", name: $name}]')
         fi
-
-        # VLESS Reality Vision
-        if echo "${type}" | grep -q ",7,"; then
-            currentUser="{\"uuid\":\"${uuid}\",\"flow\":\"xtls-rprx-vision\",\"name\":\"${name}-VLESS_Reality_Vision\"}"
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
+        # VLESS WS (id 1)
+        if [[ "${type}" == *",1,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg uuid "${uuid}" \
+                --arg name "${name}-VLESS_WS" \
+                '. += [{uuid: $uuid, name: $name}]')
         fi
-        # VLESS Reality gRPC - 已移除，推荐使用XHTTP
-
-        # hysteria2
-        if echo "${type}" | grep -q ",6,"; then
-            currentUser="{\"password\":\"${uuid}\",\"name\":\"${name}-singbox_hysteria2\"}"
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
+        # VMess WS (id 3)
+        if [[ "${type}" == *",3,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg uuid "${uuid}" \
+                --arg name "${name}-VMess_WS" \
+                '. += [{uuid: $uuid, name: $name, alterId: 0}]')
         fi
-
-        # tuic
-        if echo "${type}" | grep -q ",9,"; then
-            currentUser="{\"uuid\":\"${uuid}\",\"password\":\"${uuid}\",\"name\":\"${name}-singbox_tuic\"}"
-
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
+        # Trojan TCP (id 4)
+        if [[ "${type}" == *",4,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg password "${uuid}" \
+                --arg name "${name}-Trojan_TCP" \
+                '. += [{password: $password, name: $name}]')
         fi
-
-        # naive
-        if echo "${type}" | grep -q ",10,"; then
-            currentUser="{\"password\":\"${uuid}\",\"username\":\"${name}-singbox_naive\"}"
-
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
+        # Hysteria2 (id 6)
+        if [[ "${type}" == *",6,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg password "${uuid}" \
+                --arg name "${name}-singbox_hysteria2" \
+                '. += [{password: $password, name: $name}]')
         fi
-        # VMess HTTPUpgrade
-        if echo "${type}" | grep -q ",11,"; then
-            currentUser="{\"uuid\":\"${uuid}\",\"name\":\"${name}-VMess_HTTPUpgrade\",\"alterId\": 0}"
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
+        # VLESS Reality Vision (id 7)
+        if [[ "${type}" == *",7,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg uuid "${uuid}" \
+                --arg name "${name}-VLESS_Reality_Vision" \
+                '. += [{uuid: $uuid, flow: "xtls-rprx-vision", name: $name}]')
         fi
-        # anytls
-        if echo "${type}" | grep -q ",13,"; then
-            currentUser="{\"password\":\"${uuid}\",\"name\":\"${name}-anytls\"}"
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
+        # TUIC (id 9)
+        if [[ "${type}" == *",9,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg uuid "${uuid}" \
+                --arg name "${name}-singbox_tuic" \
+                '. += [{uuid: $uuid, password: $uuid, name: $name}]')
         fi
-
-        # Shadowsocks 2022
-        if echo "${type}" | grep -q ",14,"; then
-            # 使用UUID的前16字节进行base64编码作为用户密钥
+        # NaiveProxy (id 10) -- 使用 username 字段（sing-box docs 与其他协议不同）
+        if [[ "${type}" == *",10,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg password "${uuid}" \
+                --arg username "${name}-singbox_naive" \
+                '. += [{password: $password, username: $username}]')
+        fi
+        # VMess HTTPUpgrade (id 11)
+        if [[ "${type}" == *",11,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg uuid "${uuid}" \
+                --arg name "${name}-VMess_HTTPUpgrade" \
+                '. += [{uuid: $uuid, name: $name, alterId: 0}]')
+        fi
+        # AnyTLS (id 13)
+        if [[ "${type}" == *",13,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg password "${uuid}" \
+                --arg name "${name}-anytls" \
+                '. += [{password: $password, name: $name}]')
+        fi
+        # Shadowsocks 2022 (id 14) -- 用 UUID 前 16 字节 base64 派生 22+2 字节合规密钥
+        if [[ "${type}" == *",14,"* ]]; then
             local ss2022UserKey
             ss2022UserKey=$(echo -n "${uuid}" | head -c 16 | base64)
-            currentUser="{\"password\":\"${ss2022UserKey}\",\"name\":\"${name}-SS2022\"}"
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
+            users=$(echo "${users}" | jq \
+                --arg password "${ss2022UserKey}" \
+                --arg name "${name}-SS2022" \
+                '. += [{password: $password, name: $name}]')
         fi
-
-        if echo "${type}" | grep -q ",20,"; then
-            currentUser="{\"username\":\"${uuid}\",\"password\":\"${uuid}\"}"
-
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
+        # SOCKS5 内部 inbound (id 20) -- {username, password}，无 name 字段
+        if [[ "${type}" == *",20,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg username "${uuid}" \
+                --arg password "${uuid}" \
+                '. += [{username: $username, password: $password}]')
         fi
-
     done < <(echo "${currentClients}" | jq -c '.[]')
     echo "${users}"
 }
@@ -6259,21 +6300,30 @@ EOF
             multiPortEncode="mport%3D${port}%26"
         fi
 
-        # 构建obfs参数
+        # 构建obfs参数（密码按上下文做编码，避免特殊字符破坏 URL/JSON）
         local obfsUrlParam=""
         local obfsUrlParamEncode=""
         local clashMetaObfs=""
         local singBoxObfs=""
         if [[ -n "${hysteria2ObfsPassword}" ]]; then
-            obfsUrlParam="obfs=salamander&obfs-password=${hysteria2ObfsPassword}&"
-            obfsUrlParamEncode="obfs%3Dsamalander%26obfs-password%3D${hysteria2ObfsPassword}%26"
+            local _obfsPwUriEnc _obfsPwQrEnc _obfsPwJson
+            # 第一层 percent-encode（jq @uri，RFC 3986 query 参数规范）：
+            # 用于 hysteria2:// URL 的 query。客户端 URL-decode 后还原回原始密码。
+            # 修复：旧实现把原始密码塞进 URL，密码含 & = # 时 URL 解析直接断。
+            _obfsPwUriEnc=$(printf '%s' "${hysteria2ObfsPassword}" | jq -sRr @uri)
+            # 第二层 percent-encode（再过一遍 @uri，等价于把 % 都变 %25）：
+            # 用于 QR API ?data= 参数 —— 整个 hysteria2:// URL 嵌入 data= 时
+            # 需要再编码一次，否则 password 里的 % 会被外层 URL 解析误吃。
+            _obfsPwQrEnc=$(printf '%s' "${_obfsPwUriEnc}" | jq -sRr @uri)
+            # JSON string literal：用于 sing-box 订阅 JSON 片段（与 4925/5760 同款）
+            _obfsPwJson=$(printf '%s' "${hysteria2ObfsPassword}" | jq -Rs '.')
+
+            obfsUrlParam="obfs=salamander&obfs-password=${_obfsPwUriEnc}&"
+            # 修复 typo：旧代码 obfsUrlParamEncode 写的是 "samalander"（漏字母），
+            # QR 客户端 URL-decode 后拿到 obfs=samalander，不匹配仅支持的 "salamander" → obfs 静默失效。
+            obfsUrlParamEncode="obfs%3Dsalamander%26obfs-password%3D${_obfsPwQrEnc}%26"
             clashMetaObfs="    obfs: salamander
     obfs-password: ${hysteria2ObfsPassword}"
-            # 与 initSingBoxHysteria2Config / initSingBoxConfig 同款：用 jq -Rs 把密码
-            # 转成合法 JSON string literal（含外层引号），避免密码含 " 或 \ 时破坏后续
-            # 拼到 6296 行 jq filter 的 JSON 语法 → 订阅文件被覆盖成空/错误内容。
-            local _obfsPwJson
-            _obfsPwJson=$(printf '%s' "${hysteria2ObfsPassword}" | jq -Rs '.')
             singBoxObfs=',"obfs":{"type":"salamander","password":'"${_obfsPwJson}"'}'
         fi
 
@@ -11497,6 +11547,18 @@ removeChainProxy() {
     rm -f /etc/Proxy-agent/sing-box/conf/config/external_outbound.json
     rm -f /etc/Proxy-agent/sing-box/conf/config/external_route.json
     rm -f /etc/Proxy-agent/sing-box/conf/external_entry_info.json
+
+    # 01_direct_outbound.json 是 sing-box 共享基础出站（addSingBoxOutbound / 多链路 /
+    # 路由配置都依赖 "direct" tag），不能直接删；但旧 chain 安装可能写过 deprecated 的
+    # domain_strategy 字段（dial fields，1.12 deprecated、1.16 移除），1.16 sing-box 启动会 FATAL。
+    # 调 ensureDirectOutbound 重写为当前规范的最小形态（type+tag），剥离任何 legacy 字段。
+    if [[ -f "/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json" ]] && declare -F ensureDirectOutbound >/dev/null 2>&1; then
+        ensureDirectOutbound
+    fi
+
+    # 01_dns.json 是 chain 路由的 default_domain_resolver 依赖（grep 全文只有 chain 代码引用），
+    # 非 chain 配置不需要。删除避免残留；下次安装 chain 时 ensureSingBoxInstalled 会重建。
+    rm -f /etc/Proxy-agent/sing-box/conf/config/01_dns.json
 
     # 删除 sing-box 配置文件 - 多链路模式
     if [[ "${isMultiChain}" == "true" ]]; then
