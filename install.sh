@@ -1464,6 +1464,12 @@ readInstallProtocolType() {
             currentRealityXHTTPShortId=$(jq -r .inbounds[0].streamSettings.realitySettings.shortIds[0] "${row}.json")
             #            currentRealityXHTTPPrivateKey=$(jq -r .inbounds[0].streamSettings.realitySettings.privateKey "${row}.json")
 
+            # ML-DSA-65 后量子签名（与 Vision 配置对齐）。// empty 兜底见 Vision 分支注释——
+            # 旧 XHTTP 配置缺这俩字段时不加兜底会得到字面 "null"，导致 initRealityMldsa65 复用
+            # 假值。empty 兜底后 jq 返回空串，触发重新生成。
+            currentRealityMldsa65Seed=$(jq -r '.inbounds[0].streamSettings.realitySettings.mldsa65Seed // empty' "${row}.json")
+            currentRealityMldsa65Verify=$(jq -r '.inbounds[0].streamSettings.realitySettings.mldsa65Verify // empty' "${row}.json")
+
             #            if [[ "${coreKind}" == "2" ]]; then
             #                frontingType=03_VLESS_WS_inbounds
             #                singBoxVLESSWSPort=$(jq .inbounds[0].listen_port "${row}.json")
@@ -1510,8 +1516,11 @@ readInstallProtocolType() {
                 currentRealityPrivateKey=$(jq -r .inbounds[1].streamSettings.realitySettings.privateKey "${row}.json")
                 currentRealityShortId=$(jq -r .inbounds[1].streamSettings.realitySettings.shortIds[0] "${row}.json")
 
-                currentRealityMldsa65Seed=$(jq -r .inbounds[1].streamSettings.realitySettings.mldsa65Seed "${row}.json")
-                currentRealityMldsa65Verify=$(jq -r .inbounds[1].streamSettings.realitySettings.mldsa65Verify "${row}.json")
+                # // empty 兜底：很老的 Vision 配置（mldsa65 特性引入之前生成）没这俩字段，
+                # 不加 // empty 会让 jq -r 输出字面字符串 "null"，再被 initRealityMldsa65
+                # 当作合法 seed 复用、写进新配置，PQ 握手会失败。
+                currentRealityMldsa65Seed=$(jq -r '.inbounds[1].streamSettings.realitySettings.mldsa65Seed // empty' "${row}.json")
+                currentRealityMldsa65Verify=$(jq -r '.inbounds[1].streamSettings.realitySettings.mldsa65Verify // empty' "${row}.json")
 
                 frontingTypeReality=07_VLESS_vision_reality_inbounds
 
@@ -3876,7 +3885,10 @@ handleSingBox() {
     sleep 1.5
 
     if [[ "$1" == "start" ]]; then
-        if [[ -n $(pgrep -f "sing-box") ]]; then
+        # 用 -x（comm 精确匹配）而非 -f（命令行子串）。-f "sing-box" 会误匹配
+        # 命令行里含该字符串的任意进程（例如 install.sh 自己派生的 sing-box 子调用），
+        # 导致 sing-box 实际未起来时误报"启动成功"。stop 路径上方已统一用 -x。
+        if [[ -n $(pgrep -x "sing-box") ]]; then
             echoContent green " ---> sing-box启动成功"
         else
             echoContent red "sing-box启动失败 (systemctl 返回码: ${startResult})"
@@ -3891,7 +3903,7 @@ handleSingBox() {
             exit 1
         fi
     elif [[ "$1" == "stop" ]]; then
-        if [[ -z $(pgrep -f "sing-box") ]]; then
+        if [[ -z $(pgrep -x "sing-box") ]]; then
             echoContent green " ---> sing-box关闭成功"
         else
             echoContent red " ---> sing-box关闭失败"
@@ -4907,9 +4919,13 @@ initSingBoxHysteria2Config() {
     initHysteria2Network
 
     # 构建obfs配置（如果启用）
+    # 用 jq -Rs 把密码转成合法 JSON string literal（含外层引号），
+    # 避免密码里出现 " 或 \ 等字符破坏 JSON 语法。
     local hysteria2ObfsConfig=""
     if [[ -n "${hysteria2ObfsPassword}" ]]; then
-        hysteria2ObfsConfig='"obfs": {"type": "salamander", "password": "'"${hysteria2ObfsPassword}"'"},'
+        local _obfsPwJson
+        _obfsPwJson=$(printf '%s' "${hysteria2ObfsPassword}" | jq -Rs '.')
+        hysteria2ObfsConfig='"obfs": {"type": "salamander", "password": '"${_obfsPwJson}"'},'
     fi
 
     cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/hysteria2.json
@@ -5251,6 +5267,8 @@ EOF
             ],
             "privateKey": "${realityPrivateKey}",
             "publicKey": "${realityPublicKey}",
+            "mldsa65Seed": "${realityMldsa65Seed}",
+            "mldsa65Verify": "${realityMldsa65Verify}",
             "maxTimeDiff": 60000,
             "shortIds": [
                 "${realityShortId1}",
@@ -5702,9 +5720,13 @@ EOF
         initHysteria2Network
 
         # 构建obfs配置（如果启用）
+        # 同 initSingBoxHysteria2Config：用 jq -Rs 把密码转成合法 JSON string literal，
+        # 避免密码含 " 或 \ 时破坏 JSON。
         local hysteria2ObfsConfig=""
         if [[ -n "${hysteria2ObfsPassword}" ]]; then
-            hysteria2ObfsConfig='"obfs": {"type": "salamander", "password": "'"${hysteria2ObfsPassword}"'"},'
+            local _obfsPwJson
+            _obfsPwJson=$(printf '%s' "${hysteria2ObfsPassword}" | jq -Rs '.')
+            hysteria2ObfsConfig='"obfs": {"type": "salamander", "password": '"${_obfsPwJson}"'},'
         fi
 
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/06_hysteria2_inbounds.json
@@ -10061,74 +10083,42 @@ setupChainRelay() {
 EOF
 
     # 创建出站配置 (detour chain 到下游)
-    # 根据 chainHops 生成 detour 链
-    local outboundsJson="["
-    local i=0
-    local hopCount=${chainHopCount}
-
-    while [[ $i -lt ${hopCount} ]]; do
-        local hopIP hopPort hopKey hopMethod hopTag
-        hopIP=$(echo "${chainHops}" | jq -r ".[$i].ip")
-        hopPort=$(echo "${chainHops}" | jq -r ".[$i].port")
-        hopKey=$(echo "${chainHops}" | jq -r ".[$i].key")
-        hopMethod=$(echo "${chainHops}" | jq -r ".[$i].method")
-        hopTag="chain_hop_$((i+1))"
-
-        if [[ $i -gt 0 ]]; then
-            outboundsJson+=","
-        fi
-
-        # 第一跳直连，后续跳通过前一跳
-        if [[ $i -eq 0 ]]; then
-            outboundsJson+="
+    # chainHops 是 parseChainCode 输出的合法 JSON 数组，直接 --argjson 传给 jq -n，
+    # 由 jq 自动 escape 各字段，避免老实现用 heredoc 拼接 ${hopIP}/${hopKey} 时
+    # 用户配置码里的特殊字符（", \, 控制字符）破坏 JSON 语法。
+    local chainOutboundJson
+    if ! chainOutboundJson=$(jq -n --argjson hops "${chainHops}" '
         {
-            \"type\": \"shadowsocks\",
-            \"tag\": \"${hopTag}\",
-            \"server\": \"${hopIP}\",
-            \"server_port\": ${hopPort},
-            \"method\": \"${hopMethod}\",
-            \"password\": \"${hopKey}\",
-            \"multiplex\": {
-                \"enabled\": true,
-                \"protocol\": \"h2mux\",
-                \"max_connections\": 4,
-                \"min_streams\": 4
-            }
-        }"
-        else
-            local prevTag="chain_hop_${i}"
-            outboundsJson+="
-        {
-            \"type\": \"shadowsocks\",
-            \"tag\": \"${hopTag}\",
-            \"server\": \"${hopIP}\",
-            \"server_port\": ${hopPort},
-            \"method\": \"${hopMethod}\",
-            \"password\": \"${hopKey}\",
-            \"multiplex\": {
-                \"enabled\": true,
-                \"protocol\": \"h2mux\",
-                \"max_connections\": 4,
-                \"min_streams\": 4
-            },
-            \"detour\": \"${prevTag}\"
-        }"
-        fi
-
-        ((i++))
-    done
-
-    # 最后添加 chain_outbound 作为最终出站
-    local finalHopTag="chain_hop_${hopCount}"
-    outboundsJson+=",
-        {
-            \"type\": \"direct\",
-            \"tag\": \"chain_outbound\",
-            \"detour\": \"${finalHopTag}\"
-        }
-    ]"
-
-    echo "{\"outbounds\": ${outboundsJson}}" | jq . > /etc/Proxy-agent/sing-box/conf/config/chain_outbound.json
+            outbounds: (
+                ($hops | to_entries | map(
+                    .key as $i |
+                    .value as $h |
+                    ({
+                        type: "shadowsocks",
+                        tag: ("chain_hop_" + (($i + 1) | tostring)),
+                        server: $h.ip,
+                        server_port: $h.port,
+                        method: $h.method,
+                        password: $h.key,
+                        multiplex: {
+                            enabled: true,
+                            protocol: "h2mux",
+                            max_connections: 4,
+                            min_streams: 4
+                        }
+                    } + (if $i > 0 then {detour: ("chain_hop_" + ($i | tostring))} else {} end))
+                ))
+                + [{
+                    type: "direct",
+                    tag: "chain_outbound",
+                    detour: ("chain_hop_" + (($hops | length) | tostring))
+                }]
+            )
+        }') || [[ -z "${chainOutboundJson}" ]]; then
+        echoContent red " ---> 链式出站配置生成失败"
+        return 1
+    fi
+    printf '%s\n' "${chainOutboundJson}" > /etc/Proxy-agent/sing-box/conf/config/chain_outbound.json
 
     # 创建路由配置
     # sing-box 1.11+ 路由级 sniff（中继节点不重解析，沿用上游已嗅探到的域名）
@@ -10248,73 +10238,41 @@ setupChainEntryMultiHop() {
     # ============= sing-box 配置 =============
 
     # 创建多跳出站配置 (detour chain)
-    local outboundsJson="["
-    local i=0
-    local hopCount=${chainHopCount}
-
-    while [[ $i -lt ${hopCount} ]]; do
-        local hopIP hopPort hopKey hopMethod hopTag
-        hopIP=$(echo "${chainHops}" | jq -r ".[$i].ip")
-        hopPort=$(echo "${chainHops}" | jq -r ".[$i].port")
-        hopKey=$(echo "${chainHops}" | jq -r ".[$i].key")
-        hopMethod=$(echo "${chainHops}" | jq -r ".[$i].method")
-        hopTag="chain_hop_$((i+1))"
-
-        if [[ $i -gt 0 ]]; then
-            outboundsJson+=","
-        fi
-
-        # 第一跳直连，后续跳通过前一跳 (detour)
-        if [[ $i -eq 0 ]]; then
-            outboundsJson+="
+    # chainHops 是 parseChainCode 输出的合法 JSON 数组，直接 --argjson 传给 jq -n，
+    # jq 自动 escape 各字段；用户配置码里含 " 或 \ 的特殊字符不会破坏 JSON。
+    local chainOutboundJson
+    if ! chainOutboundJson=$(jq -n --argjson hops "${chainHops}" '
         {
-            \"type\": \"shadowsocks\",
-            \"tag\": \"${hopTag}\",
-            \"server\": \"${hopIP}\",
-            \"server_port\": ${hopPort},
-            \"method\": \"${hopMethod}\",
-            \"password\": \"${hopKey}\",
-            \"multiplex\": {
-                \"enabled\": true,
-                \"protocol\": \"h2mux\",
-                \"max_connections\": 4,
-                \"min_streams\": 4
-            }
-        }"
-        else
-            local prevTag="chain_hop_${i}"
-            outboundsJson+="
-        {
-            \"type\": \"shadowsocks\",
-            \"tag\": \"${hopTag}\",
-            \"server\": \"${hopIP}\",
-            \"server_port\": ${hopPort},
-            \"method\": \"${hopMethod}\",
-            \"password\": \"${hopKey}\",
-            \"multiplex\": {
-                \"enabled\": true,
-                \"protocol\": \"h2mux\",
-                \"max_connections\": 4,
-                \"min_streams\": 4
-            },
-            \"detour\": \"${prevTag}\"
-        }"
-        fi
-
-        ((i++))
-    done
-
-    # 最后添加 chain_outbound 作为最终出站
-    local finalHopTag="chain_hop_${hopCount}"
-    outboundsJson+=",
-        {
-            \"type\": \"direct\",
-            \"tag\": \"chain_outbound\",
-            \"detour\": \"${finalHopTag}\"
-        }
-    ]"
-
-    echo "{\"outbounds\": ${outboundsJson}}" | jq . > /etc/Proxy-agent/sing-box/conf/config/chain_outbound.json
+            outbounds: (
+                ($hops | to_entries | map(
+                    .key as $i |
+                    .value as $h |
+                    ({
+                        type: "shadowsocks",
+                        tag: ("chain_hop_" + (($i + 1) | tostring)),
+                        server: $h.ip,
+                        server_port: $h.port,
+                        method: $h.method,
+                        password: $h.key,
+                        multiplex: {
+                            enabled: true,
+                            protocol: "h2mux",
+                            max_connections: 4,
+                            min_streams: 4
+                        }
+                    } + (if $i > 0 then {detour: ("chain_hop_" + ($i | tostring))} else {} end))
+                ))
+                + [{
+                    type: "direct",
+                    tag: "chain_outbound",
+                    detour: ("chain_hop_" + (($hops | length) | tostring))
+                }]
+            )
+        }') || [[ -z "${chainOutboundJson}" ]]; then
+        echoContent red " ---> 链式出站配置生成失败"
+        return 1
+    fi
+    printf '%s\n' "${chainOutboundJson}" > /etc/Proxy-agent/sing-box/conf/config/chain_outbound.json
 
     # 如果有 Xray 代理协议，创建 SOCKS5 桥接入站
     # sniff/resolve 通过路由级 action 实现（解决出口机无 IPv6 的问题）
@@ -10533,26 +10491,34 @@ setupChainEntry() {
     # ============= sing-box 配置 =============
 
     # 创建 Shadowsocks 出站 (到出口节点)
-    cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_outbound.json
-{
-    "outbounds": [
-        {
-            "type": "shadowsocks",
-            "tag": "chain_outbound",
-            "server": "${exitIP}",
-            "server_port": ${exitPort},
-            "method": "${exitMethod}",
-            "password": "${exitKey}",
-            "multiplex": {
-                "enabled": true,
-                "protocol": "h2mux",
-                "max_connections": 4,
-                "min_streams": 4
-            }
-        }
-    ]
-}
-EOF
+    # exitIP / exitMethod / exitKey 来自 parseChainCode（V1 用正则切片）或用户手输（setupChainEntryManual），
+    # 字段里若含 " 或 \ 会破坏 heredoc JSON；走 jq -n + --arg 让 jq 自己 escape。
+    local _chainOutboundJson
+    if ! _chainOutboundJson=$(jq -n \
+            --arg server "${exitIP}" \
+            --argjson port "${exitPort}" \
+            --arg method "${exitMethod}" \
+            --arg password "${exitKey}" \
+            '{
+                outbounds: [{
+                    type: "shadowsocks",
+                    tag: "chain_outbound",
+                    server: $server,
+                    server_port: $port,
+                    method: $method,
+                    password: $password,
+                    multiplex: {
+                        enabled: true,
+                        protocol: "h2mux",
+                        max_connections: 4,
+                        min_streams: 4
+                    }
+                }]
+            }') || [[ -z "${_chainOutboundJson}" ]]; then
+        echoContent red " ---> 链式出站配置生成失败"
+        return 1
+    fi
+    printf '%s\n' "${_chainOutboundJson}" > /etc/Proxy-agent/sing-box/conf/config/chain_outbound.json
 
     # 如果有 Xray 代理协议，创建 SOCKS5 桥接入站
     # sniff/resolve 通过路由级 action 实现（解决出口机无 IPv6 的问题）
@@ -10975,6 +10941,12 @@ testChainConnection() {
     fi
 
     # 测试2: 通过链路访问外网
+    # 旧实现直接 `curl https://api.ipify.org`，没经过 sing-box，量到的是本机直连出口 IP
+    # 而不是经链路出口 IP，会让用户误以为链路工作正常。
+    # 现按角色判断如何"真的"走链路：
+    #   - entry + Xray 桥接：本机 SOCKS5 127.0.0.1:${bridge_port} 直接接入 sing-box → chain_outbound
+    #   - entry 无 Xray：sing-box 入站全是面向客户端的协议（hysteria2/tuic/...），本机没法触发
+    #   - relay：流量来自上游，本机不主动发起，端到端只能在客户端测
     echoContent yellow "测试2: 链路转发测试..."
 
     # 检查 sing-box 是否运行
@@ -10983,31 +10955,49 @@ testChainConnection() {
         return 1
     fi
 
-    # 通过链路获取出口IP
-    sleep 1
-    local outIP
-    outIP=$(curl -s --connect-timeout 10 https://api.ipify.org 2>/dev/null)
-
-    if [[ -n "${outIP}" ]]; then
-        echoContent green "  ✅ 链路转发正常"
-        echoContent green "  出口IP: ${outIP}"
-
-        # 测试延迟
-        local startTime endTime latency
-        startTime=$(date +%s%N)
-        curl -s --connect-timeout 5 https://www.google.com >/dev/null 2>&1
-        endTime=$(date +%s%N)
-        latency=$(( (endTime - startTime) / 1000000 ))
-        echoContent green "  延迟: ${latency}ms"
-    else
-        echoContent red "  ❌ 链路转发失败"
-        echoContent red "  请检查各节点配置和网络"
-        return 1
+    local viaProxy=()
+    if [[ "${role}" == "entry" ]]; then
+        local hasXray bridgePort
+        hasXray=$(jq -r '.has_xray // false' /etc/Proxy-agent/sing-box/conf/chain_entry_info.json 2>/dev/null)
+        bridgePort=$(jq -r '.bridge_port // empty' /etc/Proxy-agent/sing-box/conf/chain_entry_info.json 2>/dev/null)
+        if [[ "${hasXray}" == "true" && -n "${bridgePort}" ]]; then
+            viaProxy=(--socks5 "127.0.0.1:${bridgePort}")
+        fi
     fi
 
-    echoContent green "\n=============================================================="
-    echoContent green "链路测试通过！"
-    echoContent green "=============================================================="
+    if [[ ${#viaProxy[@]} -gt 0 ]]; then
+        sleep 1
+        local outIP
+        outIP=$(curl -s --connect-timeout 10 "${viaProxy[@]}" https://api.ipify.org 2>/dev/null)
+
+        if [[ -n "${outIP}" ]]; then
+            echoContent green "  ✅ 链路转发正常"
+            echoContent green "  出口IP: ${outIP}"
+
+            # 测试延迟（同样走链路，否则量到的是直连延迟）
+            local startTime endTime latency
+            startTime=$(date +%s%N)
+            curl -s --connect-timeout 5 "${viaProxy[@]}" https://www.google.com >/dev/null 2>&1
+            endTime=$(date +%s%N)
+            latency=$(( (endTime - startTime) / 1000000 ))
+            echoContent green "  延迟: ${latency}ms"
+        else
+            echoContent red "  ❌ 链路转发失败"
+            echoContent red "  请检查各节点配置和网络"
+            return 1
+        fi
+
+        echoContent green "\n=============================================================="
+        echoContent green "链路测试通过！"
+        echoContent green "=============================================================="
+    else
+        echoContent yellow "  ⚠️  本节点未启用 Xray 桥接（或为中继角色），脚本无法从本机直接发起经链测试"
+        echoContent yellow "     首跳 TCP 已可达；端到端连通性请在客户端连接入口节点后验证"
+
+        echoContent green "\n=============================================================="
+        echoContent green "链路基础测试完成（端到端测试需客户端验证）"
+        echoContent green "=============================================================="
+    fi
 }
 
 # 高级设置
@@ -12128,6 +12118,8 @@ addExternalChainToConfig() {
     fi
 
     # 生成链路出站配置文件 (使用外部节点配置)
+    # generateExternalOutboundConfig 现在通过 jq -n 输出已经合法的单个 outbound JSON 对象，
+    # 这里再用 jq -n --argjson 把它包进 {outbounds:[...]}，全程不做字符串拼接。
     local outboundConfig
     outboundConfig=$(generateExternalOutboundConfig "${nodeId}" "${name}")
 
@@ -12136,7 +12128,13 @@ addExternalChainToConfig() {
         return 1
     fi
 
-    echo "{\"outbounds\": [${outboundConfig}]}" | jq . > "/etc/Proxy-agent/sing-box/conf/config/chain_outbound_${name}.json"
+    local outFile="/etc/Proxy-agent/sing-box/conf/config/chain_outbound_${name}.json"
+    local wrapped
+    if ! wrapped=$(jq -n --argjson ob "${outboundConfig}" '{outbounds: [$ob]}') || [[ -z "${wrapped}" ]]; then
+        echoContent red " ---> $(t EXT_CONFIG_FAILED)"
+        return 1
+    fi
+    printf '%s\n' "${wrapped}" > "${outFile}"
 
     return 0
 }
@@ -12390,26 +12388,38 @@ addChainToConfig() {
     fi
 
     # 生成链路出站配置文件
-    cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_outbound_${name}.json
-{
-    "outbounds": [
-        {
-            "type": "shadowsocks",
-            "tag": "${name}",
-            "server": "${ip}",
-            "server_port": ${port},
-            "method": "${method}",
-            "password": "${key}",
-            "multiplex": {
-                "enabled": true,
-                "protocol": "h2mux",
-                "max_connections": 4,
-                "min_streams": 4
-            }
-        }
-    ]
-}
-EOF
+    # 用 jq -n + --arg/--argjson 而不是 heredoc 直接拼装：
+    # ip / method / key 可能含 " 或 \（特别是从用户粘贴的配置码 parseChainCode 出来的字段），
+    # heredoc 拼装会破坏 JSON；jq 会自动 escape。name 已被 validateChainName 限制为
+    # [A-Za-z0-9_-]，本身安全，但保持一致性也走 --arg。
+    local outFile="/etc/Proxy-agent/sing-box/conf/config/chain_outbound_${name}.json"
+    local outboundJson
+    if ! outboundJson=$(jq -n \
+            --arg name "${name}" \
+            --arg ip "${ip}" \
+            --argjson port "${port}" \
+            --arg method "${method}" \
+            --arg key "${key}" \
+            '{
+                outbounds: [{
+                    type: "shadowsocks",
+                    tag: $name,
+                    server: $ip,
+                    server_port: $port,
+                    method: $method,
+                    password: $key,
+                    multiplex: {
+                        enabled: true,
+                        protocol: "h2mux",
+                        max_connections: 4,
+                        min_streams: 4
+                    }
+                }]
+            }') || [[ -z "${outboundJson}" ]]; then
+        echoContent red " ---> 链路出站配置生成失败: ${name}"
+        return 1
+    fi
+    printf '%s\n' "${outboundJson}" > "${outFile}"
 
     return 0
 }
@@ -12745,12 +12755,14 @@ generateMultiChainRouteConfig() {
     local usedRuleSets=""
 
     # 如果有 SOCKS5 桥接入站（来自 Xray 的流量）
-    # 顺序：先 sniff 嗅探，再 prefer_ipv4 重解析，最后桥接到默认链路
+    # 仅 prepend sniff/resolve（非终态 action），让后续 preset/custom/ip_cidr/geoip 规则
+    # 仍能按域名/IP 命中分流；未命中的流量由 route.final（=defaultChain）兜底。
+    # 注意：早期版本曾在此处再加一条 {"inbound":["chain_bridge_in"],"outbound":defaultChain}
+    # 终态规则，会先于下方业务规则匹配，导致预设分流永远不命中。
     if [[ "${hasXray}" == "true" ]]; then
         routeRules=$(echo "${routeRules}" | jq '. + [
             {"inbound":"chain_bridge_in","action":"sniff","timeout":"1s"},
-            {"inbound":"chain_bridge_in","action":"resolve","strategy":"prefer_ipv4"},
-            {"inbound":["chain_bridge_in"],"outbound":"'"${defaultChain}"'"}
+            {"inbound":"chain_bridge_in","action":"resolve","strategy":"prefer_ipv4"}
         ]')
     fi
 
@@ -13739,6 +13751,23 @@ EOF
     echoContent yellow " ---> ID: ${nodeId}"
 }
 
+# 兼容 url-safe (RFC 4648 §5) 与 standard (§4) 两种 base64 字母表 + 自动补 padding。
+# 多数 SS 客户端导出链接采用 url-safe 编码（用 -_ 替代 +/，且常省略 =）；
+# GNU coreutils base64 默认只接受 standard 字母表 + 严格 padding，url-safe 输入会失败。
+_ssBase64Decode() {
+    local s="$1"
+    # url-safe → standard
+    s="${s//-/+}"
+    s="${s//_//}"
+    # 补齐 padding 到 4 的倍数
+    local pad=$(( (4 - ${#s} % 4) % 4 ))
+    while ((pad > 0)); do
+        s="${s}="
+        ((pad--))
+    done
+    printf '%s' "${s}" | base64 -d 2>/dev/null
+}
+
 # 解析 SS 链接
 parseSSLink() {
     local link="$1"
@@ -13761,9 +13790,9 @@ parseSSLink() {
         userInfo="${link%%@*}"
         serverPart="${link#*@}"
     else
-        # 整个是 base64 编码的
+        # 整个是 base64 编码的（兼容 url-safe / standard 两种字母表）
         local decoded
-        decoded=$(echo "${link}" | base64 -d 2>/dev/null)
+        decoded=$(_ssBase64Decode "${link}")
         if [[ -n "${decoded}" && "${decoded}" == *"@"* ]]; then
             userInfo="${decoded%%@*}"
             serverPart="${decoded#*@}"
@@ -13777,9 +13806,9 @@ parseSSLink() {
     local method=""
     local password=""
 
-    # 尝试 base64 解码
+    # 尝试 base64 解码（兼容 url-safe）
     local decodedUser
-    decodedUser=$(echo "${userInfo}" | base64 -d 2>/dev/null)
+    decodedUser=$(_ssBase64Decode "${userInfo}")
     if [[ -n "${decodedUser}" && "${decodedUser}" == *":"* ]]; then
         method="${decodedUser%%:*}"
         password="${decodedUser#*:}"
@@ -14120,6 +14149,8 @@ generateExternalOutboundConfig() {
     local type
     type=$(echo "${node}" | jq -r '.type')
 
+    # 全部走 jq -n 构造，避免 server / password / username 等用户输入字段含 " 或 \
+    # 时破坏 JSON。tag 已被上游 validateChainName 限制字符集，但保持一致性也走 --arg。
     case "${type}" in
         "shadowsocks")
             local server port method password
@@ -14128,16 +14159,20 @@ generateExternalOutboundConfig() {
             method=$(echo "${node}" | jq -r '.method')
             password=$(echo "${node}" | jq -r '.password')
 
-            cat <<EOF
-{
-    "type": "shadowsocks",
-    "tag": "${tag}",
-    "server": "${server}",
-    "server_port": ${port},
-    "method": "${method}",
-    "password": "${password}"
-}
-EOF
+            jq -n \
+                --arg tag "${tag}" \
+                --arg server "${server}" \
+                --argjson port "${port}" \
+                --arg method "${method}" \
+                --arg password "${password}" \
+                '{
+                    type: "shadowsocks",
+                    tag: $tag,
+                    server: $server,
+                    server_port: $port,
+                    method: $method,
+                    password: $password
+                }'
             ;;
         "socks")
             local server port username password
@@ -14147,27 +14182,33 @@ EOF
             password=$(echo "${node}" | jq -r '.password // empty')
 
             if [[ -n "${username}" ]]; then
-                cat <<EOF
-{
-    "type": "socks",
-    "tag": "${tag}",
-    "server": "${server}",
-    "server_port": ${port},
-    "version": "5",
-    "username": "${username}",
-    "password": "${password}"
-}
-EOF
+                jq -n \
+                    --arg tag "${tag}" \
+                    --arg server "${server}" \
+                    --argjson port "${port}" \
+                    --arg username "${username}" \
+                    --arg password "${password}" \
+                    '{
+                        type: "socks",
+                        tag: $tag,
+                        server: $server,
+                        server_port: $port,
+                        version: "5",
+                        username: $username,
+                        password: $password
+                    }'
             else
-                cat <<EOF
-{
-    "type": "socks",
-    "tag": "${tag}",
-    "server": "${server}",
-    "server_port": ${port},
-    "version": "5"
-}
-EOF
+                jq -n \
+                    --arg tag "${tag}" \
+                    --arg server "${server}" \
+                    --argjson port "${port}" \
+                    '{
+                        type: "socks",
+                        tag: $tag,
+                        server: $server,
+                        server_port: $port,
+                        version: "5"
+                    }'
             fi
             ;;
         "trojan")
@@ -14175,18 +14216,24 @@ EOF
             server=$(echo "${node}" | jq -r '.server')
             port=$(echo "${node}" | jq -r '.server_port')
             password=$(echo "${node}" | jq -r '.password')
-            tlsConfig=$(echo "${node}" | jq -c '.tls // {"enabled": true, "server_name": "'${server}'", "insecure": false}')
+            # 默认 tls 对象通过 --arg sn 注入 server，避免老写法 '.tls // {"server_name":"'${server}'"}'
+            # 在 server 含 " 时把 jq 过滤器自身打成无效语法。
+            tlsConfig=$(echo "${node}" | jq -c --arg sn "${server}" '.tls // {enabled: true, server_name: $sn, insecure: false}')
 
-            cat <<EOF
-{
-    "type": "trojan",
-    "tag": "${tag}",
-    "server": "${server}",
-    "server_port": ${port},
-    "password": "${password}",
-    "tls": ${tlsConfig}
-}
-EOF
+            jq -n \
+                --arg tag "${tag}" \
+                --arg server "${server}" \
+                --argjson port "${port}" \
+                --arg password "${password}" \
+                --argjson tls "${tlsConfig}" \
+                '{
+                    type: "trojan",
+                    tag: $tag,
+                    server: $server,
+                    server_port: $port,
+                    password: $password,
+                    tls: $tls
+                }'
             ;;
     esac
 }
@@ -14231,11 +14278,16 @@ setupExternalAsSingleExit() {
         return 1
     fi
 
-    # 保存出站配置
+    # 保存出站配置（jq -n 包装，不做字符串拼接，避免 outboundConfig 内部含特殊字符破坏 JSON）
     local configDir="/etc/Proxy-agent/sing-box/conf/config"
     mkdir -p "${configDir}"
 
-    echo "{\"outbounds\": [${outboundConfig}]}" | jq . > "${configDir}/chain_outbound.json"
+    local _wrapped
+    if ! _wrapped=$(jq -n --argjson ob "${outboundConfig}" '{outbounds: [$ob]}') || [[ -z "${_wrapped}" ]]; then
+        echoContent red " ---> $(t EXT_CONFIG_FAILED)"
+        return 1
+    fi
+    printf '%s\n' "${_wrapped}" > "${configDir}/chain_outbound.json"
 
     # 生成路由配置 - 所有流量走外部节点
     # default_domain_resolver 见 chainExit 注释，1.13 起必填

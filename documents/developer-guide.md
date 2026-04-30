@@ -958,6 +958,30 @@ V2RAY_I18N_DEBUG=1 V2RAY_LANG=xx_XX pasly
 
 ---
 
+## 附录 D: 已知上游问题（暂不修复）
+
+### D.1 VLESS+Reality dokodemo-door routing 规则死代码
+
+**位置**：`install.sh` 生成 `07_VLESS_vision_reality_inbounds.json` 的 heredoc 块（约第 5360 行起）。
+
+**现象**：dokodemo-door inbound 的 tag 为 `dokodemo-in-VLESSReality`，但同文件 `routing.rules` 内引用 `inboundTag: ["dokodemo-in"]`（Xray 是精确字符串匹配，不支持前缀），两者从不匹配 → 这两条 routing 规则**永远不会命中**。
+
+**来源**：直接继承自上游 `mack-a/v2ray-agent` commit `1e890619`（"feat(脚本): xray-core reality增加防止流量盗刷配置"），本 fork 未引入此 bug，也未修复。
+
+**为什么暂不修复**（"改 tag 让规则命中"会让伪装变弱，不是改进）：
+
+1. dokodemo-door 的 sniffing 是 `routeOnly: true`：嗅探到的 SNI 只用于路由匹配，不重写连接的 destination。所以即使把 tag 改对、规则命中、流量被路由到 `z_direct_outbound`（freedom），freedom 拨号的目标仍是 dokodemo-door 自己的 `address: 127.0.0.1, port: 45987`（内层 VLESS-Reality）—— **匹配 SNI 流量的最终行为与"规则死掉"完全相同**。
+2. 不匹配 SNI 的分支会被 `blackhole_out` 即时 RST，而真实的 nginx/apache 对错的 SNI 不会这样断 —— **会成为 Reality 自身想避免的指纹信号**。
+3. 现状（规则死掉）让所有进入 realityPort 的流量统一进内层 VLESS-Reality，由 `realitySettings.target` 兜底无指纹反向代理到真实伪装站。这正是 Reality 协议设计的标准防探测路径，比修过的 routing 行为更隐蔽。
+
+**理论上的"正确实现"**（也不该上线）：把 sniffing 改成 `routeOnly: false`，让嗅探到的 SNI 重写 destination，freedom 直接拨到真实伪装站 IP。但这会**破坏合法 Reality 客户端**——合法客户端的 SNI 也是 `realityServerName`，会被规则 1 直接转发到真实伪装站，永远到不了内层 VLESS-Reality 完成 Reality 协议鉴权。
+
+所以 dokodemo-door + routing 这套设计在"既要骗探测者又要让 Reality 客户端通过"两个目标之间无解。等上游决定怎么办（要么整套重做、要么删除这段死代码）我们再跟进。
+
+**当前影响评估**：**无安全/可用性影响**。Reality 协议的内层鉴权 + `realitySettings.target` 已经独立处理所有边界情况，dead routing 规则只是无害的 noise。
+
+---
+
 ## 版本历史
 
 | 版本 | 日期 | 更新内容 |
