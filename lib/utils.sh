@@ -165,3 +165,39 @@ versionGreaterOrEqual() {
 timestamp() {
     date +%s
 }
+
+# ============================================================================
+# Dry-run 计划模式
+# ============================================================================
+# 用户通过 DRY_RUN=1 pasly 进入只读 plan 模式：脚本走完用户输入和提示，但
+# 在每个被插入 planAction 短路点的 mutator 入口处回显"将要做什么"并直接 return。
+# 不会写入配置文件、申请证书、改 firewall、重启服务。
+#
+# 调用约定：
+#   isDryRun() 是低层探测；planAction "..." 是常用的"短路 + 计划输出"语法糖。
+#
+# 设计取舍：
+#   - 只插桩"用户菜单调用的 mutator 入口"（约 6-10 处），不深入到 jq / handle*
+#     等底层函数。这是一致的"粗粒度 plan"——告诉用户"会装 X 协议、会改防火墙"，
+#     而不是逐行 trace 每个 jq 调用。后者属于精细化插桩，是后续工作。
+#   - bootstrap 与 doctor 不受 DRY_RUN 影响：前者是脚本自身脚手架，后者本身只读。
+
+# 是否处于 dry-run 模式
+# 用法: if isDryRun; then ... fi
+isDryRun() {
+    [[ "${DRY_RUN:-0}" == "1" ]]
+}
+
+# 在 dry-run 模式下输出 plan 行并要求调用方短路返回；非 dry-run 时静默返回 1
+# 用法:
+#   if planAction "$(t PLAN_UNINSTALL_ALL)"; then return 0; fi
+# 返回值:
+#   0 = dry-run 已生效（调用方应立即 return 0）
+#   1 = 非 dry-run（调用方继续执行真实逻辑）
+planAction() {
+    if isDryRun; then
+        echoContent yellow "[plan] $*"
+        return 0
+    fi
+    return 1
+}

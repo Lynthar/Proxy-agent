@@ -119,6 +119,12 @@ jobs:
               }
             }
 
+            // install.sh — primary script asset. Allows pinned download via
+            // https://github.com/Lynthar/Proxy-agent/releases/latest/download/install.sh
+            // so README install command can move off the master raw URL (which
+            // bypasses verifyInstallSHA256 because master has no release tag).
+            await uploadAsset('install.sh', 'install.sh');
+
             // install.sh.sha256 — used by verifyInstallSHA256 during self-update.
             await uploadAsset('install.sh.sha256', 'install.sh.sha256');
 

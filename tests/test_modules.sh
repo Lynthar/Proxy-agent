@@ -151,6 +151,20 @@ assert_true "! isValidUUID 'invalid-uuid'" "isValidUUID() 拒绝无效 UUID"
 assert_true "versionGreaterThan '1.2.3' '1.2.0'" "versionGreaterThan('1.2.3', '1.2.0')"
 assert_true "! versionGreaterThan '1.2.0' '1.2.3'" "!versionGreaterThan('1.2.0', '1.2.3')"
 
+# 测试 isDryRun / planAction（DRY_RUN 关闭时）
+unset DRY_RUN
+assert_true "! isDryRun" "isDryRun() 在 DRY_RUN 未设置时返回 false"
+assert_true "! planAction 'should not print'" "planAction() 在非 dry-run 模式返回 1（调用方不短路）"
+
+# 测试 DRY_RUN=1 时
+DRY_RUN=1
+assert_true "isDryRun" "isDryRun() 在 DRY_RUN=1 时返回 true"
+assert_true "planAction 'test plan' >/dev/null" "planAction() 在 dry-run 模式返回 0（调用方应短路）"
+# planAction 应输出 [plan] 前缀（黄色 ANSI 包裹），strip 后包含原文
+plan_output=$(stripAnsi "$(planAction 'install reality')")
+assert_equals "[plan] install reality" "${plan_output}" "planAction() 输出包含 [plan] 前缀和原 message"
+unset DRY_RUN
+
 echo ""
 
 # ============================================================================
