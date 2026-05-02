@@ -15364,7 +15364,7 @@ customXrayInstall() {
 
 # 选择核心安装sing-box、xray-core
 selectCoreInstall() {
-    if planAction "$(t MSG_PLAN_CUSTOM_INSTALL)"; then return 0; fi
+    if planAction "$(t MSG_PLAN_INSTALL)"; then return 0; fi
     echoContent skyBlue "\n功能 1/${totalProgress} : 选择核心安装"
     echoContent red "\n=============================================================="
     echoContent yellow "1.Xray-core"
@@ -15430,6 +15430,7 @@ installSingBoxRealityOnly() {
 
 # 一键无域名 Reality 核心选择
 selectRealityCoreInstall() {
+    if planAction "$(t MSG_PLAN_REALITY_QUICK)"; then return 0; fi
     echoContent skyBlue "\n$(t REALITY_QUICK_TITLE)"
     echoContent red "=============================================================="
     echoContent yellow "$(t REALITY_QUICK_CORE_SELECT)"
@@ -17053,17 +17054,23 @@ _doctorCheckCore() {
         return
     fi
 
-    local coreName binaryPath serviceName pgrepPattern
+    # pgrep 约定与 install.sh 主体保持一致：
+    #   Xray 用 -f "xray/xray"（同 handleXray / showInstallStatus / chain 函数）
+    #   sing-box 用 -x sing-box（同 handleSingBox + 18+ 处 chain 函数）
+    # 不要换成自创的统一 -f 形式，否则跟 handle* 在边缘场景下行为可能背离。
+    local coreName binaryPath serviceName pgrepFlag pgrepArg
     if [[ "${coreKind}" == "1" ]]; then
         coreName="Xray-core"
         binaryPath="/etc/Proxy-agent/xray/xray"
         serviceName="xray"
-        pgrepPattern="xray/xray"
+        pgrepFlag="-f"
+        pgrepArg="xray/xray"
     else
         coreName="sing-box"
         binaryPath="/etc/Proxy-agent/sing-box/sing-box"
         serviceName="sing-box"
-        pgrepPattern="sing-box/sing-box"
+        pgrepFlag="-x"
+        pgrepArg="sing-box"
     fi
     _doctorRow "$(t MSG_DOCTOR_CHECK_CORE_KIND)" pass "${coreName}"
 
@@ -17101,7 +17108,7 @@ _doctorCheckCore() {
         _doctorRow "$(t MSG_DOCTOR_CHECK_SERVICE)" warn "service unit not found"
     fi
 
-    if pgrep -f "${pgrepPattern}" >/dev/null 2>&1; then
+    if pgrep "${pgrepFlag}" "${pgrepArg}" >/dev/null 2>&1; then
         _doctorRow "$(t MSG_DOCTOR_CHECK_PROCESS)" pass "running"
     else
         _doctorRow "$(t MSG_DOCTOR_CHECK_PROCESS)" warn "not running"
