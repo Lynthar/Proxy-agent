@@ -35,6 +35,7 @@ After install, launch the management menu with `pasly`.
 - **External nodes** — plug third-party SS / Trojan / SOCKS5 nodes into the chain as exits
 - **Atomic JSON writes** + snapshot-based config backup and rollback
 - **Signed self-update** — SHA256 verification of the downloaded `install.sh`, auto-restore from backup on mismatch
+- **Read-only diagnostic** (`pasly doctor`) and **dry-run plan mode** (`pasly --dry-run`)
 - **Bilingual UI** — Chinese / English, switch via menu or `V2RAY_LANG` env variable
 
 ## Requirements
@@ -83,11 +84,8 @@ The selection is persisted to `/etc/Proxy-agent/lang_pref` and auto-loaded on su
 7. User Management           Add / remove / view / subscribe
 8. Camouflage Site           Nginx decoy deployment
 9. Certificate Management    Let's Encrypt / Buypass
-10. CDN Nodes
 11. Routing Tools            WARP / IPv6 / SOCKS5 / DNS
 12. Add Port
-13. BT Management
-15. Domain Blacklist
 16. Core Management          Upgrade / switch
 17. Update Script            Checked against SHA256, auto-rollback on failure
 18. BBR
@@ -95,7 +93,18 @@ The selection is persisted to `/etc/Proxy-agent/lang_pref` and auto-loaded on su
 20. Uninstall
 21. Switch Language
 22. Script Version Management   Backup / rollback / list snapshots
+23. System Doctor            Read-only diagnostic
 ==============================================================
+```
+
+Numbers 10 / 13 / 14 / 15 are intentional gaps from removed or hidden menus.
+
+Subcommands also work (no menu prompt, exits after running):
+
+```bash
+pasly doctor          # Same as menu 23
+pasly --dry-run       # Plan mode: install/uninstall/chain-proxy actions print only
+DRY_RUN=1 pasly       # Same as --dry-run
 ```
 
 ## Documentation
