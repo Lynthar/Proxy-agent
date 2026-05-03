@@ -2254,7 +2254,7 @@ installTools() {
 
     # 注意：已移除 semanage 自动安装代码（参考 v2ray-agent v3.5.3）
     # 如果 SELinux 导致问题，updateSELinuxHTTPPortT() 函数会在 Nginx 启动失败时尝试修复
-    # 用户也可以手动关闭 SELinux，参考: documents/selinux.md
+    # 用户也可以手动关闭 SELinux，参考: docs/selinux.md
 
     if [[ "${selectCustomInstallType}" == "7" ]]; then
         echoContent green " ---> 检测到无需依赖证书的服务，跳过安装"
@@ -5520,7 +5520,7 @@ EOF
 EOF
         # 上方 routing.rules 的 inboundTag "dokodemo-in" 与实际 inbound tag "dokodemo-in-VLESSReality" 不匹配
         # （Xray 是精确字符串匹配），两条规则永远不会命中。继承自上游 mack-a/v2ray-agent commit 1e890619，
-        # 本 fork 既未引入也未修复。详见 documents/developer-guide.md 附录 D.1：
+        # 本 fork 既未引入也未修复。详见 docs/developer-guide.md 附录 D.1：
         # Reality 协议靠内层 realitySettings.target 兜底无指纹反代到真实伪装站，dead routing 是无害噪声；
         # 改成命中反而会让 Reality 鉴权失败或暴露 fingerprint，不是改进。等上游决定怎么办再跟进。
         # VLESS_Reality_gRPC - 已移除，推荐使用XHTTP
@@ -8733,7 +8733,7 @@ ipv6Routing() {
         echoContent red "=============================================================="
         echoContent yellow "# 注意事项\n"
         echoContent yellow "# 注意事项"
-        echoContent yellow "# 使用提示：请参考 documents 目录中的分流与策略说明 \n"
+        echoContent yellow "# 使用提示：请参考 docs 目录中的分流与策略说明 \n"
 
         read -r -p "请按照上面示例录入域名:" domainList
         if [[ "${coreKind}" == "1" ]]; then
@@ -9310,7 +9310,7 @@ warpRoutingReg() {
     elif [[ "${warpStatus}" == "2" ]]; then
         echoContent yellow "# 注意事项"
         echoContent yellow "# 支持sing-box、Xray-core"
-        echoContent yellow "# 使用提示：请参考 documents 目录中的分流与策略说明 \n"
+        echoContent yellow "# 使用提示：请参考 docs 目录中的分流与策略说明 \n"
 
         read -r -p "请按照上面示例录入域名:" domainList
         addWireGuardRoute "${type}" outboundTag "${domainList}"
@@ -14819,7 +14819,7 @@ vmessWSRouting() {
     echoContent skyBlue "\n功能 1/${totalProgress} : VMess+WS+TLS 分流"
     echoContent red "\n=============================================================="
     echoContent yellow "# 注意事项"
-    echoContent yellow "# 使用提示：详见 documents 目录中的分流与策略说明 \n"
+    echoContent yellow "# 使用提示：详见 docs 目录中的分流与策略说明 \n"
 
     echoContent yellow "1.添加出站"
     echoContent yellow "2.卸载"
@@ -14915,7 +14915,7 @@ dnsRouting() {
     echoContent skyBlue "\n功能 1/${totalProgress} : DNS分流"
     echoContent red "\n=============================================================="
     echoContent yellow "# 注意事项"
-    echoContent yellow "# 使用提示：请参考 documents 目录中的分流与策略说明 \n"
+    echoContent yellow "# 使用提示：请参考 docs 目录中的分流与策略说明 \n"
 
     echoContent yellow "1.添加"
     echoContent yellow "2.卸载"
@@ -14942,7 +14942,7 @@ sniRouting() {
     echoContent skyBlue "\n功能 1/${totalProgress} : SNI反向代理分流"
     echoContent red "\n=============================================================="
     echoContent yellow "# 注意事项"
-    echoContent yellow "# 使用提示：请参考 documents 目录中的分流与策略说明 \n"
+    echoContent yellow "# 使用提示：请参考 docs 目录中的分流与策略说明 \n"
     echoContent yellow "# sing-box不支持规则集，仅支持指定域名。\n"
 
     echoContent yellow "1.添加"
@@ -16302,22 +16302,36 @@ subscribe() {
                         cp "/etc/Proxy-agent/subscribe_local/sing-box/${email}" "/etc/Proxy-agent/subscribe/sing-box_profiles/${emailMd5}"
 
                         echoContent skyBlue " ---> 下载 sing-box 通用配置文件"
+                        # 模板文件来源：本仓库自维护的 docs/sing-box.json（455 行）。
+                        # 早期版本错误地从上游 mack-a/v2ray-agent 拉取——本 fork 已多次定制
+                        # （anytls 支持 / DNS 超时修复 / 最新 sing-box schema），上游版本与本仓库
+                        # 已完全分叉，继续走上游会让本仓库的修改对终端用户全部失效。
+                        local _singboxTplFile="/etc/Proxy-agent/subscribe/sing-box/${emailMd5}"
+                        local _singboxTplUrl="https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/docs/sing-box.json"
+                        local _singboxTplExit=0
                         if [[ "${release}" == "alpine" ]]; then
-                            wget -O "/etc/Proxy-agent/subscribe/sing-box/${emailMd5}" -q "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/documents/sing-box.json"
+                            wget -O "${_singboxTplFile}" -q "${_singboxTplUrl}" || _singboxTplExit=$?
                         else
-                            wget -O "/etc/Proxy-agent/subscribe/sing-box/${emailMd5}" -q ${wgetShowProgressStatus} "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/documents/sing-box.json"
+                            wget -O "${_singboxTplFile}" -q ${wgetShowProgressStatus} "${_singboxTplUrl}" || _singboxTplExit=$?
                         fi
 
-                        jq ".outbounds=$(jq ".outbounds|map(if has(\"outbounds\") then .outbounds += $(jq ".|map(.tag)" "/etc/Proxy-agent/subscribe_local/sing-box/${email}") else . end)" "/etc/Proxy-agent/subscribe/sing-box/${emailMd5}")" "/etc/Proxy-agent/subscribe/sing-box/${emailMd5}" >"/etc/Proxy-agent/subscribe/sing-box/${emailMd5}_tmp" && mv "/etc/Proxy-agent/subscribe/sing-box/${emailMd5}_tmp" "/etc/Proxy-agent/subscribe/sing-box/${emailMd5}"
-                        jq ".outbounds += $(jq '.' "/etc/Proxy-agent/subscribe_local/sing-box/${email}")" "/etc/Proxy-agent/subscribe/sing-box/${emailMd5}" >"/etc/Proxy-agent/subscribe/sing-box/${emailMd5}_tmp" && mv "/etc/Proxy-agent/subscribe/sing-box/${emailMd5}_tmp" "/etc/Proxy-agent/subscribe/sing-box/${emailMd5}"
+                        # 失败兜底：wget 非 0 / 文件空 / 不是合法 JSON 任意一种都视为失败。
+                        # 早期实现下载失败后会让 jq 在空输入或 HTML 错误页上爆炸、留下半成
+                        # _tmp 文件，UX 更差。这里直接 rm + 跳过该用户的 sing-box 订阅广播。
+                        if [[ ${_singboxTplExit} -ne 0 ]] || [[ ! -s "${_singboxTplFile}" ]] || ! jq -e . "${_singboxTplFile}" >/dev/null 2>&1; then
+                            echoContent red " ---> sing-box 订阅模板下载或解析失败，跳过本次 sing-box 订阅 (URL: ${_singboxTplUrl})"
+                            rm -f "${_singboxTplFile}"
+                        else
+                            jq ".outbounds=$(jq ".outbounds|map(if has(\"outbounds\") then .outbounds += $(jq ".|map(.tag)" "/etc/Proxy-agent/subscribe_local/sing-box/${email}") else . end)" "${_singboxTplFile}")" "${_singboxTplFile}" >"${_singboxTplFile}_tmp" && mv "${_singboxTplFile}_tmp" "${_singboxTplFile}"
+                            jq ".outbounds += $(jq '.' "/etc/Proxy-agent/subscribe_local/sing-box/${email}")" "${_singboxTplFile}" >"${_singboxTplFile}_tmp" && mv "${_singboxTplFile}_tmp" "${_singboxTplFile}"
 
-                        echoContent skyBlue "\n----------sing-box订阅----------\n"
-                        echoContent yellow "url:${subscribeType}://${currentDomain}/s/sing-box/${emailMd5}\n"
-                        echoContent yellow "在线二维码:https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${subscribeType}://${currentDomain}/s/sing-box/${emailMd5}\n"
-                        if [[ "${release}" != "alpine" ]]; then
-                            echo "${subscribeType}://${currentDomain}/s/sing-box/${emailMd5}" | qrencode -s 10 -m 1 -t UTF8
+                            echoContent skyBlue "\n----------sing-box订阅----------\n"
+                            echoContent yellow "url:${subscribeType}://${currentDomain}/s/sing-box/${emailMd5}\n"
+                            echoContent yellow "在线二维码:https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${subscribeType}://${currentDomain}/s/sing-box/${emailMd5}\n"
+                            if [[ "${release}" != "alpine" ]]; then
+                                echo "${subscribeType}://${currentDomain}/s/sing-box/${emailMd5}" | qrencode -s 10 -m 1 -t UTF8
+                            fi
                         fi
-
                     fi
 
                     echoContent skyBlue "--------------------------------------------------------------"

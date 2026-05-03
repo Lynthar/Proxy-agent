@@ -84,7 +84,7 @@ Proxy-agent/
 │   ├── en_US.sh
 │   └── loader.sh               # 兼容占位 stub（仅供旧版 install.sh 升级时下载用，新代码不 source）
 │
-├── documents/                  # 使用与开发文档（本文件所在）
+├── docs/                       # 使用与开发文档（本文件所在）
 ├── tests/
 │   ├── test_modules.sh         # 单元测试（69 用例）
 │   └── test_integration.sh     # 集成测试（32 用例，mock VPS 环境）
