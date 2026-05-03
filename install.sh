@@ -517,10 +517,8 @@ if ! type t &>/dev/null; then
     MSG_MENU_USER="用户管理"
     MSG_MENU_DISGUISE="伪装站管理"
     MSG_MENU_CERT="证书管理"
-    MSG_MENU_CDN="CDN 节点管理"
     MSG_MENU_ROUTING="分流工具"
     MSG_MENU_ADD_PORT="添加新端口"
-    MSG_MENU_BT="BT 下载管理"
     MSG_MENU_CORE="Core 管理"
     MSG_MENU_UPDATE_SCRIPT="更新脚本"
     MSG_MENU_BBR="安装 BBR、DD 脚本"
@@ -1831,12 +1829,8 @@ unInstallSingBox() {
             rm "${singBoxConfigPath}06_hysteria2_inbounds.json"
             echoContent green " ---> 删除sing-box hysteria2配置成功"
         fi
-        # 删除合并后的 config.json，让 handleSingBox start 走 singBoxMergeConfig
-        # 重新生成。注意：${singBoxConfigPath} 是 .../sing-box/conf/config/（片段目录），
-        # 真正的合并文件在它的上一级 .../sing-box/conf/config.json（旧实现误删 conf/config/config.json
-        # 那个不存在的路径，rm 静默失败、靠后续 singBoxMergeConfig 原子覆盖兜底；
-        # 这里改成显式绝对路径 + -f，保证「stop 之后、start 之前」窗口中如果有人手动
-        # 启动 sing-box，不会读到含已删除片段的旧合并配置）。
+        # 删除合并后的 config.json，让下一次 handleSingBox start 走 singBoxMergeConfig 重新生成。
+        # 用绝对路径而非 ${singBoxConfigPath}（后者是 .../config/ 片段目录，不是 config.json 父目录）。
         rm -f /etc/Proxy-agent/sing-box/conf/config.json
     fi
 
@@ -1931,9 +1925,6 @@ readConfigHostPathUUID() {
             if [[ -z "${currentPath}" ]]; then
                 dest=$(jq -r -c '.inbounds[0].settings.fallbacks[]|select(.alpn)|.dest' ${configPath}${frontingType}.json | head -1)
                 if [[ "${dest}" == "31302" || "${dest}" == "31304" ]]; then
-                    # 上游 mack-a/v2ray-agent d64843b (v3.5.12) 移除：BT Panel / 1Panel 自身已修补端口冲突检测，本仓兼容层不再主动调用
-                    # checkBTPanel
-                    # check1Panel
                     if grep -q "trojangrpc {" <${nginxConfigPath}alone.conf; then
                         currentPath=$(grep "trojangrpc {" <${nginxConfigPath}alone.conf | awk -F "[/]" '{print $2}' | awk -F "[t][r][o][j][a][n]" '{print $1}')
                     elif grep -q "grpc {" <${nginxConfigPath}alone.conf; then
@@ -2251,7 +2242,7 @@ installTools() {
         fi
     fi
 
-    # 注意：已移除 semanage 自动安装代码（参考 v2ray-agent v3.5.3）
+    # 注意：不再自动安装 semanage（用户应自行处理 SELinux，详见 docs/selinux.md）
     # 如果 SELinux 导致问题，updateSELinuxHTTPPortT() 函数会在 Nginx 启动失败时尝试修复
     # 用户也可以手动关闭 SELinux，参考: docs/selinux.md
 
@@ -2345,20 +2336,13 @@ installWarp() {
 
     ${installType} gnupg2 -y >/dev/null 2>&1
     # Cloudflare WARP 仓库装签：
-    # 1) `apt-key add` 在 Debian 12 / Ubuntu 24.04 已被**移除**（不只是 deprecated），
-    #    旧实现在新版系统上会静默失败，导致后续 `apt install cloudflare-warp` 因 NO_PUBKEY 失败，
-    #    最终用户看到的只是 "安装WARP失败"，没有诊断信息。
-    # 2) `pkg.cloudflareclient.com/pubkey.gpg` 公钥每次轮转后旧 key 会被 retire
-    #    （上次 2025-09-12 轮转、2025-12-04 旧 key 完全失效），所以每次安装重新拉取，
-    #    避免装错 key 后 apt update 401。
-    # 3) 走现代 `signed-by=` + `/usr/share/keyrings/` 的 deb822 风格，与 Debian/Ubuntu 当前
-    #    官方推荐做法一致（参考 Cloudflare 官方包管理博客与 Debian 11+ 文档）。
+    # 用 gpg --dearmor + signed-by 而非 apt-key add（后者在 Debian 12 / Ubuntu 24.04 已删除）；
+    # 每次安装重新拉公钥，应对 Cloudflare 不定期 key 轮转。
     if [[ "${release}" == "debian" || "${release}" == "ubuntu" ]]; then
         local _warpKeyring="/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg"
         local _warpCodename
         if [[ "${release}" == "ubuntu" ]]; then
-            # Cloudflare 上游目前只为 focal codename 发包，新版 Ubuntu 用 focal 二进制兼容
-            # （沿用上游 mack-a/v2ray-agent 与 Cloudflare 社区主流做法）。
+            # Cloudflare 仓库只对 focal codename 发包，新版 Ubuntu 用 focal 二进制兼容
             _warpCodename="focal"
         else
             _warpCodename="$(lsb_release -cs)"
@@ -3947,13 +3931,8 @@ handleXray() {
     fi
 }
 
-# 读取Xray用户数据并初始化
-# 把 currentClients 数组的现有用户重新映射到目标协议格式，并可选追加一个新用户。
-# 与 §11.3 保持一致：所有 jq 操作走 --arg/--argjson，不做字符串拼接。
-# 修复历史 bug：
-#   - 旧实现首块 "if [[ -n newUUID ]]" 用 ${uuid}（依赖父作用域泄漏）而非参数 ${newUUID}
-#   - 旧实现协议 0 分支用 grep -q "0"（无逗号），会被 ",10," / ",20," 误命中
-#   - 旧实现循环里 uuid/email/currentUser 未声明 local，会污染父作用域变量
+# 读取 currentClients 数组并重新映射到目标协议格式，可选追加一个新用户。
+# 全量走 jq --arg/--argjson 参数化（§11.3）。
 initXrayClients() {
     local type=",$1,"
     local newUUID="$2"
@@ -5484,11 +5463,9 @@ EOF
   }
 }
 EOF
-        # 上方 routing.rules 的 inboundTag "dokodemo-in" 与实际 inbound tag "dokodemo-in-VLESSReality" 不匹配
-        # （Xray 是精确字符串匹配），两条规则永远不会命中。继承自上游 mack-a/v2ray-agent commit 1e890619，
-        # 本 fork 既未引入也未修复。详见 docs/developer-guide.md 附录 D.1：
-        # Reality 协议靠内层 realitySettings.target 兜底无指纹反代到真实伪装站，dead routing 是无害噪声；
-        # 改成命中反而会让 Reality 鉴权失败或暴露 fingerprint，不是改进。等上游决定怎么办再跟进。
+        # 上方 routing.rules 的 inboundTag "dokodemo-in" 跟实际 tag "dokodemo-in-VLESSReality" 不匹配（Xray 精确字符串），
+        # 两条规则永远不会命中——这是有意保留的 dead routing：Reality 靠内层 realitySettings.target 兜底无指纹反代到真实伪装站，
+        # 改成命中反而会让 Reality 鉴权失败或暴露 fingerprint。详见 docs/developer-guide.md 附录 D.1。
         # VLESS_Reality_gRPC - 已移除，推荐使用XHTTP
     elif [[ -z "${3:-}" ]]; then
         rm /etc/Proxy-agent/xray/conf/07_VLESS_vision_reality_inbounds.json >/dev/null 2>&1
@@ -6137,8 +6114,8 @@ EOF
 vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality&type=xhttp&sni=${xrayVLESSRealityXHTTPServerName}&fp=chrome&path=${path}&pbk=${currentRealityXHTTPPublicKey}&sid=${currentRealityXHTTPShortId}#${email}
 EOF
 
-        # clashMeta（mihomo）订阅：参考上游 mack-a/v2ray-agent d64843b (v3.5.12)
-        # 我们的实现增加了 reality-opts (publicKey + shortId)；上游缺这两项 clashMeta 客户端无法连 Reality
+        # clashMeta（mihomo）订阅：reality-opts 必须含 publicKey + shortId，
+        # 否则 clashMeta 客户端连不上 Reality。
         cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
   - name: "${email}"
     type: vless
@@ -6267,9 +6244,8 @@ EOF
         local singBoxObfs=""
         if [[ -n "${hysteria2ObfsPassword}" ]]; then
             local _obfsPwUriEnc _obfsPwQrEnc _obfsPwJson
-            # 第一层 percent-encode（jq @uri，RFC 3986 query 参数规范）：
-            # 用于 hysteria2:// URL 的 query。客户端 URL-decode 后还原回原始密码。
-            # 修复：旧实现把原始密码塞进 URL，密码含 & = # 时 URL 解析直接断。
+            # 第一层 percent-encode（jq @uri，RFC 3986 query）：用于 hysteria2:// URL 的 query。
+            # 客户端 URL-decode 还原回原始密码；密码含 & = # 等保留字符时不能裸塞 URL。
             _obfsPwUriEnc=$(printf '%s' "${hysteria2ObfsPassword}" | jq -sRr @uri)
             # 第二层 percent-encode（再过一遍 @uri，等价于把 % 都变 %25）：
             # 用于 QR API ?data= 参数 —— 整个 hysteria2:// URL 嵌入 data= 时
@@ -6279,7 +6255,6 @@ EOF
             _obfsPwJson=$(printf '%s' "${hysteria2ObfsPassword}" | jq -Rs '.')
 
             obfsUrlParam="obfs=salamander&obfs-password=${_obfsPwUriEnc}&"
-            # 修复 typo：旧代码 obfsUrlParamEncode 写的是 "samalander"（漏字母），
             # QR 客户端 URL-decode 后拿到 obfs=samalander，不匹配仅支持的 "salamander" → obfs 静默失效。
             obfsUrlParamEncode="obfs%3Dsalamander%26obfs-password%3D${_obfsPwQrEnc}%26"
             clashMetaObfs="    obfs: salamander
@@ -7139,8 +7114,6 @@ unInstall() {
         menu
         exit 0
     fi
-    # 上游 mack-a/v2ray-agent d64843b (v3.5.12) 移除
-    # checkBTPanel
     echoContent yellow " ---> 脚本不会删除acme相关配置，删除请手动执行 [rm -rf /root/.acme.sh]"
     handleNginx stop
     if [[ -z $(pgrep -f "nginx") ]]; then
@@ -7192,69 +7165,6 @@ unInstall() {
     echoContent green " ---> 卸载 Proxy-agent 脚本完成"
 }
 
-# CDN节点管理
-manageCDN() {
-    echoContent skyBlue "\n进度 $1/1 : CDN节点管理"
-    local setCDNDomain=
-
-    if echo "${currentInstallProtocolType}" | grep -qE ",1,|,2,|,3,|,5,|,11,"; then
-        echoContent red "=============================================================="
-        echoContent yellow "# 注意事项"
-        echoContent yellow "\n教程地址:"
-        echoContent skyBlue "如需优化 Cloudflare 回源 IP，可根据本地网络状况选择可用的 IP 段。"
-        echoContent red "\n如对Cloudflare优化不了解，请不要使用"
-
-        echoContent yellow "1.CNAME www.digitalocean.com"
-        echoContent yellow "2.CNAME who.int"
-        echoContent yellow "3.CNAME blog.hostmonit.com"
-        echoContent yellow "4.CNAME www.visa.com.hk"
-        echoContent yellow "5.手动输入[可输入多个，比如: 1.1.1.1,1.1.2.2,cloudflare.com 逗号分隔]"
-        echoContent yellow "6.移除CDN节点"
-        echoContent red "=============================================================="
-        read -r -p "请选择:" selectCDNType
-        case ${selectCDNType} in
-        1)
-            setCDNDomain="www.digitalocean.com"
-            ;;
-        2)
-            setCDNDomain="who.int"
-            ;;
-        3)
-            setCDNDomain="blog.hostmonit.com"
-            ;;
-        4)
-            setCDNDomain="www.visa.com.hk"
-            ;;
-        5)
-            read -r -p "请输入想要自定义CDN IP或者域名:" setCDNDomain
-            # 验证输入不包含危险字符
-            if [[ "${setCDNDomain}" =~ [\;\|\&\$\`\(\)\{\}\[\]\<\>\!\#\*\?\~\'\"] ]] || [[ "${setCDNDomain}" =~ [[:space:]] ]]; then
-                echoContent red " ---> 输入包含不安全字符"
-                exit 1
-            fi
-            ;;
-        6)
-            echo >/etc/Proxy-agent/cdn
-            echoContent green " ---> 移除成功"
-            exit 0
-            ;;
-        esac
-
-        if [[ -n "${setCDNDomain}" ]]; then
-            echo >/etc/Proxy-agent/cdn
-            echo "${setCDNDomain}" >"/etc/Proxy-agent/cdn"
-            echoContent green " ---> 修改CDN成功"
-            subscribe false false
-        else
-            echoContent red " ---> 不可以为空，请重新输入"
-            manageCDN 1
-        fi
-    else
-        echoContent yellow "\n教程地址:"
-        echoContent skyBlue "请根据网络状况选择合适的 Cloudflare 回源 IP。\n"
-        echoContent red " ---> 未检测到可以使用的协议，仅支持ws、grpc、HTTPUpgrade相关的协议"
-    fi
-}
 # 自定义uuid
 customUUID() {
     read -r -p "请输入合法的UUID，[回车]随机UUID:" currentCustomUUID
@@ -7591,7 +7501,7 @@ removeUser() {
             echo "${vmessHTTPUpgradeResult}" | jq . >"${singBoxConfigPath}11_VMess_HTTPUpgrade_inbounds.json"
             echo "${vmessHTTPUpgradeResult}" | jq . >${configPath}11_VMess_HTTPUpgrade_inbounds.json
         fi
-        # AnyTLS（与 SS2022 同为 sing-box 专属，shape 一致；上游 mack-a/v2ray-agent f33a59b 修复同款）
+        # AnyTLS（与 SS2022 同为 sing-box 专属，订阅 shape 一致）
         if echo ${currentInstallProtocolType} | grep -q ",13,"; then
             local anytlsResult
             anytlsResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].users[$idx])' "${singBoxConfigPath}13_anytls_inbounds.json")
@@ -7992,8 +7902,6 @@ rollbackScript() {
         fi
 
         # 下载语言文件（同上要求全部成功）
-        # 注：loader 已在 v1.2.2 删除，此处不再拉取；shell/lang/loader.sh 仅作为 v1.2.0-v1.2.4
-        # 旧 install.sh 的兼容占位文件保留在仓库里，不应被新代码下载或 source。
         echoContent yellow " ---> 下载语言文件..."
         mkdir -p "${installDir}/shell/lang"
         local failedLangs=()
@@ -8238,7 +8146,6 @@ updateV2RayAgent() {
     echoContent green " ---> 已下载 ${moduleCount} 个模块"
 
     # 下载/更新语言文件（同上要求全部成功；i18n 缺失会让用户菜单全是裸 MSG_ 字符串）
-    # 注：loader 已在 v1.2.2 删除，旧版本曾在循环里拉它会写入 GitHub 404 页面；现在仅 zh_CN/en_US。
     echoContent yellow " ---> 下载语言文件..."
     mkdir -p "${installDir}/shell/lang"
     local failedLangs=()
@@ -8811,87 +8718,6 @@ showIPv6Routing() {
         fi
     fi
 }
-# bt下载管理
-btTools() {
-    if [[ "${coreKind}" == "2" ]]; then
-        echoContent red "\n ---> 此功能仅支持Xray-core内核，请等待后续更新"
-        exit 1
-    fi
-    if [[ -z "${configPath}" ]]; then
-        echoContent red " ---> 未安装，请使用脚本安装"
-        menu
-        exit 1
-    fi
-
-    echoContent skyBlue "\n功能 1/${totalProgress} : bt下载管理"
-    echoContent red "\n=============================================================="
-
-    if [[ -f "${configPath}09_routing.json" ]] && grep -q bittorrent <"${configPath}09_routing.json"; then
-        echoContent yellow "当前状态:已禁止下载BT"
-    else
-        echoContent yellow "当前状态:允许下载BT"
-    fi
-
-    echoContent yellow "1.禁止下载BT"
-    echoContent yellow "2.允许下载BT"
-    echoContent red "=============================================================="
-    read -r -p "请选择:" btStatus
-    if [[ "${btStatus}" == "1" ]]; then
-
-        if [[ -f "${configPath}09_routing.json" ]]; then
-
-            unInstallRouting blackhole_out outboundTag bittorrent
-
-            routing=$(jq -r '.routing.rules += [{"type":"field","outboundTag":"blackhole_out","protocol":["bittorrent"]}]' ${configPath}09_routing.json)
-
-            echo "${routing}" | jq . >${configPath}09_routing.json
-
-        else
-            cat <<EOF >${configPath}09_routing.json
-{
-    "routing":{
-        "domainStrategy": "IPOnDemand",
-        "rules": [
-          {
-            "type": "field",
-            "outboundTag": "blackhole_out",
-            "protocol": [ "bittorrent" ]
-          }
-        ]
-  }
-}
-EOF
-        fi
-
-        installSniffing
-        removeXrayOutbound blackhole_out
-        addXrayOutbound blackhole_out
-
-        echoContent green " ---> 禁止BT下载"
-
-    elif [[ "${btStatus}" == "2" ]]; then
-
-        unInstallSniffing
-
-        unInstallRouting blackhole_out outboundTag bittorrent
-
-        echoContent green " ---> 允许BT下载"
-    else
-        echoContent red " ---> 选择错误"
-        exit 1
-    fi
-
-    reloadCore
-}
-
-# 域名黑名单功能（菜单 15）已下线：
-#   - sing-box 1.13 移除 "type": "block" outbound，旧实现会让 sing-box check FATAL
-#   - 服务端域名屏蔽对个人代理用例价值低（客户端 Clash/sing-box rule 更灵活）
-#   - 旧 sing-box 片段（block_domain_*, cn_block_*, cn_01_google_play_route）
-#     由 singBoxMergeConfig 顶部的一次性清理负责移除
-#   - Xray 侧 09_routing.json 里指向 blackhole_out 的规则保留——它们仍正常工作，
-#     用户失去 UI 管理但流量行为不变（强行清理会违背用户原意图）
-
 # 添加routing配置
 # 全量使用 jq --arg/--argjson 传值，避免 tag/domain 拼接进过滤器
 addXrayRouting() {
@@ -9431,12 +9257,9 @@ EOF
 EOF
     fi
 
-    # 确保直连出站存在
-    # 注：早期版本写过 "domain_strategy": "prefer_ipv4"，1.12 起在 dial fields 里
-    # 该字段已 deprecated（1.16 移除）。chain proxy 流量在路由级 resolve action 里已
-    # 按 prefer_ipv4 解析（chain_route.json）；非 chain 流量由客户端送 IP 进来，
-    # outbound 自身不会发起域名解析。所以删掉 domain_strategy，不影响行为。
-    # 详见 https://sing-box.sagernet.org/migration/
+    # 确保直连出站存在。outbound 不带 domain_strategy（sing-box 1.12 弃用 / 1.16 删除）：
+    # chain proxy 流量在 chain_route.json 的 resolve action 里按 prefer_ipv4 解析；
+    # 非 chain 流量由客户端送 IP，outbound 自己不发起域名解析。
     if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json" ]]; then
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
 {
@@ -9709,8 +9532,8 @@ EOF
 EOF
 
     # 创建路由配置 (让链式入站流量走直连)
-    # sing-box 1.11+ 路由级 action：先 sniff 嗅探域名，再按 domainStrategy 重新解析
-    # 显式绑定 inbound + timeout 与上游 mack-a/v2ray-agent v3.5.10 一致
+    # sing-box 1.11+ 路由级 action：先 sniff 嗅探域名，再按 domainStrategy 重新解析。
+    # 显式绑定 inbound + timeout 1s。
     # default_domain_resolver 指向 01_dns.json 里的 google tag——sing-box 1.12 起，
     # outbound 解析域名必须有显式 DNS server 来源，1.13 没设直接 FATAL 拒绝启动。
     # 详见 https://sing-box.sagernet.org/migration/#migrate-outbound-dns-rule-items-to-domain-resolver
@@ -11134,9 +10957,7 @@ testChainConnection() {
     fi
 
     # 测试2: 通过链路访问外网
-    # 旧实现直接 `curl https://api.ipify.org`，没经过 sing-box，量到的是本机直连出口 IP
-    # 而不是经链路出口 IP，会让用户误以为链路工作正常。
-    # 现按角色判断如何"真的"走链路：
+    # 必须经 sing-box 出口（直 curl 量到的是本机直连出口，链路坏掉时仍假阳性）。按角色选择如何走链路：
     #   - entry + Xray 桥接：本机 SOCKS5 127.0.0.1:${bridge_port} 直接接入 sing-box → chain_outbound
     #   - entry 无 Xray：sing-box 入站全是面向客户端的协议（hysteria2/tuic/...），本机没法触发
     #   - relay：流量来自上游，本机不主动发起，端到端只能在客户端测
@@ -12978,11 +12799,9 @@ generateMultiChainRouteConfig() {
     local ruleSetDefs="[]"
     local usedRuleSets=""
 
-    # 如果有 SOCKS5 桥接入站（来自 Xray 的流量）
-    # 仅 prepend sniff/resolve（非终态 action），让后续 preset/custom/ip_cidr/geoip 规则
-    # 仍能按域名/IP 命中分流；未命中的流量由 route.final（=defaultChain）兜底。
-    # 注意：早期版本曾在此处再加一条 {"inbound":["chain_bridge_in"],"outbound":defaultChain}
-    # 终态规则，会先于下方业务规则匹配，导致预设分流永远不命中。
+    # 如果有 SOCKS5 桥接入站（来自 Xray 的流量），仅 prepend sniff/resolve（非终态 action），
+    # 让后续 preset/custom/ip_cidr/geoip 规则仍能按域名/IP 命中分流；未命中由 route.final（=defaultChain）兜底。
+    # 不要在这里 prepend 终态规则（如 inbound→outbound:defaultChain），那会让预设分流永远不命中。
     if [[ "${hasXray}" == "true" ]]; then
         routeRules=$(echo "${routeRules}" | jq '. + [
             {"inbound":"chain_bridge_in","action":"sniff","timeout":"1s"},
@@ -15224,9 +15043,6 @@ customXrayInstall() {
 
         readLastInstallationConfig
         unInstallSubscribe
-        # 上游 mack-a/v2ray-agent d64843b (v3.5.12) 移除
-        # checkBTPanel
-        # check1Panel
         totalProgress=12
         installTools 1
         if [[ -n "${btDomain}" ]]; then
@@ -15312,8 +15128,7 @@ selectCoreInstall() {
     esac
 }
 
-# 一键无域名 Reality 安装（参考上游 mack-a/v2ray-agent 773b1b7 v3.5.9）
-# 仅安装 VLESS+Reality+Vision (协议 7)；跳过域名/TLS 申请
+# 一键无域名 Reality 安装：仅安装 VLESS+Reality+Vision (协议 7)，跳过域名/TLS 申请
 installXrayRealityOnly() {
     selectCustomInstallType=",7,"
     readLastInstallationConfig
@@ -15368,9 +15183,6 @@ selectRealityCoreInstall() {
 xrayCoreInstall() {
     readLastInstallationConfig
     unInstallSubscribe
-    # 上游 mack-a/v2ray-agent d64843b (v3.5.12) 移除
-    # checkBTPanel
-    # check1Panel
     selectCustomInstallType=
     totalProgress=12
     installTools 2
@@ -15414,9 +15226,6 @@ xrayCoreInstall() {
 singBoxInstall() {
     readLastInstallationConfig
     unInstallSubscribe
-    # 上游 mack-a/v2ray-agent d64843b (v3.5.12) 移除
-    # checkBTPanel
-    # check1Panel
     selectCustomInstallType=
     totalProgress=8
     installTools 2
@@ -16188,10 +15997,7 @@ subscribe() {
                         cp "/etc/Proxy-agent/subscribe_local/sing-box/${email}" "/etc/Proxy-agent/subscribe/sing-box_profiles/${emailMd5}"
 
                         echoContent skyBlue " ---> 下载 sing-box 通用配置文件"
-                        # 模板文件来源：本仓库自维护的 docs/sing-box.json（455 行）。
-                        # 早期版本错误地从上游 mack-a/v2ray-agent 拉取——本 fork 已多次定制
-                        # （anytls 支持 / DNS 超时修复 / 最新 sing-box schema），上游版本与本仓库
-                        # 已完全分叉，继续走上游会让本仓库的修改对终端用户全部失效。
+                        # 模板从本仓库 docs/sing-box.json 拉取，便于跟脚本同步演进。
                         local _singboxTplFile="/etc/Proxy-agent/subscribe/sing-box/${emailMd5}"
                         local _singboxTplUrl="https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/docs/sing-box.json"
                         local _singboxTplExit=0
@@ -16439,9 +16245,7 @@ checkRealityDest() {
 
 # 初始化客户端可用的ServersName
 initRealityClientServersName() {
-    # Reality 默认 serverName 候选列表
-    # 上游 mack-a/v2ray-agent e376117 (v3.5.10) 移除了 Apple/MS 系 10 个域名
-    # 原因：这些端点近期 TLS 握手行为变化，Reality 伪装失败率上升
+    # Reality 默认 serverName 候选列表（不含 Apple/MS 系——它们 TLS 握手行为变化、Reality 伪装失败率高）
     local realityDestDomainList="download-installer.cdn.mozilla.net,addons.mozilla.org,s0.awsstatic.com,d1.awsstatic.com,images-na.ssl-images-amazon.com,m.media-amazon.com,player.live-video.net,one-piece.com,lol.secure.dyn.riotcdn.net,www.lovelive-anime.jp,academy.nvidia.com,dl.google.com,www.google-analytics.com,www.caltech.edu,www.calstatela.edu,www.suny.edu,www.suffolk.edu,www.python.org,vuejs-jp.org,vuejs.org,zh-hk.vuejs.org,react.dev,www.java.com,www.oracle.com,www.mysql.com,www.mongodb.com,redis.io,cname.vercel-dns.com,vercel-dns.com,www.swift.com,www.cisco.com,www.asus.com,www.samsung.com,www.amd.com,www.umcg.nl,www.fom-international.com,www.u-can.co.jp,github.io"
     if [[ -n "${realityServerName}" && -z "${lastInstallationConfig}" ]]; then
         if echo ${realityDestDomainList} | grep -q "${realityServerName}"; then
@@ -17281,10 +17085,8 @@ menu() {
     echoContent yellow "7.$(t MENU_USER)"
     echoContent yellow "8.$(t MENU_DISGUISE)"
     echoContent yellow "9.$(t MENU_CERT)"
-    echoContent yellow "10.$(t MENU_CDN)"
     echoContent yellow "11.$(t MENU_ROUTING)"
     echoContent yellow "12.$(t MENU_ADD_PORT)"
-    echoContent yellow "13.$(t MENU_BT)"
     echoContent skyBlue "-------------------------$(t MENU_VERSION_MGMT)-----------------------------"
     echoContent yellow "16.$(t MENU_CORE)"
     echoContent yellow "17.$(t MENU_UPDATE_SCRIPT)"
@@ -17327,17 +17129,11 @@ menu() {
     9)
         renewalTLS 1
         ;;
-    10)
-        manageCDN 1
-        ;;
     11)
         routingToolsMenu 1
         ;;
     12)
         addCorePort 1
-        ;;
-    13)
-        btTools 1
         ;;
     14)
         switchAlpn 1

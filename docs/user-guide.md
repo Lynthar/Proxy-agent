@@ -683,6 +683,54 @@ W: ... Key is stored in legacy trusted.gpg keyring (/etc/apt/trusted.gpg)
 
 如果你的 obfs 密码只有字母数字，旧订阅本来就是对的，**不用动**。
 
+### CDN 节点管理（菜单 10）已下线
+
+**适用对象**：之前用过菜单 10 设置过 CDN 优选 IP / 域名的用户。
+
+**为什么删**：
+
+- Cloudflare 政策进一步收紧，**明确禁止**把它的 CDN 当代理使用，社区道德层面对这种用法也不认可
+- CDN 优选对中国大陆用户的实际收益**因网络环境差异很大**，并非通用提速
+- 想优选回源 IP 的用户更应该走 Cloudflare Workers / 自建中转 / 商业 CDN，而不是绕 Cloudflare 免费版的 ToS
+
+**自动迁移**：**不动你的现有设置**。订阅生成路径（`subscribe()`）仍然读 `/etc/Proxy-agent/cdn` 文件，已设过 CDN 的用户**订阅链接不变**——只是失去 UI 入口。
+
+**清除/修改 CDN 设置**：
+
+```bash
+# 完全清除 CDN，订阅恢复用 VPS 直连域名
+rm /etc/Proxy-agent/cdn
+
+# 或者改为新的 CDN 域名 / IP
+echo "your.new.domain.or.ip" > /etc/Proxy-agent/cdn
+
+pasly  # → 7 → 2  重新查看订阅，确认链接更新
+```
+
+### BT 下载管理（菜单 13）已下线
+
+**适用对象**：之前用过菜单 13 启用过「禁止下载 BT」的 Xray 用户。
+
+**为什么删**：
+
+- VPS 主机商是否禁 BT 这件事，用户在购买时本就该自己了解；如果确实不允许，自己用的时候注意点就行了
+- 仅 Xray 支持，sing-box 用户用不上
+- 维护一个仅 Xray、仅 niche 场景的菜单不划算
+
+**自动迁移**：**Xray 09_routing.json 里的 BT 屏蔽规则继续生效**——已经启用过的用户，BT 仍然被丢入 blackhole_out（保留你原来的意图）。
+
+**关闭 BT 屏蔽（如果想恢复）**：
+
+```bash
+jq '.routing.rules |= map(select((.outboundTag != "blackhole_out") or (.protocol // [] | index("bittorrent") | not)))' \
+   /etc/Proxy-agent/xray/conf/09_routing.json > /tmp/x \
+&& mv /tmp/x /etc/Proxy-agent/xray/conf/09_routing.json
+
+pasly  # → 16 → 重启 Xray
+```
+
+> 这条 jq 只删除「outboundTag=blackhole_out **且** protocol 包含 bittorrent」的规则，不影响其它 blackhole 规则（如 SNI 反向代理用的）。
+
 ### 域名黑名单功能（菜单 15）已下线
 
 **适用对象**：之前用过菜单 15 添加过域名屏蔽规则的用户。
