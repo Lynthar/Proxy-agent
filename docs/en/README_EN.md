@@ -9,7 +9,7 @@ One-click installer and management menu for Xray-core / sing-box multi-protocol 
 ## Quick Install
 
 ```bash
-wget -P /root -N https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/install.sh && chmod 700 /root/install.sh && /root/install.sh
+wget -P /root -N https://github.com/Lynthar/Proxy-agent/releases/latest/download/install.sh && chmod 700 /root/install.sh && /root/install.sh
 ```
 
 > **Alpine users: run `apk add bash wget` first** (the script requires bash).

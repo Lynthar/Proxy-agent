@@ -65,7 +65,7 @@ sudo -i
 复制以下命令，粘贴到终端中并回车执行：
 
 ```bash
-wget -P /root -N https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/install.sh && chmod 700 /root/install.sh && /root/install.sh
+wget -P /root -N https://github.com/Lynthar/Proxy-agent/releases/latest/download/install.sh && chmod 700 /root/install.sh && /root/install.sh
 ```
 
 > **网络问题？** 如果下载失败，可能是您的服务器无法访问 GitHub。可以尝试使用加速镜像或手动上传脚本文件。

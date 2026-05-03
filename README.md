@@ -10,7 +10,7 @@ Xray-core / sing-box 多协议代理一键安装脚本。基于 [v2ray-agent](ht
 ## 快速安装
 
 ```bash
-wget -P /root -N https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/install.sh && chmod 700 /root/install.sh && /root/install.sh
+wget -P /root -N https://github.com/Lynthar/Proxy-agent/releases/latest/download/install.sh && chmod 700 /root/install.sh && /root/install.sh
 ```
 
 > **Alpine 用户请先执行 `apk add bash wget`**（脚本依赖 bash）。

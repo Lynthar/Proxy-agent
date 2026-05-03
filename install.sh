@@ -3109,24 +3109,40 @@ nginxBlog() {
         fi
 
         if [[ "${nginxBlogInstallStatus}" == "y" ]]; then
-            rm -rf "${nginxStaticPath}"*
             # 随机选择模板
             randomNum=$(randomNum 0 $((templateCount - 1)))
             local selectedTemplate="${templates[$randomNum]}"
 
-            # 下载并解压仓库
+            # 下载并解压仓库（必须先全部成功才动 nginxStaticPath，
+            # 否则下载失败会清空伪装站留空目录）
             mkdir -p "${tempDir}"
+            local _wgetExit=0
             if [[ "${release}" == "alpine" ]]; then
-                wget -q -O "${tempDir}/repo.zip" "${repoUrl}"
+                wget -q -O "${tempDir}/repo.zip" "${repoUrl}" || _wgetExit=$?
             else
-                wget -q ${wgetShowProgressStatus} -O "${tempDir}/repo.zip" "${repoUrl}"
+                wget -q ${wgetShowProgressStatus} -O "${tempDir}/repo.zip" "${repoUrl}" || _wgetExit=$?
+            fi
+            if [[ ${_wgetExit} -ne 0 ]] || [[ ! -s "${tempDir}/repo.zip" ]]; then
+                echoContent red " ---> 下载伪装站模板失败，保留现有内容不变"
+                rm -rf "${tempDir}"
+                return 1
+            fi
+            if ! unzip -q -o "${tempDir}/repo.zip" -d "${tempDir}"; then
+                echoContent red " ---> 解压伪装站模板失败，保留现有内容不变"
+                rm -rf "${tempDir}"
+                return 1
+            fi
+            local _srcDir="${tempDir}/website-examples-main/${selectedTemplate}"
+            if [[ ! -d "${_srcDir}" ]]; then
+                echoContent red " ---> 模板目录缺失 ${_srcDir}，保留现有内容不变"
+                rm -rf "${tempDir}"
+                return 1
             fi
 
-            unzip -q -o "${tempDir}/repo.zip" -d "${tempDir}"
-
-            # 复制模板到目标目录
+            # 至此下载+解压都已通过，可以安全替换静态目录
+            rm -rf "${nginxStaticPath}"*
             mkdir -p "${nginxStaticPath}"
-            cp -rf "${tempDir}/website-examples-main/${selectedTemplate}/"* "${nginxStaticPath}"
+            cp -rf "${_srcDir}/"* "${nginxStaticPath}"
 
             # 创建 check 标记文件
             echo "${selectedTemplate}" > "${nginxStaticPath}/check"
@@ -3140,21 +3156,36 @@ nginxBlog() {
         randomNum=$(randomNum 0 $((templateCount - 1)))
         local selectedTemplate="${templates[$randomNum]}"
 
-        rm -rf "${nginxStaticPath}"*
         mkdir -p "${tempDir}"
 
-        # 下载并解压仓库
+        # 下载并解压仓库（与上方同款：必须先全部成功才动 nginxStaticPath）
+        local _wgetExit=0
         if [[ "${release}" == "alpine" ]]; then
-            wget -q -O "${tempDir}/repo.zip" "${repoUrl}"
+            wget -q -O "${tempDir}/repo.zip" "${repoUrl}" || _wgetExit=$?
         else
-            wget -q ${wgetShowProgressStatus} -O "${tempDir}/repo.zip" "${repoUrl}"
+            wget -q ${wgetShowProgressStatus} -O "${tempDir}/repo.zip" "${repoUrl}" || _wgetExit=$?
+        fi
+        if [[ ${_wgetExit} -ne 0 ]] || [[ ! -s "${tempDir}/repo.zip" ]]; then
+            echoContent red " ---> 下载伪装站模板失败，保留现有内容不变"
+            rm -rf "${tempDir}"
+            return 1
+        fi
+        if ! unzip -q -o "${tempDir}/repo.zip" -d "${tempDir}"; then
+            echoContent red " ---> 解压伪装站模板失败，保留现有内容不变"
+            rm -rf "${tempDir}"
+            return 1
+        fi
+        local _srcDir="${tempDir}/website-examples-main/${selectedTemplate}"
+        if [[ ! -d "${_srcDir}" ]]; then
+            echoContent red " ---> 模板目录缺失 ${_srcDir}，保留现有内容不变"
+            rm -rf "${tempDir}"
+            return 1
         fi
 
-        unzip -q -o "${tempDir}/repo.zip" -d "${tempDir}"
-
-        # 复制模板到目标目录
+        # 至此下载+解压都已通过，可以安全替换静态目录
+        rm -rf "${nginxStaticPath}"*
         mkdir -p "${nginxStaticPath}"
-        cp -rf "${tempDir}/website-examples-main/${selectedTemplate}/"* "${nginxStaticPath}"
+        cp -rf "${_srcDir}/"* "${nginxStaticPath}"
 
         # 创建 check 标记文件
         echo "${selectedTemplate}" > "${nginxStaticPath}/check"
@@ -6936,27 +6967,37 @@ updateNginxBlog() {
 
         echoContent yellow " ---> 正在下载模板 [${selectedName}]..."
 
-        rm -rf "${nginxStaticPath}"*
         mkdir -p "${tempDir}"
 
-        # 下载并解压仓库
+        # 下载并解压仓库（必须先全部成功才动 nginxStaticPath，否则下载失败会清空已有伪装站留空目录）
+        # 旧实现的 [[ ! -f file ]] 检查无效——wget -O 总会创建文件（即使内容为空 / HTML 错误页）
+        local _wgetExit=0
         if [[ "${release}" == "alpine" ]]; then
-            wget -q -O "${tempDir}/repo.zip" "${repoUrl}"
+            wget -q -O "${tempDir}/repo.zip" "${repoUrl}" || _wgetExit=$?
         else
-            wget -q ${wgetShowProgressStatus} -O "${tempDir}/repo.zip" "${repoUrl}"
+            wget -q ${wgetShowProgressStatus} -O "${tempDir}/repo.zip" "${repoUrl}" || _wgetExit=$?
         fi
-
-        if [[ ! -f "${tempDir}/repo.zip" ]]; then
-            echoContent red " ---> 下载失败，请检查网络连接"
+        if [[ ${_wgetExit} -ne 0 ]] || [[ ! -s "${tempDir}/repo.zip" ]]; then
+            echoContent red " ---> 下载伪装站模板失败，保留现有内容不变"
+            rm -rf "${tempDir}"
+            exit 1
+        fi
+        if ! unzip -q -o "${tempDir}/repo.zip" -d "${tempDir}"; then
+            echoContent red " ---> 解压伪装站模板失败，保留现有内容不变"
+            rm -rf "${tempDir}"
+            exit 1
+        fi
+        local _srcDir="${tempDir}/website-examples-main/${selectedTemplate}"
+        if [[ ! -d "${_srcDir}" ]]; then
+            echoContent red " ---> 模板目录缺失 ${_srcDir}，保留现有内容不变"
             rm -rf "${tempDir}"
             exit 1
         fi
 
-        unzip -q -o "${tempDir}/repo.zip" -d "${tempDir}"
-
-        # 复制模板到目标目录
+        # 至此下载+解压都已通过，可以安全替换静态目录
+        rm -rf "${nginxStaticPath}"*
         mkdir -p "${nginxStaticPath}"
-        cp -rf "${tempDir}/website-examples-main/${selectedTemplate}/"* "${nginxStaticPath}"
+        cp -rf "${_srcDir}/"* "${nginxStaticPath}"
 
         # 创建 check 标记文件
         echo "${selectedTemplate}" > "${nginxStaticPath}/check"
@@ -7000,6 +7041,13 @@ addCorePort() {
         read -r -p "请输入端口号:" newPort
         read -r -p "请输入默认的端口号，同时会更改订阅端口以及节点端口，[回车]默认443:" defaultPort
 
+        # defaultPort 校验：必须 1-65535 整数（空表示用默认 443）。非法直接退出，
+        # 不进 find 删除阶段——避免 "*default*" 内插非法字符干扰文件匹配。
+        if [[ -n "${defaultPort}" ]] && { ! [[ "${defaultPort}" =~ ^[1-9][0-9]{0,4}$ ]] || (( defaultPort > 65535 )); }; then
+            echoContent red " ---> 默认端口非法: ${defaultPort}（必须 1-65535 整数）"
+            exit 1
+        fi
+
         if [[ -n "${defaultPort}" && -n "${configPath}" ]]; then
             find "${configPath}" -maxdepth 1 -type f -name "*default*" -exec rm -f {} \;
         fi
@@ -7007,6 +7055,12 @@ addCorePort() {
         if [[ -n "${newPort}" ]]; then
 
             while read -r port; do
+                # 端口校验：每条都要 1-65535 整数。旧实现未校验，
+                # 输入 "8080,abcd,5678" 中间项会让 reloadCore 解析 JSON 失败、Xray 启不起来。
+                if [[ ! "${port}" =~ ^[1-9][0-9]{0,4}$ ]] || (( port > 65535 )); then
+                    echoContent yellow " ---> 跳过非法端口: ${port}"
+                    continue
+                fi
                 if [[ -n "${configPath}" && -n "${port}" ]]; then
                     find "${configPath}" -maxdepth 1 -type f -name "*${port}*" -exec rm -f {} \;
                 fi
@@ -15501,7 +15555,9 @@ lan-allowed-ips:
   - 0.0.0.0/0
   - ::/0
 find-process-mode: strict
-external-controller: 0.0.0.0:9090
+# external-controller 仅绑 loopback：避免共享 LAN（公司/学校/酒店 Wi-Fi）上其他设备
+# 直连 Yacd / Clash Verge API 偷节点信息或切换出口。Yacd/Verge 在本机运行，loopback 够用。
+external-controller: 127.0.0.1:9090
 
 geox-url:
   geoip: "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat"
@@ -15513,7 +15569,7 @@ geo-update-interval: 24
 external-controller-cors:
   allow-private-network: true
 
-global-client-fingerprint: chrome
+# global-client-fingerprint 已被 mihomo 弃用；每个 proxy 内部已显式声明 client-fingerprint。
 
 profile:
   store-selected: true
