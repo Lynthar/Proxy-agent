@@ -1065,4 +1065,4 @@ MSG_DOCTOR_DETAIL_REALITY_ONLY="Reality protocols only (no ACME certificate requ
 MSG_DOCTOR_DETAIL_NO_TLS="TLS certificate directory not found"
 MSG_DOCTOR_DETAIL_NOT_CENTOS="Not CentOS / RHEL"
 MSG_DOCTOR_SUMMARY="Summary"
-MSG_DOCTOR_FOOTER_HINT="Note: this is a read-only diagnostic. To fix issues, use the relevant menu option or see documents/developer-guide.md"
+MSG_DOCTOR_FOOTER_HINT="Note: this is a read-only diagnostic. To fix issues, use the relevant menu option or see docs/developer-guide.md"

@@ -13,7 +13,8 @@
 7. [外部节点管理](#外部节点管理)
 8. [常用功能速查](#常用功能速查)
 9. [故障排查指南](#故障排查指南)
-10. [常见问题解答](#常见问题解答)
+10. [升级与迁移提示](#升级与迁移提示)
+11. [常见问题解答](#常见问题解答)
 
 ---
 
@@ -480,12 +481,25 @@ socks5://...       (SOCKS5)
 | 续期证书 | 9（直接进入即检查/续期） |
 | 切换语言 | 21 |
 | 卸载脚本 | 20 |
+| 系统诊断（只读体检） | 23 或 `pasly doctor` |
+| 计划模式（预演操作不真改系统） | `pasly --dry-run` 或 `DRY_RUN=1 pasly` |
 
 > 菜单 16 的子选项编号 Xray-core 与 sing-box 不一致：以"按提示选择"为准，下列编号是当前版本实际值。
 
 ---
 
 ## 故障排查指南
+
+### 第一步：跑一次系统诊断
+
+遇到任何问题，先跑一遍系统诊断（只读检测，不会动配置）：
+
+```bash
+pasly doctor
+# 或在菜单里选 23
+```
+
+会按 **系统 / 安装 / 内核 / 配置 / 网络 / 证书 / 防火墙** 七段输出 PASS / WARN / FAIL / SKIP，最后给一个汇总行。哪一段红字 FAIL 就先看那段——能省下大量盲找时间。
 
 ### 服务无法启动
 
@@ -627,6 +641,71 @@ socks5://...       (SOCKS5)
 
 ---
 
+## 升级与迁移提示
+
+下面是从旧版本升级时**可能注意到**的行为变化。这里只列出真正会让用户看到不同/需要动手的项；其它修复对最终用户透明，不必关心。
+
+### Cloudflare WARP：升级后 `apt update` 可能有 legacy keyring 警告
+
+**适用对象**：之前用过菜单 11 安装过 WARP，并且系统是 Debian / Ubuntu 的用户。
+
+**现象**：升级到新脚本之后再跑 `apt update` 看到一行
+```
+W: ... Key is stored in legacy trusted.gpg keyring (/etc/apt/trusted.gpg)
+```
+
+**原因**：旧版脚本用的是已经被 Debian 12 / Ubuntu 24.04 移除的 `apt-key add` 命令，把 Cloudflare 公钥写进了老的 `/etc/apt/trusted.gpg`。新版脚本改用现代的 `signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg`，并在每次安装时重新拉取最新公钥（应对 Cloudflare 的 key rotation——例如 2025-12-04 的那次）。
+
+**要不要处理**：
+- **不影响功能**——警告只是提示老 key 还在传统钥匙串里没清掉，新仓库的签名校验已经走新 key。
+- 想消除警告的话，手动执行：
+  ```bash
+  # 列出所有老 key
+  apt-key list 2>/dev/null | grep -B1 -A1 -i "cloudflare\|warp"
+  # 找到 fingerprint 后删除（命令在 Debian 12 / Ubuntu 24.04 上不存在，直接删除文件即可）
+  apt-key del <fingerprint>
+  # 或者如果系统已经移除 apt-key：
+  sudo rm -f /etc/apt/trusted.gpg
+  ```
+
+### Hysteria2：obfs 密码含特殊字符的用户请重新生成订阅
+
+**适用对象**：装了 Hysteria2 协议、且 obfs 密码里**包含 `"`、`\`、`%`、空格或其它非字母数字字符**的用户。
+
+**现象**：旧版本生成的订阅链接、二维码可能漏掉 obfs 字段，或 obfs 密码被截断/转义错误，导致客户端连不上、或连上了没启用混淆。
+
+**原因**：旧版本对 obfs 密码的 JSON 转义和 URL 编码不到位（commit `99a2854` / `147c922` 修复）。
+
+**怎么处理**：升级后做一次：
+1. `pasly` → `7. 用户管理` → `2. 查看订阅`
+2. 把新生成的订阅链接重新导入客户端（V2rayN / Clash 等）
+3. obfs 密码本身不需要改，重新生成订阅即可。
+
+如果你的 obfs 密码只有字母数字，旧订阅本来就是对的，**不用动**。
+
+### sing-box ≥ 1.11 / 1.13 配置 schema 演进
+
+**适用对象**：自己手动改过 sing-box 配置文件、或者使用很旧版本（脚本之前的）安装了 sing-box 的用户。
+
+**现象**：升级 sing-box 内核到 1.13+ 后，老配置可能因 `domain_strategy` / `default_domain_resolver` / `sniff` schema 变更而 FATAL 拒绝启动。
+
+**怎么处理**：
+- 脚本本身在多次 commit（`f718bdd` / `a7e56b2` / `3152def`）已自动剥离/迁移这些字段，跑一次 `pasly doctor` 看 Config 段是否 PASS 即可
+- 如果 FAIL：菜单 9 重装一次受影响的协议、或菜单 22 → 4 找一个旧版本备份回滚
+
+### 新增的可用工具
+
+```bash
+pasly doctor          # 只读系统诊断（菜单 23 同义）
+pasly --dry-run       # 预演模式：装/卸/链式代理操作只打印计划，不真改系统
+pasly -n              # 同上简写
+DRY_RUN=1 pasly       # 同上（环境变量形式）
+```
+
+dry-run 模式覆盖菜单 1 / 2 / 3 / 19 / 20 的入口；菜单 4-18、22 的子菜单**仍会真实操作**，需要留意。
+
+---
+
 ## 常见问题解答
 
 ### Q: 可以同时安装多个协议吗？
@@ -698,6 +777,9 @@ tar -czvf proxy-backup.tar.gz /etc/Proxy-agent/
 | 命令 | 功能 |
 |------|------|
 | `pasly` | 打开脚本菜单 |
+| `pasly doctor` | 只读系统诊断（不进菜单、不更新检查） |
+| `pasly --dry-run` 或 `DRY_RUN=1 pasly` | 进入计划模式，装卸操作只打印不执行 |
+| `cat /etc/Proxy-agent/VERSION` | 查看当前已装版本号 |
 | `systemctl status xray` | 查看 Xray 服务状态 |
 | `systemctl status sing-box` | 查看 sing-box 服务状态 |
 | `systemctl restart xray` | 重启 Xray 服务 |

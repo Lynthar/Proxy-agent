@@ -6,7 +6,7 @@ labels: bug
 assignees: ''
 ---
 
-> 提交前请先查看 [README](../../README.md) 与 [使用指南](../../documents/user-guide.md)。
+> 提交前请先查看 [README](../../README.md) 与 [使用指南](../../docs/user-guide.md)。
 
 ## 1. 问题描述
 

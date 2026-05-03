@@ -20,7 +20,7 @@ checkCentosSELinux() {
     if command -v getenforce >/dev/null 2>&1 && [[ "$(getenforce)" == "Enforcing" ]]; then
         echoContent yellow "# $(t NOTICE)"
         echoContent yellow "$(t SYS_SELINUX_NOTICE)"
-        echoContent yellow "https://github.com/Lynthar/Proxy-agent/blob/master/documents/selinux.md"
+        echoContent yellow "https://github.com/Lynthar/Proxy-agent/blob/master/docs/selinux.md"
         exit 1
     fi
 }
