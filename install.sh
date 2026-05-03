@@ -1832,7 +1832,13 @@ unInstallSingBox() {
             rm "${singBoxConfigPath}06_hysteria2_inbounds.json"
             echoContent green " ---> 删除sing-box hysteria2配置成功"
         fi
-        rm "${singBoxConfigPath}config.json"
+        # 删除合并后的 config.json，让 handleSingBox start 走 singBoxMergeConfig
+        # 重新生成。注意：${singBoxConfigPath} 是 .../sing-box/conf/config/（片段目录），
+        # 真正的合并文件在它的上一级 .../sing-box/conf/config.json（旧实现误删 conf/config/config.json
+        # 那个不存在的路径，rm 静默失败、靠后续 singBoxMergeConfig 原子覆盖兜底；
+        # 这里改成显式绝对路径 + -f，保证「stop 之后、start 之前」窗口中如果有人手动
+        # 启动 sing-box，不会读到含已删除片段的旧合并配置）。
+        rm -f /etc/Proxy-agent/sing-box/conf/config.json
     fi
 
     readInstallType
@@ -2339,14 +2345,41 @@ installWarp() {
     fi
 
     ${installType} gnupg2 -y >/dev/null 2>&1
-    if [[ "${release}" == "debian" ]]; then
-        curl -s https://pkg.cloudflareclient.com/pubkey.gpg | sudo apt-key add - >/dev/null 2>&1
-        echo "deb https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null 2>&1
-        sudo apt update >/dev/null 2>&1
-
-    elif [[ "${release}" == "ubuntu" ]]; then
-        curl -s https://pkg.cloudflareclient.com/pubkey.gpg | sudo apt-key add - >/dev/null 2>&1
-        echo "deb https://pkg.cloudflareclient.com/ focal main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null 2>&1
+    # Cloudflare WARP 仓库装签：
+    # 1) `apt-key add` 在 Debian 12 / Ubuntu 24.04 已被**移除**（不只是 deprecated），
+    #    旧实现在新版系统上会静默失败，导致后续 `apt install cloudflare-warp` 因 NO_PUBKEY 失败，
+    #    最终用户看到的只是 "安装WARP失败"，没有诊断信息。
+    # 2) `pkg.cloudflareclient.com/pubkey.gpg` 公钥每次轮转后旧 key 会被 retire
+    #    （上次 2025-09-12 轮转、2025-12-04 旧 key 完全失效），所以每次安装重新拉取，
+    #    避免装错 key 后 apt update 401。
+    # 3) 走现代 `signed-by=` + `/usr/share/keyrings/` 的 deb822 风格，与 Debian/Ubuntu 当前
+    #    官方推荐做法一致（参考 Cloudflare 官方包管理博客与 Debian 11+ 文档）。
+    if [[ "${release}" == "debian" || "${release}" == "ubuntu" ]]; then
+        local _warpKeyring="/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg"
+        local _warpCodename
+        if [[ "${release}" == "ubuntu" ]]; then
+            # Cloudflare 上游目前只为 focal codename 发包，新版 Ubuntu 用 focal 二进制兼容
+            # （沿用上游 mack-a/v2ray-agent 与 Cloudflare 社区主流做法）。
+            _warpCodename="focal"
+        else
+            _warpCodename="$(lsb_release -cs)"
+        fi
+        sudo install -m 0755 -d /usr/share/keyrings
+        sudo rm -f "${_warpKeyring}"
+        if ! curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | \
+                sudo gpg --yes --dearmor --output "${_warpKeyring}" 2>/dev/null; then
+            echoContent red " ---> 下载/解析 Cloudflare WARP 公钥失败，请检查网络与 gnupg2 安装"
+            exit 1
+        fi
+        if [[ ! -s "${_warpKeyring}" ]]; then
+            echoContent red " ---> Cloudflare WARP 公钥落盘为空，安装中止"
+            exit 1
+        fi
+        sudo chmod a+r "${_warpKeyring}"
+        # 旧版残留：把先前可能写过的 trusted.gpg 形态删掉，避免新旧 key 同时存在导致 apt 警告
+        sudo rm -f /etc/apt/trusted.gpg.d/cloudflare-warp-archive-keyring.gpg 2>/dev/null
+        echo "deb [signed-by=${_warpKeyring}] https://pkg.cloudflareclient.com/ ${_warpCodename} main" | \
+            sudo tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null
         sudo apt update >/dev/null 2>&1
 
     elif [[ "${release}" == "centos" ]]; then
@@ -6057,7 +6090,7 @@ EOF
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40${currentHost}%3A${port}%3Fencryption%3Dnone%26fp%3Dchrome%26security%3Dtls%26type%3Dtcp%26${currentHost}%3D${currentHost}%26headerType%3Dnone%26sni%3D${currentHost}%26flow%3Dxtls-rprx-vision%23${email}\n"
 
     elif [[ "${type}" == "vmessws" ]]; then
-        qrCodeBase64Default=$(echo -n "{\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"ws\",\"add\":\"${add}\",\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}" | base64 -w 0)
+        qrCodeBase64Default=$(echo -n "{\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"ws\",\"add\":\"${add}\",\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}" | base64 | tr -d '\n')
         qrCodeBase64Default="${qrCodeBase64Default// /}"
 
         echoContent yellow " ---> 通用json(VMess+WS+TLS)"
@@ -6449,7 +6482,7 @@ EOF
         echoContent yellow " ---> 二维码 Naive(TLS)"
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=naive%2Bhttps%3A%2F%2F${email}%3A${id}%40${currentHost}%3A${port}%3Fpadding%3Dtrue%23${email}\n"
     elif [[ "${type}" == "vmessHTTPUpgrade" ]]; then
-        qrCodeBase64Default=$(echo -n "{\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"httpupgrade\",\"add\":\"${add}\",\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}" | base64 -w 0)
+        qrCodeBase64Default=$(echo -n "{\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"httpupgrade\",\"add\":\"${add}\",\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}" | base64 | tr -d '\n')
         qrCodeBase64Default="${qrCodeBase64Default// /}"
 
         echoContent yellow " ---> 通用json(VMess+HTTPUpgrade+TLS)"
@@ -16223,7 +16256,7 @@ subscribe() {
                     updateRemoteSubscribe "${emailMd5}" "${email}"
                 fi
                 local base64Result
-                base64Result=$(base64 -w 0 "/etc/Proxy-agent/subscribe/default/${emailMd5}")
+                base64Result=$(base64 < "/etc/Proxy-agent/subscribe/default/${emailMd5}" | tr -d '\n')
                 echo "${base64Result}" >"/etc/Proxy-agent/subscribe/default/${emailMd5}"
                 echoContent yellow "--------------------------------------------------------------"
                 local currentDomain=${currentHost}
@@ -16662,7 +16695,7 @@ manageReality() {
     readCustomPort
     readSingBoxConfig
 
-    if ! echo "${currentInstallProtocolType}" | grep -q -E "7,|8," || [[ -z "${coreKind}" ]]; then
+    if ! echo "${currentInstallProtocolType}" | grep -q -E ",7,|,8," || [[ -z "${coreKind}" ]]; then
         echoContent red "\n ---> 请先安装Reality协议，并确认已配置可用的 serverName/公钥。"
         exit 1
     fi
