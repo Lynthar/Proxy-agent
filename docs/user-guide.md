@@ -683,6 +683,36 @@ W: ... Key is stored in legacy trusted.gpg keyring (/etc/apt/trusted.gpg)
 
 如果你的 obfs 密码只有字母数字，旧订阅本来就是对的，**不用动**。
 
+### 域名黑名单功能（菜单 15）已下线
+
+**适用对象**：之前用过菜单 15 添加过域名屏蔽规则的用户。
+
+**为什么删**：服务端做域名屏蔽对个人代理用例价值很低——客户端 Clash / sing-box 客户端 / NekoBox 的 rule 系统本来就更灵活、控制粒度更细。同时实现里用的 `block` outbound 在 sing-box 1.13 已彻底删除，留着会让 `sing-box check` FATAL，整个 sing-box 起不来。综合下来直接下线最干净。
+
+**自动迁移**：sing-box 侧——脚本下次启动并 merge 配置时，会自动移除以下 5 个废弃片段（不需要你手动做）：
+
+```
+/etc/Proxy-agent/sing-box/conf/config/{block_domain_outbound,block_domain_route,
+                                       cn_block_outbound,cn_block_route,
+                                       cn_01_google_play_route}.json
+```
+
+**Xray 侧不会被自动清理**：你的 `09_routing.json` 里指向 `blackhole_out` 的规则**仍然正常工作**，流量行为不变；只是失去 UI 管理能力。如果你已经不想要这些规则，手动跑：
+
+```bash
+jq '.routing.rules |= map(select(.outboundTag != "blackhole_out" or has("protocol")))' \
+   /etc/Proxy-agent/xray/conf/09_routing.json > /tmp/x \
+&& mv /tmp/x /etc/Proxy-agent/xray/conf/09_routing.json
+pasly  # → 16 → 重启
+```
+
+> `has("protocol")` 那段是为了**保留** BT 屏蔽规则（它也用 blackhole_out 但带 protocol 字段，是另一个菜单的合法功能）。
+
+**迁移到客户端做**：如果你确实需要域名屏蔽，在客户端层做更合适：
+- Clash / mihomo：在 `rules` 段加 `DOMAIN-SUFFIX,baidu.com,REJECT`
+- sing-box 客户端：route rule + `action: reject`
+- NekoBox / Hiddify：路由规则界面直接配
+
 ### sing-box ≥ 1.11 / 1.13 配置 schema 演进
 
 **适用对象**：自己手动改过 sing-box 配置文件、或者使用很旧版本（脚本之前的）安装了 sing-box 的用户。

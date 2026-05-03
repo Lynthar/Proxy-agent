@@ -521,7 +521,6 @@ if ! type t &>/dev/null; then
     MSG_MENU_ROUTING="分流工具"
     MSG_MENU_ADD_PORT="添加新端口"
     MSG_MENU_BT="BT 下载管理"
-    MSG_MENU_BLACKLIST="域名黑名单"
     MSG_MENU_CORE="Core 管理"
     MSG_MENU_UPDATE_SCRIPT="更新脚本"
     MSG_MENU_BBR="安装 BBR、DD 脚本"
@@ -3765,7 +3764,7 @@ WorkingDirectory=/root
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
 ExecStart=${execStart}
-ExecReload=/bin/kill -HUP $MAINPID
+ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
 RestartSec=10
 LimitNPROC=infinity
@@ -4530,42 +4529,6 @@ initTuicProtocol() {
 }
 
 # 初始化singbox route配置
-initSingBoxRouteConfig() {
-    downloadSingBoxGeositeDB
-    local outboundTag=$1
-    if [[ ! -f "${singBoxConfigPath}${outboundTag}_route.json" ]]; then
-        cat <<EOF >"${singBoxConfigPath}${outboundTag}_route.json"
-{
-    "route": {
-        "geosite": {
-            "path": "${singBoxConfigPath}geosite.db"
-        },
-        "rules": [
-            {
-                "domain": [
-                ],
-                "geosite": [
-                ],
-                "outbound": "${outboundTag}"
-            }
-        ]
-    }
-}
-EOF
-    fi
-}
-# 下载sing-box geosite db
-downloadSingBoxGeositeDB() {
-    if [[ ! -f "${singBoxConfigPath}geosite.db" ]]; then
-        if [[ "${release}" == "alpine" ]]; then
-            wget -q -P "${singBoxConfigPath}" https://github.com/Johnshall/sing-geosite/releases/latest/download/geosite.db
-        else
-            wget -q ${wgetShowProgressStatus} -P "${singBoxConfigPath}" https://github.com/Johnshall/sing-geosite/releases/latest/download/geosite.db
-        fi
-
-    fi
-}
-
 # 初始化sing-box规则配置（检查geosite可用性）
 # 参数1: 域名列表(逗号分隔)
 # 参数2: 路由名称后缀
@@ -4706,18 +4669,6 @@ EOF
      "outbounds": [
         {
              "type": "direct",
-             "tag": "${tag}"
-        }
-    ]
-}
-EOF
-    elif echo "${tag}" | grep -q "block"; then
-
-        cat <<EOF >"${singBoxConfigPath}${tag}.json"
-{
-     "outbounds": [
-        {
-             "type": "block",
              "tag": "${tag}"
         }
     ]
@@ -5054,6 +5005,21 @@ singBoxMergeConfig() {
     local targetFile="/etc/Proxy-agent/sing-box/conf/config.json"
     local fragmentDir="/etc/Proxy-agent/sing-box/conf/config/"
     local tmpFile mergeOutput mergeResult checkOutput checkResult
+
+    # 一次性迁移：移除已下线的「菜单 15 域名黑名单」遗留片段。
+    # block 类 outbound 在 sing-box 1.13 已彻底删除，留着会让后续 sing-box check FATAL。
+    # 没用过黑名单菜单的用户这些文件不存在；什么都不打印。
+    local _orphanFile _orphanCleaned=0
+    for _orphanFile in block_domain_outbound block_domain_route \
+                       cn_block_outbound cn_block_route cn_01_google_play_route; do
+        if [[ -f "${fragmentDir}${_orphanFile}.json" ]]; then
+            rm -f "${fragmentDir}${_orphanFile}.json"
+            _orphanCleaned=1
+        fi
+    done
+    if [[ ${_orphanCleaned} -eq 1 ]]; then
+        echoContent yellow " ---> 已移除已废弃的「域名黑名单」配置片段（功能已下线，详见用户指南升级与迁移提示）"
+    fi
 
     if ! tmpFile=$(mktemp /tmp/Proxy-agent-singbox-merge-XXXXXX.json); then
         echoContent red " ---> sing-box 配置合并失败：无法创建临时文件"
@@ -8918,94 +8884,14 @@ EOF
     reloadCore
 }
 
-# 域名黑名单
-blacklist() {
-    if [[ -z "${configPath}" ]]; then
-        echoContent red " ---> 未安装，请使用脚本安装"
-        menu
-        exit 1
-    fi
+# 域名黑名单功能（菜单 15）已下线：
+#   - sing-box 1.13 移除 "type": "block" outbound，旧实现会让 sing-box check FATAL
+#   - 服务端域名屏蔽对个人代理用例价值低（客户端 Clash/sing-box rule 更灵活）
+#   - 旧 sing-box 片段（block_domain_*, cn_block_*, cn_01_google_play_route）
+#     由 singBoxMergeConfig 顶部的一次性清理负责移除
+#   - Xray 侧 09_routing.json 里指向 blackhole_out 的规则保留——它们仍正常工作，
+#     用户失去 UI 管理但流量行为不变（强行清理会违背用户原意图）
 
-    echoContent skyBlue "\n进度  $1/${totalProgress} : 域名黑名单"
-    echoContent red "\n=============================================================="
-    echoContent yellow "1.查看已屏蔽域名"
-    echoContent yellow "2.添加域名"
-    echoContent yellow "3.屏蔽大陆域名"
-    echoContent yellow "4.卸载黑名单"
-    echoContent red "=============================================================="
-
-    read -r -p "请选择:" blacklistStatus
-    if [[ "${blacklistStatus}" == "1" ]]; then
-        jq -r -c '.routing.rules[]|select (.outboundTag=="blackhole_out")|.domain' ${configPath}09_routing.json | jq -r
-        exit 0
-    elif [[ "${blacklistStatus}" == "2" ]]; then
-        echoContent red "=============================================================="
-        echoContent yellow "# 注意事项\n"
-        echoContent yellow "1.规则支持预定义域名列表[https://github.com/v2fly/domain-list-community]"
-        echoContent yellow "2.规则支持自定义域名"
-        echoContent yellow "3.录入示例:speedtest,facebook,cn,example.com"
-        echoContent yellow "4.如果域名在预定义域名列表中存在则使用 geosite:xx，如果不存在则默认使用输入的域名"
-        echoContent yellow "5.添加规则为增量配置，不会删除之前设置的内容\n"
-        read -r -p "请按照上面示例录入域名:" domainList
-        if [[ "${coreKind}" == "1" ]]; then
-            addXrayRouting blackhole_out outboundTag "${domainList}"
-            addXrayOutbound blackhole_out
-        fi
-
-        if [[ -n "${singBoxConfigPath}" ]]; then
-            addSingBoxRouteRule "block_domain_outbound" "${domainList}" "block_domain_route"
-            addSingBoxOutbound "block_domain_outbound"
-            ensureDirectOutbound
-        fi
-        echoContent green " ---> 添加完毕"
-
-    elif [[ "${blacklistStatus}" == "3" ]]; then
-
-        if [[ "${coreKind}" == "1" ]]; then
-            unInstallRouting blackhole_out outboundTag
-
-            addXrayRouting blackhole_out outboundTag "cn"
-
-            addXrayOutbound blackhole_out
-        fi
-
-        if [[ -n "${singBoxConfigPath}" ]]; then
-
-            addSingBoxRouteRule "cn_block_outbound" "cn" "cn_block_route"
-
-            # Google Play 服务域名虽然在 geosite:cn 里，但必须直连（apk 更新走这些端点）
-            # outbound 必须是 "direct"（base 出站的规范 tag），而不是文件名 "01_direct_outbound"
-            # 之前用文件名是因为旧代码靠 addSingBoxOutbound "01_direct_outbound" 副作用把 base tag 污染成了 "01_direct_outbound"
-            # ensureDirectOutbound 修复污染后，rule 首参必须同步改为规范 tag
-            addSingBoxRouteRule "direct" "googleapis.com,googleapis.cn,xn--ngstr-lra8j.com,gstatic.com" "cn_01_google_play_route"
-
-            addSingBoxOutbound "cn_block_outbound"
-            ensureDirectOutbound
-        fi
-
-        echoContent green " ---> 屏蔽大陆域名完毕"
-
-    elif [[ "${blacklistStatus}" == "4" ]]; then
-        if [[ "${coreKind}" == "1" ]]; then
-            unInstallRouting blackhole_out outboundTag
-        fi
-
-        if [[ -n "${singBoxConfigPath}" ]]; then
-            removeSingBoxConfig "cn_block_route"
-            removeSingBoxConfig "cn_block_outbound"
-
-            removeSingBoxConfig "cn_01_google_play_route"
-
-            removeSingBoxConfig "block_domain_route"
-            removeSingBoxConfig "block_domain_outbound"
-        fi
-        echoContent green " ---> 域名黑名单删除完毕"
-    else
-        echoContent red " ---> 选择错误"
-        exit 1
-    fi
-    reloadCore
-}
 # 添加routing配置
 # 全量使用 jq --arg/--argjson 传值，避免 tag/domain 拼接进过滤器
 addXrayRouting() {
@@ -17399,7 +17285,6 @@ menu() {
     echoContent yellow "11.$(t MENU_ROUTING)"
     echoContent yellow "12.$(t MENU_ADD_PORT)"
     echoContent yellow "13.$(t MENU_BT)"
-    echoContent yellow "15.$(t MENU_BLACKLIST)"
     echoContent skyBlue "-------------------------$(t MENU_VERSION_MGMT)-----------------------------"
     echoContent yellow "16.$(t MENU_CORE)"
     echoContent yellow "17.$(t MENU_UPDATE_SCRIPT)"
@@ -17456,9 +17341,6 @@ menu() {
         ;;
     14)
         switchAlpn 1
-        ;;
-    15)
-        blacklist 1
         ;;
     16)
         coreVersionManageMenu 1
