@@ -78,20 +78,17 @@ jobs:
             const fs = require('fs');
             const tag = "${{ steps.version.outputs.file_version }}";
 
-            const commits = await github.rest.repos.listCommits({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              per_page: 1
-            });
-            const lastMessage = commits.data[0].commit.message;
-
+            // Release body is intentionally left empty: release notes are
+            // hand-written in markdown and pasted via the GitHub Web UI after
+            // the workflow attaches assets. Auto-filling from the last commit
+            // message produced noisy "v1.3.0 + commit subject" displays.
             let release;
             try {
               const result = await github.rest.repos.createRelease({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 tag_name: tag,
-                body: lastMessage
+                name: tag
               });
               release = result.data;
             } catch (err) {
