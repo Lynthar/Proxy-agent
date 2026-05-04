@@ -36,6 +36,7 @@ wget -P /root -N https://github.com/Lynthar/Proxy-agent/releases/latest/download
 - 外部节点：可将第三方 SS/Trojan/SOCKS5 节点接入链式代理作为出口
 - 原子化 JSON 写入 + 配置快照式备份与回滚
 - 自更新 SHA256 校验 + 失败自动回滚
+- 系统诊断（`pasly doctor`）+ dry-run 计划模式（`pasly --dry-run`）
 - 中英双语，支持菜单切换与环境变量覆盖
 
 ## 系统要求

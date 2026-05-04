@@ -65,6 +65,41 @@ jobs:
           fi
           echo "OK: $(wc -l < "$zh") keys match."
 
+      - name: every t() call resolves to a real MSG_ key
+        # Guards against two mistakes that the parity job above misses:
+        #   1) `t MSG_FOO` — t() prepends MSG_ itself, so this looks up
+        #      MSG_MSG_FOO and silently falls back to printing the raw key.
+        #   2) `t TYPO` — passes a key that exists in neither lang file.
+        # Both render the literal key to users (e.g. "23.MSG_MENU_DOCTOR"
+        # in the main menu, every doctor section header, the dry-run
+        # banner, plan-mode descriptions, ...).
+        #
+        # Match form is `$(t KEY ...)` — the only way t() is actually
+        # invoked. A loose `\bt KEY` regex would false-positive on
+        # things like `qrencode -t UTF8` and example snippets in
+        # comments.
+        run: |
+          keys=$(mktemp)
+          calls=$(mktemp)
+          grep -oE '^MSG_[A-Z0-9_]+=' shell/lang/zh_CN.sh | sed 's/^MSG_//;s/=$//' | sort -u > "$keys"
+          # Strip full-line comments first so docstring usage examples
+          # like `#   $(t ERR_PORT_OCCUPIED "${port}")` don't false-fire.
+          # Match `$(t KEY` and `$(t "KEY` — both forms are documented
+          # in lib/i18n.sh; bare form is what the codebase actually uses.
+          sed -E '/^[[:space:]]*#/d' install.sh lib/*.sh \
+            | grep -oE '\$\(t "?[A-Z][A-Z0-9_]+' \
+            | sed -E 's/^\$\(t "?//' | sort -u > "$calls"
+          missing=$(comm -23 "$calls" "$keys" || true)
+          if [[ -n "$missing" ]]; then
+            echo "::error::t() called with keys that have no MSG_<key> definition:"
+            echo "$missing" | sed 's/^/  - /'
+            echo
+            echo "Either the key is misspelled, or 't MSG_FOO' was used"
+            echo "(t() prepends MSG_ itself — pass the suffix only)."
+            exit 1
+          fi
+          echo "OK: all $(wc -l < "$calls") distinct t() keys resolve."
+
   syntax:
     name: bash -n syntax check
     runs-on: ubuntu-latest
