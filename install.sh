@@ -2030,6 +2030,12 @@ showInstallStatus() {
         if echo ${currentInstallProtocolType} | grep -q ",14,"; then
             echoContent yellow "SS2022 \c"
         fi
+        # 协议列表所有分支都用 \c 抑制换行；这里在分支结束后补一个换行，
+        # 避免后续菜单首项被拼在协议行末（fork 时删掉了上游"推广区"那条
+        # 以 \n 起始的分隔符，自然顶替这个换行的兜底也没了）。
+        if [[ -n ${currentInstallProtocolType} ]]; then
+            echo
+        fi
     fi
 }
 
@@ -7161,7 +7167,7 @@ EOF
 
 # 卸载脚本
 unInstall() {
-    if planAction "$(t MSG_PLAN_UNINSTALL)"; then return 0; fi
+    if planAction "$(t PLAN_UNINSTALL)"; then return 0; fi
     read -r -p "是否确认卸载安装内容？[y/n]:" unInstallStatus
     if [[ "${unInstallStatus}" != "y" ]]; then
         echoContent green " ---> 放弃卸载"
@@ -9447,7 +9453,7 @@ getChainPublicIP() {
 
 # 配置出口节点 (Exit)
 setupChainExit() {
-    if planAction "$(t MSG_PLAN_CHAIN_EXIT)"; then return 0; fi
+    if planAction "$(t PLAN_CHAIN_EXIT)"; then return 0; fi
     echoContent skyBlue "\n配置出口节点 (Exit)"
     echoContent red "\n=============================================================="
 
@@ -9980,7 +9986,7 @@ parseChainCode() {
 
 # 通过配置码配置入口节点
 setupChainEntryByCode() {
-    if planAction "$(t MSG_PLAN_CHAIN_ENTRY)"; then return 0; fi
+    if planAction "$(t PLAN_CHAIN_ENTRY)"; then return 0; fi
     echoContent skyBlue "\n配置入口节点 (Entry) - 配置码模式"
     echoContent red "\n=============================================================="
 
@@ -10009,7 +10015,7 @@ setupChainEntryByCode() {
 
 # 手动配置入口节点
 setupChainEntryManual() {
-    if planAction "$(t MSG_PLAN_CHAIN_ENTRY)"; then return 0; fi
+    if planAction "$(t PLAN_CHAIN_ENTRY)"; then return 0; fi
     echoContent skyBlue "\n配置入口节点 (Entry) - 手动模式"
     echoContent red "\n=============================================================="
 
@@ -10047,7 +10053,7 @@ setupChainEntryManual() {
 # 配置中继节点 (Relay)
 # 中继节点同时作为上游的"出口"（接收流量）和下游的"入口"（转发流量）
 setupChainRelay() {
-    if planAction "$(t MSG_PLAN_CHAIN_RELAY)"; then return 0; fi
+    if planAction "$(t PLAN_CHAIN_RELAY)"; then return 0; fi
     echoContent skyBlue "\n配置中继节点 (Relay)"
     echoContent red "\n=============================================================="
     echoContent yellow "中继节点工作原理:"
@@ -11742,7 +11748,7 @@ isChainNameExists() {
 
 # 多链路入口配置向导
 setupMultiChainEntry() {
-    if planAction "$(t MSG_PLAN_CHAIN_ENTRY_MULTI)"; then return 0; fi
+    if planAction "$(t PLAN_CHAIN_ENTRY_MULTI)"; then return 0; fi
     echoContent skyBlue "\n$(t CHAIN_MULTI_TITLE)"
     echoContent red "\n=============================================================="
     echoContent yellow "$(t CHAIN_MULTI_DESC)"
@@ -15153,7 +15159,7 @@ customXrayInstall() {
 
 # 选择核心安装sing-box、xray-core
 selectCoreInstall() {
-    if planAction "$(t MSG_PLAN_INSTALL)"; then return 0; fi
+    if planAction "$(t PLAN_INSTALL)"; then return 0; fi
     echoContent skyBlue "\n功能 1/${totalProgress} : 选择核心安装"
     echoContent red "\n=============================================================="
     echoContent yellow "1.Xray-core"
@@ -15218,7 +15224,7 @@ installSingBoxRealityOnly() {
 
 # 一键无域名 Reality 核心选择
 selectRealityCoreInstall() {
-    if planAction "$(t MSG_PLAN_REALITY_QUICK)"; then return 0; fi
+    if planAction "$(t PLAN_REALITY_QUICK)"; then return 0; fi
     echoContent skyBlue "\n$(t REALITY_QUICK_TITLE)"
     echoContent red "=============================================================="
     echoContent yellow "$(t REALITY_QUICK_CORE_SELECT)"
@@ -16722,19 +16728,19 @@ _doctorRow() {
     case "${status}" in
         pass)
             ((_doctor_pass++)) || true
-            statusText="$(echoContent green "[$(t MSG_DOCTOR_STATUS_PASS)]")"
+            statusText="$(echoContent green "[$(t DOCTOR_STATUS_PASS)]")"
             ;;
         warn)
             ((_doctor_warn++)) || true
-            statusText="$(echoContent yellow "[$(t MSG_DOCTOR_STATUS_WARN)]")"
+            statusText="$(echoContent yellow "[$(t DOCTOR_STATUS_WARN)]")"
             ;;
         fail)
             ((_doctor_fail++)) || true
-            statusText="$(echoContent red "[$(t MSG_DOCTOR_STATUS_FAIL)]")"
+            statusText="$(echoContent red "[$(t DOCTOR_STATUS_FAIL)]")"
             ;;
         skip|*)
             ((_doctor_skip++)) || true
-            statusText="$(echoContent yellow "[$(t MSG_DOCTOR_STATUS_SKIP)]")"
+            statusText="$(echoContent yellow "[$(t DOCTOR_STATUS_SKIP)]")"
             ;;
     esac
     if [[ -n "${detail}" ]]; then
@@ -16745,33 +16751,33 @@ _doctorRow() {
 }
 
 _doctorCheckSystem() {
-    _doctorSection "$(t MSG_DOCTOR_SECTION_SYSTEM)"
+    _doctorSection "$(t DOCTOR_SECTION_SYSTEM)"
 
     if [[ "$(id -u)" == "0" ]]; then
-        _doctorRow "$(t MSG_DOCTOR_CHECK_ROOT)" pass "uid=0"
+        _doctorRow "$(t DOCTOR_CHECK_ROOT)" pass "uid=0"
     else
-        _doctorRow "$(t MSG_DOCTOR_CHECK_ROOT)" fail "uid=$(id -u)"
+        _doctorRow "$(t DOCTOR_CHECK_ROOT)" fail "uid=$(id -u)"
     fi
 
     if [[ -r /etc/os-release ]]; then
         local osID osVer
         osID=$(. /etc/os-release && echo "${ID:-unknown}")
         osVer=$(. /etc/os-release && echo "${VERSION_ID:-?}")
-        _doctorRow "$(t MSG_DOCTOR_CHECK_OS)" pass "${osID} ${osVer}"
+        _doctorRow "$(t DOCTOR_CHECK_OS)" pass "${osID} ${osVer}"
     else
-        _doctorRow "$(t MSG_DOCTOR_CHECK_OS)" warn "/etc/os-release not found"
+        _doctorRow "$(t DOCTOR_CHECK_OS)" warn "/etc/os-release not found"
     fi
 
-    _doctorRow "$(t MSG_DOCTOR_CHECK_CPU)" pass "$(uname -m)"
+    _doctorRow "$(t DOCTOR_CHECK_CPU)" pass "$(uname -m)"
 
     local cmd missing=""
     for cmd in jq openssl curl wget; do
         command -v "${cmd}" >/dev/null 2>&1 || missing="${missing}${missing:+, }${cmd}"
     done
     if [[ -z "${missing}" ]]; then
-        _doctorRow "$(t MSG_DOCTOR_CHECK_COMMANDS)" pass "jq openssl curl wget"
+        _doctorRow "$(t DOCTOR_CHECK_COMMANDS)" pass "jq openssl curl wget"
     else
-        _doctorRow "$(t MSG_DOCTOR_CHECK_COMMANDS)" fail "missing: ${missing}"
+        _doctorRow "$(t DOCTOR_CHECK_COMMANDS)" fail "missing: ${missing}"
     fi
 
     if command -v getenforce >/dev/null 2>&1; then
@@ -16779,37 +16785,37 @@ _doctorCheckSystem() {
         sel=$(getenforce 2>/dev/null || echo unknown)
         case "${sel}" in
             Disabled|Permissive)
-                _doctorRow "$(t MSG_DOCTOR_CHECK_SELINUX)" pass "${sel}"
+                _doctorRow "$(t DOCTOR_CHECK_SELINUX)" pass "${sel}"
                 ;;
             Enforcing)
-                _doctorRow "$(t MSG_DOCTOR_CHECK_SELINUX)" warn "${sel} (may block proxy ports — see checkCentosSELinux)"
+                _doctorRow "$(t DOCTOR_CHECK_SELINUX)" warn "${sel} (may block proxy ports — see checkCentosSELinux)"
                 ;;
             *)
-                _doctorRow "$(t MSG_DOCTOR_CHECK_SELINUX)" warn "${sel}"
+                _doctorRow "$(t DOCTOR_CHECK_SELINUX)" warn "${sel}"
                 ;;
         esac
     else
-        _doctorRow "$(t MSG_DOCTOR_CHECK_SELINUX)" skip "$(t MSG_DOCTOR_DETAIL_NOT_CENTOS)"
+        _doctorRow "$(t DOCTOR_CHECK_SELINUX)" skip "$(t DOCTOR_DETAIL_NOT_CENTOS)"
     fi
 }
 
 _doctorCheckInstall() {
-    _doctorSection "$(t MSG_DOCTOR_SECTION_INSTALL)"
+    _doctorSection "$(t DOCTOR_SECTION_INSTALL)"
 
     if [[ -d /etc/Proxy-agent ]]; then
-        _doctorRow "$(t MSG_DOCTOR_CHECK_INSTALLED)" pass "/etc/Proxy-agent"
+        _doctorRow "$(t DOCTOR_CHECK_INSTALLED)" pass "/etc/Proxy-agent"
     else
-        _doctorRow "$(t MSG_DOCTOR_CHECK_INSTALLED)" fail "missing /etc/Proxy-agent"
+        _doctorRow "$(t DOCTOR_CHECK_INSTALLED)" fail "missing /etc/Proxy-agent"
     fi
 
     if [[ -r /etc/Proxy-agent/VERSION ]]; then
         local ver
         ver=$(tr -d '[:space:]' </etc/Proxy-agent/VERSION 2>/dev/null)
-        _doctorRow "$(t MSG_DOCTOR_CHECK_VERSION)" pass "${ver:-?}"
+        _doctorRow "$(t DOCTOR_CHECK_VERSION)" pass "${ver:-?}"
     elif [[ -n "${SCRIPT_VERSION:-}" ]]; then
-        _doctorRow "$(t MSG_DOCTOR_CHECK_VERSION)" pass "${SCRIPT_VERSION} (from running script)"
+        _doctorRow "$(t DOCTOR_CHECK_VERSION)" pass "${SCRIPT_VERSION} (from running script)"
     else
-        _doctorRow "$(t MSG_DOCTOR_CHECK_VERSION)" warn "VERSION file not found"
+        _doctorRow "$(t DOCTOR_CHECK_VERSION)" warn "VERSION file not found"
     fi
 
     local libDir mod libMissing=""
@@ -16818,9 +16824,9 @@ _doctorCheckInstall() {
         [[ -f "${libDir}/${mod}.sh" ]] || libMissing="${libMissing}${libMissing:+, }${mod}.sh"
     done
     if [[ -z "${libMissing}" ]]; then
-        _doctorRow "$(t MSG_DOCTOR_CHECK_LIB)" pass "${libDir}"
+        _doctorRow "$(t DOCTOR_CHECK_LIB)" pass "${libDir}"
     else
-        _doctorRow "$(t MSG_DOCTOR_CHECK_LIB)" fail "missing: ${libMissing}"
+        _doctorRow "$(t DOCTOR_CHECK_LIB)" fail "missing: ${libMissing}"
     fi
 
     local langDir f langMissing=""
@@ -16833,17 +16839,17 @@ _doctorCheckInstall() {
         [[ -f "${langDir}/${f}" ]] || langMissing="${langMissing}${langMissing:+, }${f}"
     done
     if [[ -z "${langMissing}" ]]; then
-        _doctorRow "$(t MSG_DOCTOR_CHECK_LANG)" pass "${langDir}"
+        _doctorRow "$(t DOCTOR_CHECK_LANG)" pass "${langDir}"
     else
-        _doctorRow "$(t MSG_DOCTOR_CHECK_LANG)" fail "missing: ${langMissing}"
+        _doctorRow "$(t DOCTOR_CHECK_LANG)" fail "missing: ${langMissing}"
     fi
 }
 
 _doctorCheckCore() {
-    _doctorSection "$(t MSG_DOCTOR_SECTION_CORE)"
+    _doctorSection "$(t DOCTOR_SECTION_CORE)"
 
     if [[ -z "${coreKind}" ]]; then
-        _doctorRow "$(t MSG_DOCTOR_CHECK_CORE_KIND)" skip "$(t MSG_DOCTOR_DETAIL_NO_CORE)"
+        _doctorRow "$(t DOCTOR_CHECK_CORE_KIND)" skip "$(t DOCTOR_DETAIL_NO_CORE)"
         return
     fi
 
@@ -16865,10 +16871,10 @@ _doctorCheckCore() {
         pgrepFlag="-x"
         pgrepArg="sing-box"
     fi
-    _doctorRow "$(t MSG_DOCTOR_CHECK_CORE_KIND)" pass "${coreName}"
+    _doctorRow "$(t DOCTOR_CHECK_CORE_KIND)" pass "${coreName}"
 
     if [[ -x "${binaryPath}" ]]; then
-        _doctorRow "$(t MSG_DOCTOR_CHECK_CORE_BINARY)" pass "${binaryPath}"
+        _doctorRow "$(t DOCTOR_CHECK_CORE_BINARY)" pass "${binaryPath}"
         local ver
         if [[ "${coreKind}" == "1" ]]; then
             ver=$("${binaryPath}" --version 2>/dev/null | awk '{print $2}' | head -1)
@@ -16876,44 +16882,44 @@ _doctorCheckCore() {
             ver=$("${binaryPath}" version 2>/dev/null | head -1 | awk '{print $3}')
         fi
         if [[ -n "${ver}" ]]; then
-            _doctorRow "$(t MSG_DOCTOR_CHECK_CORE_VERSION)" pass "${ver}"
+            _doctorRow "$(t DOCTOR_CHECK_CORE_VERSION)" pass "${ver}"
         else
-            _doctorRow "$(t MSG_DOCTOR_CHECK_CORE_VERSION)" warn "could not parse version output"
+            _doctorRow "$(t DOCTOR_CHECK_CORE_VERSION)" warn "could not parse version output"
         fi
     else
-        _doctorRow "$(t MSG_DOCTOR_CHECK_CORE_BINARY)" fail "missing or not executable: ${binaryPath}"
-        _doctorRow "$(t MSG_DOCTOR_CHECK_CORE_VERSION)" skip "binary missing"
+        _doctorRow "$(t DOCTOR_CHECK_CORE_BINARY)" fail "missing or not executable: ${binaryPath}"
+        _doctorRow "$(t DOCTOR_CHECK_CORE_VERSION)" skip "binary missing"
     fi
 
     if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files "${serviceName}.service" 2>/dev/null | grep -q "^${serviceName}\.service"; then
         if systemctl is-active --quiet "${serviceName}.service" 2>/dev/null; then
-            _doctorRow "$(t MSG_DOCTOR_CHECK_SERVICE)" pass "systemd: ${serviceName}.service active"
+            _doctorRow "$(t DOCTOR_CHECK_SERVICE)" pass "systemd: ${serviceName}.service active"
         else
-            _doctorRow "$(t MSG_DOCTOR_CHECK_SERVICE)" warn "systemd: ${serviceName}.service inactive"
+            _doctorRow "$(t DOCTOR_CHECK_SERVICE)" warn "systemd: ${serviceName}.service inactive"
         fi
     elif [[ -f "/etc/init.d/${serviceName}" ]]; then
         if rc-service "${serviceName}" status >/dev/null 2>&1; then
-            _doctorRow "$(t MSG_DOCTOR_CHECK_SERVICE)" pass "OpenRC: ${serviceName} started"
+            _doctorRow "$(t DOCTOR_CHECK_SERVICE)" pass "OpenRC: ${serviceName} started"
         else
-            _doctorRow "$(t MSG_DOCTOR_CHECK_SERVICE)" warn "OpenRC: ${serviceName} stopped"
+            _doctorRow "$(t DOCTOR_CHECK_SERVICE)" warn "OpenRC: ${serviceName} stopped"
         fi
     else
-        _doctorRow "$(t MSG_DOCTOR_CHECK_SERVICE)" warn "service unit not found"
+        _doctorRow "$(t DOCTOR_CHECK_SERVICE)" warn "service unit not found"
     fi
 
     if pgrep "${pgrepFlag}" "${pgrepArg}" >/dev/null 2>&1; then
-        _doctorRow "$(t MSG_DOCTOR_CHECK_PROCESS)" pass "running"
+        _doctorRow "$(t DOCTOR_CHECK_PROCESS)" pass "running"
     else
-        _doctorRow "$(t MSG_DOCTOR_CHECK_PROCESS)" warn "not running"
+        _doctorRow "$(t DOCTOR_CHECK_PROCESS)" warn "not running"
     fi
 }
 
 _doctorCheckConfig() {
-    _doctorSection "$(t MSG_DOCTOR_SECTION_CONFIG)"
+    _doctorSection "$(t DOCTOR_SECTION_CONFIG)"
 
     if [[ -z "${coreKind}" ]]; then
-        _doctorRow "$(t MSG_DOCTOR_CHECK_CONFIG)" skip "$(t MSG_DOCTOR_DETAIL_NO_CORE)"
-        _doctorRow "$(t MSG_DOCTOR_CHECK_PROTOCOLS)" skip "$(t MSG_DOCTOR_DETAIL_NO_CORE)"
+        _doctorRow "$(t DOCTOR_CHECK_CONFIG)" skip "$(t DOCTOR_DETAIL_NO_CORE)"
+        _doctorRow "$(t DOCTOR_CHECK_PROTOCOLS)" skip "$(t DOCTOR_DETAIL_NO_CORE)"
         return
     fi
 
@@ -16933,23 +16939,23 @@ _doctorCheckConfig() {
             shopt -u nullglob
         fi
         if [[ "${total}" -eq 0 ]]; then
-            _doctorRow "$(t MSG_DOCTOR_CHECK_CONFIG)" warn "no JSON files in ${confDir}"
+            _doctorRow "$(t DOCTOR_CHECK_CONFIG)" warn "no JSON files in ${confDir}"
         elif [[ "${bad}" -eq 0 ]]; then
-            _doctorRow "$(t MSG_DOCTOR_CHECK_CONFIG)" pass "${total} files OK"
+            _doctorRow "$(t DOCTOR_CHECK_CONFIG)" pass "${total} files OK"
         else
-            _doctorRow "$(t MSG_DOCTOR_CHECK_CONFIG)" fail "${bad}/${total} invalid: ${badList}"
+            _doctorRow "$(t DOCTOR_CHECK_CONFIG)" fail "${bad}/${total} invalid: ${badList}"
         fi
     else
         local mergedConfig="/etc/Proxy-agent/sing-box/conf/config.json"
         local binary="/etc/Proxy-agent/sing-box/sing-box"
         if [[ -x "${binary}" && -f "${mergedConfig}" ]]; then
             if "${binary}" check -c "${mergedConfig}" >/dev/null 2>&1; then
-                _doctorRow "$(t MSG_DOCTOR_CHECK_CONFIG)" pass "sing-box check OK"
+                _doctorRow "$(t DOCTOR_CHECK_CONFIG)" pass "sing-box check OK"
             else
-                _doctorRow "$(t MSG_DOCTOR_CHECK_CONFIG)" fail "sing-box check failed: ${mergedConfig}"
+                _doctorRow "$(t DOCTOR_CHECK_CONFIG)" fail "sing-box check failed: ${mergedConfig}"
             fi
         else
-            _doctorRow "$(t MSG_DOCTOR_CHECK_CONFIG)" warn "merged config or binary not found"
+            _doctorRow "$(t DOCTOR_CHECK_CONFIG)" warn "merged config or binary not found"
         fi
     fi
 
@@ -16961,36 +16967,36 @@ _doctorCheckConfig() {
             count=$(echo "${trimmed}" | tr ',' '\n' | grep -c .)
         fi
     fi
-    _doctorRow "$(t MSG_DOCTOR_CHECK_PROTOCOLS)" pass "${count}"
+    _doctorRow "$(t DOCTOR_CHECK_PROTOCOLS)" pass "${count}"
 }
 
 _doctorCheckNetwork() {
-    _doctorSection "$(t MSG_DOCTOR_SECTION_NETWORK)"
+    _doctorSection "$(t DOCTOR_SECTION_NETWORK)"
 
     local pubIP
     pubIP=$(curl --max-time 5 -fsSL https://api.ipify.org 2>/dev/null)
     if [[ -n "${pubIP}" ]]; then
-        _doctorRow "$(t MSG_DOCTOR_CHECK_PUBLICIP)" pass "${pubIP}"
+        _doctorRow "$(t DOCTOR_CHECK_PUBLICIP)" pass "${pubIP}"
     else
-        _doctorRow "$(t MSG_DOCTOR_CHECK_PUBLICIP)" warn "unreachable / timeout"
+        _doctorRow "$(t DOCTOR_CHECK_PUBLICIP)" warn "unreachable / timeout"
     fi
 
     if curl --max-time 5 -fsS -o /dev/null https://api.github.com/zen 2>/dev/null; then
-        _doctorRow "$(t MSG_DOCTOR_CHECK_GITHUB)" pass "reachable"
+        _doctorRow "$(t DOCTOR_CHECK_GITHUB)" pass "reachable"
     else
-        _doctorRow "$(t MSG_DOCTOR_CHECK_GITHUB)" warn "unreachable / timeout"
+        _doctorRow "$(t DOCTOR_CHECK_GITHUB)" warn "unreachable / timeout"
     fi
 }
 
 _doctorCheckCert() {
-    _doctorSection "$(t MSG_DOCTOR_SECTION_CERT)"
+    _doctorSection "$(t DOCTOR_SECTION_CERT)"
 
     local tlsDir="/etc/Proxy-agent/tls"
     if [[ ! -d "${tlsDir}" ]]; then
-        _doctorRow "$(t MSG_DOCTOR_CHECK_CERT_DIR)" skip "$(t MSG_DOCTOR_DETAIL_NO_TLS)"
+        _doctorRow "$(t DOCTOR_CHECK_CERT_DIR)" skip "$(t DOCTOR_DETAIL_NO_TLS)"
         return
     fi
-    _doctorRow "$(t MSG_DOCTOR_CHECK_CERT_DIR)" pass "${tlsDir}"
+    _doctorRow "$(t DOCTOR_CHECK_CERT_DIR)" pass "${tlsDir}"
 
     local needsCert=0 trimmed pid
     if [[ -n "${currentInstallProtocolType}" ]]; then
@@ -17006,11 +17012,11 @@ _doctorCheckCert() {
 
     if [[ "${needsCert}" == "0" ]]; then
         if [[ -z "${currentInstallProtocolType//,/}" ]]; then
-            _doctorRow "$(t MSG_DOCTOR_CHECK_CERT_EXPIRY)" skip "$(t MSG_DOCTOR_DETAIL_NO_CORE)"
-            _doctorRow "$(t MSG_DOCTOR_CHECK_CERT_MATCH)" skip "$(t MSG_DOCTOR_DETAIL_NO_CORE)"
+            _doctorRow "$(t DOCTOR_CHECK_CERT_EXPIRY)" skip "$(t DOCTOR_DETAIL_NO_CORE)"
+            _doctorRow "$(t DOCTOR_CHECK_CERT_MATCH)" skip "$(t DOCTOR_DETAIL_NO_CORE)"
         else
-            _doctorRow "$(t MSG_DOCTOR_CHECK_CERT_EXPIRY)" skip "$(t MSG_DOCTOR_DETAIL_REALITY_ONLY)"
-            _doctorRow "$(t MSG_DOCTOR_CHECK_CERT_MATCH)" skip "$(t MSG_DOCTOR_DETAIL_REALITY_ONLY)"
+            _doctorRow "$(t DOCTOR_CHECK_CERT_EXPIRY)" skip "$(t DOCTOR_DETAIL_REALITY_ONLY)"
+            _doctorRow "$(t DOCTOR_CHECK_CERT_MATCH)" skip "$(t DOCTOR_DETAIL_REALITY_ONLY)"
         fi
         return
     fi
@@ -17026,26 +17032,26 @@ _doctorCheckCert() {
     shopt -u nullglob
 
     if [[ -z "${found}" ]]; then
-        _doctorRow "$(t MSG_DOCTOR_CHECK_CERT_EXPIRY)" warn "no .crt+.key pair in ${tlsDir}"
-        _doctorRow "$(t MSG_DOCTOR_CHECK_CERT_MATCH)" skip "no cert pair"
+        _doctorRow "$(t DOCTOR_CHECK_CERT_EXPIRY)" warn "no .crt+.key pair in ${tlsDir}"
+        _doctorRow "$(t DOCTOR_CHECK_CERT_MATCH)" skip "no cert pair"
         return
     fi
 
     if verifyCertExpiry "${found}" >/dev/null 2>&1; then
-        _doctorRow "$(t MSG_DOCTOR_CHECK_CERT_EXPIRY)" pass "$(basename "${found}")"
+        _doctorRow "$(t DOCTOR_CHECK_CERT_EXPIRY)" pass "$(basename "${found}")"
     else
-        _doctorRow "$(t MSG_DOCTOR_CHECK_CERT_EXPIRY)" fail "$(basename "${found}") expired or unparseable"
+        _doctorRow "$(t DOCTOR_CHECK_CERT_EXPIRY)" fail "$(basename "${found}") expired or unparseable"
     fi
 
     if verifyCertKeyMatch "${found}" "${key}" >/dev/null 2>&1; then
-        _doctorRow "$(t MSG_DOCTOR_CHECK_CERT_MATCH)" pass "$(basename "${found}") matches key"
+        _doctorRow "$(t DOCTOR_CHECK_CERT_MATCH)" pass "$(basename "${found}") matches key"
     else
-        _doctorRow "$(t MSG_DOCTOR_CHECK_CERT_MATCH)" fail "cert/key mismatch"
+        _doctorRow "$(t DOCTOR_CHECK_CERT_MATCH)" fail "cert/key mismatch"
     fi
 }
 
 _doctorCheckFirewall() {
-    _doctorSection "$(t MSG_DOCTOR_SECTION_FIREWALL)"
+    _doctorSection "$(t DOCTOR_SECTION_FIREWALL)"
 
     local detected=""
     if command -v ufw >/dev/null 2>&1; then
@@ -17067,9 +17073,9 @@ _doctorCheckFirewall() {
     fi
 
     if [[ -n "${detected}" ]]; then
-        _doctorRow "$(t MSG_DOCTOR_CHECK_FIREWALL)" pass "${detected}"
+        _doctorRow "$(t DOCTOR_CHECK_FIREWALL)" pass "${detected}"
     else
-        _doctorRow "$(t MSG_DOCTOR_CHECK_FIREWALL)" warn "no firewall manager detected"
+        _doctorRow "$(t DOCTOR_CHECK_FIREWALL)" warn "no firewall manager detected"
     fi
 }
 
@@ -17081,7 +17087,7 @@ doctor() {
     _doctor_skip=0
 
     echoContent skyBlue "\n=============================================================="
-    echoContent skyBlue "  $(t MSG_DOCTOR_HEADER)"
+    echoContent skyBlue "  $(t DOCTOR_HEADER)"
     echoContent skyBlue "=============================================================="
 
     _doctorCheckSystem
@@ -17093,8 +17099,8 @@ doctor() {
     _doctorCheckFirewall
 
     echoContent skyBlue "\n=============================================================="
-    echoContent green "  $(t MSG_DOCTOR_SUMMARY): $(t MSG_DOCTOR_STATUS_PASS)=${_doctor_pass}  $(t MSG_DOCTOR_STATUS_WARN)=${_doctor_warn}  $(t MSG_DOCTOR_STATUS_FAIL)=${_doctor_fail}  $(t MSG_DOCTOR_STATUS_SKIP)=${_doctor_skip}"
-    echoContent yellow "  $(t MSG_DOCTOR_FOOTER_HINT)"
+    echoContent green "  $(t DOCTOR_SUMMARY): $(t DOCTOR_STATUS_PASS)=${_doctor_pass}  $(t DOCTOR_STATUS_WARN)=${_doctor_warn}  $(t DOCTOR_STATUS_FAIL)=${_doctor_fail}  $(t DOCTOR_STATUS_SKIP)=${_doctor_skip}"
+    echoContent yellow "  $(t DOCTOR_FOOTER_HINT)"
     echoContent skyBlue "=============================================================="
 
     if [[ "${_doctor_fail}" -gt 0 ]]; then
@@ -17107,7 +17113,7 @@ doctor() {
 menu() {
     cd "$HOME" || exit
     if isDryRun; then
-        echoContent yellow "\n$(t MSG_DRY_RUN_BANNER)"
+        echoContent yellow "\n$(t DRY_RUN_BANNER)"
     fi
     echoContent red "\n=============================================================="
     echoContent green "$(t MENU_AUTHOR): Lynthar"
@@ -17152,7 +17158,7 @@ menu() {
     echoContent yellow "20.$(t MENU_UNINSTALL)"
     echoContent yellow "21.切换语言 / Switch Language"
     echoContent yellow "22.$(t MENU_SCRIPT_VERSION)"
-    echoContent yellow "23.$(t MSG_MENU_DOCTOR)"
+    echoContent yellow "23.$(t MENU_DOCTOR)"
     echoContent red "=============================================================="
     mkdirTools
     aliasInstall
