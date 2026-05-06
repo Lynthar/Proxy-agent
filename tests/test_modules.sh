@@ -151,6 +151,18 @@ assert_true "! isValidUUID 'invalid-uuid'" "isValidUUID() 拒绝无效 UUID"
 assert_true "versionGreaterThan '1.2.3' '1.2.0'" "versionGreaterThan('1.2.3', '1.2.0')"
 assert_true "! versionGreaterThan '1.2.0' '1.2.3'" "!versionGreaterThan('1.2.0', '1.2.3')"
 
+# 测试 isYesInput - 接受 y/Y/yes/Yes 任意大小写组合
+assert_true "isYesInput 'y'" "isYesInput('y') 返回 true"
+assert_true "isYesInput 'Y'" "isYesInput('Y') 返回 true"
+assert_true "isYesInput 'yes'" "isYesInput('yes') 返回 true"
+assert_true "isYesInput 'YES'" "isYesInput('YES') 返回 true"
+assert_true "isYesInput 'Yes'" "isYesInput('Yes') 返回 true"
+# 拒绝模糊输入：yy 多为按键弹起延迟，不应解读为肯定
+assert_true "! isYesInput 'yy'" "isYesInput('yy') 返回 false"
+assert_true "! isYesInput 'yep'" "isYesInput('yep') 返回 false"
+assert_true "! isYesInput 'n'" "isYesInput('n') 返回 false"
+assert_true "! isYesInput ''" "isYesInput('') 返回 false"
+
 # 测试 isDryRun / planAction（DRY_RUN 关闭时）
 unset DRY_RUN
 assert_true "! isDryRun" "isDryRun() 在 DRY_RUN 未设置时返回 false"

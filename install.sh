@@ -3375,14 +3375,36 @@ installSingBox() {
 
     if [[ ! -f "/etc/Proxy-agent/sing-box/sing-box" ]]; then
 
-        version=$(curl -s --connect-timeout 10 "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=20" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
+        # 缓存原始响应，区分"GitHub 完全访问不到"vs"访问到但筛选后为空"两种失败模式
+        # per_page=30：与 Xray 对齐，足以覆盖近期所有稳定版
+        local releasesJson
+        releasesJson=$(curl -s --connect-timeout 10 "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=30")
 
-        # 检查版本获取是否成功
+        version=$(echo "${releasesJson}" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
+
+        # 优雅降级：30 个里都没有稳定版的极端情况下，让用户决定是否使用最新预览版
+        if [[ -z "${version}" && "${prereleaseStatus}" == "false" && -n "${releasesJson}" ]]; then
+            local latestAnyVersion
+            latestAnyVersion=$(echo "${releasesJson}" | jq -r '.[].tag_name' | head -1)
+            if [[ -n "${latestAnyVersion}" ]]; then
+                echoContent yellow "\n ---> 最近 30 个 release 中没有找到稳定版"
+                echoContent yellow " ---> 最新版本: ${latestAnyVersion} (预览版)"
+                read -r -p "是否使用此预览版继续安装？[y/n]" usePrereleaseStatus
+                if isYesInput "${usePrereleaseStatus}"; then
+                    version="${latestAnyVersion}"
+                else
+                    echoContent yellow " ---> 已取消安装（如需稳定版请稍后重试，或从菜单选择预览版安装）"
+                    return 1
+                fi
+            fi
+        fi
+
+        # 检查版本获取是否成功（网络/API 失败导致空）
         if [[ -z "${version}" ]]; then
             echoContent red " ---> 获取 sing-box 版本失败，请检查网络连接或 GitHub API 访问"
             echoContent yellow "     可能原因: 网络超时、GitHub API 限流、DNS 解析失败"
             read -r -p "是否重新尝试？[y/n]" retryStatus
-            if [[ "${retryStatus}" == "y" ]]; then
+            if isYesInput "${retryStatus}"; then
                 installSingBox "$1"
                 return $?
             fi
@@ -3416,7 +3438,7 @@ installSingBox() {
 
         if [[ ! -f "${singBoxTarFile}" ]]; then
             read -r -p "核心下载失败，请重新尝试安装，是否重新尝试？[y/n]" downloadStatus
-            if [[ "${downloadStatus}" == "y" ]]; then
+            if isYesInput "${downloadStatus}"; then
                 installSingBox "$1"
                 return $?
             fi
@@ -3431,7 +3453,7 @@ installSingBox() {
                     echoContent red " ---> 文件校验失败，可能已被篡改，请重新下载"
                     rm -f "${singBoxTarFile}" "${singBoxChecksumFile}"
                     read -r -p "是否重新尝试？[y/n]" retryStatus
-                    if [[ "${retryStatus}" == "y" ]]; then
+                    if isYesInput "${retryStatus}"; then
                         installSingBox "$1"
                         return $?
                     fi
@@ -3467,7 +3489,7 @@ installSingBox() {
     else
         echoContent green " ---> 当前版本:v$(/etc/Proxy-agent/sing-box/sing-box version | grep "sing-box version" | awk '{print $3}')"
 
-        version=$(curl -s --connect-timeout 10 "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=20" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
+        version=$(curl -s --connect-timeout 10 "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=30" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
         if [[ -n "${version}" ]]; then
             echoContent green " ---> 最新版本:${version}"
         else
@@ -3476,7 +3498,7 @@ installSingBox() {
 
         if [[ -z "${lastInstallationConfig}" ]]; then
             read -r -p "是否更新、升级？[y/n]:" reInstallSingBoxStatus
-            if [[ "${reInstallSingBoxStatus}" == "y" ]]; then
+            if isYesInput "${reInstallSingBoxStatus}"; then
                 rm -f /etc/Proxy-agent/sing-box/sing-box
                 installSingBox "$1"
                 return $?
@@ -3506,14 +3528,36 @@ installXray() {
 
     if [[ ! -f "/etc/Proxy-agent/xray/xray" ]]; then
 
-        version=$(curl -s --connect-timeout 10 "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=5" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
+        # 缓存原始响应，区分"GitHub 完全访问不到"vs"访问到但筛选后为空"两种失败模式
+        # per_page=30：XTLS 偶尔会连续发好几个 prerelease，5 个窗口太窄；30 个足以覆盖近期所有稳定版
+        local releasesJson
+        releasesJson=$(curl -s --connect-timeout 10 "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=30")
 
-        # 检查版本获取是否成功
+        version=$(echo "${releasesJson}" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
+
+        # 优雅降级：30 个里都没有稳定版的极端情况下，让用户决定是否使用最新预览版
+        if [[ -z "${version}" && "${prereleaseStatus}" == "false" && -n "${releasesJson}" ]]; then
+            local latestAnyVersion
+            latestAnyVersion=$(echo "${releasesJson}" | jq -r '.[].tag_name' | head -1)
+            if [[ -n "${latestAnyVersion}" ]]; then
+                echoContent yellow "\n ---> 最近 30 个 release 中没有找到稳定版（XTLS 异常密集地发布预览版）"
+                echoContent yellow " ---> 最新版本: ${latestAnyVersion} (预览版)"
+                read -r -p "是否使用此预览版继续安装？[y/n]" usePrereleaseStatus
+                if isYesInput "${usePrereleaseStatus}"; then
+                    version="${latestAnyVersion}"
+                else
+                    echoContent yellow " ---> 已取消安装（如需稳定版请稍后重试，或从菜单选择预览版安装）"
+                    return 1
+                fi
+            fi
+        fi
+
+        # 检查版本获取是否成功（网络/API 失败导致空）
         if [[ -z "${version}" ]]; then
             echoContent red " ---> 获取 Xray-core 版本失败，请检查网络连接或 GitHub API 访问"
             echoContent yellow "     可能原因: 网络超时、GitHub API 限流、DNS 解析失败"
             read -r -p "是否重新尝试？[y/n]" retryStatus
-            if [[ "${retryStatus}" == "y" ]]; then
+            if isYesInput "${retryStatus}"; then
                 installXray "$1" "$2"
                 return $?
             fi
@@ -3536,7 +3580,7 @@ installXray() {
 
         if [[ ! -f "${xrayZipFile}" ]]; then
             read -r -p "核心下载失败，请重新尝试安装，是否重新尝试？[y/n]" downloadStatus
-            if [[ "${downloadStatus}" == "y" ]]; then
+            if isYesInput "${downloadStatus}"; then
                 installXray "$1" "$2"
                 return $?
             fi
@@ -3551,7 +3595,7 @@ installXray() {
                     echoContent red " ---> 文件校验失败，可能已被篡改，请重新下载"
                     rm -f "${xrayZipFile}" "${xrayDgstFile}"
                     read -r -p "是否重新尝试？[y/n]" retryStatus
-                    if [[ "${retryStatus}" == "y" ]]; then
+                    if isYesInput "${retryStatus}"; then
                         installXray "$1" "$2"
                         return $?
                     fi
@@ -3584,7 +3628,7 @@ installXray() {
         if [[ -z "${lastInstallationConfig}" ]]; then
             echoContent green " ---> Xray-core版本:$(/etc/Proxy-agent/xray/xray --version | awk '{print $2}' | head -1)"
             read -r -p "是否更新、升级？[y/n]:" reInstallXrayStatus
-            if [[ "${reInstallXrayStatus}" == "y" ]]; then
+            if isYesInput "${reInstallXrayStatus}"; then
                 rm -f /etc/Proxy-agent/xray/xray
                 installXray "$1" "$2"
                 return $?
@@ -3685,7 +3729,7 @@ updateXray() {
         if [[ -n "${1:-}" ]]; then
             version=$1
         else
-            version=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=5" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
+            version=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=30" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
         fi
 
         echoContent green " ---> Xray-core版本:${version}"
@@ -3703,14 +3747,14 @@ updateXray() {
         handleXray start
     else
         echoContent green " ---> 当前版本:v$(/etc/Proxy-agent/xray/xray --version | awk '{print $2}' | head -1)"
-        remoteVersion=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=5" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
+        remoteVersion=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=30" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
 
         echoContent green " ---> 最新版本:${remoteVersion}"
 
         if [[ -n "${1:-}" ]]; then
             version=$1
         else
-            version=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=10" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
+            version=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=30" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
         fi
 
         if [[ -n "${1:-}" ]]; then
