@@ -3384,6 +3384,7 @@ installSingBox() {
             read -r -p "是否重新尝试？[y/n]" retryStatus
             if [[ "${retryStatus}" == "y" ]]; then
                 installSingBox "$1"
+                return $?
             fi
             return 1
         fi
@@ -3417,7 +3418,9 @@ installSingBox() {
             read -r -p "核心下载失败，请重新尝试安装，是否重新尝试？[y/n]" downloadStatus
             if [[ "${downloadStatus}" == "y" ]]; then
                 installSingBox "$1"
+                return $?
             fi
+            return 1
         else
             # 校验SHA256
             local expectedHash
@@ -3430,6 +3433,7 @@ installSingBox() {
                     read -r -p "是否重新尝试？[y/n]" retryStatus
                     if [[ "${retryStatus}" == "y" ]]; then
                         installSingBox "$1"
+                        return $?
                     fi
                     return 1
                 fi
@@ -3475,10 +3479,17 @@ installSingBox() {
             if [[ "${reInstallSingBoxStatus}" == "y" ]]; then
                 rm -f /etc/Proxy-agent/sing-box/sing-box
                 installSingBox "$1"
+                return $?
             fi
         fi
     fi
 
+    # 最终防线：函数返回前确认二进制确实就位
+    # 上面任何路径若漏掉显式 return，都会被这里兜住，避免 caller 在二进制缺失时继续执行
+    if [[ ! -f "/etc/Proxy-agent/sing-box/sing-box" ]]; then
+        return 1
+    fi
+    return 0
 }
 
 # checkWgetShowProgress 由 lib/system-detect.sh 提供（Alpine 上跳过探测的语义已 port）。
@@ -3504,6 +3515,7 @@ installXray() {
             read -r -p "是否重新尝试？[y/n]" retryStatus
             if [[ "${retryStatus}" == "y" ]]; then
                 installXray "$1" "$2"
+                return $?
             fi
             return 1
         fi
@@ -3525,8 +3537,10 @@ installXray() {
         if [[ ! -f "${xrayZipFile}" ]]; then
             read -r -p "核心下载失败，请重新尝试安装，是否重新尝试？[y/n]" downloadStatus
             if [[ "${downloadStatus}" == "y" ]]; then
-                installXray "$1"
+                installXray "$1" "$2"
+                return $?
             fi
+            return 1
         else
             # 校验SHA256
             local expectedHash
@@ -3539,6 +3553,7 @@ installXray() {
                     read -r -p "是否重新尝试？[y/n]" retryStatus
                     if [[ "${retryStatus}" == "y" ]]; then
                         installXray "$1" "$2"
+                        return $?
                     fi
                     return 1
                 fi
@@ -3572,9 +3587,17 @@ installXray() {
             if [[ "${reInstallXrayStatus}" == "y" ]]; then
                 rm -f /etc/Proxy-agent/xray/xray
                 installXray "$1" "$2"
+                return $?
             fi
         fi
     fi
+
+    # 最终防线：函数返回前确认二进制确实就位
+    # 上面任何路径若漏掉显式 return，都会被这里兜住，避免 caller 在二进制缺失时继续执行
+    if [[ ! -f "/etc/Proxy-agent/xray/xray" ]]; then
+        return 1
+    fi
+    return 0
 }
 
 # xray版本管理
@@ -4960,7 +4983,7 @@ singBoxTuicInstall() {
     fi
 
     totalProgress=5
-    installSingBox 1
+    installSingBox 1 || { echoContent red "\n ---> sing-box 安装失败，已中止安装流程"; exit 1; }
     selectCustomInstallType=",9,"
     initSingBoxConfig custom 2 true
     installSingBoxService 3
@@ -4976,7 +4999,7 @@ singBoxHysteria2Install() {
     fi
 
     totalProgress=5
-    installSingBox 1
+    installSingBox 1 || { echoContent red "\n ---> sing-box 安装失败，已中止安装流程"; exit 1; }
     selectCustomInstallType=",6,"
     initSingBoxConfig custom 2 true
     installSingBoxService 3
@@ -4987,7 +5010,7 @@ singBoxHysteria2Install() {
 # sing-box Shadowsocks 2022 安装
 singBoxSS2022Install() {
     totalProgress=5
-    installSingBox 1
+    installSingBox 1 || { echoContent red "\n ---> sing-box 安装失败，已中止安装流程"; exit 1; }
     selectCustomInstallType=",14,"
     initSingBoxConfig custom 2 true
     installSingBoxService 3
@@ -5107,6 +5130,13 @@ initSingBoxPort() {
 initXrayConfig() {
     echoContent skyBlue "\n进度 $2/${totalProgress} : 初始化Xray配置"
     echo
+    # 二进制预检：本函数依赖 /etc/Proxy-agent/xray/xray 生成 UUID（5152/5165 行）。
+    # 主安装路径已在 installXray 失败时退出，这里是 belt-and-suspenders，覆盖 addUser 等独立调用。
+    if [[ ! -f "/etc/Proxy-agent/xray/xray" ]]; then
+        echoContent red " ---> Xray-core 二进制不存在，无法初始化配置"
+        echoContent yellow "     预期路径: /etc/Proxy-agent/xray/xray"
+        exit 1
+    fi
     local uuid=
     local addClientsStatus=
     if [[ -n "${currentUUID}" && -z "${lastInstallationConfig}" ]]; then
@@ -5545,6 +5575,13 @@ initSingBoxConfig() {
     echoContent skyBlue "\n进度 $2/${totalProgress} : 初始化sing-box配置"
 
     echo
+    # 二进制预检：本函数依赖 /etc/Proxy-agent/sing-box/sing-box 生成 UUID。
+    # 主安装路径已在 installSingBox 失败时退出，这里是 belt-and-suspenders，覆盖独立调用。
+    if [[ ! -f "/etc/Proxy-agent/sing-box/sing-box" ]]; then
+        echoContent red " ---> sing-box 二进制不存在，无法初始化配置"
+        echoContent yellow "     预期路径: /etc/Proxy-agent/sing-box/sing-box"
+        exit 1
+    fi
     local uuid=
     local addClientsStatus=
     local sslDomain=
@@ -15038,7 +15075,7 @@ customSingBoxInstall() {
             handleNginx stop
         fi
 
-        installSingBox 4
+        installSingBox 4 || { echoContent red "\n ---> sing-box 安装失败，已中止安装流程"; exit 1; }
         installSingBoxService 5
         initSingBoxConfig custom 6
         cleanUp xrayDel
@@ -15138,7 +15175,7 @@ customXrayInstall() {
         fi
 
         # 安装Xray
-        installXray 7 false
+        installXray 7 false || { echoContent red "\n ---> Xray-core 安装失败，已中止安装流程"; exit 1; }
         installXrayService 8
         initXrayConfig custom 9
         cleanUp singBoxDel
@@ -15196,7 +15233,7 @@ installXrayRealityOnly() {
     totalProgress=6
     installTools 1
     handleNginx stop
-    installXray 2 false
+    installXray 2 false || { echoContent red "\n ---> Xray-core 安装失败，已中止安装流程"; exit 1; }
     installXrayService 3
     initXrayConfig custom 4
     cleanUp singBoxDel
@@ -15212,7 +15249,7 @@ installSingBoxRealityOnly() {
     unInstallSubscribe
     totalProgress=6
     installTools 1
-    installSingBox 2
+    installSingBox 2 || { echoContent red "\n ---> sing-box 安装失败，已中止安装流程"; exit 1; }
     installSingBoxService 3
     initSingBoxConfig custom 4
     cleanUp xrayDel
@@ -15261,7 +15298,7 @@ xrayCoreInstall() {
     randomPathFunction 5
 
     # 安装Xray
-    installXray 6 false
+    installXray 6 false || { echoContent red "\n ---> Xray-core 安装失败，已中止安装流程"; exit 1; }
     installXrayService 7
     initXrayConfig all 8
     cleanUp singBoxDel
@@ -15303,7 +15340,7 @@ singBoxInstall() {
 
     handleNginx stop
 
-    installSingBox 5
+    installSingBox 5 || { echoContent red "\n ---> sing-box 安装失败，已中止安装流程"; exit 1; }
     installSingBoxService 6
     initSingBoxConfig all 7
 
@@ -16218,11 +16255,23 @@ initRealityKey() {
     fi
     if [[ -z "${realityPrivateKey}" ]]; then
         if [[ "${selectCoreType}" == "2" || "${coreKind}" == "2" ]]; then
+            # 二进制预检：缺失会导致 reality-keypair 输出为空 → 后续 JSON 拼接出无效配置
+            if [[ ! -f "/etc/Proxy-agent/sing-box/sing-box" ]]; then
+                echoContent red "\n ---> sing-box 二进制不存在，无法生成 Reality 密钥"
+                echoContent yellow "     预期路径: /etc/Proxy-agent/sing-box/sing-box"
+                exit 1
+            fi
             realityX25519Key=$(/etc/Proxy-agent/sing-box/sing-box generate reality-keypair)
             realityPrivateKey=$(echo "${realityX25519Key}" | head -1 | awk '{print $2}')
             realityPublicKey=$(echo "${realityX25519Key}" | tail -n 1 | awk '{print $2}')
             echo "publicKey:${realityPublicKey}" >/etc/Proxy-agent/sing-box/conf/config/reality_key
         else
+            # 二进制预检：缺失会让下方 x25519 输出为空，私钥为空又会触发本函数自递归 → 死循环
+            if [[ ! -f "/etc/Proxy-agent/xray/xray" ]]; then
+                echoContent red "\n ---> Xray-core 二进制不存在，无法生成 Reality 密钥"
+                echoContent yellow "     预期路径: /etc/Proxy-agent/xray/xray"
+                exit 1
+            fi
             read -r -p "请输入Private Key[回车自动生成]:" historyPrivateKey
             if [[ -n "${historyPrivateKey}" ]]; then
                 realityX25519Key=$(/etc/Proxy-agent/xray/xray x25519 -i "${historyPrivateKey}")
@@ -16256,6 +16305,12 @@ initRealityShortIds() {
 # 初始化 mldsa65Seed
 initRealityMldsa65() {
     echoContent skyBlue "\n生成Reality mldsa65\n"
+    # 二进制预检：缺失会让 tls ping 报 No such file，下面的 -gt 比较还会因 length 为空报数值错误
+    if [[ ! -f "/etc/Proxy-agent/xray/xray" ]]; then
+        echoContent red "\n ---> Xray-core 二进制不存在，无法检测目标域名能力，跳过 ML-DSA-65"
+        echoContent yellow "     预期路径: /etc/Proxy-agent/xray/xray"
+        exit 1
+    fi
     if /etc/Proxy-agent/xray/xray tls ping "${realityServerName}:${realityDomainPort}" 2>/dev/null | grep -q "X25519MLKEM768"; then
         length=$(/etc/Proxy-agent/xray/xray tls ping "${realityServerName}:${realityDomainPort}" | grep "Certificate chain's total length:" | awk '{print $5}' | head -1)
 
@@ -16631,7 +16686,7 @@ singBoxVersionManageMenu() {
         touch "${singBoxConfigPath}../box.log" >/dev/null 2>&1
     fi
     if [[ "${selectSingBoxType}" == "1" ]]; then
-        installSingBox 1
+        installSingBox 1 || { echoContent red "\n ---> sing-box 安装失败"; exit 1; }
         handleSingBox stop
         handleSingBox start
     elif [[ "${selectSingBoxType}" == "2" ]]; then
