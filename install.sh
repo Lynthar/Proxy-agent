@@ -1900,7 +1900,7 @@ readConfigHostPathUUID() {
             fi
             currentUUID=$(jq -r .inbounds[0].users[0].uuid ${configPath}${frontingType}.json)
             currentClients=$(jq -r .inbounds[0].users ${configPath}${frontingType}.json)
-        else
+        elif [[ -n "${frontingTypeReality}" ]]; then
             currentUUID=$(jq -r .inbounds[0].users[0].uuid ${configPath}${frontingTypeReality}.json)
             currentClients=$(jq -r .inbounds[0].users ${configPath}${frontingTypeReality}.json)
         fi
@@ -9865,6 +9865,23 @@ _chainQueryGet() {
     awk -F= -v k="${wantKey}" 'BEGIN{RS="&"} $1==k {print substr($0, length(k)+2); exit}' <<< "${query}"
 }
 
+# 便携 TCP 连通性探测。优先用 nc -z（BSD/GNU/BusyBox 通用），缺 nc 时回退到 bash /dev/tcp。
+# Debian/Ubuntu 最小化镜像默认不带 netcat，原 `nc -zv -w 5 ... 2>/dev/null` 会因 exit 127
+# 静默判失败，链路实际是通的也会显示 ❌。
+# 用法: _chainTCPProbe HOST PORT [TIMEOUT_SECS]   返回 0 = 连得上
+_chainTCPProbe() {
+    local host=$1 port=$2 timeoutSec=${3:-5}
+    if command -v nc >/dev/null 2>&1; then
+        nc -z -w "${timeoutSec}" "${host}" "${port}" >/dev/null 2>&1
+        return $?
+    fi
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "${timeoutSec}" bash -c "exec 3<>/dev/tcp/${host}/${port} && exec 3<&-" >/dev/null 2>&1
+        return $?
+    fi
+    (exec 3<>/dev/tcp/"${host}"/"${port}" && exec 3<&-) >/dev/null 2>&1
+}
+
 # 解析配置码 (支持 V1 单跳和 V2 多跳格式)
 # V1 格式: chain://ss2022@IP:PORT?key=xxx&method=xxx          （IPv4 / 域名）
 #          chain://ss2022@[IPv6]:PORT?key=xxx&method=xxx     （IPv6）
@@ -11086,7 +11103,7 @@ testChainConnection() {
 
     # 测试1: TCP端口连通性 (到第一跳)
     echoContent yellow "测试1: TCP端口连通性..."
-    if nc -zv -w 5 "${firstHopIP}" "${firstHopPort}" >/dev/null 2>&1; then
+    if _chainTCPProbe "${firstHopIP}" "${firstHopPort}" 5; then
         echoContent green "  ✅ TCP端口连通 (${firstHopIP}:${firstHopPort})"
     else
         echoContent red "  ❌ TCP端口不通"
@@ -13270,13 +13287,13 @@ testMultiChainConnection() {
             local latency="N/A"
 
             # TCP 连接测试
-            if nc -zv -w 5 "${ip}" "${port}" >/dev/null 2>&1; then
+            if _chainTCPProbe "${ip}" "${port}" 5; then
                 result="pass"
 
                 # 测量延迟
                 local startTime endTime
                 startTime=$(date +%s%N)
-                nc -zv -w 3 "${ip}" "${port}" >/dev/null 2>&1
+                _chainTCPProbe "${ip}" "${port}" 3
                 endTime=$(date +%s%N)
                 latency=$(( (endTime - startTime) / 1000000 ))
             fi
