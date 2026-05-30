@@ -41,10 +41,11 @@ wget -P /root -N https://github.com/Lynthar/Proxy-agent/releases/latest/download
 
 ## 系统要求
 
-- **系统**：Debian 9+、Ubuntu 16+、CentOS 7+、Alpine 3+
+- **系统**：Debian 9+、Ubuntu 16+、CentOS/RHEL 8+、Alpine 3+
 - **架构**：amd64、arm64
 - **内存**：512 MB+
 - **权限**：root
+- **Bash**：≥ 4.3（脚本用到 nameref 与负数组下标 `${arr[-1]}`；CentOS 7 自带的 bash 4.2 不受支持）
 - **sing-box**：≥ 1.11（脚本默认拉最新版自动满足；本脚本配置使用 1.11 引入的路由级 sniff/resolve action）
 
 ## 语言切换
