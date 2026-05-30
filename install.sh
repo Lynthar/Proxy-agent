@@ -11,6 +11,19 @@ export LANG=en_US.UTF-8
 # ============================================================================
 set -o pipefail
 
+# ============================================================================
+# Bash 版本守卫
+# 脚本用到 nameref（local -n，端口/域名输入）与负数组下标 ${arr[-1]}（端口生成等），
+# 二者均为 Bash 4.3+ 特性。CentOS 7 自带 bash 4.2.46 会在这些路径上静默失败，
+# 这里直接给出明确报错，避免装到一半才崩。
+# 守卫本身只用 4.3 以前就有的语法（算术比较 + BASH_VERSINFO 数组）。
+# ============================================================================
+if [[ -z "${BASH_VERSINFO:-}" ]] || (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then
+    echo "[Proxy-agent] 需要 Bash 4.3 或更高版本，当前为 ${BASH_VERSION:-非 bash}。" >&2
+    echo "[Proxy-agent] requires Bash >= 4.3, current: ${BASH_VERSION:-not bash}." >&2
+    exit 1
+fi
+
 # 错误处理函数
 _error_handler() {
     local exit_code=$?
@@ -1800,8 +1813,11 @@ readSingBoxConfig() {
         fi
         if [[ -f "${singBoxConfigPath}06_hysteria2_inbounds.json" ]]; then
             hysteriaPort=$(jq -r '.inbounds[0].listen_port' "${singBoxConfigPath}06_hysteria2_inbounds.json")
-            hysteria2ClientUploadSpeed=$(jq -r '.inbounds[0].up_mbps' "${singBoxConfigPath}06_hysteria2_inbounds.json")
-            hysteria2ClientDownloadSpeed=$(jq -r '.inbounds[0].down_mbps' "${singBoxConfigPath}06_hysteria2_inbounds.json")
+            # 写入时 up_mbps=下行速度、down_mbps=上行速度（见 initSingBoxHysteria2Config，
+            # 符合 Hysteria2 "服务端上行=客户端下行" 语义）。读回必须按同一约定还原，
+            # 否则改配置 / 重新生成订阅时会把上下行对调。
+            hysteria2ClientDownloadSpeed=$(jq -r '.inbounds[0].up_mbps' "${singBoxConfigPath}06_hysteria2_inbounds.json")
+            hysteria2ClientUploadSpeed=$(jq -r '.inbounds[0].down_mbps' "${singBoxConfigPath}06_hysteria2_inbounds.json")
             hysteria2ObfsPassword=$(jq -r '.inbounds[0].obfs.password // empty' "${singBoxConfigPath}06_hysteria2_inbounds.json")
         fi
     fi
@@ -5198,6 +5214,12 @@ initXrayConfig() {
         read -r -p 'UUID:' customUUID
 
         if [[ -n ${customUUID} ]]; then
+            # 输入即校验：UUID 必须是 8-4-4-4-12 十六进制，挡住特殊字符进入下游 JSON 构造
+            # （与 addUser 走的 customUUID() 同一规则；首装路径此前漏了这道校验）。
+            if ! [[ "${customUUID}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+                echoContent red " ---> UUID 格式非法，需 8-4-4-4-12 位十六进制（例：550e8400-e29b-41d4-a716-446655440000）"
+                exit 1
+            fi
             uuid=${customUUID}
         else
             uuid=$(/etc/Proxy-agent/xray/xray uuid)
@@ -5207,6 +5229,10 @@ initXrayConfig() {
         read -r -p '用户名:' customEmail
         if [[ -z ${customEmail} ]]; then
             customEmail="$(echo "${uuid}" | cut -d "-" -f 1)-VLESS_TCP/TLS_Vision"
+        elif ! [[ "${customEmail}" =~ ^[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}$ ]]; then
+            # 仅校验用户自定义值；上面的默认值含 '/'（JSON 合法）走 if 分支不经过这里
+            echoContent red " ---> email 格式非法，仅允许字母数字及 . _ @ + -，长度 1-64"
+            exit 1
         fi
     fi
 
@@ -5649,6 +5675,12 @@ initSingBoxConfig() {
         read -r -p 'UUID:' customUUID
 
         if [[ -n ${customUUID} ]]; then
+            # 输入即校验：UUID 必须是 8-4-4-4-12 十六进制，挡住特殊字符进入下游 JSON 构造
+            # （与 addUser 走的 customUUID() 同一规则；首装路径此前漏了这道校验）。
+            if ! [[ "${customUUID}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+                echoContent red " ---> UUID 格式非法，需 8-4-4-4-12 位十六进制（例：550e8400-e29b-41d4-a716-446655440000）"
+                exit 1
+            fi
             uuid=${customUUID}
         else
             uuid=$(/etc/Proxy-agent/sing-box/sing-box generate uuid)
@@ -5658,6 +5690,10 @@ initSingBoxConfig() {
         read -r -p '用户名:' customEmail
         if [[ -z ${customEmail} ]]; then
             customEmail="$(echo "${uuid}" | cut -d "-" -f 1)-VLESS_TCP/TLS_Vision"
+        elif ! [[ "${customEmail}" =~ ^[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}$ ]]; then
+            # 仅校验用户自定义值；上面的默认值含 '/'（JSON 合法）走 if 分支不经过这里
+            echoContent red " ---> email 格式非法，仅允许字母数字及 . _ @ + -，长度 1-64"
+            exit 1
         fi
     fi
 
@@ -7876,8 +7912,10 @@ listScriptVersions() {
     echoContent skyBlue "--------------------------------------------------------------"
     echoContent yellow "0. $(t BACK)"
 
-    # 返回版本列表供选择
-    echo "${backupList[*]}"
+    # 把可选版本交给调用方：写入全局数组，而不是 echo 到 stdout。
+    # 旧实现 echo 数据后被命令替换连同上面的彩色菜单一起捕获，read 只读到第一行
+    # （ANSI 转义码）——回退菜单因此永远拿不到真正的版本数组。
+    scriptVersionList=("${backupList[@]}")
 }
 
 # 回退脚本版本
@@ -7886,13 +7924,11 @@ rollbackScript() {
     local backupDir="${installDir}/backup"
     local rawBase="https://raw.githubusercontent.com/Lynthar/Proxy-agent"
 
-    # 获取版本列表
-    local versionListStr
-    versionListStr=$(listScriptVersions)
-
-    # 解析版本列表（最后一行是版本数组）
-    local versionList
-    IFS=' ' read -ra versionList <<< "${versionListStr}"
+    # 获取版本列表：listScriptVersions 直接把彩色菜单打印到终端，并通过全局数组
+    # scriptVersionList 回传可选项（不能用命令替换，否则会把菜单文本一起吞进来）。
+    scriptVersionList=()
+    listScriptVersions
+    local versionList=("${scriptVersionList[@]}")
 
     if [[ ${#versionList[@]} -eq 0 ]]; then
         echoContent red "\n ---> $(t SCRIPT_ROLLBACK_NO_VERSIONS)"
@@ -8255,53 +8291,59 @@ updateV2RayAgent() {
 
     chmod 700 "${installDir}/install.sh"
 
-    # 下载/更新 lib 目录模块（必须全部成功；失败则从备份回滚 install.sh + 退出）
+    # 下载/更新 lib 模块 + 语言文件（原子化：先全部下到 .new 校验，全部成功才统一落地）。
     # 关键修复：
-    #   - 不用 wget -c：本地有旧版本时续传会拼接出损坏文件（之前用户实测 bug 来源）
-    #   - 先下到 ${dst}.new，bash -n 验证语法后才 mv 覆盖，确保不留半截 / 错误页
-    #   - 验证失败的算下载失败，跟 wget 错误同等处理
-    echoContent yellow " ---> 下载模块文件..."
-    mkdir -p "${installDir}/lib"
-    local moduleCount=0
+    #   - 旧实现逐个 mv 落地，若后面的模块/语言失败，前面已提交的不回滚，会留下
+    #     "install.sh 旧版 + 部分模块新版" 的混版态。改为下载阶段只写 .new、提交阶段才 mv，
+    #     任一失败就删掉所有 .new 并回滚 install.sh，保证整体版本一致（备份里其实有
+    #     旧 lib/lang，但这里压根没动 live 文件，回滚 install.sh 即可）。
+    #   - 不用 wget -c：本地有旧版本时续传会拼接出损坏文件（之前用户实测 bug 来源）。
+    #   - 先下到 .new，bash -n 验证语法后才算成功，确保不留半截 / 错误页。
+    echoContent yellow " ---> 下载模块与语言文件..."
+    mkdir -p "${installDir}/lib" "${installDir}/shell/lang"
+
+    local _stagedSrc=()   # 校验通过、待提交的 .new 路径
+    local _stagedDst=()   # 对应目标路径（与 _stagedSrc 同序）
     local failedModules=()
+    local failedLangs=()
+    local _dst _tmp module langFile
+
     for module in i18n constants utils json-utils system-detect protocol-registry; do
-        local _dst="${installDir}/lib/${module}.sh"
-        local _tmp="${_dst}.new"
+        _dst="${installDir}/lib/${module}.sh"
+        _tmp="${_dst}.new"
         if wget -q -O "${_tmp}" "${rawBase}/lib/${module}.sh" && bash -n "${_tmp}" 2>/dev/null; then
-            mv -f "${_tmp}" "${_dst}"
-            ((moduleCount++))
+            _stagedSrc+=("${_tmp}")
+            _stagedDst+=("${_dst}")
         else
             rm -f "${_tmp}"
             failedModules+=("${module}")
         fi
     done
-    if [[ ${#failedModules[@]} -gt 0 ]]; then
-        echoContent red " ---> $(t UPDATE_MODULE_DOWNLOAD_FAIL "${failedModules[*]}")"
-        if [[ -n "${backupPath}" && -f "${backupPath}/install.sh" ]]; then
-            cp -f "${backupPath}/install.sh" "${installDir}/install.sh"
-            chmod 700 "${installDir}/install.sh"
-            echoContent green " ---> $(t UPDATE_SHA256_RESTORED "${backupPath}")"
-        fi
-        exit 1
-    fi
-    echoContent green " ---> 已下载 ${moduleCount} 个模块"
 
-    # 下载/更新语言文件（同上要求全部成功；i18n 缺失会让用户菜单全是裸 MSG_ 字符串）
-    echoContent yellow " ---> 下载语言文件..."
-    mkdir -p "${installDir}/shell/lang"
-    local failedLangs=()
     for langFile in zh_CN en_US; do
-        local _dst="${installDir}/shell/lang/${langFile}.sh"
-        local _tmp="${_dst}.new"
+        _dst="${installDir}/shell/lang/${langFile}.sh"
+        _tmp="${_dst}.new"
         if wget -q -O "${_tmp}" "${rawBase}/shell/lang/${langFile}.sh" && bash -n "${_tmp}" 2>/dev/null; then
-            mv -f "${_tmp}" "${_dst}"
+            _stagedSrc+=("${_tmp}")
+            _stagedDst+=("${_dst}")
         else
             rm -f "${_tmp}"
             failedLangs+=("${langFile}")
         fi
     done
-    if [[ ${#failedLangs[@]} -gt 0 ]]; then
-        echoContent red " ---> $(t UPDATE_LANG_DOWNLOAD_FAIL "${failedLangs[*]}")"
+
+    if [[ ${#failedModules[@]} -gt 0 || ${#failedLangs[@]} -gt 0 ]]; then
+        # 放弃本次更新：删掉所有暂存 .new（未提交任何文件），回滚 install.sh
+        local _staged
+        for _staged in "${_stagedSrc[@]}"; do
+            rm -f "${_staged}"
+        done
+        if [[ ${#failedModules[@]} -gt 0 ]]; then
+            echoContent red " ---> $(t UPDATE_MODULE_DOWNLOAD_FAIL "${failedModules[*]}")"
+        fi
+        if [[ ${#failedLangs[@]} -gt 0 ]]; then
+            echoContent red " ---> $(t UPDATE_LANG_DOWNLOAD_FAIL "${failedLangs[*]}")"
+        fi
         if [[ -n "${backupPath}" && -f "${backupPath}/install.sh" ]]; then
             cp -f "${backupPath}/install.sh" "${installDir}/install.sh"
             chmod 700 "${installDir}/install.sh"
@@ -8309,6 +8351,13 @@ updateV2RayAgent() {
         fi
         exit 1
     fi
+
+    # 全部校验通过，统一落地（同分区 mv 原子，几乎不会失败）
+    local _i
+    for _i in "${!_stagedSrc[@]}"; do
+        mv -f "${_stagedSrc[$_i]}" "${_stagedDst[$_i]}"
+    done
+    echoContent green " ---> 已更新 ${#_stagedDst[@]} 个模块/语言文件"
 
     # 所有文件下载完成后，更新版本文件
     # 确保版本号与实际下载的代码一致
@@ -13782,20 +13831,15 @@ addExternalNodeSS() {
     local nodeId
     nodeId=$(generateNodeId)
     local nodeJson
-    nodeJson=$(cat <<EOF
-{
-    "id": "${nodeId}",
-    "name": "${nodeName}",
-    "type": "shadowsocks",
-    "server": "${server}",
-    "server_port": ${port},
-    "method": "${method}",
-    "password": "${password}",
-    "enabled": true,
-    "created_at": "$(date -Iseconds)"
-}
-EOF
-)
+    nodeJson=$(jq -n \
+        --arg id "${nodeId}" \
+        --arg name "${nodeName}" \
+        --arg server "${server}" \
+        --argjson server_port "${port}" \
+        --arg method "${method}" \
+        --arg password "${password}" \
+        --arg created_at "$(date -Iseconds)" \
+        '{id: $id, name: $name, type: "shadowsocks", server: $server, server_port: $server_port, method: $method, password: $password, enabled: true, created_at: $created_at}')
 
     # 添加到配置文件
     addExternalNodeToFile "${nodeJson}"
@@ -13844,35 +13888,23 @@ addExternalNodeSOCKS() {
     local nodeJson
 
     if [[ -n "${username}" ]]; then
-        nodeJson=$(cat <<EOF
-{
-    "id": "${nodeId}",
-    "name": "${nodeName}",
-    "type": "socks",
-    "server": "${server}",
-    "server_port": ${port},
-    "version": "5",
-    "username": "${username}",
-    "password": "${password}",
-    "enabled": true,
-    "created_at": "$(date -Iseconds)"
-}
-EOF
-)
+        nodeJson=$(jq -n \
+            --arg id "${nodeId}" \
+            --arg name "${nodeName}" \
+            --arg server "${server}" \
+            --argjson server_port "${port}" \
+            --arg username "${username}" \
+            --arg password "${password}" \
+            --arg created_at "$(date -Iseconds)" \
+            '{id: $id, name: $name, type: "socks", server: $server, server_port: $server_port, version: "5", username: $username, password: $password, enabled: true, created_at: $created_at}')
     else
-        nodeJson=$(cat <<EOF
-{
-    "id": "${nodeId}",
-    "name": "${nodeName}",
-    "type": "socks",
-    "server": "${server}",
-    "server_port": ${port},
-    "version": "5",
-    "enabled": true,
-    "created_at": "$(date -Iseconds)"
-}
-EOF
-)
+        nodeJson=$(jq -n \
+            --arg id "${nodeId}" \
+            --arg name "${nodeName}" \
+            --arg server "${server}" \
+            --argjson server_port "${port}" \
+            --arg created_at "$(date -Iseconds)" \
+            '{id: $id, name: $name, type: "socks", server: $server, server_port: $server_port, version: "5", enabled: true, created_at: $created_at}')
     fi
 
     # 添加到配置文件
@@ -13937,25 +13969,16 @@ addExternalNodeTrojan() {
     local nodeId
     nodeId=$(generateNodeId)
     local nodeJson
-    nodeJson=$(cat <<EOF
-{
-    "id": "${nodeId}",
-    "name": "${nodeName}",
-    "type": "trojan",
-    "server": "${server}",
-    "server_port": ${port},
-    "password": "${password}",
-    "tls": {
-        "enabled": true,
-        "server_name": "${sni}",
-        "insecure": ${insecure},
-        "alpn": ["h2", "http/1.1"]
-    },
-    "enabled": true,
-    "created_at": "$(date -Iseconds)"
-}
-EOF
-)
+    nodeJson=$(jq -n \
+        --arg id "${nodeId}" \
+        --arg name "${nodeName}" \
+        --arg server "${server}" \
+        --argjson server_port "${port}" \
+        --arg password "${password}" \
+        --arg sni "${sni}" \
+        --argjson insecure "${insecure}" \
+        --arg created_at "$(date -Iseconds)" \
+        '{id: $id, name: $name, type: "trojan", server: $server, server_port: $server_port, password: $password, tls: {enabled: true, server_name: $sni, insecure: $insecure, alpn: ["h2", "http/1.1"]}, enabled: true, created_at: $created_at}')
 
     # 添加到配置文件
     addExternalNodeToFile "${nodeJson}"
@@ -14040,7 +14063,7 @@ parseSSLink() {
     local server="${serverPart%%:*}"
     local port="${serverPart##*:}"
 
-    if [[ -z "${server}" || -z "${port}" || -z "${method}" ]]; then
+    if [[ -z "${server}" || -z "${port}" || -z "${method}" ]] || ! [[ "${port}" =~ ^[0-9]+$ ]]; then
         echo ""
         return 1
     fi
@@ -14051,16 +14074,13 @@ parseSSLink() {
     fi
 
     # 输出 JSON
-    cat <<EOF
-{
-    "name": "${name}",
-    "type": "shadowsocks",
-    "server": "${server}",
-    "server_port": ${port},
-    "method": "${method}",
-    "password": "${password}"
-}
-EOF
+    jq -n \
+        --arg name "${name}" \
+        --arg server "${server}" \
+        --argjson server_port "${port}" \
+        --arg method "${method}" \
+        --arg password "${password}" \
+        '{name: $name, type: "shadowsocks", server: $server, server_port: $server_port, method: $method, password: $password}'
 }
 
 # 解析 Trojan 链接
@@ -14097,10 +14117,14 @@ parseTrojanLink() {
 
     if [[ -n "${params}" ]]; then
         # 解析 sni/peer/host
+        # 用纯 bash 参数展开提取，避免 grep -oP（Alpine/BusyBox grep 不支持 -P/\K，
+        # 会让 sni 解析失败、server_name 变空）。与本仓库别处（如 parseChainCode）一致。
         if [[ "${params}" == *"sni="* ]]; then
-            sni=$(echo "${params}" | grep -oP 'sni=\K[^&]+')
+            sni="${params#*sni=}"
+            sni="${sni%%&*}"
         elif [[ "${params}" == *"peer="* ]]; then
-            sni=$(echo "${params}" | grep -oP 'peer=\K[^&]+')
+            sni="${params#*peer=}"
+            sni="${sni%%&*}"
         fi
 
         # 解析 allowInsecure
@@ -14109,7 +14133,7 @@ parseTrojanLink() {
         fi
     fi
 
-    if [[ -z "${server}" || -z "${port}" || -z "${password}" ]]; then
+    if [[ -z "${server}" || -z "${port}" || -z "${password}" ]] || ! [[ "${port}" =~ ^[0-9]+$ ]]; then
         echo ""
         return 1
     fi
@@ -14118,21 +14142,14 @@ parseTrojanLink() {
         name="Trojan-${server}"
     fi
 
-    cat <<EOF
-{
-    "name": "${name}",
-    "type": "trojan",
-    "server": "${server}",
-    "server_port": ${port},
-    "password": "${password}",
-    "tls": {
-        "enabled": true,
-        "server_name": "${sni}",
-        "insecure": ${insecure},
-        "alpn": ["h2", "http/1.1"]
-    }
-}
-EOF
+    jq -n \
+        --arg name "${name}" \
+        --arg server "${server}" \
+        --argjson server_port "${port}" \
+        --arg password "${password}" \
+        --arg sni "${sni}" \
+        --argjson insecure "${insecure}" \
+        '{name: $name, type: "trojan", server: $server, server_port: $server_port, password: $password, tls: {enabled: true, server_name: $sni, insecure: $insecure, alpn: ["h2", "http/1.1"]}}'
 }
 
 # 解析 SOCKS5 链接
@@ -14169,7 +14186,7 @@ parseSOCKS5Link() {
     local server="${serverPart%%:*}"
     local port="${serverPart##*:}"
 
-    if [[ -z "${server}" || -z "${port}" ]]; then
+    if [[ -z "${server}" || -z "${port}" ]] || ! [[ "${port}" =~ ^[0-9]+$ ]]; then
         echo ""
         return 1
     fi
@@ -14179,27 +14196,19 @@ parseSOCKS5Link() {
     fi
 
     if [[ -n "${username}" ]]; then
-        cat <<EOF
-{
-    "name": "${name}",
-    "type": "socks",
-    "server": "${server}",
-    "server_port": ${port},
-    "version": "5",
-    "username": "${username}",
-    "password": "${password}"
-}
-EOF
+        jq -n \
+            --arg name "${name}" \
+            --arg server "${server}" \
+            --argjson server_port "${port}" \
+            --arg username "${username}" \
+            --arg password "${password}" \
+            '{name: $name, type: "socks", server: $server, server_port: $server_port, version: "5", username: $username, password: $password}'
     else
-        cat <<EOF
-{
-    "name": "${name}",
-    "type": "socks",
-    "server": "${server}",
-    "server_port": ${port},
-    "version": "5"
-}
-EOF
+        jq -n \
+            --arg name "${name}" \
+            --arg server "${server}" \
+            --argjson server_port "${port}" \
+            '{name: $name, type: "socks", server: $server, server_port: $server_port, version: "5"}'
     fi
 }
 
@@ -17361,6 +17370,10 @@ case "${1:-}" in
         shift
         ;;
 esac
+
+# root 权限校验：doctor 子命令上面已 exit（只读诊断允许非 root），其余路径（含 --dry-run）
+# 都会落到这里。脚本随后大量写 /etc、systemd、防火墙，非 root 必然中途失败，这里统一拦截。
+checkRoot
 
 # 启动时检查更新（使用短超时，避免阻塞太久）
 checkForUpdates 2>/dev/null

@@ -25,7 +25,7 @@
 
 ### 1.1 技术栈
 
-- **语言**：Bash 4+
+- **语言**：Bash 4.3+（用到 nameref `local -n` 与负数组下标 `${arr[-1]}`，二者均为 4.3 引入；CentOS 7 的 bash 4.2 不支持，入口处有版本守卫直接拦截）
 - **依赖**：`jq` · `curl` · `wget` · `openssl`
 - **支持核心**：Xray-core · sing-box（最低 1.11，由 `lib/constants.sh::SINGBOX_MIN_VERSION` 锁定，`installSingBox` 安装后会校验，低版本拒绝继续）
 - **支持系统**：Debian / Ubuntu · CentOS / RHEL · Alpine Linux
