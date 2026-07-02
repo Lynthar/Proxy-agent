@@ -978,29 +978,15 @@ verifyCertExpiry() {
         return 1
     fi
 
-    local expiryDate expiryTimestamp currentTimestamp daysLeft
-    expiryDate=$(openssl x509 -in "${certFile}" -noout -enddate 2>/dev/null | cut -d= -f2)
-
-    if [[ -z "${expiryDate}" ]]; then
-        echoContent yellow " ---> 无法读取证书过期时间"
-        return 0
-    fi
-
-    expiryTimestamp=$(date -d "${expiryDate}" +%s 2>/dev/null)
-    currentTimestamp=$(date +%s)
-
-    if [[ -z "${expiryTimestamp}" ]]; then
-        return 0
-    fi
-
-    ((daysLeft = (expiryTimestamp - currentTimestamp) / 86400))
-
-    if [[ ${daysLeft} -lt 0 ]]; then
-        echoContent red " ---> 证书已过期 ${daysLeft#-} 天"
+    # 用 openssl -checkend 判定有效期：避免 BusyBox(Alpine) 的 date -d 无法解析 openssl
+    # enddate 文本（如 "Jul  2 12:00:00 2026 GMT"）。checkend N：N 秒后仍有效则退出 0。
+    if ! openssl x509 -in "${certFile}" -noout -checkend 0 >/dev/null 2>&1; then
+        echoContent red " ---> 证书已过期"
         return 1
-    elif [[ ${daysLeft} -lt 7 ]]; then
-        echoContent yellow " ---> 警告: 证书将在 ${daysLeft} 天后过期"
-        return 0
+    fi
+
+    if ! openssl x509 -in "${certFile}" -noout -checkend 604800 >/dev/null 2>&1; then
+        echoContent yellow " ---> 警告: 证书将在 7 天内过期"
     fi
 
     return 0
@@ -2244,7 +2230,7 @@ installTools() {
     if echo "${selectCustomInstallType}" | grep -qwE ",7,|,8,|,7,8,"; then
         echoContent green " ---> 检测到无需依赖Nginx的服务，跳过安装"
     else
-        if ! nginx >/dev/null 2>&1; then
+        if ! command -v nginx >/dev/null 2>&1; then
             echoContent green " ---> 安装nginx"
             installNginxTools
         else
@@ -3334,16 +3320,16 @@ renewalTLS() {
             local wildcardCertFile
             wildcardCertFile=$(find "$HOME/.acme.sh" -path '*/\*.'"${dnsTLSDomain}_ecc"'/\*.'"${dnsTLSDomain}.cer" -type f 2>/dev/null | head -1)
             if [[ -n "${wildcardCertFile}" ]]; then
-                modifyTime=$(stat --format=%z "${wildcardCertFile}")
+                modifyTime=$(stat -c %Y "${wildcardCertFile}")
             else
                 echoContent red " ---> 未找到通配符证书文件"
                 return 1
             fi
         else
-            modifyTime=$(stat --format=%z "$HOME/.acme.sh/${domain}_ecc/${domain}.cer")
+            modifyTime=$(stat -c %Y "$HOME/.acme.sh/${domain}_ecc/${domain}.cer")
         fi
 
-        modifyTime=$(date +%s -d "${modifyTime}")
+        # stat -c %Y 直接给出 epoch 秒(mtime)，GNU/BusyBox(Alpine) 通用，省去 date -d 解析
         currentTime=$(date +%s)
         ((stampDiff = currentTime - modifyTime))
         ((days = stampDiff / 86400))
@@ -4249,10 +4235,21 @@ initSingBoxClients() {
                 --arg name "${name}-anytls" \
                 '. += [{password: $password, name: $name}]')
         fi
-        # Shadowsocks 2022 (id 14) -- 用 UUID 前 16 字节 base64 派生 22+2 字节合规密钥
+        # Shadowsocks 2022 (id 14) -- uPSK 长度必须等于方法密钥长度（SIP022）：
+        # aes-128-gcm=16B，aes-256-gcm / chacha20-poly1305=32B；否则 sing-box check 报
+        # "bad user PSK length"。方法优先取全局（initSS2022Config 在全新安装路径已设），
+        # 否则从现有 inbound 读（addUser 路径）。保留 head -c 派生以兼容既有 128-gcm 用户密钥。
         if [[ "${type}" == *",14,"* ]]; then
+            local ss2022Method14="${ss2022Method:-}"
+            if [[ -z "${ss2022Method14}" && -f "${singBoxConfigPath}14_ss2022_inbounds.json" ]]; then
+                ss2022Method14=$(jq -r '.inbounds[0].method' "${singBoxConfigPath}14_ss2022_inbounds.json")
+            fi
+            local ss2022UserKeyLen=16
+            if [[ "${ss2022Method14}" == "2022-blake3-aes-256-gcm" || "${ss2022Method14}" == "2022-blake3-chacha20-poly1305" ]]; then
+                ss2022UserKeyLen=32
+            fi
             local ss2022UserKey
-            ss2022UserKey=$(echo -n "${uuid}" | head -c 16 | base64)
+            ss2022UserKey=$(echo -n "${uuid}" | head -c "${ss2022UserKeyLen}" | base64)
             users=$(echo "${users}" | jq \
                 --arg password "${ss2022UserKey}" \
                 --arg name "${name}-SS2022" \
@@ -6647,6 +6644,8 @@ EOF
     elif [[ "${type}" == "ss2022" ]]; then
         local ss2022ServerKey=$5
         local ss2022Method=$6
+        # SS2022 无域名，服务器地址取公网 IP（取一次复用，避免 getPublicIP 多次外网探测）
+        local ss2022ServerAddr; ss2022ServerAddr=$(getPublicIP)
         # SS2022 密码格式: serverKey:userKey
         local ss2022Password="${ss2022ServerKey}:${id}"
         local ss2022PasswordBase64
@@ -6655,31 +6654,31 @@ EOF
         echoContent yellow " ---> Shadowsocks 2022"
 
         echoContent yellow " ---> 格式化明文(SS2022)"
-        echoContent green "协议类型:ss2022，地址:${publicIP}，端口:${port}，加密方式:${ss2022Method}，密码:${ss2022Password}，账户名:${email}\n"
+        echoContent green "协议类型:ss2022，地址:${ss2022ServerAddr}，端口:${port}，加密方式:${ss2022Method}，密码:${ss2022Password}，账户名:${email}\n"
 
         # SIP002 URL格式: ss://BASE64(method:password)@host:port#name
         local ss2022UrlPassword
         ss2022UrlPassword=$(echo -n "${ss2022Method}:${ss2022Password}" | base64 | tr -d '\n')
-        echoContent green "    ss://${ss2022UrlPassword}@${publicIP}:${port}#${email}\n"
+        echoContent green "    ss://${ss2022UrlPassword}@${ss2022ServerAddr}:${port}#${email}\n"
         cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
-ss://${ss2022UrlPassword}@${publicIP}:${port}#${email}
+ss://${ss2022UrlPassword}@${ss2022ServerAddr}:${port}#${email}
 EOF
         cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
   - name: "${email}"
     type: ss
-    server: ${publicIP}
+    server: ${ss2022ServerAddr}
     port: ${port}
     cipher: ${ss2022Method}
     password: "${ss2022Password}"
     udp: true
 EOF
 
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"shadowsocks\",\"server\":\"${publicIP}\",\"server_port\":${port},\"method\":\"${ss2022Method}\",\"password\":\"${ss2022Password}\",\"multiplex\":{\"enabled\":true}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"shadowsocks\",\"server\":\"${ss2022ServerAddr}\",\"server_port\":${port},\"method\":\"${ss2022Method}\",\"password\":\"${ss2022Password}\",\"multiplex\":{\"enabled\":true}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
         echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
 
         echoContent yellow " ---> 二维码 SS2022"
         local ss2022QRCode
-        ss2022QRCode=$(echo -n "ss://${ss2022UrlPassword}@${publicIP}:${port}#${email}" | sed 's/:/%3A/g; s/\//%2F/g; s/@/%40/g; s/#/%23/g')
+        ss2022QRCode=$(echo -n "ss://${ss2022UrlPassword}@${ss2022ServerAddr}:${port}#${email}" | sed 's/:/%3A/g; s/\//%2F/g; s/@/%40/g; s/#/%23/g')
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${ss2022QRCode}\n"
     fi
 
@@ -10449,9 +10448,10 @@ setupChainEntryMultiHop() {
 
     # 检测是否有 Xray 代理协议在运行
     local hasXrayProtocols=false
-    if [[ -f "/etc/Proxy-agent/xray/conf/02_VLESS_TCP_inbounds.json" ]] || \
-       [[ -f "/etc/Proxy-agent/xray/conf/07_VLESS_vision_reality_inbounds.json" ]] || \
-       [[ -f "/etc/Proxy-agent/xray/conf/04_trojan_TCP_inbounds.json" ]]; then
+    # 扫描 xray/conf 下所有已注册代理协议(含 WS/XHTTP/HTTPUpgrade 等，见 lib/protocol-registry.sh)；
+    # 仅查 02/07/04 会漏掉 XHTTP 等 → hasXrayProtocols=false → 不建桥接/不改路由 → 链路静默失效
+    local _xrayProtos; _xrayProtos=$(scanInstalledProtocols "/etc/Proxy-agent/xray/conf/")
+    if [[ -n "${_xrayProtos//,/}" ]]; then
         hasXrayProtocols=true
         echoContent green " ---> 检测到 Xray 代理协议，将同时配置 Xray 链式转发"
     fi
@@ -10703,9 +10703,10 @@ setupChainEntry() {
 
     # 检测是否有 Xray 代理协议在运行
     local hasXrayProtocols=false
-    if [[ -f "/etc/Proxy-agent/xray/conf/02_VLESS_TCP_inbounds.json" ]] || \
-       [[ -f "/etc/Proxy-agent/xray/conf/07_VLESS_vision_reality_inbounds.json" ]] || \
-       [[ -f "/etc/Proxy-agent/xray/conf/04_trojan_TCP_inbounds.json" ]]; then
+    # 扫描 xray/conf 下所有已注册代理协议(含 WS/XHTTP/HTTPUpgrade 等，见 lib/protocol-registry.sh)；
+    # 仅查 02/07/04 会漏掉 XHTTP 等 → hasXrayProtocols=false → 不建桥接/不改路由 → 链路静默失效
+    local _xrayProtos; _xrayProtos=$(scanInstalledProtocols "/etc/Proxy-agent/xray/conf/")
+    if [[ -n "${_xrayProtos//,/}" ]]; then
         hasXrayProtocols=true
         echoContent green " ---> 检测到 Xray 代理协议，将同时配置 Xray 链式转发"
     fi
@@ -12917,9 +12918,10 @@ finalizeMultiChainConfig() {
 
     # 检测是否有 Xray 代理协议在运行
     local hasXrayProtocols=false
-    if [[ -f "/etc/Proxy-agent/xray/conf/02_VLESS_TCP_inbounds.json" ]] || \
-       [[ -f "/etc/Proxy-agent/xray/conf/07_VLESS_vision_reality_inbounds.json" ]] || \
-       [[ -f "/etc/Proxy-agent/xray/conf/04_trojan_TCP_inbounds.json" ]]; then
+    # 扫描 xray/conf 下所有已注册代理协议(含 WS/XHTTP/HTTPUpgrade 等，见 lib/protocol-registry.sh)；
+    # 仅查 02/07/04 会漏掉 XHTTP 等 → hasXrayProtocols=false → 不建桥接/不改路由 → 链路静默失效
+    local _xrayProtos; _xrayProtos=$(scanInstalledProtocols "/etc/Proxy-agent/xray/conf/")
+    if [[ -n "${_xrayProtos//,/}" ]]; then
         hasXrayProtocols=true
         echoContent green " ---> $(t CHAIN_XRAY_DETECTED)"
     fi
@@ -16254,9 +16256,11 @@ updateRemoteSubscribe() {
         local singBoxSubscribe=
         singBoxSubscribe=$(curl -s "${subscribeType}://${remoteUrl}/s/sing-box_profiles/${emailMD5}")
 
-        if ! echo "${singBoxSubscribe}" | grep -q "nginx" && [[ -n "${singBoxSubscribe}" ]]; then
-            singBoxSubscribe=${singBoxSubscribe//tag\": \"${email}/tag\": \"${email}_${serverAlias}}
-            singBoxSubscribe=$(jq ". +=${singBoxSubscribe}" "/etc/Proxy-agent/subscribe_local/sing-box/${email}")
+        # 远程订阅是半可信内容：先做标签重命名，再 jq -e 预校验为合法 JSON，最后用
+        # --argjson 传入（jq 自动 escape），避免把远程响应直接拼进 jq 过滤器。
+        singBoxSubscribe=${singBoxSubscribe//tag\": \"${email}/tag\": \"${email}_${serverAlias}}
+        if ! echo "${singBoxSubscribe}" | grep -q "nginx" && [[ -n "${singBoxSubscribe}" ]] && echo "${singBoxSubscribe}" | jq -e . >/dev/null 2>&1; then
+            singBoxSubscribe=$(jq --argjson remote "${singBoxSubscribe}" '. += $remote' "/etc/Proxy-agent/subscribe_local/sing-box/${email}")
             echo "${singBoxSubscribe}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${email}"
 
             echoContent green " ---> 通用订阅 ${remoteUrl}:${email} 更新成功"
