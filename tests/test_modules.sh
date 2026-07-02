@@ -362,6 +362,29 @@ assert_equals "0" "${id}" "parseProtocolIdFromFileName(02_VLESS_TCP) = 0"
 id=$(parseProtocolIdFromFileName "07_VLESS_vision_reality_inbounds.json")
 assert_equals "7" "${id}" "parseProtocolIdFromFileName(07_Reality) = 7"
 
+# 测试 scanInstalledProtocols（回归 finding C：链式入口须探测全部已注册 Xray 代理协议，
+# 不能只认 02/07/04，否则 XHTTP/WS-only 安装会导致链式转发静默失效、真实 IP 泄露）
+_scanTmp1=$(mktemp -d)
+: >"${_scanTmp1}/12_VLESS_XHTTP_inbounds.json"
+scanRes1=$(scanInstalledProtocols "${_scanTmp1}")
+assert_true '[[ "${scanRes1}" == *",12,"* ]]' "scanInstalledProtocols detects XHTTP-only dir (id 12)"
+assert_not_empty "${scanRes1//,/}" "scanInstalledProtocols non-empty for XHTTP-only dir"
+
+# dokodemo 端口跳跃文件名以 _<port>.json 结尾，不匹配 *_inbounds.json，不应误判为代理协议
+_scanTmp2=$(mktemp -d)
+: >"${_scanTmp2}/02_dokodemodoor_inbounds_443.json"
+scanRes2=$(scanInstalledProtocols "${_scanTmp2}")
+assert_empty "${scanRes2//,/}" "scanInstalledProtocols excludes dokodemo port-hopping file"
+rm -rf "${_scanTmp1}" "${_scanTmp2}"
+
+# 测试 SS2022 uPSK 长度契约（回归 finding B：uPSK 解码长度必须等于方法密钥长度，
+# 镜像 install.sh initSingBoxClients id-14 的派生 head -c {16|32} | base64）
+_ss2022Uuid="9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+_ss2022Len16=$(echo -n "${_ss2022Uuid}" | head -c 16 | base64 | base64 -d | wc -c | tr -d ' ')
+_ss2022Len32=$(echo -n "${_ss2022Uuid}" | head -c 32 | base64 | base64 -d | wc -c | tr -d ' ')
+assert_equals "16" "${_ss2022Len16}" "SS2022 aes-128-gcm uPSK decodes to 16 bytes"
+assert_equals "32" "${_ss2022Len32}" "SS2022 aes-256-gcm/chacha20 uPSK decodes to 32 bytes"
+
 echo ""
 
 # ============================================================================
