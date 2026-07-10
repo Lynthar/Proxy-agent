@@ -3991,9 +3991,28 @@ handleSingBox() {
     fi
 }
 
+# 清理旧版 Socks5 分流残留的 allowInsecure 字段
+# Xray-core ≥ v26.2.6 移除了 allowInsecure（迁移至 pinnedPeerCertSha256），配置含 allowInsecure:true 时拒绝启动。
+# 该字段只可能存在于已移除的 Socks5 分流功能写入的 socks5_outbound.json 中。只剥离字段、保留出站和
+# 既有分流规则（证书转为严格校验），避免删除出站导致命中规则的流量静默直连。
+removeLegacyAllowInsecure() {
+    local legacySocks5Outbound="/etc/Proxy-agent/xray/conf/socks5_outbound.json"
+    if [[ -f "${legacySocks5Outbound}" ]] && grep -q '"allowInsecure"' "${legacySocks5Outbound}"; then
+        if jsonModifyFile "${legacySocks5Outbound}" 'del(.outbounds[]?.streamSettings.tlsSettings.allowInsecure)'; then
+            echoContent yellow " ---> $(t XRAY_ALLOWINSECURE_STRIPPED)"
+        else
+            echoContent yellow " ---> $(t XRAY_ALLOWINSECURE_STRIP_FAILED)"
+        fi
+    fi
+}
+
 # 操作xray
 handleXray() {
     local startResult=0
+
+    if [[ "$1" == "start" ]]; then
+        removeLegacyAllowInsecure
+    fi
 
     if [[ -n $(find /bin /usr/bin -name "systemctl") ]] && [[ -n $(find /etc/systemd/system/ -name "xray.service") ]]; then
         if [[ -z $(pgrep -f "xray/xray") ]] && [[ "$1" == "start" ]]; then
@@ -6371,7 +6390,7 @@ EOF
       grpc-service-name: ${currentPath}trojangrpc
 EOF
 
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"trojan\",\"server\":\"${add}\",\"server_port\":${port},\"password\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"insecure\":true,\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"transport\":{\"type\":\"grpc\",\"service_name\":\"${currentPath}trojangrpc\",\"idle_timeout\":\"15s\",\"ping_timeout\":\"15s\",\"permit_without_stream\":false},\"multiplex\":{\"enabled\":false,\"protocol\":\"smux\",\"max_streams\":32}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"trojan\",\"server\":\"${add}\",\"server_port\":${port},\"password\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"transport\":{\"type\":\"grpc\",\"service_name\":\"${currentPath}trojangrpc\",\"idle_timeout\":\"15s\",\"ping_timeout\":\"15s\",\"permit_without_stream\":false},\"multiplex\":{\"enabled\":false,\"protocol\":\"smux\",\"max_streams\":32}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
         echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
 
         echoContent yellow " ---> 二维码 Trojan gRPC(TLS)"

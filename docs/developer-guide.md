@@ -474,7 +474,7 @@ sing-box **1.11** 引入路由级 `action` 字段（参见官方迁移文档 <ht
 
 | 函数 | 位置 | 职责 |
 |------|------|------|
-| `handleXray start\|stop` | install.sh | Xray 启停 + pgrep 验证 + 失败时打印 systemctl status / journalctl 诊断 |
+| `handleXray start\|stop` | install.sh | Xray 启停 + pgrep 验证 + 失败时打印 systemctl status / journalctl 诊断；start 前调用 `removeLegacyAllowInsecure` 剥离旧版 socks5_outbound.json 残留的 `allowInsecure`（Xray ≥ v26.2.6 遇 true 拒启） |
 | `handleSingBox start\|stop` | install.sh | sing-box 启停 + **自动合并配置** + 10×0.5s 等待退出循环 |
 | `handleNginx start\|stop` | install.sh | Nginx 启停 + Reality-only 场景跳过 + CentOS SELinux 自动修复 |
 | `reloadCore` | install.sh | 根据 `${coreKind}` 和 `currentInstallProtocolType` 决定重启 xray / sing-box |
@@ -950,7 +950,7 @@ unInstall() {
 
 | 函数 | 用途 |
 |------|------|
-| `handleXray start\|stop` | Xray 启停 + 诊断输出 |
+| `handleXray start\|stop` | Xray 启停 + 诊断输出；start 前清理 legacy allowInsecure 残留 |
 | `handleSingBox start\|stop` | sing-box 启停（含自动合并） |
 | `handleNginx start\|stop` | Nginx 启停（含 SELinux 修复） |
 | `singBoxMergeConfig` | 合并 sing-box 配置并验证 |
