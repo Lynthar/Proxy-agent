@@ -528,6 +528,76 @@ fi
 echo ""
 
 # ============================================================================
+# 测试 legacy allowInsecure 清理
+# ============================================================================
+# 镜像 install.sh removeLegacyAllowInsecure 的过滤器：Xray-core ≥ v26.2.6 遇
+# allowInsecure:true 拒绝启动，启动前需从旧版 socks5_outbound.json 剥离该字段
+
+echo -e "${YELLOW}=== 测试 legacy allowInsecure 清理 ===${NC}"
+
+STRIP_ALLOWINSECURE_FILTER='del(.outbounds[]?.streamSettings.tlsSettings.allowInsecure)'
+LEGACY_SOCKS5_FILE="${MOCK_ROOT}/etc/Proxy-agent/xray/conf/socks5_outbound.json"
+
+cat > "${LEGACY_SOCKS5_FILE}" << 'EOF'
+{
+    "outbounds": [
+        {
+            "tag": "socks5_outbound",
+            "protocol": "socks",
+            "settings": {
+                "servers": [
+                    {"address": "192.0.2.10", "port": 1080, "users": [{"user": "u1", "pass": "p1"}]}
+                ]
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "tls",
+                "tlsSettings": {
+                    "serverName": "upstream.example.com",
+                    "alpn": ["h2", "http/1.1"],
+                    "allowInsecure": true
+                }
+            }
+        }
+    ]
+}
+EOF
+
+if jsonModifyFile "${LEGACY_SOCKS5_FILE}" "${STRIP_ALLOWINSECURE_FILTER}" false; then
+    result=$(jq -r '.outbounds[0].streamSettings.tlsSettings | has("allowInsecure")' "${LEGACY_SOCKS5_FILE}")
+    assert_equals "false" "${result}" "allowInsecure 字段已剥离"
+
+    result=$(jq -r '.outbounds[0].streamSettings.tlsSettings.serverName' "${LEGACY_SOCKS5_FILE}")
+    assert_equals "upstream.example.com" "${result}" "serverName 字段保留"
+
+    result=$(jq -r '.outbounds[0].settings.servers[0].address' "${LEGACY_SOCKS5_FILE}")
+    assert_equals "192.0.2.10" "${result}" "上游 socks5 服务器配置保留"
+
+    result=$(jq -r '.outbounds[0].streamSettings.security' "${LEGACY_SOCKS5_FILE}")
+    assert_equals "tls" "${result}" "TLS 传输配置保留"
+else
+    echo -e "${RED}✗${NC} legacy allowInsecure 清理失败"
+    ((TESTS_FAILED++))
+fi
+
+# 无 allowInsecure 的旧文件（纯 socks 出站）应原样保留
+cat > "${LEGACY_SOCKS5_FILE}" << 'EOF'
+{"outbounds": [{"tag": "socks5_outbound", "protocol": "socks", "settings": {"servers": [{"address": "192.0.2.11", "port": 1080}]}}]}
+EOF
+beforeStrip=$(jq -c -S . "${LEGACY_SOCKS5_FILE}")
+if jsonModifyFile "${LEGACY_SOCKS5_FILE}" "${STRIP_ALLOWINSECURE_FILTER}" false; then
+    afterStrip=$(jq -c -S . "${LEGACY_SOCKS5_FILE}")
+    assert_equals "${beforeStrip}" "${afterStrip}" "无 allowInsecure 的文件保持不变"
+else
+    echo -e "${RED}✗${NC} 纯 socks 出站文件处理失败"
+    ((TESTS_FAILED++))
+fi
+
+rm -f "${LEGACY_SOCKS5_FILE}"
+
+echo ""
+
+# ============================================================================
 # 测试结果汇总
 # ============================================================================
 
