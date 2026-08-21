@@ -58,7 +58,6 @@ V2RAY_LANG=en pasly       # 环境变量临时覆盖
 ## 文档
 
 - [使用指南](docs/user-guide.md)
-- [开发指南](docs/developer-guide.md)
 - [English README](docs/en/README_EN.md)
 
 ## 致谢

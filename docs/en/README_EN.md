@@ -110,7 +110,6 @@ DRY_RUN=1 pasly       # Same as --dry-run
 ## Documentation
 
 - [User Guide](../user-guide.md)
-- [Developer Guide](../developer-guide.md)
 - [SELinux Notes](../selinux.md)
 
 ## Contributing

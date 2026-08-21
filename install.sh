@@ -5618,7 +5618,7 @@ EOF
 EOF
         # 上方 routing.rules 的 inboundTag "dokodemo-in" 跟实际 tag "dokodemo-in-VLESSReality" 不匹配（Xray 精确字符串），
         # 两条规则永远不会命中——这是有意保留的 dead routing：Reality 靠内层 realitySettings.target 兜底无指纹反代到真实伪装站，
-        # 改成命中反而会让 Reality 鉴权失败或暴露 fingerprint。详见 docs/developer-guide.md 附录 D.1。
+        # 改成命中反而会让 Reality 鉴权失败或暴露 fingerprint。**不要"修"这两条规则。**
         # VLESS_Reality_gRPC - 已移除，推荐使用XHTTP
     elif [[ -z "${3:-}" ]]; then
         rm /etc/Proxy-agent/xray/conf/07_VLESS_vision_reality_inbounds.json >/dev/null 2>&1
