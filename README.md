@@ -3,7 +3,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![GitHub Release](https://img.shields.io/github/v/release/Lynthar/Proxy-agent?label=Release)](https://github.com/Lynthar/Proxy-agent/releases)
 [![Tests](https://img.shields.io/badge/Tests-passing-brightgreen)]()
-[![English](https://img.shields.io/badge/English-README-blue)](docs/en/README_EN.md)
+[![English](https://img.shields.io/badge/English-README-blue)](README.en.md)
 
 Xray-core / sing-box 多协议代理一键安装脚本。基于 [v2ray-agent](https://github.com/mack-a/v2ray-agent) 修改而来，感谢 @mack-a 的贡献。
 
@@ -58,7 +58,7 @@ V2RAY_LANG=en pasly       # 环境变量临时覆盖
 ## 文档
 
 - [使用指南](docs/user-guide.md)
-- [English README](docs/en/README_EN.md)
+- [English README](README.en.md)
 
 ## 致谢
 

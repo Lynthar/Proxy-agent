@@ -2,7 +2,7 @@
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![GitHub Release](https://img.shields.io/github/v/release/Lynthar/Proxy-agent?label=Release)](https://github.com/Lynthar/Proxy-agent/releases)
-[![中文](https://img.shields.io/badge/中文-README-blue)](../../README.md)
+[![中文](https://img.shields.io/badge/中文-README-blue)](README.md)
 
 One-click installer and management menu for Xray-core / sing-box multi-protocol proxy stacks. Fork of [v2ray-agent](https://github.com/mack-a/v2ray-agent) by @mack-a.
 
@@ -109,8 +109,8 @@ DRY_RUN=1 pasly       # Same as --dry-run
 
 ## Documentation
 
-- [User Guide](../user-guide.md)
-- [SELinux Notes](../selinux.md)
+- [User Guide](docs/user-guide.md)
+- [SELinux Notes](docs/selinux.md)
 
 ## Contributing
 
@@ -124,4 +124,4 @@ Issues and pull requests are welcome on [GitHub](https://github.com/Lynthar/Prox
 
 ## License
 
-[AGPL-3.0](../../LICENSE)
+[AGPL-3.0](LICENSE)
