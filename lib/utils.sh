@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# utils.sh - Proxy-agent 工具函数
-# ============================================================================
-# 本文件包含纯工具函数，这些函数没有副作用，不修改全局变量
+# utils.sh - 纯工具函数（无副作用，不写全局变量）
 # ============================================================================
 
 # 防止重复加载
@@ -54,10 +52,9 @@ echoContent() {
 # 字符串处理函数
 # ============================================================================
 
-# 移除 ANSI 控制字符
-# 用法: cleanText=$(stripAnsi "$coloredText")
-# 终止符匹配 [a-zA-Z]（不仅 m/J/K），覆盖 cursor 移动等更多 ANSI 序列；
-# install.sh 用它清洗用户粘贴的凭据，宽匹配更稳。
+# stripAnsi TEXT → 去掉 ANSI 控制序列
+# 终止符按 [a-zA-Z] 宽匹配（不止 m/J/K），cursor 移动等序列同样要清掉——
+# install.sh 用它洗用户粘贴的凭据。
 stripAnsi() {
     echo -e "$@" | sed 's/\x1B\[[0-9;]*[a-zA-Z]//g'
 }
@@ -170,12 +167,8 @@ timestamp() {
 # 用户输入解析
 # ============================================================================
 
-# 判断字符串是否为"是"的肯定回答（大小写不敏感）
-# 用法: if isYesInput "${reply}"; then ...
-# 接受: y, Y, yes, Yes, YES（任意大小写组合）
-# 不接受: yy, yep, yeah, n, 空字符串等。
-# 设计取舍：故意不接受 yy/yep/yeah 等模糊输入——精确性优先于过度宽容；
-# 用户的 yy 多为按键弹起延迟导致的连击，不应被解读为肯定。
+# isYesInput STR → 0=是。只认 y/yes（大小写不敏感）；yy/yep/yeah/空串一律否。
+# 放宽之前先想清楚哪个破坏性操作会因此被误触发。
 isYesInput() {
     case "${1,,}" in
         y|yes) return 0 ;;
@@ -183,21 +176,8 @@ isYesInput() {
     esac
 }
 
-# ============================================================================
-# Dry-run 计划模式
-# ============================================================================
-# 用户通过 DRY_RUN=1 pasly 进入只读 plan 模式：脚本走完用户输入和提示，但
-# 在每个被插入 planAction 短路点的 mutator 入口处回显"将要做什么"并直接 return。
-# 不会写入配置文件、申请证书、改 firewall、重启服务。
-#
-# 调用约定：
-#   isDryRun() 是低层探测；planAction "..." 是常用的"短路 + 计划输出"语法糖。
-#
-# 设计取舍：
-#   - 只插桩"用户菜单调用的 mutator 入口"（约 6-10 处），不深入到 jq / handle*
-#     等底层函数。这是一致的"粗粒度 plan"——告诉用户"会装 X 协议、会改防火墙"，
-#     而不是逐行 trace 每个 jq 调用。后者属于精细化插桩，是后续工作。
-#   - bootstrap 与 doctor 不受 DRY_RUN 影响：前者是脚本自身脚手架，后者本身只读。
+# Dry-run 计划模式：DRY_RUN=1 时 mutator 入口回显计划并直接返回，不写配置、不申请证书、
+# 不改 firewall、不重启服务。bootstrap 与 doctor 不受影响。
 
 # 是否处于 dry-run 模式
 # 用法: if isDryRun; then ... fi
@@ -205,12 +185,8 @@ isDryRun() {
     [[ "${DRY_RUN:-0}" == "1" ]]
 }
 
-# 在 dry-run 模式下输出 plan 行并要求调用方短路返回；非 dry-run 时静默返回 1
-# 用法:
-#   if planAction "$(t PLAN_UNINSTALL_ALL)"; then return 0; fi
-# 返回值:
-#   0 = dry-run 已生效（调用方应立即 return 0）
-#   1 = 非 dry-run（调用方继续执行真实逻辑）
+# planAction TEXT → 0=dry-run 已生效（调用方须立即 return 0）；1=非 dry-run，继续真实逻辑
+# 用法: if planAction "$(t PLAN_UNINSTALL_ALL)"; then return 0; fi
 planAction() {
     if isDryRun; then
         echoContent yellow "[plan] $*"

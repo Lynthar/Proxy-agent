@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# json-utils.sh - JSON 操作工具函数
-#
-# 提供安全的 JSON 读取、验证、原子写入功能
-# 封装 jq 操作，添加错误处理
+# json-utils.sh - JSON 读取、校验、原子写入（封装 jq，统一错误处理）
 # ============================================================================
 
 # 防止重复加载
@@ -37,11 +34,7 @@ jsonValidateFile() {
 # 读取函数
 # ============================================================================
 
-# 从 JSON 文件读取单个值
-# 参数: $1 - JSON 文件路径
-#       $2 - jq 路径表达式 (如 .inbounds[0].port)
-#       $3 - 默认值 (可选)
-# 输出: 读取到的值或默认值
+# jsonGetValue FILE JQ_PATH [DEFAULT] → 值；文件缺失或路径不存在时输出 DEFAULT
 jsonGetValue() {
     local file="$1"
     local path="$2"
@@ -63,10 +56,7 @@ jsonGetValue() {
     echo "${value}"
 }
 
-# 从 JSON 文件读取数组
-# 参数: $1 - JSON 文件路径
-#       $2 - jq 路径表达式
-# 输出: 紧凑格式的 JSON 数组；缺失/无效时输出 "[]"
+# jsonGetArray FILE JQ_PATH → 紧凑 JSON 数组；缺失或无效时输出 []
 jsonGetArray() {
     local file="$1"
     local path="$2"
@@ -87,10 +77,7 @@ jsonGetArray() {
     echo "${arr}"
 }
 
-# 获取数组长度
-# 参数: $1 - JSON 文件路径
-#       $2 - jq 路径表达式
-# 输出: 数组长度（缺失或无效返回 0）
+# jsonGetArrayLength FILE JQ_PATH → 数组长度；缺失或无效时输出 0
 jsonGetArrayLength() {
     local file="$1"
     local path="$2"
@@ -107,12 +94,8 @@ jsonGetArrayLength() {
 # 数组追加函数
 # ============================================================================
 
-# 向数组追加元素
-# 参数: $1 - JSON 文件路径
-#       $2 - 数组路径
-#       $3 - 要追加的元素（JSON 格式）
-# 输出: 修改后的完整 JSON（仅输出，不写回）
-# 注: 需要原子写回时，调用方应该把结果通过 jsonWriteFile 写回
+# jsonArrayAppend FILE ARRAY_PATH ELEMENT_JSON → 修改后的完整 JSON（只输出，不写回）
+# 要落盘必须把结果交给 jsonWriteFile，否则不是原子的。
 jsonArrayAppend() {
     local file="$1"
     local arrayPath="$2"
@@ -129,12 +112,8 @@ jsonArrayAppend() {
 # 原子文件写入函数
 # ============================================================================
 
-# 安全写入 JSON 到文件（原子操作）
-# 参数: $1 - 目标文件路径
-#       $2 - JSON 内容
-#       $3 - 是否创建备份 (true/false, 默认 true)
-# 返回: 0=成功, 1=失败（写入路径上任何错误都保留原文件不变）
-# 流程: 验证 JSON 语法 → 可选备份旧文件 → 写 mktemp 临时文件 → 原子 rename
+# jsonWriteFile FILE CONTENT [BACKUP=true] → 0=成功 1=失败
+# 验证语法 → 可选备份 → 写 mktemp → 原子 rename；任一步失败原文件不变。
 jsonWriteFile() {
     local file="$1"
     local content="$2"
@@ -167,12 +146,8 @@ jsonWriteFile() {
     return 0
 }
 
-# 安全修改 JSON 文件（原子操作，jq 过滤器驱动）
-# 参数: $1 - JSON 文件路径
-#       $2 - jq 过滤器表达式
-#       $3 - 是否创建备份 (true/false, 默认 true)
-# 返回: 0=成功, 1=失败
-# 流程: 验证源文件 → 可选备份 → jq 到 mktemp 临时文件 → 验证结果 → 原子 rename
+# jsonModifyFile FILE JQ_FILTER [BACKUP=true] → 0=成功 1=失败
+# 验证源文件 → 可选备份 → jq 到 mktemp → 验证结果 → 原子 rename。
 jsonModifyFile() {
     local file="$1"
     local filter="$2"
@@ -269,11 +244,8 @@ xrayGetTLSDomain() {
     fi
 }
 
-# 读取 Xray Reality 配置
-# 直接写入全局变量，避免 eval 注入面。输出名前缀 reality*
-# 用法:
-#   xrayGetRealityConfig "/path/to/config.json" 1
-#   echo "${realityServerName} ${realityPublicKey}"
+# xrayGetRealityConfig FILE [INDEX=1] → 写全局 realityServerName / realityPublicKey / …
+# 走全局变量而非回显 heredoc + eval，那条路径是注入面。
 xrayGetRealityConfig() {
     local file="$1"
     local index="${2:-1}"
@@ -340,11 +312,7 @@ singboxGetTLSServerName() {
     jsonGetValue "${file}" ".inbounds[${index}].tls.server_name"
 }
 
-# 读取 sing-box Reality 配置
-# 直接写入全局变量，避免 eval 注入面。输出名前缀 singboxReality*
-# 用法:
-#   singboxGetRealityConfig "/path/to/config.json" 0
-#   echo "${singboxRealityServerName}"
+# singboxGetRealityConfig FILE [INDEX=0] → 写全局 singboxRealityServerName / …
 singboxGetRealityConfig() {
     local file="$1"
     local index="${2:-0}"
@@ -355,11 +323,7 @@ singboxGetRealityConfig() {
     singboxRealityHandshakePort=$(jsonGetValue "${file}" ".inbounds[${index}].tls.reality.handshake.server_port")
 }
 
-# 读取 Hysteria2 配置
-# 直接写入全局变量；输出名前缀 hysteria2*
-# 用法:
-#   singboxGetHysteria2Config "/path/to/config.json"
-#   echo "${hysteria2Port} ${hysteria2UpMbps}"
+# singboxGetHysteria2Config FILE → 写全局 hysteria2Port / hysteria2UpMbps / …
 singboxGetHysteria2Config() {
     local file="$1"
 
@@ -369,11 +333,7 @@ singboxGetHysteria2Config() {
     hysteria2ObfsPassword=$(jsonGetValue "${file}" ".inbounds[0].obfs.password")
 }
 
-# 读取 TUIC 配置
-# 直接写入全局变量；输出名前缀 tuic*
-# 用法:
-#   singboxGetTuicConfig "/path/to/config.json"
-#   echo "${tuicPort} ${tuicAlgorithm}"
+# singboxGetTuicConfig FILE → 写全局 tuicPort / tuicAlgorithm
 singboxGetTuicConfig() {
     local file="$1"
 

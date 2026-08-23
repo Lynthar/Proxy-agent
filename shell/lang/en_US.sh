@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# English Language File
-# v2ray-agent i18n System
+# English language file
 # =============================================================================
 
 # =============================================================================
@@ -840,9 +839,6 @@ MSG_USER="User"
 MSG_ENTRY_NODE="Entry Node"
 MSG_INTERNET="Internet"
 MSG_OPTIONAL="Optional"
-MSG_DISABLED="Disabled"
-MSG_YES="Yes"
-MSG_NO="No"
 
 # =============================================================================
 # Multi-Chain Integration Messages
@@ -865,7 +861,6 @@ MSG_CHAIN_NAME_HINT="Set an identifier for this chain (letters, numbers, undersc
 MSG_CHAIN_NAME_PROMPT="Chain name"
 MSG_CHAIN_NAME_INVALID="Invalid name format, only letters, numbers, underscores allowed"
 MSG_CHAIN_NAME_EXISTS="Chain name already exists"
-MSG_CHAIN_STEP_RULES="Step: Set routing rules"
 MSG_CHAIN_RULES_HINT="Select routing rules for this chain"
 MSG_CHAIN_RULE_LATER="Configure later"
 MSG_CHAIN_RULE_PRESET="Use preset rules"
@@ -880,7 +875,6 @@ MSG_CHAIN_PRESET_GOOGLE="Google Services"
 MSG_CHAIN_PRESET_MICROSOFT="Microsoft Services"
 MSG_CHAIN_PRESET_APPLE="Apple Services"
 MSG_CHAIN_CUSTOM_DOMAIN_HINT="Enter domains (comma separated, e.g.: example.com,test.org)"
-MSG_DOMAIN="Domain"
 MSG_CHAIN_ADDED="Chain added successfully"
 MSG_RULES="Rules"
 MSG_CUSTOM_DOMAIN="Custom domains"
@@ -971,7 +965,6 @@ MSG_CHAIN_SET_DEFAULT_SUCCESS="Set [%s] as default chain"
 MSG_CHAIN_XRAY_DETECTED="Xray proxy protocol detected, will also configure Xray chain forwarding"
 MSG_CHAIN_TARGET="Target"
 MSG_CHAIN_RULE_ADDED="Rule added"
-MSG_CONFIRM="Confirm"
 MSG_CHAIN_MERGING_SINGBOX="Merging sing-box configuration..."
 MSG_CHAIN_STARTING_SINGBOX="Starting sing-box..."
 MSG_CHAIN_SINGBOX_START_FAILED="sing-box failed to start"
@@ -1065,3 +1058,18 @@ MSG_DOCTOR_DETAIL_NO_TLS="TLS certificate directory not found"
 MSG_DOCTOR_DETAIL_NOT_CENTOS="Not CentOS / RHEL"
 MSG_DOCTOR_SUMMARY="Summary"
 MSG_DOCTOR_FOOTER_HINT="Note: this is a read-only diagnostic. To fix issues, use the relevant menu option or see docs/user-guide.md"
+
+# =============================================================================
+# Transactional core update / package-manager lock / custom install validation (2026-08 fix batch)
+# =============================================================================
+MSG_UPDATE_CORE_VERSION_FAIL="Failed to fetch version info; current version kept"
+MSG_UPDATE_CORE_DL_FAIL_KEEP="Core download failed; current version kept"
+MSG_UPDATE_CORE_VERIFY_FAIL_KEEP="File verification failed (possibly tampered); current version kept"
+MSG_UPDATE_CORE_EXTRACT_FAIL_KEEP="Extraction failed; current version kept"
+MSG_UPDATE_CORE_FAIL_RESTORED="Update failed; pre-update binary restored"
+MSG_ROLLBACK_STAGING_FAIL="Download or verification failed; the active version was not modified"
+MSG_PKG_MANAGER_WAIT="Another package manager is running; waiting for it to finish..."
+MSG_PKG_MANAGER_WAIT_TIMEOUT="Timed out waiting for the package-manager lock; retry later (or finish the running system update first)"
+MSG_PKG_MANAGER_YUM_LIVE="yum is running (PID %s); retry after it finishes"
+MSG_CUSTOM_INSTALL_INVALID_TOKENS="Invalid option(s):%s — re-enter using the menu numbers"
+MSG_WARP_REG_VERIFY_FAIL="warp-reg download failed or checksum mismatch; installation aborted"

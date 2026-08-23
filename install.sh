@@ -5,19 +5,12 @@
 export LANG=en_US.UTF-8
 
 # ============================================================================
-# 全局错误处理
-# 注意：不使用 set -e 因为脚本中有许多命令允许失败
-# 但启用 pipefail 确保管道错误能被检测
+# 不用 set -e（大量命令允许失败），但开 pipefail 让管道错误可见
 # ============================================================================
 set -o pipefail
 
-# ============================================================================
-# Bash 版本守卫
-# 脚本用到 nameref（local -n，端口/域名输入）与负数组下标 ${arr[-1]}（端口生成等），
-# 二者均为 Bash 4.3+ 特性。CentOS 7 自带 bash 4.2.46 会在这些路径上静默失败，
-# 这里直接给出明确报错，避免装到一半才崩。
-# 守卫本身只用 4.3 以前就有的语法（算术比较 + BASH_VERSINFO 数组）。
-# ============================================================================
+# Bash 4.3+ 硬要求：用到 nameref（local -n）与负数组下标 ${arr[-1]}，CentOS 7 的
+# 4.2.46 会在这些路径上静默失败。守卫自身只用 4.3 以前的语法。
 if [[ -z "${BASH_VERSINFO:-}" ]] || (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then
     echo "[Proxy-agent] 需要 Bash 4.3 或更高版本，当前为 ${BASH_VERSION:-非 bash}。" >&2
     echo "[Proxy-agent] requires Bash >= 4.3, current: ${BASH_VERSION:-not bash}." >&2
@@ -47,9 +40,7 @@ _cleanup() {
 trap '_cleanup' EXIT
 
 # ============================================================================
-# 模块加载
-# 如果 lib 目录存在，加载模块化组件
-# 这允许逐步重构而保持向后兼容
+# 模块加载：lib/ 存在则加载模块化组件
 # ============================================================================
 
 # 解析符号链接：pasly 是 /usr/bin/pasly → /etc/Proxy-agent/install.sh 的
@@ -71,23 +62,9 @@ if [[ ! -d "${_LIB_DIR}" && -d "${_LIB_FALLBACK_DIR}" ]]; then
     _LIB_DIR="${_LIB_FALLBACK_DIR}"
 fi
 
-# 自举下载：lib/ 与 shell/lang/ 在本机彻底找不到时，从 GitHub 拉一份
-# 到 _LIB_FALLBACK_DIR / _LANG_FALLBACK_DIR。这样：
-#   - README 的 wget 单文件安装命令仍能用（不必改 README）
-#   - pasly 的后续调用直接命中 fallback 路径
-# 优先级：
-#   1. release tarball + SHA256（强校验）—— release.yml 发出的 lib_bundle.tar.gz
-#   2. raw 单文件下载（弱校验，仅 bash -n）—— 用于 release 还没发资产的旧版本
-# 目标位置：固定 _LIB_FALLBACK_DIR / _LANG_FALLBACK_DIR，
-#   先全部下到 mktemp 临时目录、校验通过再原子 mv，失败时目标位置零污染。
-# env 旁路:
-#   PROXY_AGENT_NO_BOOTSTRAP=1        跳过自举，让 self-check 走 fatal 路径
-#   PROXY_AGENT_BOOTSTRAP_REF=<ref>   raw 模式改用指定 git ref（默认 master）
-#   PROXY_AGENT_BOOTSTRAP_MODE=auto|release|raw
-#                                     选模式（默认 auto = 先 release 后 raw）
-# 触发条件：任意一个核心 lib 文件缺失，或者文件存在但 bash -n 不通过（损坏）。
-# 后者（损坏触发）保护用户不被先前 buggy 的"17. 更新脚本"流程残留的坏文件锁死——
-# 只看文件存在性会让 bootstrap 误以为已装好，跳过后 source 损坏文件直接崩。
+# 自举下载：lib/ 与 shell/lang/ 本机缺失、或存在但 bash -n 不通过时从 GitHub 拉。
+# 先全下到 mktemp、校验通过才原子 mv，失败时目标位置零污染。
+# 旁路：PROXY_AGENT_NO_BOOTSTRAP / PROXY_AGENT_BOOTSTRAP_REF / PROXY_AGENT_BOOTSTRAP_MODE。
 _lib_health_ok=1
 if [[ -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
     for _f in i18n constants utils json-utils system-detect protocol-registry; do
@@ -156,8 +133,7 @@ if [[ -z "${_lib_health_ok}" && -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
         }
 
         # ----------------------------------------------------------------
-        # 模式 1：尝试 release tarball + SHA256（强校验）
-        # 把 lib/ 与 shell/lang/ 树解到 tmpDir 下，成功 return 0，失败 return 1
+        # 模式 1：release tarball + SHA256（强校验），解到 tmpDir
         # ----------------------------------------------------------------
         _try_release_bundle() {
             local releaseInfo bundleUrl shaUrl
@@ -329,10 +305,8 @@ if [[ -z "${_lib_health_ok}" && -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
             fi
         done
 
-        # VERSION：release tarball 自带，raw 模式 best-effort 单拉。
-        # 部署到 /etc/Proxy-agent/VERSION，让 _load_version 走第二档（本地文件）
-        # 而不是每次启动都打 GitHub API releases/latest 拿版本号。
-        # 部署失败不致命——_load_version 还有 API 兜底，只是慢一点。
+        # VERSION 部署到 /etc/Proxy-agent/VERSION，让 _load_version 走本地文件档而非每次打 API。
+        # 失败不致命。
         if [[ -f "${tmpDir}/VERSION" ]]; then
             mkdir -p /etc/Proxy-agent 2>/dev/null
             mv -f "${tmpDir}/VERSION" /etc/Proxy-agent/VERSION 2>/dev/null || true
@@ -352,10 +326,7 @@ fi
 
 # 加载模块（如果存在）
 if [[ -d "${_LIB_DIR}" ]]; then
-    # 加载顺序很重要：
-    # Phase 1: i18n (国际化，最先加载)
-    # Phase 2: constants -> utils -> system-detect
-    # Phase 3: json-utils -> protocol-registry
+    # 加载顺序不可换：i18n → constants → utils → system-detect → json-utils → protocol-registry
     for _module in i18n constants utils json-utils system-detect protocol-registry; do
         if [[ -f "${_LIB_DIR}/${_module}.sh" ]]; then
             # shellcheck source=/dev/null
@@ -395,8 +366,7 @@ fi
 unset _LIB_DIR _LIB_FALLBACK_DIR _LANG_FALLBACK_DIR _SCRIPT_PATH _module _fn _required_lib_fns _missing_lib_fns _lib_health_ok _f
 
 # ============================================================================
-# 版本号管理
-# 版本号来源优先级: VERSION文件 > GitHub Release > 硬编码默认值
+# 版本号来源优先级：VERSION 文件 > GitHub Release > 硬编码默认值
 # ============================================================================
 _load_version() {
     local versionFile="${_SCRIPT_DIR}/VERSION"
@@ -429,8 +399,7 @@ _load_version() {
 _load_version
 
 # ============================================================================
-# GitHub Release 版本检测
-# 从 GitHub API 获取最新 Release 版本号
+# 从 GitHub API 取最新 Release 版本号
 # ============================================================================
 GITHUB_REPO="Lynthar/Proxy-agent"
 GITHUB_API_URL="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
@@ -741,13 +710,9 @@ isValidDomain() {
     return 0
 }
 
-# 读取并校验端口输入（统一入口，杜绝"先动手再校验"）
-# 用法:
-#   readValidPort "端口: " port                          必输，默认范围 1-65535
-#   readValidPort "端口: " port 443                      回车采用 443
-#   readValidPort "端口: " port "RANDOM" 10000 30000      回车随机生成
-#   readValidPort "起点: " portStart "" 30000 40000        必输，限定范围
-# 成功将值写入 <out-var> 返回 0；空 + 无 default 或越界返回 1，错误经 echoContent + i18n
+# readValidPort PROMPT OUT_VAR [DEFAULT|"RANDOM"] [MIN] [MAX] → 0=成功，值写入 OUT_VAR
+# DEFAULT="RANDOM" 时回车生成随机端口；空且无 default、或越界返回 1。
+# 统一入口，杜绝"先动手再校验"。
 readValidPort() {
     local prompt="$1"
     local -n __rvp_out="$2"
@@ -776,11 +741,8 @@ readValidPort() {
     return 0
 }
 
-# 读取并校验域名输入
-# 用法:
-#   readValidDomain "域名: " domain                       必输
-#   readValidDomain "域名: " domain "${currentHost}"        回车沿用旧值
-# 域名校验复用本文件的 isValidDomain（含命令注入字符过滤）
+# readValidDomain PROMPT OUT_VAR [DEFAULT] → 0=成功
+# 校验走 isValidDomain（含命令注入字符过滤）。
 readValidDomain() {
     local prompt="$1"
     local -n __rvd_out="$2"
@@ -869,12 +831,9 @@ extractSingBoxHash() {
     fi
 }
 
-# 校验已下载的 install.sh 完整性
-# 参数: $1 - 已下载文件路径
-#       $2 - 对应 GitHub Release tag (空则跳过校验)
-# 返回: 0=通过或软降级跳过, 1=校验失败
-# 校验文件来自 Release 资产: install.sh.sha256 (由 create_release.yml 生成)
-# 降级策略: 无 tag、无资产、无 sha256sum 工具时跳过并警告，不阻断旧版本升级
+# verifyInstallSHA256 FILE TAG → 0=通过或软降级跳过，1=校验失败
+# sha256 来自 Release 资产 install.sh.sha256。无 tag / 无资产 / 无 sha256sum 工具时
+# 跳过并警告，不阻断旧版本升级。
 verifyInstallSHA256() {
     local file="$1"
     local tag="$2"
@@ -1022,11 +981,8 @@ isValidIP() {
     return 1
 }
 
-# 检查SELinux状态（使用运行时检测）
-# checkCentosSELinux / checkSystem / checkCPUVendor 由 lib/system-detect.sh 提供
-# （已 port inline 历史行为：i18n 错误消息、SELinux enforcing 时 exit 1、
-# checkSystem 失败时 exit 1，并修复 inline 的几处缺陷——amd64 cpuVendor 漏赋
-# 值、debian 检测看错文件等）。
+# SELinux / 系统 / CPU 探测由 lib/system-detect.sh 提供；
+# SELinux enforcing 与 checkSystem 失败都 exit 1。
 
 # 初始化全局变量
 initVar() {
@@ -1046,10 +1002,7 @@ initVar() {
     # 安装总进度
     totalProgress=1
 
-    # 当前安装的核心类型
-    # 1 = xray-core
-    # 2 = sing-box
-    # （v2ray-core / v2ray[xtls] 早期值已下线，旧脚本无 3 路径）
+    # 当前安装的核心类型：1=xray-core，2=sing-box（早期的 v2ray 值已下线）
     coreKind=
 
     # 核心安装path
@@ -1221,12 +1174,6 @@ initVar() {
     realityServerName=
     realityDestDomain=
 
-    # 端口状态
-    #    isPortOpen=
-    # 通配符域名状态
-    #    wildcardDomainStatus=
-    # 通过nginx检查的端口
-    #    nginxIPort=
 
     # wget show progress
     wgetShowProgressStatus=
@@ -1459,10 +1406,6 @@ readInstallProtocolType() {
             currentRealityMldsa65Seed=$(jq -r '.inbounds[0].streamSettings.realitySettings.mldsa65Seed // empty' "${row}.json")
             currentRealityMldsa65Verify=$(jq -r '.inbounds[0].streamSettings.realitySettings.mldsa65Verify // empty' "${row}.json")
 
-            #            if [[ "${coreKind}" == "2" ]]; then
-            #                frontingType=03_VLESS_WS_inbounds
-            #                singBoxVLESSWSPort=$(jq .inbounds[0].listen_port "${row}.json")
-            #            fi
         fi
 
         if echo "${row}" | grep -q trojan_gRPC_inbounds; then
@@ -2053,6 +1996,10 @@ cleanUp() {
     fi
 }
 initVar "${1:-}"
+# doctor 是只读诊断入口：SELinux Enforcing 正是它要报告的问题，不能在初始化期就退出
+if [[ "${1:-}" == "doctor" ]]; then
+    PROXY_AGENT_SELINUX_NONFATAL=1
+fi
 checkSystem
 checkCPUVendor
 
@@ -2069,11 +2016,15 @@ mkdirTools() {
     mkdir -p /etc/Proxy-agent/tls
     chmod 700 /etc/Proxy-agent/tls
 
+    # subscribe_local/_remote 存明文节点配置（含 UUID），收紧到 root-only；
+    # nginx 只读对外发布目录 subscribe/，不受影响
     mkdir -p /etc/Proxy-agent/subscribe_local/default
     mkdir -p /etc/Proxy-agent/subscribe_local/clashMeta
+    chmod 700 /etc/Proxy-agent/subscribe_local
 
     mkdir -p /etc/Proxy-agent/subscribe_remote/default
     mkdir -p /etc/Proxy-agent/subscribe_remote/clashMeta
+    chmod 700 /etc/Proxy-agent/subscribe_remote
 
     mkdir -p /etc/Proxy-agent/subscribe/default
     mkdir -p /etc/Proxy-agent/subscribe/clashMetaProfiles
@@ -2112,8 +2063,21 @@ installTools() {
         dpkg --configure -a
     fi
 
-    if [[ -n $(pgrep -f "apt") ]]; then
-        pgrep -f apt | xargs kill -9
+    # 等待 apt/dpkg 结束而不是 kill -9：SIGKILL 会截断 dpkg 事务损坏包数据库，
+    # 且旧写法 pgrep -f "apt" 按整条命令行子串匹配，连 "laptop" 之类无关进程都会被杀
+    if [[ "${release}" == "debian" || "${release}" == "ubuntu" ]]; then
+        local aptWaited=0
+        while pgrep -x "apt|apt-get|dpkg|aptitude|unattended-upgr" >/dev/null 2>&1; do
+            if [[ ${aptWaited} -eq 0 ]]; then
+                echoContent yellow " ---> $(t PKG_MANAGER_WAIT)"
+            fi
+            if [[ ${aptWaited} -ge 120 ]]; then
+                echoContent red " ---> $(t PKG_MANAGER_WAIT_TIMEOUT)"
+                exit 1
+            fi
+            sleep 5
+            aptWaited=$((aptWaited + 5))
+        done
     fi
 
     echoContent green " ---> $(t INSTALL_CHECKING)"
@@ -2124,7 +2088,16 @@ installTools() {
     fi
 
     if [[ "${release}" == "centos" ]]; then
-        rm -rf /var/run/yum.pid
+        # 只清确认已死的陈旧锁；删活锁会让两个 yum 并发写包数据库
+        if [[ -f "/var/run/yum.pid" ]]; then
+            local yumPid
+            yumPid=$(cat /var/run/yum.pid 2>/dev/null)
+            if [[ -n "${yumPid}" ]] && kill -0 "${yumPid}" 2>/dev/null; then
+                echoContent red " ---> $(t PKG_MANAGER_YUM_LIVE "${yumPid}")"
+                exit 1
+            fi
+            rm -f /var/run/yum.pid
+        fi
         ${installType} epel-release >/dev/null 2>&1
     fi
 
@@ -2819,14 +2792,7 @@ selectAcmeInstallSSL() {
     if [[ "${ipType}" == "6" ]]; then
         sslIPv6="--listen-v6"
     fi
-    #    currentIPType=$(curl -s "-${ipType}" http://www.cloudflare.com/cdn-cgi/trace | grep "ip" | cut -d "=" -f 2)
 
-    #    if [[ -z "${currentIPType}" ]]; then
-    #                currentIPType=$(curl -s -6 http://www.cloudflare.com/cdn-cgi/trace | grep "ip" | cut -d "=" -f 2)
-    #        if [[ -n "${currentIPType}" ]]; then
-    #            sslIPv6="--listen-v6"
-    #        fi
-    #    fi
 
     acmeInstallSSL
 
@@ -3072,10 +3038,8 @@ randomPathFunction() {
             initRandomPath
             currentPath=${customPath}
         else
-            # 格式校验：URL path 片段只允许字母数字与 . _ -，长度 1-32
-            # 放点号是为了兼容像 "api.v1" 这种习惯；点号对 Nginx path matching 无影响
-            # customPath 会嵌入 JSON（.path）与 Nginx location、fallback path 多处字符串，
-            # 禁用引号/斜杠/空白/jq-shell 元字符以阻断 JSON 破坏与下游注入
+            # URL path 片段白名单：字母数字与 . _ -，长度 1-32（点号放行是为了 api.v1 这种写法）。
+            # 引号/斜杠/空白/jq-shell 元字符一律禁——它会同时嵌入 JSON、Nginx location 与 fallback path。
             if ! [[ "${customPath}" =~ ^[A-Za-z0-9._-]{1,32}$ ]]; then
                 echoContent red " ---> 路径格式非法，仅允许字母数字及 . _ -，长度 1-32"
                 exit 1
@@ -3472,10 +3436,8 @@ installSingBox() {
             rm -rf /etc/Proxy-agent/sing-box/sing-box-*
             chmod 655 /etc/Proxy-agent/sing-box/sing-box
 
-            # 版本守门（兜底）：本脚本配置使用 1.11+ 引入的路由级 sniff/resolve action
-            # 前面已在下载前按 ${version} tag 检查过一次，这里再用实际二进制版本验证一次。
-            # 参见 https://sing-box.sagernet.org/migration/#migrate-legacy-inbound-fields-to-rule-actions
-            # 1.11 以下不识别 action 字段，会启动失败；1.12+ 必须用 action（inbound 级 sniff 已移除）
+            # 版本守门（兜底）：配置用 1.11+ 的路由级 sniff/resolve action，1.11 以下不识别会启动失败。
+            # 下载前已按 tag 检查过一次，这里用实际二进制版本再验一次。
             local installedSingBoxVer
             installedSingBoxVer=$(/etc/Proxy-agent/sing-box/sing-box version 2>/dev/null | head -1 | awk '{print $3}')
             if [[ -z "${installedSingBoxVer}" ]]; then
@@ -3501,9 +3463,16 @@ installSingBox() {
         if [[ -z "${lastInstallationConfig}" ]]; then
             read -r -p "是否更新、升级？[y/n]:" reInstallSingBoxStatus
             if isYesInput "${reInstallSingBoxStatus}"; then
-                rm -f /etc/Proxy-agent/sing-box/sing-box
-                installSingBox "$1"
-                return $?
+                # 先挪走而不是删掉：下载/校验失败时恢复原二进制，避免服务下次重启后拉不起来
+                local singBoxUpgradeBakBin="/etc/Proxy-agent/sing-box/sing-box.update-bak"
+                mv -f /etc/Proxy-agent/sing-box/sing-box "${singBoxUpgradeBakBin}"
+                if installSingBox "$1"; then
+                    rm -f "${singBoxUpgradeBakBin}"
+                    return 0
+                fi
+                mv -f "${singBoxUpgradeBakBin}" /etc/Proxy-agent/sing-box/sing-box
+                echoContent red " ---> $(t UPDATE_CORE_FAIL_RESTORED)"
+                return 1
             fi
         fi
     fi
@@ -3631,9 +3600,16 @@ installXray() {
             echoContent green " ---> Xray-core版本:$(/etc/Proxy-agent/xray/xray --version | awk '{print $2}' | head -1)"
             read -r -p "是否更新、升级？[y/n]:" reInstallXrayStatus
             if isYesInput "${reInstallXrayStatus}"; then
-                rm -f /etc/Proxy-agent/xray/xray
-                installXray "$1" "$2"
-                return $?
+                # 先挪走而不是删掉：下载/校验失败时恢复原二进制，避免服务下次重启后拉不起来
+                local xrayUpgradeBakBin="/etc/Proxy-agent/xray/xray.update-bak"
+                mv -f /etc/Proxy-agent/xray/xray "${xrayUpgradeBakBin}"
+                if installXray "$1" "$2"; then
+                    rm -f "${xrayUpgradeBakBin}"
+                    return 0
+                fi
+                mv -f "${xrayUpgradeBakBin}" /etc/Proxy-agent/xray/xray
+                echoContent red " ---> $(t UPDATE_CORE_FAIL_RESTORED)"
+                return 1
             fi
         fi
     fi
@@ -3724,8 +3700,11 @@ updateGeoSite() {
 }
 
 # 更新Xray
+# 下载/校验全部通过前不停服务、不动旧二进制；失败时从 xray.update-bak 恢复。
+# 调用侧先 mv 旧二进制到 .update-bak（而非 rm），让本分支的失败路径有东西可恢复。
 updateXray() {
     readInstallType
+    local xrayBakBin="/etc/Proxy-agent/xray/xray.update-bak"
 
     if [[ -z "${coreKind}" || "${coreKind}" != "1" ]]; then
         if [[ -n "${1:-}" ]]; then
@@ -3734,16 +3713,54 @@ updateXray() {
             version=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=30" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
         fi
 
-        echoContent green " ---> Xray-core版本:${version}"
-
-        if [[ "${release}" == "alpine" ]]; then
-            wget -c -q -P /etc/Proxy-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip"
-        else
-            wget -c -q ${wgetShowProgressStatus} -P /etc/Proxy-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip"
+        if [[ -z "${version}" ]]; then
+            [[ -f "${xrayBakBin}" ]] && mv -f "${xrayBakBin}" /etc/Proxy-agent/xray/xray
+            echoContent red " ---> $(t UPDATE_CORE_VERSION_FAIL)"
+            return 1
         fi
 
-        unzip -o "/etc/Proxy-agent/xray/${xrayCoreCPUVendor}.zip" -d /etc/Proxy-agent/xray >/dev/null
-        rm -rf "/etc/Proxy-agent/xray/${xrayCoreCPUVendor}.zip"
+        echoContent green " ---> Xray-core版本:${version}"
+
+        local xrayZipFile="/etc/Proxy-agent/xray/${xrayCoreCPUVendor}.zip"
+        local xrayDgstFile="${xrayZipFile}.dgst"
+        # 清掉可能的残留半截文件——wget -c 会在其上续传拼出损坏包
+        rm -f "${xrayZipFile}" "${xrayDgstFile}"
+        if [[ "${release}" == "alpine" ]]; then
+            wget -c -q -P /etc/Proxy-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip"
+            wget -c -q -P /etc/Proxy-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip.dgst"
+        else
+            wget -c -q ${wgetShowProgressStatus} -P /etc/Proxy-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip"
+            wget -c -q ${wgetShowProgressStatus} -P /etc/Proxy-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip.dgst"
+        fi
+
+        if [[ ! -s "${xrayZipFile}" ]]; then
+            rm -f "${xrayZipFile}" "${xrayDgstFile}"
+            [[ -f "${xrayBakBin}" ]] && mv -f "${xrayBakBin}" /etc/Proxy-agent/xray/xray
+            echoContent red " ---> $(t UPDATE_CORE_DL_FAIL_KEEP)"
+            return 1
+        fi
+
+        local expectedHash
+        expectedHash=$(extractXrayHash "${xrayDgstFile}")
+        if [[ -n "${expectedHash}" ]]; then
+            if ! verifySHA256 "${xrayZipFile}" "${expectedHash}"; then
+                rm -f "${xrayZipFile}" "${xrayDgstFile}"
+                [[ -f "${xrayBakBin}" ]] && mv -f "${xrayBakBin}" /etc/Proxy-agent/xray/xray
+                echoContent red " ---> $(t UPDATE_CORE_VERIFY_FAIL_KEEP)"
+                return 1
+            fi
+            echoContent green " ---> 文件校验通过"
+        else
+            echoContent yellow " ---> 警告: 未能获取校验信息，跳过完整性验证"
+        fi
+
+        if ! unzip -o "${xrayZipFile}" -d /etc/Proxy-agent/xray >/dev/null || [[ ! -f "/etc/Proxy-agent/xray/xray" ]]; then
+            rm -f "${xrayZipFile}" "${xrayDgstFile}"
+            [[ -f "${xrayBakBin}" ]] && mv -f "${xrayBakBin}" /etc/Proxy-agent/xray/xray
+            echoContent red " ---> $(t UPDATE_CORE_EXTRACT_FAIL_KEEP)"
+            return 1
+        fi
+        rm -f "${xrayZipFile}" "${xrayDgstFile}" "${xrayBakBin}"
         chmod 655 /etc/Proxy-agent/xray/xray
         handleXray stop
         handleXray start
@@ -3764,8 +3781,7 @@ updateXray() {
             if [[ "${rollbackXrayStatus}" == "y" ]]; then
                 echoContent green " ---> 当前Xray-core版本:$(/etc/Proxy-agent/xray/xray --version | awk '{print $2}' | head -1)"
 
-                handleXray stop
-                rm -f /etc/Proxy-agent/xray/xray
+                mv -f /etc/Proxy-agent/xray/xray "${xrayBakBin}"
                 updateXray "${version}"
             else
                 echoContent green " ---> 放弃回退版本"
@@ -3773,8 +3789,7 @@ updateXray() {
         elif [[ "${version}" == "v$(/etc/Proxy-agent/xray/xray --version | awk '{print $2}' | head -1)" ]]; then
             read -r -p "当前版本与最新版相同，是否重新安装？[y/n]:" reInstallXrayStatus
             if [[ "${reInstallXrayStatus}" == "y" ]]; then
-                handleXray stop
-                rm -f /etc/Proxy-agent/xray/xray
+                mv -f /etc/Proxy-agent/xray/xray "${xrayBakBin}"
                 updateXray
             else
                 echoContent green " ---> 放弃重新安装"
@@ -3782,7 +3797,7 @@ updateXray() {
         else
             read -r -p "最新版本为:${version}，是否更新？[y/n]:" installXrayStatus
             if [[ "${installXrayStatus}" == "y" ]]; then
-                rm /etc/Proxy-agent/xray/xray
+                mv -f /etc/Proxy-agent/xray/xray "${xrayBakBin}"
                 updateXray
             else
                 echoContent green " ---> 放弃更新"
@@ -3991,10 +4006,8 @@ handleSingBox() {
     fi
 }
 
-# 清理旧版 Socks5 分流残留的 allowInsecure 字段
-# Xray-core ≥ v26.2.6 移除了 allowInsecure（迁移至 pinnedPeerCertSha256），配置含 allowInsecure:true 时拒绝启动。
-# 该字段只可能存在于已移除的 Socks5 分流功能写入的 socks5_outbound.json 中。只剥离字段、保留出站和
-# 既有分流规则（证书转为严格校验），避免删除出站导致命中规则的流量静默直连。
+# 剥离旧版 socks5_outbound.json 里的 allowInsecure（Xray-core ≥ v26.2.6 遇 true 拒绝启动）。
+# 只剥字段、保留出站与分流规则——删出站会让命中规则的流量静默直连。
 removeLegacyAllowInsecure() {
     local legacySocks5Outbound="/etc/Proxy-agent/xray/conf/socks5_outbound.json"
     if [[ -f "${legacySocks5Outbound}" ]] && grep -q '"allowInsecure"' "${legacySocks5Outbound}"; then
@@ -4074,7 +4087,10 @@ initXrayClients() {
     local user uuid email
     while read -r user; do
         uuid=$(echo "${user}" | jq -r '.id // .uuid')
-        email=$(echo "${user}" | jq -r '.email // .name' | awk -F '-' '{print $1}')
+        email=$(echo "${user}" | jq -r '.email // .name')
+        # 只剥最后一段 "-协议后缀"（后缀不含连字符）。按第一个连字符切会把含连字符的
+        # 用户名与默认 email（完整 UUID）截断成第一段，每次 remap 都改写存量用户身份
+        email="${email%-*}"
 
         # VLESS+TCP+Vision (id 0)
         if [[ "${type}" == *",0,"* ]]; then
@@ -4156,16 +4172,8 @@ initXrayClients() {
     done < <(echo "${currentClients}" | jq -c '.[]')
     echo "${users}"
 }
-# 读取 sing-box 用户数据并初始化
-# 把 currentClients 数组的现有用户重新映射到目标协议格式，并可选追加一个新用户。
-# 与 §11.3 对齐：所有 jq 操作走 --arg/--argjson，不做字符串拼接（与 initXrayClients
-# 同步改造；本函数原本就没有 initXrayClients 那两个隐藏 bug——4075 用 ${newUUID}
-# 而非 ${uuid}，每个 grep 都带逗号边界——所以这里只做 string-concat 一项改造）。
-# 用户字段集已对照 sing-box 官方 docs 逐个核对：
-#   - VLESS/VMess/Trojan/Hysteria2/TUIC/AnyTLS/SS2022 → name + (uuid|password) [+flow|alterId]
-#   - Naive → username + password
-#   - SOCKS5 (inbound) → username + password (内部用，无 name)
-# 不实现协议 8（VLESS Reality gRPC，已废弃，sing-box 路径未启用）
+# 把 currentClients 重映射到目标协议的用户字段格式，可选追加一个新用户。
+# jq 一律 --arg/--argjson，不做字符串拼接。协议 8（VLESS Reality gRPC）不实现。
 initSingBoxClients() {
     local type=",$1,"
     local newUUID="$2"
@@ -4182,7 +4190,9 @@ initSingBoxClients() {
     local user uuid name
     while read -r user; do
         uuid=$(echo "${user}" | jq -r '.uuid // .id // .password')
-        name=$(echo "${user}" | jq -r '.name // .email // .username' | awk -F '-' '{print $1}')
+        name=$(echo "${user}" | jq -r '.name // .email // .username')
+        # 同 initXrayClients：只剥最后一段协议后缀，不能按第一个连字符截断
+        name="${name%-*}"
 
         # VLESS+TCP+Vision (id 0)
         if [[ "${type}" == *",0,"* ]]; then
@@ -4254,10 +4264,8 @@ initSingBoxClients() {
                 --arg name "${name}-anytls" \
                 '. += [{password: $password, name: $name}]')
         fi
-        # Shadowsocks 2022 (id 14) -- uPSK 长度必须等于方法密钥长度（SIP022）：
-        # aes-128-gcm=16B，aes-256-gcm / chacha20-poly1305=32B；否则 sing-box check 报
-        # "bad user PSK length"。方法优先取全局（initSS2022Config 在全新安装路径已设），
-        # 否则从现有 inbound 读（addUser 路径）。保留 head -c 派生以兼容既有 128-gcm 用户密钥。
+        # SS2022 (id 14) 的 uPSK 长度必须等于方法密钥长度（SIP022）：128-gcm=16B，其余 32B，
+        # 否则 sing-box check 报 bad user PSK length。方法优先取全局，否则从现有 inbound 读。
         if [[ "${type}" == *",14,"* ]]; then
             local ss2022Method14="${ss2022Method:-}"
             if [[ -z "${ss2022Method14}" && -f "${singBoxConfigPath}14_ss2022_inbounds.json" ]]; then
@@ -4643,11 +4651,8 @@ initTuicProtocol() {
     fi
 }
 
-# 初始化singbox route配置
-# 初始化sing-box规则配置（检查geosite可用性）
-# 参数1: 域名列表(逗号分隔)
-# 参数2: 路由名称后缀
-# 返回: JSON格式 {"domainRules":[], "ruleSet":[]}
+# initSingBoxRouteConfig DOMAIN_CSV NAME_SUFFIX → {"domainRules":[],"ruleSet":[]}
+# 内部先探测 geosite 可用性，不可用时只出 domainRules。
 initSingBoxRules() {
     local domainRules=[]
     local ruleSet=[]
@@ -4734,13 +4739,8 @@ removeSingBoxRouteRule() {
     fi
 }
 
-# 添加sing-box出站
-# 确保基础 direct 出站存在（tag 固定为 "direct"）
-# 背景：install 期在 L5746 写入 01_direct_outbound.json 时使用 "tag": "direct"；
-# 但 addSingBoxOutbound 对任何含 "direct" 字样的 tag 都会写出 "tag": "${tag}"——
-# 直接调 addSingBoxOutbound "01_direct_outbound" 会把 tag 覆盖成 "01_direct_outbound"，
-# 链式代理 / 分流配置里 "outbound":"direct" / "final":"direct" 全部失效。
-# 这个 helper 把 base file 内容用单一权威来源重建，让所有 "需要确保 direct 存在"的代码路径走统一出口。
+# 确保基础 direct 出站存在（tag 恒为 "direct"）。
+# 别改调 addSingBoxOutbound——它会把 tag 覆盖成文件名，分流里所有 "direct" 引用一起失效。
 ensureDirectOutbound() {
     if [[ -z "${singBoxConfigPath}" ]]; then
         return 1
@@ -5094,11 +5094,8 @@ singBoxSS2022Install() {
     showAccounts 4
 }
 
-# 原子写入 chain/external 状态 JSON
-# 参数: $1=目标路径  $2=完整 JSON 内容
-# 行为: 通过 lib/json-utils.sh::jsonWriteFile 验证 + 写 tmp + 原子 rename
-#       backup=false, 避免 /etc/Proxy-agent/sing-box/conf/ 堆积 .bak 文件
-# 返回: 0=成功, 1=JSON 非法或写入失败 (旧文件保持不变)
+# 原子写入 chain/external 状态 JSON：$1=路径 $2=JSON。走 jsonWriteFile，backup=false
+# （避免 conf/ 堆积 .bak）。返回 1 时旧文件保持不变。
 writeChainInfoAtomic() {
     local file="$1"
     local content="$2"
@@ -5109,13 +5106,8 @@ writeChainInfoAtomic() {
     return 1
 }
 
-# 合并config
-# 设计要点（与 lib/json-utils.sh::jsonWriteFile 同款原子写入语义）：
-#   1. 不先 rm 现有 config.json —— sing-box merge (cmd_merge.go) 内部用
-#      os.WriteFile，自带 O_TRUNC；先 rm 反而制造"merge 失败 → 文件丢失"
-#      窗口，后续 systemd Restart=on-failure 会陷入 restart loop。
-#   2. 输出到 mktemp，校验通过再原子 mv 到目标位置。任何失败保留旧 config。
-#   3. sing-box check 比单纯 merge 多一层运行时校验（端口冲突 / tag 唯一性等）。
+# 合并 config：不先 rm 旧文件——merge 自带 O_TRUNC，先 rm 会制造"失败即丢文件"的窗口，
+# systemd 会进 restart loop。输出到 mktemp，sing-box check 通过才原子 mv。
 singBoxMergeConfig() {
     local targetFile="/etc/Proxy-agent/sing-box/conf/config.json"
     local fragmentDir="/etc/Proxy-agent/sing-box/conf/config/"
@@ -5616,10 +5608,9 @@ EOF
   }
 }
 EOF
-        # 上方 routing.rules 的 inboundTag "dokodemo-in" 跟实际 tag "dokodemo-in-VLESSReality" 不匹配（Xray 精确字符串），
-        # 两条规则永远不会命中——这是有意保留的 dead routing：Reality 靠内层 realitySettings.target 兜底无指纹反代到真实伪装站，
-        # 改成命中反而会让 Reality 鉴权失败或暴露 fingerprint。**不要"修"这两条规则。**
-        # VLESS_Reality_gRPC - 已移除，推荐使用XHTTP
+    # 上方两条 dokodemo-in 规则永不命中（tag 是精确字符串匹配），是有意保留的 dead routing：
+    # Reality 靠内层 realitySettings.target 兜底反代真实伪装站，改成命中会让鉴权失败或暴露
+    # fingerprint。不要"修"它们。
     elif [[ -z "${3:-}" ]]; then
         rm /etc/Proxy-agent/xray/conf/07_VLESS_vision_reality_inbounds.json >/dev/null 2>&1
         rm /etc/Proxy-agent/xray/conf/08_VLESS_vision_gRPC_inbounds.json >/dev/null 2>&1
@@ -7380,11 +7371,15 @@ customUUID() {
             echoContent red " ---> UUID 格式非法，需 8-4-4-4-12 位十六进制（例：550e8400-e29b-41d4-a716-446655440000）"
             exit 1
         fi
+        # 仅 Reality 安装时 frontingType 为空，回退到 frontingTypeReality（同 removeUser）
+        local dupCheckFile="${frontingType:-${frontingTypeReality}}"
         local checkUUID=
         if [[ "${coreKind}" == "1" ]]; then
-            checkUUID=$(jq -r --arg currentUUID "$currentCustomUUID" ".inbounds[0].settings.clients[] | select(.uuid | index(\$currentUUID) != null) | .name" ${configPath}${frontingType}.json)
+            # Xray 客户端字段是 id（trojan 为 password），不是 uuid——查错字段查重永远通过，
+            # 而同 inbound 内重复凭据会让 Xray 拒绝启动
+            checkUUID=$(jq -r --arg currentUUID "$currentCustomUUID" '(.inbounds[0].settings.clients // .inbounds[1].settings.clients)[]? | select((.id // .password) == $currentUUID) | .email' ${configPath}${dupCheckFile}.json 2>/dev/null)
         elif [[ "${coreKind}" == "2" ]]; then
-            checkUUID=$(jq -r --arg currentUUID "$currentCustomUUID" ".inbounds[0].users[] | select(.uuid | index(\$currentUUID) != null) | .name//.username" ${configPath}${frontingType}.json)
+            checkUUID=$(jq -r --arg currentUUID "$currentCustomUUID" '.inbounds[0].users[]? | select((.uuid // .password) == $currentUUID) | .name // .username' ${configPath}${dupCheckFile}.json 2>/dev/null)
         fi
 
         if [[ -n "${checkUUID}" ]]; then
@@ -7409,18 +7404,14 @@ customUserEmail() {
             echoContent red " ---> email 格式非法，仅允许字母数字及 . _ @ + -，长度 1-64"
             exit 1
         fi
+        # 存量条目形如 "<base>-<协议后缀>"，按 base 精确比对（兼容无后缀的历史条目）。
+        # Xray 字段是 email 不是 name；同 inbound 内 email 重复会让 Xray 拒绝启动
         local checkEmail=
+        local emailCheckFile="${frontingType:-${frontingTypeReality}}"
         if [[ "${coreKind}" == "1" ]]; then
-            local frontingTypeConfig="${frontingType}"
-            if [[ "${currentInstallProtocolType}" == ",7,8," ]]; then
-                frontingTypeConfig="07_VLESS_vision_reality_inbounds"
-            fi
-
-            checkEmail=$(jq -r --arg currentEmail "$currentCustomEmail" ".inbounds[0].settings.clients[] | select(.name | index(\$currentEmail) != null) | .name" ${configPath}${frontingTypeConfig}.json)
-        elif
-            [[ "${coreKind}" == "2" ]]
-        then
-            checkEmail=$(jq -r --arg currentEmail "$currentCustomEmail" ".inbounds[0].users[] | select(.name | index(\$currentEmail) != null) | .name" ${configPath}${frontingType}.json)
+            checkEmail=$(jq -r --arg currentEmail "$currentCustomEmail" '(.inbounds[0].settings.clients // .inbounds[1].settings.clients)[]? | (.email // .name) as $e | select($e == $currentEmail or ($e | sub("-[^-]*$"; "")) == $currentEmail) | $e' ${configPath}${emailCheckFile}.json 2>/dev/null)
+        elif [[ "${coreKind}" == "2" ]]; then
+            checkEmail=$(jq -r --arg currentEmail "$currentCustomEmail" '.inbounds[0].users[]? | (.name // .username) as $e | select($e == $currentEmail or ($e | sub("-[^-]*$"; "")) == $currentEmail) | $e' ${configPath}${emailCheckFile}.json 2>/dev/null)
         fi
 
         if [[ -n "${checkEmail}" ]]; then
@@ -7525,6 +7516,14 @@ addUser() {
         fi
 
         # vless reality grpc - 已移除
+
+        # vless reality xhttp（仅 Xray 内核；漏掉这条分支会让新用户拿不到 XHTTP 凭据）
+        if echo "${currentInstallProtocolType}" | grep -q ",12," && [[ "${coreKind}" == "1" ]]; then
+            local clients=
+            clients=$(initXrayClients 12 "${uuid}" "${email}")
+            clients=$(jq -r ".inbounds[0].settings.clients = ${clients}" ${configPath}12_VLESS_XHTTP_inbounds.json)
+            echo "${clients}" | jq . >${configPath}12_VLESS_XHTTP_inbounds.json
+        fi
 
         # hysteria2
         if echo ${currentInstallProtocolType} | grep -q ",6,"; then
@@ -7647,7 +7646,8 @@ removeUser() {
         fi
         if echo ${currentInstallProtocolType} | grep -q ",1,"; then
             local vlessWSResult
-            vlessWSResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].settings.clients[$idx])' ${configPath}03_VLESS_WS_inbounds.json)
+            # sing-box 侧用户在 .users——缺这个回退时 del 是静默 no-op，用户删除后凭据仍有效
+            vlessWSResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].settings.clients[$idx]//.inbounds[0].users[$idx])' ${configPath}03_VLESS_WS_inbounds.json)
             echo "${vlessWSResult}" | jq . >${configPath}03_VLESS_WS_inbounds.json
         fi
 
@@ -7674,6 +7674,13 @@ removeUser() {
         fi
         # VLESS Reality gRPC - 已移除
 
+        # VLESS Reality XHTTP（仅 Xray 内核；漏掉这条分支会让删除后的凭据在 XHTTP 上继续有效）
+        if echo ${currentInstallProtocolType} | grep -q ",12," && [[ "${coreKind}" == "1" ]]; then
+            local vlessXHTTPResult
+            vlessXHTTPResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].settings.clients[$idx])' ${configPath}12_VLESS_XHTTP_inbounds.json)
+            echo "${vlessXHTTPResult}" | jq . >${configPath}12_VLESS_XHTTP_inbounds.json
+        fi
+
         if echo ${currentInstallProtocolType} | grep -q ",6,"; then
             local hysteriaResult
             hysteriaResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].users[$idx]//.inbounds[0].users[$idx])' "${singBoxConfigPath}06_hysteria2_inbounds.json")
@@ -7690,11 +7697,12 @@ removeUser() {
             echo "${naiveResult}" | jq . >"${singBoxConfigPath}10_naive_inbounds.json"
         fi
         # VMess HTTPUpgrade
+        # 必须走 ${configPath}（两个内核都对）：Xray 下 singBoxConfigPath 为空，按旧写法
+        # jq 读不到文件、空输出经 jq . 落盘会把配置写成 0 字节，重启后 Xray 拒绝启动
         if echo ${currentInstallProtocolType} | grep -q ",11,"; then
             local vmessHTTPUpgradeResult
-            vmessHTTPUpgradeResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].users[$idx]//.inbounds[0].users[$idx])' "${singBoxConfigPath}11_VMess_HTTPUpgrade_inbounds.json")
-            echo "${vmessHTTPUpgradeResult}" | jq . >"${singBoxConfigPath}11_VMess_HTTPUpgrade_inbounds.json"
-            echo "${vmessHTTPUpgradeResult}" | jq . >${configPath}11_VMess_HTTPUpgrade_inbounds.json
+            vmessHTTPUpgradeResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].settings.clients[$idx]//.inbounds[0].users[$idx])' "${configPath}11_VMess_HTTPUpgrade_inbounds.json")
+            echo "${vmessHTTPUpgradeResult}" | jq . >"${configPath}11_VMess_HTTPUpgrade_inbounds.json"
         fi
         # AnyTLS（与 SS2022 同为 sing-box 专属，订阅 shape 一致）
         if echo ${currentInstallProtocolType} | grep -q ",13,"; then
@@ -7719,10 +7727,8 @@ removeUser() {
 
 # ======================= 脚本版本管理 =======================
 
-# 配置快照：把运行时配置（xray/sing-box/tls/lang_pref）拷贝到 destDir
-# 用于 backupScript 和 rollback 时的"当前配置预快照"
-# 参数: $1 - 目标目录（不存在则创建）
-# 返回: 0 = 至少有一项被快照，1 = 全部源缺失或目标不可写
+# snapshotConfig DEST_DIR → 0=至少快照了一项，1=全部源缺失或目标不可写
+# 快照 xray / sing-box / tls / lang_pref，供 backupScript 与 rollback 用。
 backupConfigSnapshot() {
     local destDir="$1"
     local installDir="/etc/Proxy-agent"
@@ -7752,10 +7758,8 @@ backupConfigSnapshot() {
     [[ ${copied} -eq 1 ]]
 }
 
-# 配置快照恢复：把 sourceDir 内容覆盖回 /etc/Proxy-agent/
-# 调用方需自行 stop/start 服务。失败时已替换的部分不会自动回滚 —— 调用方应预先做 pre-restore snapshot
-# 参数: $1 - 来源目录（即 backup/<ver>/config 或类似路径）
-# 返回: 0 = 成功（至少一项），1 = sourceDir 不存在或全部源缺失
+# restoreConfig SRC_DIR → 0=成功（至少一项），1=源不存在或全缺
+# 调用方负责 stop/start，且必须先做 pre-restore 快照——失败时已替换的部分不自动回滚。
 restoreConfigSnapshot() {
     local sourceDir="$1"
     local installDir="/etc/Proxy-agent"
@@ -8029,10 +8033,8 @@ rollbackScript() {
                     if [[ -d "${installDir}/tls" ]]; then
                         echoContent yellow " ---> $(t SCRIPT_ROLLBACK_TLS_NOTICE)"
                     fi
-                    # sing-box 配置由片段合并而来，重启前必须 merge 一次。
-                    # 不能吞错：跨大版本回滚时，旧片段对新 sing-box 二进制可能 schema 不兼容，
-                    # merge 失败若被忽略 → reloadCore 启动到无配置状态 → systemd restart loop。
-                    # 失败时回退回滚操作本身：从 pre_rollback_config 恢复回滚前快照，让用户停在"还能跑"的状态。
+                    # 回滚重启前必须 merge 一次，且不能吞错：旧片段对新二进制可能 schema 不兼容，
+                    # 吞掉会让 reloadCore 启动到无配置状态。失败时从 pre_rollback_config 恢复。
                     if [[ -f "${installDir}/sing-box/sing-box" ]]; then
                         if ! singBoxMergeConfig; then
                             echoContent red " ---> $(t SCRIPT_ROLLBACK_CONFIG_FAILED)"
@@ -8055,61 +8057,82 @@ rollbackScript() {
         fi
 
     elif [[ "${sourceType}" == "github" ]]; then
-        # 从 GitHub 下载指定版本
+        # 整包先下到 staging 校验（非空 + bash -n + SHA256），全部通过才逐文件 .new + mv 落盘。
+        # 旧实现直接覆盖活动 install.sh 再逐个下模块，中途断网会留下混版本残局
         local version="${sourcePath}"
         echoContent yellow " ---> 从 GitHub 下载版本 ${version}..."
 
-        # 下载脚本
-        local downloadUrl="${rawBase}/${version}/install.sh"
+        local stagingDir
+        if ! stagingDir=$(mktemp -d /tmp/proxy-agent-rollback-XXXXXX); then
+            echoContent red " ---> $(t ROLLBACK_STAGING_FAIL)"
+            return 1
+        fi
+        mkdir -p "${stagingDir}/lib" "${stagingDir}/shell/lang"
+
+        local stagedOk=1
         if [[ "${release}" == "alpine" ]]; then
-            wget -c -q -O "${installDir}/install.sh" "${downloadUrl}"
+            wget -q -O "${stagingDir}/install.sh" "${rawBase}/${version}/install.sh" || stagedOk=
         else
-            wget -c -q ${wgetShowProgressStatus} -O "${installDir}/install.sh" "${downloadUrl}"
+            wget -q ${wgetShowProgressStatus} -O "${stagingDir}/install.sh" "${rawBase}/${version}/install.sh" || stagedOk=
+        fi
+        if [[ -n "${stagedOk}" ]] && { [[ ! -s "${stagingDir}/install.sh" ]] || ! bash -n "${stagingDir}/install.sh" 2>/dev/null; }; then
+            stagedOk=
+        fi
+        # Release 有 install.sh.sha256 资产时强校验；无 tag/资产时 verifyInstallSHA256 软放行
+        if [[ -n "${stagedOk}" ]] && ! verifyInstallSHA256 "${stagingDir}/install.sh" "${version}"; then
+            stagedOk=
         fi
 
-        if [[ ! -f "${installDir}/install.sh" || ! -s "${installDir}/install.sh" ]]; then
-            echoContent red " ---> 下载失败，尝试从备份恢复..."
-            if [[ -f "${backupPath}/install.sh" ]]; then
-                cp -f "${backupPath}/install.sh" "${installDir}/"
-            fi
-            return 1
-        fi
-
-        chmod 700 "${installDir}/install.sh"
-
-        # 更新版本号
-        echo "${version#v}" > "${installDir}/VERSION"
-
-        # 下载相关模块（rollback 同样需要全部成功；半下载会让目标版本启动不了）
-        # 注意：rollback 已经在前面 backupScript 时把当前 install.sh + lib 备份到了 ${backupPath}
-        echoContent yellow " ---> 下载模块文件..."
-        mkdir -p "${installDir}/lib"
         local failedModules=()
-        for module in i18n constants utils json-utils system-detect protocol-registry; do
-            if ! wget -c -q -O "${installDir}/lib/${module}.sh" "${rawBase}/${version}/lib/${module}.sh"; then
-                failedModules+=("${module}")
+        if [[ -n "${stagedOk}" ]]; then
+            echoContent yellow " ---> 下载模块文件..."
+            for module in i18n constants utils json-utils system-detect protocol-registry; do
+                if ! wget -q -O "${stagingDir}/lib/${module}.sh" "${rawBase}/${version}/lib/${module}.sh" ||
+                    [[ ! -s "${stagingDir}/lib/${module}.sh" ]] ||
+                    ! bash -n "${stagingDir}/lib/${module}.sh" 2>/dev/null; then
+                    failedModules+=("${module}")
+                fi
+            done
+            if [[ ${#failedModules[@]} -gt 0 ]]; then
+                echoContent red " ---> $(t UPDATE_MODULE_DOWNLOAD_FAIL "${failedModules[*]}")"
+                stagedOk=
             fi
-        done
-        if [[ ${#failedModules[@]} -gt 0 ]]; then
-            echoContent red " ---> $(t UPDATE_MODULE_DOWNLOAD_FAIL "${failedModules[*]}")"
-            echoContent yellow " ---> 保留 ${backupPath} 备份；可手动从备份目录复制 install.sh + lib/ + shell/lang/ 恢复"
+        fi
+
+        local failedLangs=()
+        if [[ -n "${stagedOk}" ]]; then
+            echoContent yellow " ---> 下载语言文件..."
+            for langFile in zh_CN en_US; do
+                if ! wget -q -O "${stagingDir}/shell/lang/${langFile}.sh" "${rawBase}/${version}/shell/lang/${langFile}.sh" ||
+                    [[ ! -s "${stagingDir}/shell/lang/${langFile}.sh" ]] ||
+                    ! bash -n "${stagingDir}/shell/lang/${langFile}.sh" 2>/dev/null; then
+                    failedLangs+=("${langFile}")
+                fi
+            done
+            if [[ ${#failedLangs[@]} -gt 0 ]]; then
+                echoContent red " ---> $(t UPDATE_LANG_DOWNLOAD_FAIL "${failedLangs[*]}")"
+                stagedOk=
+            fi
+        fi
+
+        if [[ -z "${stagedOk}" ]]; then
+            rm -rf "${stagingDir}"
+            echoContent red " ---> $(t ROLLBACK_STAGING_FAIL)"
             return 1
         fi
 
-        # 下载语言文件（同上要求全部成功）
-        echoContent yellow " ---> 下载语言文件..."
-        mkdir -p "${installDir}/shell/lang"
-        local failedLangs=()
-        for langFile in zh_CN en_US; do
-            if ! wget -c -q -O "${installDir}/shell/lang/${langFile}.sh" "${rawBase}/${version}/shell/lang/${langFile}.sh"; then
-                failedLangs+=("${langFile}")
-            fi
+        # 提交：staging 可能在别的文件系统，逐文件 cp 成 .new 再同目录 mv 保持原子
+        cp -f "${stagingDir}/install.sh" "${installDir}/install.sh.new" && mv -f "${installDir}/install.sh.new" "${installDir}/install.sh"
+        chmod 700 "${installDir}/install.sh"
+        mkdir -p "${installDir}/lib" "${installDir}/shell/lang"
+        for module in i18n constants utils json-utils system-detect protocol-registry; do
+            cp -f "${stagingDir}/lib/${module}.sh" "${installDir}/lib/${module}.sh.new" && mv -f "${installDir}/lib/${module}.sh.new" "${installDir}/lib/${module}.sh"
         done
-        if [[ ${#failedLangs[@]} -gt 0 ]]; then
-            echoContent red " ---> $(t UPDATE_LANG_DOWNLOAD_FAIL "${failedLangs[*]}")"
-            echoContent yellow " ---> 保留 ${backupPath} 备份；可手动从备份目录复制 install.sh + lib/ + shell/lang/ 恢复"
-            return 1
-        fi
+        for langFile in zh_CN en_US; do
+            cp -f "${stagingDir}/shell/lang/${langFile}.sh" "${installDir}/shell/lang/${langFile}.sh.new" && mv -f "${installDir}/shell/lang/${langFile}.sh.new" "${installDir}/shell/lang/${langFile}.sh"
+        done
+        echo "${version#v}" > "${installDir}/VERSION"
+        rm -rf "${stagingDir}"
 
         echoContent green "\n ---> $(t SCRIPT_ROLLBACK_SUCCESS)!"
     fi
@@ -8231,14 +8254,8 @@ updateV2RayAgent() {
         echoContent yellow " ---> 备份跳过 (首次安装或备份失败)"
     fi
 
-    # 下载新版本脚本
-    # 与 lib/lang 模块的下载（见下方）同款：先下到 .new 文件、bash -n 校验语法，
-    # 通过后再原子 mv 到 live install.sh。两层防线：
-    #   1. bash -n 拦下"GitHub 200 OK 但内容是 HTML 错误页"这种半成功（HTML 不合法 bash）。
-    #   2. 与 1896940 commit 同步：不用 wget -c（残留半截文件会触发拼接破坏）。
-    # 之所以原本只对 lib/lang 做了 .new 模式而 install.sh 用直接覆盖+SHA256 校验，
-    # 是因为 verifyInstallSHA256 对 master 分支软降级；master 用户实际无任何完整性
-    # 校验，被错误页直接覆盖到 live 文件。.new + bash -n 给 master 用户也补上一层。
+    # 下载新版 install.sh：先写 .new、bash -n 验语法，通过才原子 mv 到 live。
+    # bash -n 拦的是"200 OK 但内容是 HTML 错误页"。不要用 wget -c（续传会拼出损坏文件）。
     echoContent yellow " ---> 下载脚本文件..."
     local _scriptTmp="${installDir}/install.sh.new"
     rm -f "${_scriptTmp}"
@@ -8309,14 +8326,8 @@ updateV2RayAgent() {
 
     chmod 700 "${installDir}/install.sh"
 
-    # 下载/更新 lib 模块 + 语言文件（原子化：先全部下到 .new 校验，全部成功才统一落地）。
-    # 关键修复：
-    #   - 旧实现逐个 mv 落地，若后面的模块/语言失败，前面已提交的不回滚，会留下
-    #     "install.sh 旧版 + 部分模块新版" 的混版态。改为下载阶段只写 .new、提交阶段才 mv，
-    #     任一失败就删掉所有 .new 并回滚 install.sh，保证整体版本一致（备份里其实有
-    #     旧 lib/lang，但这里压根没动 live 文件，回滚 install.sh 即可）。
-    #   - 不用 wget -c：本地有旧版本时续传会拼接出损坏文件（之前用户实测 bug 来源）。
-    #   - 先下到 .new，bash -n 验证语法后才算成功，确保不留半截 / 错误页。
+    # 更新 lib 模块 + 语言文件：全部下到 .new 校验，全部成功才统一 mv。
+    # 任一失败就删掉所有 .new 并回滚 install.sh——逐个 mv 会留下混版态。
     echoContent yellow " ---> 下载模块与语言文件..."
     mkdir -p "${installDir}/lib" "${installDir}/shell/lang"
 
@@ -9091,7 +9102,23 @@ installWarpReg() {
 
         if [[ "${installWarpRegStatus}" == "y" ]]; then
 
-            curl -sLo /etc/Proxy-agent/warp/warp-reg "https://github.com/badafans/warp-reg/releases/download/v1.0/${warpRegCoreCPUVendor}"
+            # v1.0 资产 SHA256（2026-08-23 实测钉定）。上游 release 资产可被替换，
+            # root 直接执行的第三方二进制必须校验；不匹配即拒装
+            local warpRegExpectedHash=
+            case "${warpRegCoreCPUVendor}" in
+            main-linux-amd64) warpRegExpectedHash="95e97d92bda8f343e0ba0b7a7402c5947fb4204fdb0d368fd53dbddb664de895" ;;
+            main-linux-arm64) warpRegExpectedHash="eb7a29853466f805755caddcebeedfbfb36cccd73a4eb950a1eb82915fa17f9b" ;;
+            main-linux-arm) warpRegExpectedHash="7def80f34b206bbb44df24b7bd04edfc03e5507d0ae17ac379d15ef81a2ca33f" ;;
+            esac
+
+            local warpRegTmp="/etc/Proxy-agent/warp/warp-reg.download"
+            curl -sLo "${warpRegTmp}" "https://github.com/badafans/warp-reg/releases/download/v1.0/${warpRegCoreCPUVendor}"
+            if [[ ! -s "${warpRegTmp}" ]] || { [[ -n "${warpRegExpectedHash}" ]] && ! verifySHA256 "${warpRegTmp}" "${warpRegExpectedHash}"; }; then
+                rm -f "${warpRegTmp}"
+                echoContent red " ---> $(t WARP_REG_VERIFY_FAIL)"
+                exit 1
+            fi
+            mv -f "${warpRegTmp}" /etc/Proxy-agent/warp/warp-reg
             chmod 655 /etc/Proxy-agent/warp/warp-reg
 
         else
@@ -9434,11 +9461,8 @@ ensureSingBoxInstalled() {
 EOF
     fi
 
-    # 确保 DNS 配置存在（sing-box 1.12+ 新格式：必须带 type，且字段从 address 改为 server）
-    # 旧 legacy 格式 ({tag,address}) 1.12 deprecated、1.13 默认拒绝合并，详见
-    # https://sing-box.sagernet.org/migration/#migrate-to-new-dns-server-formats
-    # 已有 legacy 格式的旧机器（含 address 但无 type）需要自动迁移，否则
-    # singBoxMergeConfig 会以 ENABLE_DEPRECATED_LEGACY_DNS_SERVERS 为由 FATAL。
+    # 确保 DNS 配置存在，并把 legacy 的 {tag,address} 迁到 1.12+ 的 {type,server}。
+    # 不迁的话 merge 会以 ENABLE_DEPRECATED_LEGACY_DNS_SERVERS 为由 FATAL。
     local _dnsConf="/etc/Proxy-agent/sing-box/conf/config/01_dns.json"
     if [[ ! -f "${_dnsConf}" ]] || \
        { grep -q '"address"' "${_dnsConf}" 2>/dev/null && ! grep -q '"type"' "${_dnsConf}" 2>/dev/null; }; then
@@ -9496,10 +9520,8 @@ EOF
         fi
     fi
 
-    # 已有 chain_route.json 缺 default_domain_resolver 时自动补全。
-    # sing-box 1.13 起没有 default_domain_resolver / outbound.domain_resolver 直接 FATAL。
-    # 后续 chainExit/chainRelay/chainEntry 等流程会重写 chain_route.json，但用户如果只是
-    # "重启 sing-box" 而不重跑配置流程，就会卡住——这里先做一次 in-place 迁移兜底。
+    # 已有 chain_route.json 缺 default_domain_resolver 时 in-place 补全——1.13 起缺它直接 FATAL。
+    # 后续 chain* 流程会重写该文件，但用户只"重启 sing-box"不重跑配置就会卡住。
     local _chainRoute="/etc/Proxy-agent/sing-box/conf/config/chain_route.json"
     if [[ -f "${_chainRoute}" ]] && jq -e . "${_chainRoute}" >/dev/null 2>&1; then
         if ! jq -e '.route | has("default_domain_resolver")' "${_chainRoute}" >/dev/null 2>&1; then
@@ -9723,11 +9745,8 @@ setupChainExit() {
 }
 EOF
 
-    # 同步更新 direct 出站配置
-    # 不再写 domain_strategy（dial fields 中的该字段 1.12 deprecated、1.16 移除）。
-    # 用户选的 ${domainStrategy} 仍通过下方 chain_route.json 的 `action: resolve,
-    # strategy: ${domainStrategy}` 路由级 action 落地——chain inbound 的流量在路由
-    # 阶段就按 IPv4/IPv6 偏好解析过，outbound 不需要再设。
+    # 同步 direct 出站：不再写 domain_strategy（1.12 deprecated、1.16 移除）。
+    # 用户选的策略由 chain_route.json 的 action: resolve 路由级 action 落地。
     cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
 {
     "outbounds": [
@@ -9739,12 +9758,8 @@ EOF
 }
 EOF
 
-    # 创建路由配置 (让链式入站流量走直连)
-    # sing-box 1.11+ 路由级 action：先 sniff 嗅探域名，再按 domainStrategy 重新解析。
-    # 显式绑定 inbound + timeout 1s。
-    # default_domain_resolver 指向 01_dns.json 里的 google tag——sing-box 1.12 起，
-    # outbound 解析域名必须有显式 DNS server 来源，1.13 没设直接 FATAL 拒绝启动。
-    # 详见 https://sing-box.sagernet.org/migration/#migrate-outbound-dns-rule-items-to-domain-resolver
+    # 创建路由配置（链式入站走直连）：先 sniff 再按 domainStrategy 重解析，显式绑 inbound + timeout 1s。
+    # default_domain_resolver 指向 01_dns.json 的 google tag——1.13 起没有它直接 FATAL。
     if [[ -n "${domainStrategy}" ]]; then
         cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
 {
@@ -9863,12 +9878,8 @@ showExistingChainCode() {
     echoContent green "  加密方式: ${method}"
 }
 
-# SS2022 method 白名单 + 对应 base64-key 长度（解码一次后字节长度）
-# - 16 字节 → base64 22 chars + "==" padding 共 24
-# - 32 字节 → base64 43 chars + "=" padding 共 44
-# 注意：传输层会对 password（24 chars 的 base64）再做一层 base64 给 URL 用，所以
-# parseChainCode 在 URL 层 base64 -d 一次拿到的就是这个 24-char 字符串本身。
-# 这里校验的就是 24/44 chars 这一层（即 sing-box password 字段值）。
+# SS2022 method 白名单与对应 base64 key 长度：16B → 24 chars，32B → 44 chars。
+# 校验的是 sing-box password 字段那一层（URL 层 base64 -d 一次拿到的就是它）。
 _chainSS2022PasswordOK() {
     local method="$1" key="$2"
     case "${method}" in
@@ -9932,10 +9943,8 @@ _chainQueryGet() {
     awk -F= -v k="${wantKey}" 'BEGIN{RS="&"} $1==k {print substr($0, length(k)+2); exit}' <<< "${query}"
 }
 
-# 便携 TCP 连通性探测。优先用 nc -z（BSD/GNU/BusyBox 通用），缺 nc 时回退到 bash /dev/tcp。
-# Debian/Ubuntu 最小化镜像默认不带 netcat，原 `nc -zv -w 5 ... 2>/dev/null` 会因 exit 127
-# 静默判失败，链路实际是通的也会显示 ❌。
-# 用法: _chainTCPProbe HOST PORT [TIMEOUT_SECS]   返回 0 = 连得上
+# _chainTCPProbe HOST PORT [TIMEOUT] → 0=连得上。优先 nc -z，缺 nc 回退 bash /dev/tcp。
+# Debian/Ubuntu 最小化镜像不带 netcat，只用 nc 会因 exit 127 把通的链路报成 ❌。
 _chainTCPProbe() {
     local host=$1 port=$2 timeoutSec=${3:-5}
     if command -v nc >/dev/null 2>&1; then
@@ -9949,19 +9958,9 @@ _chainTCPProbe() {
     (exec 3<>/dev/tcp/"${host}"/"${port}" && exec 3<&-) >/dev/null 2>&1
 }
 
-# 解析配置码 (支持 V1 单跳和 V2 多跳格式)
-# V1 格式: chain://ss2022@IP:PORT?key=xxx&method=xxx          （IPv4 / 域名）
-#          chain://ss2022@[IPv6]:PORT?key=xxx&method=xxx     （IPv6）
-# V2 格式: chain://v2@BASE64_JSON_ARRAY
-# 输出: chainHops 数组 (JSON), chainHopCount 跳数
-#
-# 校验策略：
-#   - IP/host 走 isValidIP（IPv4/IPv6）或域名形态（含 `.` 的字符串）
-#   - 端口必须是 [1, 65535]
-#   - method 严格白名单（SS2022 三种之一），不接受 silent fallback
-#   - key 解码后长度按 method 校验
-#   - 不再让"key 解码失败 → 用原 base64 当 key"的 fallback 通过
-#   - V2 base64 体积上限 64 KiB，解码后 jq 解析，跳数上限 8
+# 解析配置码 → chainHops (JSON 数组) + chainHopCount。
+# V1: chain://ss2022@IP:PORT?key=&method=（IPv4 / [IPv6] / 域名）  V2: chain://v2@BASE64_JSON_ARRAY
+# method 严格白名单不接受 silent fallback；base64 上限 64 KiB，跳数上限 8。
 parseChainCode() {
     local code=$1
 
@@ -10318,10 +10317,8 @@ setupChainRelay() {
 }
 EOF
 
-    # 创建出站配置 (detour chain 到下游)
-    # chainHops 是 parseChainCode 输出的合法 JSON 数组，直接 --argjson 传给 jq -n，
-    # 由 jq 自动 escape 各字段，避免老实现用 heredoc 拼接 ${hopIP}/${hopKey} 时
-    # 用户配置码里的特殊字符（", \, 控制字符）破坏 JSON 语法。
+    # 出站配置（detour chain）：chainHops 直接 --argjson 传给 jq，由 jq 转义各字段——
+    # heredoc 拼接会被配置码里的 " 和 \ 破坏 JSON。
     local chainOutboundJson
     if ! chainOutboundJson=$(jq -n --argjson hops "${chainHops}" '
         {
@@ -11183,11 +11180,8 @@ testChainConnection() {
         return 1
     fi
 
-    # 测试2: 通过链路访问外网
-    # 必须经 sing-box 出口（直 curl 量到的是本机直连出口，链路坏掉时仍假阳性）。按角色选择如何走链路：
-    #   - entry + Xray 桥接：本机 SOCKS5 127.0.0.1:${bridge_port} 直接接入 sing-box → chain_outbound
-    #   - entry 无 Xray：sing-box 入站全是面向客户端的协议（hysteria2/tuic/...），本机没法触发
-    #   - relay：流量来自上游，本机不主动发起，端到端只能在客户端测
+    # 测试2 走链路访问外网：必须经 sing-box 出口，直 curl 量到的是本机直连出口会假阳性。
+    # entry+Xray 走本机 SOCKS5 桥接口；entry 无 Xray 与 relay 都无法在本机端到端测。
     echoContent yellow "测试2: 链路转发测试..."
 
     # 检查 sing-box 是否运行
@@ -11481,10 +11475,8 @@ removeChainProxy() {
     rm -f /etc/Proxy-agent/sing-box/conf/config/external_route.json
     rm -f /etc/Proxy-agent/sing-box/conf/external_entry_info.json
 
-    # 01_direct_outbound.json 是 sing-box 共享基础出站（addSingBoxOutbound / 多链路 /
-    # 路由配置都依赖 "direct" tag），不能直接删；但旧 chain 安装可能写过 deprecated 的
-    # domain_strategy 字段（dial fields，1.12 deprecated、1.16 移除），1.16 sing-box 启动会 FATAL。
-    # 调 ensureDirectOutbound 重写为当前规范的最小形态（type+tag），剥离任何 legacy 字段。
+    # 01_direct_outbound.json 不能删（共享基础出站），但旧 chain 装的 domain_strategy 会让
+    # 1.16 启动 FATAL——调 ensureDirectOutbound 重写为最小形态，剥掉 legacy 字段。
     if [[ -f "/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json" ]] && declare -F ensureDirectOutbound >/dev/null 2>&1; then
         ensureDirectOutbound
     fi
@@ -12657,11 +12649,7 @@ addChainToConfig() {
         mv "${tmpFile}" "${infoFile}"
     fi
 
-    # 生成链路出站配置文件
-    # 用 jq -n + --arg/--argjson 而不是 heredoc 直接拼装：
-    # ip / method / key 可能含 " 或 \（特别是从用户粘贴的配置码 parseChainCode 出来的字段），
-    # heredoc 拼装会破坏 JSON；jq 会自动 escape。name 已被 validateChainName 限制为
-    # [A-Za-z0-9_-]，本身安全，但保持一致性也走 --arg。
+    # 生成链路出站：用 jq -n + --arg/--argjson 而非 heredoc——ip / method / key 可能含 " 或 \。
     local outFile="/etc/Proxy-agent/sing-box/conf/config/chain_outbound_${name}.json"
     local outboundJson
     if ! outboundJson=$(jq -n \
@@ -13019,10 +13007,8 @@ generateMultiChainRouteConfig() {
     local hasXray
     hasXray=$(jq -r '.has_xray' "${infoFile}")
 
-    # 开始构建路由配置
-    # sing-box 1.11+ 路由级 sniff/resolve action 替代 inbound 上的 sniff 字段
-    # 仅当存在 chain_bridge_in（has_xray=true）时才在 chain_route 中加 sniff/resolve；
-    # 否则留空（其他协议入站如有需要应自行 sniff）
+    # 路由级 sniff/resolve 替代 inbound 上的 sniff 字段（1.11+）。
+    # 仅当存在 chain_bridge_in（has_xray）时才加 sniff/resolve，否则留空。
     local routeRules="[]"
     local ruleSetDefs="[]"
     local usedRuleSets=""
@@ -15114,6 +15100,36 @@ EOF
     exit 0
 }
 
+# validateCustomInstallTokens SELECTION ALLOWED... → 0=合法；非法时打印红字并返回 1
+# 旧的字符级正则（^[0-9]+$ / ^[0-7]+$）会放过 999、70 之类未知项，下游 grep 静默忽略——
+# 用户以为装了 A 实际装了 B，甚至带着空协议集把安装流程跑完、破坏现有配置
+validateCustomInstallTokens() {
+    local selection="$1"
+    shift
+    if ! [[ "${selection}" =~ ^[0-9,]+$ && -n "${selection//,/}" ]]; then
+        echoContent red " ---> 输入不合法"
+        return 1
+    fi
+    local token allowed bad=
+    for token in ${selection//,/ }; do
+        local ok=
+        for allowed in "$@"; do
+            if [[ "${token}" == "${allowed}" ]]; then
+                ok=1
+                break
+            fi
+        done
+        if [[ -z "${ok}" ]]; then
+            bad="${bad} ${token}"
+        fi
+    done
+    if [[ -n "${bad}" ]]; then
+        echoContent red " ---> $(t CUSTOM_INSTALL_INVALID_TOKENS "${bad}")"
+        return 1
+    fi
+    return 0
+}
+
 # sing-box 个性化安装
 customSingBoxInstall() {
     echoContent skyBlue "\n========================个性化安装============================"
@@ -15147,7 +15163,7 @@ customSingBoxInstall() {
         selectCustomInstallType=",${selectCustomInstallType},"
     fi
 
-    if [[ "${selectCustomInstallType//,/}" =~ ^[0-9]+$ ]]; then
+    if validateCustomInstallTokens "${selectCustomInstallType}" 0 1 3 4 6 7 9 10 11 13 14; then
         # WebSocket 协议迁移提示
         if echo "${selectCustomInstallType}" | grep -q -E ",1,|,3,"; then
             echoContent yellow "\n ---> 提示: WebSocket传输已逐渐被XHTTP(SplitHTTP)取代"
@@ -15179,7 +15195,6 @@ customSingBoxInstall() {
         checkGFWStatue 8
         showAccounts 9
     else
-        echoContent red " ---> 输入不合法"
         customSingBoxInstall
     fi
 }
@@ -15221,7 +15236,7 @@ customXrayInstall() {
     if [[ "${selectCustomInstallType:0:1}" != "," ]]; then
         selectCustomInstallType=",${selectCustomInstallType},"
     fi
-    if [[ "${selectCustomInstallType//,/}" =~ ^[0-7]+$ ]]; then
+    if validateCustomInstallTokens "${selectCustomInstallType}" 0 1 3 4 7 12; then
         # WebSocket 协议迁移提示
         if echo "${selectCustomInstallType}" | grep -q -E ",1,|,3,"; then
             echoContent yellow "\n ---> 提示: WebSocket传输已逐渐被XHTTP(SplitHTTP)取代"
@@ -15280,7 +15295,6 @@ customXrayInstall() {
         checkGFWStatue 11
         showAccounts 12
     else
-        echoContent red " ---> 输入不合法"
         customXrayInstall
     fi
 }
@@ -15679,11 +15693,13 @@ clashMetaConfig() {
     local url=$1
     local id=$2
     cat <<EOF >"/etc/Proxy-agent/subscribe/clashMetaProfiles/${id}"
-log-level: debug
+log-level: info
 mode: rule
 ipv6: true
 mixed-port: 7890
-allow-lan: true
+# 默认不向局域网开放本地代理端口（公共 Wi-Fi 下 7890 无认证对全网段可见）。
+# 需要给局域网设备共享时把 allow-lan 改为 true——下面两项已按共享场景配好。
+allow-lan: false
 bind-address: "*"
 lan-allowed-ips:
   - 0.0.0.0/0
@@ -15724,7 +15740,8 @@ sniffer:
 dns:
   enable: true
   prefer-h3: false
-  listen: 0.0.0.0:1053
+  # 与 allow-lan: false 配套仅监听回环；开共享时改 0.0.0.0:1053
+  listen: 127.0.0.1:1053
   ipv6: true
   enhanced-mode: fake-ip
   fake-ip-range: 198.18.0.1/16
@@ -16419,19 +16436,10 @@ initRealityMldsa65() {
                 realityMldsa65Verify=${currentRealityMldsa65Verify}
             fi
             if [[ -z "${realityMldsa65Seed}" ]]; then
-                #        if [[ "${selectCoreType}" == "2" || "${coreKind}" == "2" ]]; then
-                #            realityX25519Key=$(/etc/Proxy-agent/sing-box/sing-box generate reality-keypair)
-                #            realityPrivateKey=$(echo "${realityX25519Key}" | head -1 | awk '{print $2}')
-                #            realityPublicKey=$(echo "${realityX25519Key}" | tail -n 1 | awk '{print $2}')
-                #            echo "publicKey:${realityPublicKey}" >/etc/Proxy-agent/sing-box/conf/config/reality_key
-                #        else
                 realityMldsa65=$(/etc/Proxy-agent/xray/xray mldsa65)
                 realityMldsa65Seed=$(echo "${realityMldsa65}" | head -1 | awk '{print $2}')
                 realityMldsa65Verify=$(echo "${realityMldsa65}" | tail -n 1 | awk '{print $2}')
-                #        fi
             fi
-            #    echoContent green "\n Seed:${realityMldsa65Seed}"
-            #    echoContent green "\n Verify:${realityMldsa65Verify}"
         else
             echoContent green " 目标域名支持X25519MLKEM768，但是证书的长度不足，忽略ML-DSA-65。"
         fi
@@ -16541,20 +16549,12 @@ initXrayRealityPort() {
     fi
 
     if [[ -z "${realityPort}" ]]; then
-        #        if [[ -n "${port}" ]]; then
-        #            read -r -p "是否使用TLS+Vision端口 ？[y/n]:" realityPortTLSVisionStatus
-        #            if [[ "${realityPortTLSVisionStatus}" == "y" ]]; then
-        #                realityPort=${port}
-        #            fi
-        #        fi
-        #        if [[ -z "${realityPort}" ]]; then
         echoContent yellow "请输入端口[回车随机10000-30000]"
 
         read -r -p "端口:" realityPort
         if [[ -z "${realityPort}" ]]; then
             realityPort=$(randomNum 10000 30000)
         fi
-        #        fi
         if [[ -n "${realityPort}" && "${xrayVLESSRealityPort}" == "${realityPort}" ]]; then
             handleXray stop
         else
@@ -16844,19 +16844,8 @@ switchLanguage() {
 }
 
 # ============================================================================
-# 系统诊断 / Doctor —— 只读检测
+# doctor —— 只读诊断（不写配置 / 防火墙 / 证书 / 服务）。任意 FAIL 返回非零。
 # ============================================================================
-# 仅读取系统状态：不写配置文件、不改防火墙、不申请证书、不重启服务。
-# 通过 `pasly doctor` 子命令或菜单 23 调用。每行输出 PASS/WARN/FAIL/SKIP，末尾汇总。
-#
-# 设计取舍：
-#   - 计数器 _doctor_* 是模块级变量（非 local），让 _doctorRow 跨子函数共享；
-#     `doctor()` 入口处重置一次。
-#   - 网络探测 5s 超时，避免被 GFW 阻断时 doctor 卡死。
-#   - verifyCertExpiry / verifyCertKeyMatch 是 install.sh 已有的只读校验函数，
-#     直接复用，stdout/stderr 静默吞掉，详情自己组装在 row 里。
-#   - 仅 Reality / UDP / 自签 协议安装时，没有真正的 ACME 证书 —— 跳过证书段。
-#   - 任意 FAIL 时返回非零，方便 `pasly doctor` 进 cron / CI 自动化使用。
 
 _doctor_pass=0
 _doctor_warn=0
@@ -17001,10 +16990,8 @@ _doctorCheckCore() {
         return
     fi
 
-    # pgrep 约定与 install.sh 主体保持一致：
-    #   Xray 用 -f "xray/xray"（同 handleXray / showInstallStatus / chain 函数）
-    #   sing-box 用 -x sing-box（同 handleSingBox + 18+ 处 chain 函数）
-    # 不要换成自创的统一 -f 形式，否则跟 handle* 在边缘场景下行为可能背离。
+    # pgrep 形式必须与主体一致：Xray 用 -f "xray/xray"，sing-box 用 -x sing-box。
+    # 换成自创的统一形式会跟 handle* 在边缘场景下背离。
     local coreName binaryPath serviceName pgrepFlag pgrepArg
     if [[ "${coreKind}" == "1" ]]; then
         coreName="Xray-core"
@@ -17308,8 +17295,11 @@ menu() {
     echoContent yellow "22.$(t MENU_SCRIPT_VERSION)"
     echoContent yellow "23.$(t MENU_DOCTOR)"
     echoContent red "=============================================================="
-    mkdirTools
-    aliasInstall
+    # dry-run 下不建目录树、不装 pasly 别名——mkdirTools/aliasInstall 都是真实写盘
+    if ! isDryRun; then
+        mkdirTools
+        aliasInstall
+    fi
     read -r -p "$(t PROMPT_SELECT):" selectInstallType
     case ${selectInstallType} in
     1)
@@ -17376,13 +17366,8 @@ menu() {
 }
 
 # ============================================================================
-# 顶层入口分发
+# 顶层入口分发（doctor / --dry-run / 菜单）：必须在所有函数定义之后、menu 调用之前
 # ============================================================================
-# 子命令 / 选项：
-#   pasly doctor       只读系统诊断（跳过更新检查 / cron / 菜单）
-#   pasly --dry-run    进入计划模式（等价于 DRY_RUN=1 pasly），随后照常进菜单
-#   pasly              常规交互菜单
-# 解析必须在所有函数定义之后、checkForUpdates / cronFunction / menu 调用之前。
 case "${1:-}" in
     doctor)
         doctor

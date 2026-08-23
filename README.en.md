@@ -34,16 +34,17 @@ After install, launch the management menu with `pasly`.
 - **Chain proxy** — exit / relay / entry multi-hop, multi-chain split routing, Xray+sing-box hybrid outbounds
 - **External nodes** — plug third-party SS / Trojan / SOCKS5 nodes into the chain as exits
 - **Atomic JSON writes** + snapshot-based config backup and rollback
-- **Signed self-update** — SHA256 verification of the downloaded `install.sh`, auto-restore from backup on mismatch
+- **Checksum-verified self-update** — SHA256 verification of the downloaded `install.sh`, auto-restore from backup on mismatch
 - **Read-only diagnostic** (`pasly doctor`) and **dry-run plan mode** (`pasly --dry-run`)
 - **Bilingual UI** — Chinese / English, switch via menu or `V2RAY_LANG` env variable
 
 ## Requirements
 
-- **OS**: Debian 9+, Ubuntu 16+, CentOS 7+, Alpine 3+
+- **OS**: Debian 9+, Ubuntu 18+, CentOS/RHEL 8+, Alpine 3+ (Ubuntu 16 is explicitly rejected by the script)
 - **Arch**: amd64, arm64
 - **Memory**: 512 MB+
 - **Privilege**: root
+- **Bash**: ≥ 4.3 (the script uses namerefs and negative array indices; the stock bash 4.2 on CentOS 7 is not supported)
 - **sing-box**: ≥ 1.11 (auto-satisfied by the installer's "always pull latest" policy; the script's config uses route-level sniff/resolve actions introduced in 1.11)
 
 ## Language Selection

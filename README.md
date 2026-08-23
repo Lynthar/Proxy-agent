@@ -41,7 +41,7 @@ wget -P /root -N https://github.com/Lynthar/Proxy-agent/releases/latest/download
 
 ## 系统要求
 
-- **系统**：Debian 9+、Ubuntu 16+、CentOS/RHEL 8+、Alpine 3+
+- **系统**：Debian 9+、Ubuntu 18+、CentOS/RHEL 8+、Alpine 3+（Ubuntu 16 已被脚本明确拒绝）
 - **架构**：amd64、arm64
 - **内存**：512 MB+
 - **权限**：root

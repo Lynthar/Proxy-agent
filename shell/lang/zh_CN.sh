@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Chinese (Simplified) Language File / 简体中文语言文件
-# v2ray-agent i18n System
+# 简体中文语言文件 / Chinese (Simplified)
 # =============================================================================
 
 # =============================================================================
@@ -840,9 +839,6 @@ MSG_USER="用户"
 MSG_ENTRY_NODE="入口节点"
 MSG_INTERNET="互联网"
 MSG_OPTIONAL="可选"
-MSG_DISABLED="已禁用"
-MSG_YES="是"
-MSG_NO="否"
 
 # =============================================================================
 # 多链路分流集成 - Multi-Chain Integration Messages
@@ -865,7 +861,6 @@ MSG_CHAIN_NAME_HINT="请为此链路设置标识名称 (仅限英文字母、数
 MSG_CHAIN_NAME_PROMPT="链路名称"
 MSG_CHAIN_NAME_INVALID="名称格式无效，仅允许英文字母、数字、下划线"
 MSG_CHAIN_NAME_EXISTS="链路名称已存在"
-MSG_CHAIN_STEP_RULES="步骤: 设置分流规则"
 MSG_CHAIN_RULES_HINT="选择此链路的分流规则"
 MSG_CHAIN_RULE_LATER="稍后统一配置"
 MSG_CHAIN_RULE_PRESET="使用预设规则"
@@ -880,7 +875,6 @@ MSG_CHAIN_PRESET_GOOGLE="谷歌服务"
 MSG_CHAIN_PRESET_MICROSOFT="微软服务"
 MSG_CHAIN_PRESET_APPLE="苹果服务"
 MSG_CHAIN_CUSTOM_DOMAIN_HINT="请输入域名 (逗号分隔，如: example.com,test.org)"
-MSG_DOMAIN="域名"
 MSG_CHAIN_ADDED="链路添加成功"
 MSG_RULES="规则"
 MSG_CUSTOM_DOMAIN="自定义域名"
@@ -971,7 +965,6 @@ MSG_CHAIN_SET_DEFAULT_SUCCESS="已将 [%s] 设为默认链路"
 MSG_CHAIN_XRAY_DETECTED="检测到 Xray 代理协议，将同时配置 Xray 链式转发"
 MSG_CHAIN_TARGET="目标"
 MSG_CHAIN_RULE_ADDED="规则已添加"
-MSG_CONFIRM="确认"
 MSG_CHAIN_MERGING_SINGBOX="正在合并 sing-box 配置..."
 MSG_CHAIN_STARTING_SINGBOX="正在启动 sing-box..."
 MSG_CHAIN_SINGBOX_START_FAILED="sing-box 启动失败"
@@ -1065,3 +1058,18 @@ MSG_DOCTOR_DETAIL_NO_TLS="未发现 TLS 证书目录"
 MSG_DOCTOR_DETAIL_NOT_CENTOS="非 CentOS / RHEL"
 MSG_DOCTOR_SUMMARY="汇总"
 MSG_DOCTOR_FOOTER_HINT="提示：以上为只读检测。如需修复请走对应菜单或查看 docs/user-guide.md"
+
+# =============================================================================
+# 核心更新事务化 / 包管理器锁 / 自定义安装校验（2026-08 修复批）
+# =============================================================================
+MSG_UPDATE_CORE_VERSION_FAIL="获取版本信息失败，已保留当前版本"
+MSG_UPDATE_CORE_DL_FAIL_KEEP="核心下载失败，已保留当前版本"
+MSG_UPDATE_CORE_VERIFY_FAIL_KEEP="文件校验失败（可能已被篡改），已保留当前版本"
+MSG_UPDATE_CORE_EXTRACT_FAIL_KEEP="解压失败，已保留当前版本"
+MSG_UPDATE_CORE_FAIL_RESTORED="更新失败，已恢复更新前的二进制"
+MSG_ROLLBACK_STAGING_FAIL="下载或校验失败，当前版本未被改动"
+MSG_PKG_MANAGER_WAIT="检测到其他包管理进程正在运行，等待其结束..."
+MSG_PKG_MANAGER_WAIT_TIMEOUT="等待包管理器锁超时，请稍后重试（或先处理正在运行的系统更新）"
+MSG_PKG_MANAGER_YUM_LIVE="yum 正在运行 (PID %s)，请等它结束后重试"
+MSG_CUSTOM_INSTALL_INVALID_TOKENS="包含无效选项:%s，请对照菜单重新输入"
+MSG_WARP_REG_VERIFY_FAIL="warp-reg 下载失败或校验不通过，已取消安装"
