@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# test_modules.sh - 模块单元测试
-# ============================================================================
-# 用法: bash tests/test_modules.sh
+# test_modules.sh - lib/ 模块单元测试。跑法: bash tests/test_modules.sh
 # ============================================================================
 
 # 注意: 不使用 set -e，以便所有测试都能运行
@@ -408,6 +406,36 @@ assert_true "[[ ${memory} -ge 0 ]]" "getSystemMemoryMB() 返回有效值: ${memo
 # 测试 getOSInfo
 osInfo=$(getOSInfo)
 assert_not_empty "${osInfo}" "getOSInfo() 返回系统信息"
+
+echo ""
+
+# ============================================================================
+# 测试 isPlausiblePublicIP（getPublicIP 的输出闸门）
+# ============================================================================
+echo -e "${YELLOW}[system-detect.sh] isPlausiblePublicIP 测试${NC}"
+assert_true "isPlausiblePublicIP 203.0.113.7" "isPlausiblePublicIP 接受普通 IPv4"
+assert_true "isPlausiblePublicIP 2001:db8::1" "isPlausiblePublicIP 接受普通 IPv6"
+assert_true "isPlausiblePublicIP ::ffff:203.0.113.7" "isPlausiblePublicIP 接受 IPv4-mapped IPv6"
+assert_true "! isPlausiblePublicIP ''" "isPlausiblePublicIP 拒绝空串"
+assert_true "! isPlausiblePublicIP 'not-an-ip-or-html'" "isPlausiblePublicIP 拒绝提示文本"
+assert_true "! isPlausiblePublicIP '<html><body>error</body></html>'" "isPlausiblePublicIP 拒绝 HTML 错误页"
+assert_true "! isPlausiblePublicIP 'deadbeef'" "isPlausiblePublicIP 拒绝无冒号纯十六进制串"
+assert_true "! isPlausiblePublicIP '203.0.113.7 x'" "isPlausiblePublicIP 拒绝带空白的响应"
+
+echo ""
+
+# ============================================================================
+# 测试 checkCentosSELinux 的 doctor 放行（stub getenforce 模拟 Enforcing）
+# ============================================================================
+echo -e "${YELLOW}[system-detect.sh] checkCentosSELinux doctor 放行测试${NC}"
+selinuxStubDir=$(mktemp -d)
+printf '#!/bin/sh\necho Enforcing\n' >"${selinuxStubDir}/getenforce"
+chmod +x "${selinuxStubDir}/getenforce"
+(PATH="${selinuxStubDir}:${PATH}" checkCentosSELinux) >/dev/null 2>&1
+assert_equals "1" "$?" "Enforcing 且无放行变量时 exit 1"
+(PATH="${selinuxStubDir}:${PATH}" PROXY_AGENT_SELINUX_NONFATAL=1 checkCentosSELinux) >/dev/null 2>&1
+assert_equals "0" "$?" "PROXY_AGENT_SELINUX_NONFATAL=1（doctor 入口）时放行"
+rm -rf "${selinuxStubDir}"
 
 echo ""
 

@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# test_integration.sh - 集成测试 (模拟 VPS 环境)
-# ============================================================================
-# 用法: bash tests/test_integration.sh
-# 此脚本创建模拟的安装环境来测试配置读取功能
+# test_integration.sh - 集成测试：建模拟安装树测配置读取。跑法: bash tests/test_integration.sh
 # ============================================================================
 
 # 颜色
@@ -528,10 +525,8 @@ fi
 echo ""
 
 # ============================================================================
-# 测试 legacy allowInsecure 清理
+# 测试 legacy allowInsecure 清理（镜像 install.sh 的 removeLegacyAllowInsecure 过滤器）
 # ============================================================================
-# 镜像 install.sh removeLegacyAllowInsecure 的过滤器：Xray-core ≥ v26.2.6 遇
-# allowInsecure:true 拒绝启动，启动前需从旧版 socks5_outbound.json 剥离该字段
 
 echo -e "${YELLOW}=== 测试 legacy allowInsecure 清理 ===${NC}"
 
@@ -594,6 +589,51 @@ else
 fi
 
 rm -f "${LEGACY_SOCKS5_FILE}"
+
+echo ""
+
+# ============================================================================
+# 测试 removeUser 删除过滤器语义（镜像 install.sh removeUser 的 jq 过滤器）
+# 回归背景：只写 .settings.clients 的过滤器在 sing-box 形态（.users）上是静默
+# no-op——命令成功退出但用户没删掉，凭据继续有效
+# ============================================================================
+
+echo -e "${YELLOW}=== 测试 removeUser 删除过滤器语义 ===${NC}"
+
+REMOVE_USER_FILTER='del(.inbounds[0].settings.clients[$idx]//.inbounds[0].users[$idx])'
+REMOVE_USER_TMP="${MOCK_ROOT}/remove_user_semantics.json"
+
+# sing-box 形态（.users）——组合过滤器必须真的删掉目标用户
+cat > "${REMOVE_USER_TMP}" << 'EOF'
+{"inbounds": [{"type": "vless", "users": [{"uuid": "u-aaa", "name": "alice-VLESS_WS"}, {"uuid": "u-bbb", "name": "bob-VLESS_WS"}]}]}
+EOF
+result=$(jq -r --argjson idx 0 "${REMOVE_USER_FILTER}" "${REMOVE_USER_TMP}" | jq -r '.inbounds[0].users | length')
+assert_equals "1" "${result}" "sing-box .users 形态：删除后剩 1 个用户"
+result=$(jq -r --argjson idx 0 "${REMOVE_USER_FILTER}" "${REMOVE_USER_TMP}" | jq -r '.inbounds[0].users[0].uuid')
+assert_equals "u-bbb" "${result}" "sing-box .users 形态：删除的是选中下标的用户"
+
+# 旧过滤器（仅 settings.clients）在同一文件上是静默 no-op——钉死这个缺陷不再回归
+result=$(jq -r --argjson idx 0 'del(.inbounds[0].settings.clients[$idx])' "${REMOVE_USER_TMP}" | jq -r '.inbounds[0].users | length')
+assert_equals "2" "${result}" "旧的仅 settings.clients 过滤器在 sing-box 形态上确实是 no-op（回归钉）"
+
+# Xray 形态（.settings.clients，含 XHTTP 的 12_ 文件同构）
+cat > "${REMOVE_USER_TMP}" << 'EOF'
+{"inbounds": [{"protocol": "vless", "settings": {"clients": [{"id": "u-ccc", "email": "carol-VLESS_TCP/TLS_Vision"}, {"id": "u-ddd", "email": "dave-VLESS_TCP/TLS_Vision"}]}}]}
+EOF
+result=$(jq -r --argjson idx 1 "${REMOVE_USER_FILTER}" "${REMOVE_USER_TMP}" | jq -r '.inbounds[0].settings.clients | length')
+assert_equals "1" "${result}" "Xray .settings.clients 形态：删除后剩 1 个用户"
+result=$(jq -r --argjson idx 1 "${REMOVE_USER_FILTER}" "${REMOVE_USER_TMP}" | jq -r '.inbounds[0].settings.clients[0].id')
+assert_equals "u-ccc" "${result}" "Xray .settings.clients 形态：保留未选中的用户"
+
+# Xray Reality 07 形态（clients 在 inbounds[1]）——removeUser 协议 7 的三路组合过滤器
+REMOVE_REALITY_FILTER='del(.inbounds[0].settings.clients[$idx]//.inbounds[1].settings.clients[$idx]//.inbounds[0].users[$idx])'
+cat > "${REMOVE_USER_TMP}" << 'EOF'
+{"inbounds": [{"port": 443, "protocol": "dokodemo-door", "settings": {}}, {"protocol": "vless", "settings": {"clients": [{"id": "u-eee", "email": "erin-vless_reality_vision"}, {"id": "u-fff", "email": "frank-vless_reality_vision"}]}}]}
+EOF
+result=$(jq -r --argjson idx 0 "${REMOVE_REALITY_FILTER}" "${REMOVE_USER_TMP}" | jq -r '.inbounds[1].settings.clients | length')
+assert_equals "1" "${result}" "Reality 07 形态：inbounds[1] 中删除成功"
+
+rm -f "${REMOVE_USER_TMP}"
 
 echo ""
 

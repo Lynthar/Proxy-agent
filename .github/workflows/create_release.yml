@@ -96,10 +96,12 @@ jobs:
               return;
             }
 
-            // Helper: upload one file as a release asset, log + swallow errors.
-            // We don't want a single asset upload failure to abort the rest of
-            // the release pipeline (e.g. install.sh.sha256 should still attach
-            // even if lib_bundle had a transient upload glitch, and vice versa).
+            // Helper: upload one file as a release asset. A single failure must
+            // not abort the remaining uploads (each asset is independent), but
+            // every failure is collected and fails the job at the end — a
+            // release missing install.sh / .sha256 / lib_bundle silently breaks
+            // self-update verification and bootstrap for every user.
+            const failedAssets = [];
             async function uploadAsset(filename, label) {
               try {
                 const data = fs.readFileSync(filename);
@@ -113,6 +115,7 @@ jobs:
                 console.log(`✓ Uploaded ${label} for ${tag}`);
               } catch (err) {
                 console.log(`⚠ Failed to upload ${label}: ${err.message}`);
+                failedAssets.push(label);
               }
             }
 
@@ -129,6 +132,13 @@ jobs:
             // to grab lib/ + shell/lang/ when they're missing on first run.
             await uploadAsset('lib_bundle.tar.gz', 'lib_bundle.tar.gz');
             await uploadAsset('lib_bundle.tar.gz.sha256', 'lib_bundle.tar.gz.sha256');
+
+            // All four assets are load-bearing (self-update SHA256 + bootstrap
+            // bundle). A release that "succeeded" without them is worse than a
+            // failed run — fail loudly so the release can be re-cut.
+            if (failedAssets.length > 0) {
+              core.setFailed(`Release ${tag} is missing assets: ${failedAssets.join(', ')}`);
+            }
 
             // Old releases and tags are intentionally retained — manual cleanup only.
             // Tag deletion would orphan history references (issues, git log v1.x..v2.y),

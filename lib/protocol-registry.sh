@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# protocol-registry.sh - 协议注册表
-#
-# 集中管理协议 ID、配置文件映射、协议属性查询
-# 依赖 constants.sh 先加载
+# protocol-registry.sh - 协议 ID、配置文件映射与属性查询（需先加载 constants.sh）
 # ============================================================================
 
 # 防止重复加载
@@ -245,10 +242,7 @@ scanInstalledProtocols() {
     echo "${result}"
 }
 
-# 获取协议配置文件完整路径
-# 参数: $1 - 协议ID
-#       $2 - 配置目录路径 (可选，默认 ${configPath})
-# 输出: 完整文件路径
+# getProtocolConfigPath ID [CONFIG_DIR=${configPath}] → 配置文件完整路径
 getProtocolConfigPath() {
     local protocolId="$1"
     local cfgPath="${2:-${configPath}}"

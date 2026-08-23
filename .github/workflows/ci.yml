@@ -24,11 +24,9 @@ jobs:
           shellcheck --severity=error --shell=bash \
             lib/*.sh tests/*.sh
 
-      - name: shellcheck install.sh (report-only)
-        # install.sh is ~16k lines of legacy bash; this job surfaces real
-        # errors but does not block PRs. Tighten to blocking once the
-        # backlog is cleared.
-        continue-on-error: true
+      - name: shellcheck install.sh
+        # The legacy error backlog is cleared (0 errors since 2026-08); keep it
+        # that way — this step blocks so regressions can't ride a soft gate.
         run: |
           shellcheck --severity=error --shell=bash install.sh
 
@@ -64,6 +62,21 @@ jobs:
             exit 1
           fi
           echo "OK: $(wc -l < "$zh") keys match."
+
+      - name: no duplicate MSG_ keys within one language file
+        # Bash "last definition wins" makes duplicates silently shadow earlier
+        # values — translators can't tell which value is live.
+        run: |
+          status=0
+          for f in shell/lang/zh_CN.sh shell/lang/en_US.sh; do
+            dups=$(grep -oE '^MSG_[A-Z0-9_]+=' "$f" | sort | uniq -d)
+            if [[ -n "$dups" ]]; then
+              echo "::error::duplicate MSG_ keys in $f:"
+              echo "$dups" | sed 's/=$//;s/^/  - /'
+              status=1
+            fi
+          done
+          exit "$status"
 
       - name: every t() call resolves to a real MSG_ key
         # Guards against two mistakes that the parity job above misses:

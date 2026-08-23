@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# system-detect.sh - 系统检测模块
-# ============================================================================
-# 本模块负责检测操作系统类型、CPU架构等系统信息
-# 注意：这些函数会写入全局变量，供主脚本使用
+# system-detect.sh - OS / CPU / 网络探测。这些函数不返回值，只写全局变量。
 # ============================================================================
 
 # 防止重复加载
@@ -11,13 +8,16 @@
 readonly _SYSTEM_DETECT_LOADED=1
 
 # ============================================================================
-# 检查 SELinux 状态 (CentOS)
-# enforcing 时直接 exit 1（与历史 install.sh 行为一致：脚本不允许在
-# enforcing 模式下继续——nginx / xray socket binding 会被 SELinux 阻断）
+# checkCentosSELinux —— enforcing 时 exit 1（socket binding 会被 SELinux 阻断）
 # ============================================================================
 
 checkCentosSELinux() {
     if command -v getenforce >/dev/null 2>&1 && [[ "$(getenforce)" == "Enforcing" ]]; then
+        # PROXY_AGENT_SELINUX_NONFATAL=1（doctor 入口设置）时只放行不退出，
+        # 否则 doctor 永远到不了自己的 SELinux 诊断行
+        if [[ -n "${PROXY_AGENT_SELINUX_NONFATAL:-}" ]]; then
+            return 0
+        fi
         echoContent yellow "# $(t NOTICE)"
         echoContent yellow "$(t SYS_SELINUX_NOTICE)"
         echoContent yellow "https://github.com/Lynthar/Proxy-agent/blob/master/docs/selinux.md"
@@ -26,14 +26,7 @@ checkCentosSELinux() {
 }
 
 # ============================================================================
-# 检测操作系统类型
-# 设置全局变量:
-#   - release: 系统类型 (centos/debian/ubuntu/alpine)
-#   - installType: 包安装命令
-#   - removeType: 包卸载命令
-#   - upgrade: 系统更新命令
-#   - centosVersion: CentOS版本 (仅CentOS)
-#   - nginxConfigPath: Nginx配置路径 (Alpine不同)
+# checkSystem → release / installType / removeType / upgrade / centosVersion / nginxConfigPath
 # ============================================================================
 
 checkSystem() {
@@ -100,12 +93,7 @@ checkSystem() {
 }
 
 # ============================================================================
-# 检测 CPU 架构
-# 设置全局变量:
-#   - cpuVendor: CPU厂商/架构类型
-#   - xrayCoreCPUVendor: Xray二进制名称后缀
-#   - singBoxCoreCPUVendor: sing-box二进制名称后缀
-#   - warpRegCoreCPUVendor: WARP二进制名称后缀
+# checkCPUVendor → cpuVendor 与 xray/singBox/warpReg 三个 CoreCPUVendor 后缀
 # ============================================================================
 
 checkCPUVendor() {
@@ -156,9 +144,7 @@ checkRoot() {
 }
 
 # ============================================================================
-# 检查 wget 是否支持进度显示
-# 设置全局变量:
-#   - wgetShowProgressStatus: "--show-progress" 或空
+# checkWgetShowProgress → wgetShowProgressStatus（"--show-progress" 或空）
 # ============================================================================
 
 checkWgetShowProgress() {
@@ -174,16 +160,18 @@ checkWgetShowProgress() {
     fi
 }
 
-# ============================================================================
-# 获取公网IP地址
-# 调用约定（与 install.sh 历史调用方式兼容）：
-#   getPublicIP        → echo IPv4，失败回退 IPv6
-#   getPublicIP 4      → 强制 IPv4
-#   getPublicIP 6      → 强制 IPv6
-# Reality 短路：当 currentHost 与 Reality 的 serverName 相同（且未显式指定
-# type）时，直接 echo currentHost，省去一次外网探测。install.sh 在 Reality
-# 场景下大量调用 $(getPublicIP)，这条短路保留性能。
-# ============================================================================
+# getPublicIP [4|6] → 公网 IP。无参=IPv4 失败回退 IPv6。
+# Reality 短路（currentHost == serverName 且未指定 type）直接回显 currentHost，是性能项别删。
+
+# isPlausiblePublicIP VALUE → 0=形似合法 IPv4/IPv6
+# 宽松形态校验：拦 HTML 错误页/代理提示文本混进订阅与配置；严格语义版是 install.sh 的 isValidIP
+isPlausiblePublicIP() {
+    local v="$1"
+    [[ "${v}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] && return 0
+    # IPv6（含 IPv4-mapped 尾段）：必须含冒号且仅由十六进制/冒号/点组成
+    [[ "${v}" == *:* && "${v}" =~ ^[0-9a-fA-F:.]+$ ]] && return 0
+    return 1
+}
 
 getPublicIP() {
     local type="${1:-4}"
@@ -196,28 +184,43 @@ getPublicIP() {
         return 0
     fi
 
+    # 单次运行内公网 IP 不变——按请求形态缓存，避免账号/订阅生成对每个协议都打一轮外网
+    local cacheVar="_publicIPCache${1:-Auto}"
+    if [[ -n "${!cacheVar:-}" ]]; then
+        echo "${!cacheVar}"
+        return 0
+    fi
+
     # cf 自家 trace 优先（更稳定 + 单次响应里可同时拿到 ip 字段）；
-    # 失败再走 ip.sb / ifconfig.me / ipinfo.io。每个源 5s 超时，
-    # 总最坏耗时 ≈ 4 * 5s = 20s。
+    # 失败再走 ip.sb / ifconfig.me / ipinfo.io。全部 HTTPS，connect 5s + 总时限 10s。
+    # 每个源的响应过 isPlausiblePublicIP，垃圾内容按失败处理落到下一个源
     local ip=
-    ip="$(curl -s "-${type}" --connect-timeout 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null \
+    ip="$(curl -s "-${type}" --connect-timeout 5 --max-time 10 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null \
           | sed -n 's/^ip=//p')"
+    isPlausiblePublicIP "${ip}" || ip=
     if [[ -z "${ip}" ]]; then
-        ip="$(curl -s "-${type}" --connect-timeout 5 ip.sb 2>/dev/null)"
+        ip="$(curl -s "-${type}" --connect-timeout 5 --max-time 10 https://ip.sb 2>/dev/null)"
+        isPlausiblePublicIP "${ip}" || ip=
     fi
     if [[ -z "${ip}" ]]; then
-        ip="$(curl -s "-${type}" --connect-timeout 5 ifconfig.me 2>/dev/null)"
+        ip="$(curl -s "-${type}" --connect-timeout 5 --max-time 10 https://ifconfig.me 2>/dev/null)"
+        isPlausiblePublicIP "${ip}" || ip=
     fi
     if [[ -z "${ip}" ]]; then
-        ip="$(curl -s "-${type}" --connect-timeout 5 ipinfo.io/ip 2>/dev/null)"
+        ip="$(curl -s "-${type}" --connect-timeout 5 --max-time 10 https://ipinfo.io/ip 2>/dev/null)"
+        isPlausiblePublicIP "${ip}" || ip=
     fi
 
     # IPv4 全部失败 + 没显式指定 type 时，再尝试 IPv6（与 inline 历史行为一致）
     if [[ -z "${ip}" && -z "${1:-}" ]]; then
-        ip="$(curl -s -6 --connect-timeout 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null \
+        ip="$(curl -s -6 --connect-timeout 5 --max-time 10 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null \
               | sed -n 's/^ip=//p')"
+        isPlausiblePublicIP "${ip}" || ip=
     fi
 
+    if [[ -n "${ip}" ]]; then
+        printf -v "${cacheVar}" '%s' "${ip}"
+    fi
     echo "${ip}"
     [[ -n "${ip}" ]]
 }
@@ -244,19 +247,13 @@ getCPUCores() {
     nproc 2>/dev/null || grep -c processor /proc/cpuinfo 2>/dev/null || echo "1"
 }
 
-# ============================================================================
-# 检查命令是否存在
-# 用法: if commandExists "curl"; then ...
-# ============================================================================
+# commandExists CMD → 0=存在。用法: if commandExists "curl"; then ...
 
 commandExists() {
     command -v "$1" &>/dev/null
 }
 
-# ============================================================================
-# 获取操作系统详细信息
-# 返回格式: "OS Version (Kernel)"
-# ============================================================================
+# 获取操作系统详细信息 → "OS Version (Kernel)"
 
 getOSInfo() {
     local osName=""

@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# constants.sh - Proxy-agent 常量定义
-# ============================================================================
-# 本文件定义所有硬编码常量，包括协议ID、文件路径、默认配置等
-# 使用 readonly 声明确保常量不被意外修改
+# constants.sh - Proxy-agent 常量定义（readonly，防误改）
 # ============================================================================
 
 # 防止重复加载
@@ -11,9 +8,7 @@
 readonly _CONSTANTS_LOADED=1
 
 # ============================================================================
-# 协议ID定义
-# 这些ID用于 currentInstallProtocolType 变量中的协议标识
-# 格式: ",ID," 表示该协议已安装 (例如 ",0,1,3," 表示安装了协议0,1,3)
+# 协议ID定义 —— currentInstallProtocolType 用 ",ID," 形式记录已装协议（如 ",0,1,3,"）
 # ============================================================================
 
 readonly PROTOCOL_VLESS_TCP_VISION=0      # VLESS+TCP+TLS+Vision
@@ -46,8 +41,7 @@ readonly SUBSCRIBE_DIR="${V2RAY_AGENT_DIR}/subscribe"
 readonly SUBSCRIBE_LOCAL_DIR="${V2RAY_AGENT_DIR}/subscribe_local"
 
 # ============================================================================
-# 配置文件名映射
-# 文件名格式: XX_协议名_inbounds.json
+# 配置文件名映射 —— XX_协议名_inbounds.json
 # ============================================================================
 
 declare -A PROTOCOL_CONFIG_FILES
@@ -184,9 +178,7 @@ readonly XRAY_ACCESS_LOG="${V2RAY_AGENT_DIR}/xray/access.log"
 readonly XRAY_ERROR_LOG="${V2RAY_AGENT_DIR}/xray/error.log"
 
 # ============================================================================
-# 脚本版本
-# SCRIPT_VERSION 由 install.sh 从 VERSION 文件动态加载
-# 这里只提供默认值和其他常量
+# 脚本版本（SCRIPT_VERSION 由 install.sh 从 VERSION 文件加载，此处仅默认值）
 # ============================================================================
 
 : "${SCRIPT_VERSION:=(initial)}"  # 默认版本标识，如果未从VERSION文件加载
@@ -194,7 +186,5 @@ readonly SCRIPT_AUTHOR="Lynthar"
 readonly SCRIPT_REPO="https://github.com/Lynthar/Proxy-agent"
 
 # ============================================================================
-# 注意: 协议辅助函数已移至 protocol-registry.sh
-# 包括: isProtocolInstalled, getProtocolConfigPath, getProtocolDisplayName,
-#       protocolRequiresTLS 等
+# 协议辅助函数在 protocol-registry.sh，不在本文件
 # ============================================================================
