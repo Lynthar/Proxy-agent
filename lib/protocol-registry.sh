@@ -219,6 +219,79 @@ getProtocolTransport() {
 }
 
 # ============================================================================
+# 账户字段映射（按内核区分——同名文件在两个内核下的用户数组结构不同）
+# ============================================================================
+
+# getProtocolUsersPath COREKIND ID → 用户数组的 jq 路径
+# Xray 的 07 用户在 inbounds[1]（[0] 是 dokodemo 分发器）；Xray 内核下 6/9 是
+# sing-box sidecar 文件，走 .users。改任何 cell 前先对照真实模板与读取端。
+getProtocolUsersPath() {
+    local core="$1" protocolId="$2"
+
+    if [[ "${core}" == "1" ]]; then
+        case "${protocolId}" in
+            7)                       echo ".inbounds[1].settings.clients" ;;
+            6 | 9)                   echo ".inbounds[0].users" ;;
+            0 | 1 | 2 | 3 | 4 | 5 | 8 | 11 | 12) echo ".inbounds[0].settings.clients" ;;
+            *) return 1 ;;
+        esac
+    elif [[ "${core}" == "2" ]]; then
+        case "${protocolId}" in
+            0 | 1 | 3 | 4 | 6 | 7 | 8 | 9 | 10 | 11 | 13 | 14 | 20) echo ".inbounds[0].users" ;;
+            *) return 1 ;;
+        esac
+    else
+        return 1
+    fi
+}
+
+# getProtocolIdField COREKIND ID → 承载身份凭据的字段名（id/uuid/password/username）
+# 注意 ss2022(14) 的 password 是派生 uPSK 不是原始 UUID，不能当身份源逆推。
+getProtocolIdField() {
+    local core="$1" protocolId="$2"
+
+    if [[ "${core}" == "1" ]]; then
+        case "${protocolId}" in
+            0 | 1 | 3 | 5 | 7 | 8 | 12) echo "id" ;;
+            2 | 4 | 6)                  echo "password" ;;
+            9)                          echo "uuid" ;;
+            *) return 1 ;;
+        esac
+    elif [[ "${core}" == "2" ]]; then
+        case "${protocolId}" in
+            0 | 1 | 3 | 7 | 8 | 9 | 11) echo "uuid" ;;
+            4 | 6 | 10 | 13 | 14)       echo "password" ;;
+            20)                         echo "username" ;;
+            *) return 1 ;;
+        esac
+    else
+        return 1
+    fi
+}
+
+# getProtocolNameField COREKIND ID → 承载显示名的字段名（email/name/username）
+# sing-box 的 naive(10) 用 username；socks(20) 无显示名字段，返回 1。
+getProtocolNameField() {
+    local core="$1" protocolId="$2"
+
+    if [[ "${core}" == "1" ]]; then
+        case "${protocolId}" in
+            6 | 9)                                   echo "name" ;;
+            0 | 1 | 2 | 3 | 4 | 5 | 7 | 8 | 11 | 12) echo "email" ;;
+            *) return 1 ;;
+        esac
+    elif [[ "${core}" == "2" ]]; then
+        case "${protocolId}" in
+            10)                                          echo "username" ;;
+            0 | 1 | 3 | 4 | 6 | 7 | 8 | 9 | 11 | 13 | 14) echo "name" ;;
+            *) return 1 ;;
+        esac
+    else
+        return 1
+    fi
+}
+
+# ============================================================================
 # 协议检测与路径
 # ============================================================================
 
