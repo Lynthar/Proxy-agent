@@ -1079,3 +1079,7 @@ MSG_SINGBOX_DOMAIN_STRATEGY_MIGRATED="Migrated legacy outbound domain_strategy t
 MSG_TLS_RENEW_ACME_FAILED="acme.sh renewal failed; existing certificate kept and services restarted"
 MSG_TLS_RENEW_INSTALL_FAILED="Certificate installation failed; previous certificate restored and services restarted"
 MSG_TLS_RENEW_VERIFY_FAILED="New certificate does not match the private key; previous certificate restored and services restarted"
+MSG_ACCOUNT_TX_BEGIN_FAILED="Failed to create the account-change transaction snapshot; operation cancelled"
+MSG_ACCOUNT_TX_FILE_MISSING="Protocol config file missing; the whole account change was rolled back"
+MSG_ACCOUNT_TX_WRITE_FAILED="Failed to write protocol config; the whole account change was rolled back"
+MSG_ACCOUNT_TX_VALIDATE_FAILED="Core config validation failed; the whole account change was rolled back"

@@ -633,6 +633,36 @@ EOF
 result=$(jq -r --argjson idx 0 "${REMOVE_REALITY_FILTER}" "${REMOVE_USER_TMP}" | jq -r '.inbounds[1].settings.clients | length')
 assert_equals "1" "${result}" "Reality 07 形态：inbounds[1] 中删除成功"
 
+# 注册表驱动的账户过滤器语义（镜像 applyAccountChangeAllProtocols：路径来自
+# getProtocolUsersPath，add 用 --argjson 整组替换，del 用精确路径不再靠 // 猜测链）
+# (core=1, id=7)：del 精确打 inbounds[1]，与旧三路组合链等价，且 [0] 的 dokodemo 不动
+result=$(jq -r --argjson idx 0 'del(.inbounds[1].settings.clients[$idx])' "${REMOVE_USER_TMP}" | jq -r '.inbounds[1].settings.clients | length')
+assert_equals "1" "${result}" "注册表 del(1,7)：精确 inbounds[1] 删除，与旧组合链等价"
+result=$(jq -r --argjson idx 0 'del(.inbounds[1].settings.clients[$idx])' "${REMOVE_USER_TMP}" | jq -r '.inbounds[0].protocol')
+assert_equals "dokodemo-door" "${result}" "注册表 del(1,7)：inbounds[0] 的 dokodemo 分发器不受影响"
+
+# (core=1, id=7)：add 整组替换写 inbounds[1]，[0] 不长出 clients
+result=$(jq --argjson newClients '[{"id":"u-new","email":"new-vless_reality_vision"}]' '.inbounds[1].settings.clients = $newClients' "${REMOVE_USER_TMP}" | jq -r '.inbounds[1].settings.clients[0].id')
+assert_equals "u-new" "${result}" "注册表 add(1,7)：整组替换落在 inbounds[1]"
+result=$(jq --argjson newClients '[{"id":"u-new","email":"n"}]' '.inbounds[1].settings.clients = $newClients' "${REMOVE_USER_TMP}" | jq -r '.inbounds[0].settings | has("clients")')
+assert_equals "false" "${result}" "注册表 add(1,7)：dokodemo 的 settings 不长出 clients"
+
+# (core=2)：add/del 精确打 .inbounds[0].users（B02 家族的 add/del 两侧一并钉死）
+cat > "${REMOVE_USER_TMP}" << 'EOF'
+{"inbounds": [{"type": "vless", "users": [{"uuid": "u-ggg", "name": "gina-VLESS_WS"}, {"uuid": "u-hhh", "name": "hank-VLESS_WS"}]}]}
+EOF
+result=$(jq --argjson newClients '[{"uuid":"u-1","name":"a"},{"uuid":"u-2","name":"b"},{"uuid":"u-3","name":"c"}]' '.inbounds[0].users = $newClients' "${REMOVE_USER_TMP}" | jq -r '.inbounds[0].users | length')
+assert_equals "3" "${result}" "注册表 add(2,*)：整组替换落在 .users"
+result=$(jq -r --argjson idx 1 'del(.inbounds[0].users[$idx])' "${REMOVE_USER_TMP}" | jq -r '.inbounds[0].users[0].uuid')
+assert_equals "u-ggg" "${result}" "注册表 del(2,*)：按 index 删 .users 保留其余"
+
+# removeUser 列表端组合：naive fronting 的名字段是 username（旧的 name//username 整流链已废）
+cat > "${REMOVE_USER_TMP}" << 'EOF'
+{"inbounds": [{"type": "naive", "users": [{"username": "ivy-singbox_naive", "password": "u-iii"}]}]}
+EOF
+result=$(jq -r '.inbounds[0].users[].username' "${REMOVE_USER_TMP}")
+assert_equals "ivy-singbox_naive" "${result}" "注册表列表(2,10)：usersPath[].username 取到显示名"
+
 rm -f "${REMOVE_USER_TMP}"
 
 echo ""
