@@ -8,13 +8,6 @@
 readonly _JSON_UTILS_LOADED=1
 
 # ============================================================================
-# 常量定义
-# ============================================================================
-
-# JSON 临时文件前缀（mktemp 会在此基础上加 6 字节随机后缀）
-readonly JSON_TMP_PREFIX="/tmp/Proxy-agent-json"
-
-# ============================================================================
 # 验证函数
 # ============================================================================
 
@@ -129,9 +122,9 @@ jsonWriteFile() {
         cp "${file}" "${file}.bak.$(date +%s)" 2>/dev/null
     fi
 
-    # 写入临时文件（mktemp 保证并发安全）
+    # 临时文件建在目标同目录——/tmp 与目标跨文件系统时 mv 退化为 copy+unlink，不再原子
     local tmpFile
-    tmpFile=$(mktemp "${JSON_TMP_PREFIX}_XXXXXXXX") || return 1
+    tmpFile=$(mktemp "${file}.tmp.XXXXXXXX") || return 1
     if ! echo "${content}" | jq . > "${tmpFile}" 2>/dev/null; then
         rm -f "${tmpFile}"
         return 1
@@ -167,9 +160,9 @@ jsonModifyFile() {
         cp "${file}" "${file}.bak.$(date +%s)" 2>/dev/null
     fi
 
-    # jq 输出到临时文件
+    # 临时文件建在目标同目录——/tmp 与目标跨文件系统时 mv 退化为 copy+unlink，不再原子
     local tmpFile
-    tmpFile=$(mktemp "${JSON_TMP_PREFIX}_XXXXXXXX") || return 1
+    tmpFile=$(mktemp "${file}.tmp.XXXXXXXX") || return 1
     if ! jq "${filter}" "${file}" > "${tmpFile}" 2>/dev/null; then
         rm -f "${tmpFile}"
         return 1
@@ -339,4 +332,62 @@ singboxGetTuicConfig() {
 
     tuicPort=$(jsonGetValue "${file}" ".inbounds[0].listen_port")
     tuicAlgorithm=$(jsonGetValue "${file}" ".inbounds[0].congestion_control")
+}
+
+# ============================================================================
+# 多文件写事务（Begin → Track 逐文件快照 → 修改 → Commit / Rollback）
+# ============================================================================
+
+# jsonTxBegin [BASE_DIR=/etc/Proxy-agent] → 0=事务已开启
+# 快照目录建在 BASE_DIR 下（与目标文件同文件系统，恢复用 cp 不依赖 rename 语义）。
+jsonTxBegin() {
+    local baseDir="${1:-/etc/Proxy-agent}"
+    [[ -d "${baseDir}" ]] || return 1
+    _JSON_TX_DIR=$(mktemp -d "${baseDir}/.txn.XXXXXX") || return 1
+    _JSON_TX_FILES=()
+    return 0
+}
+
+# jsonTxTrack FILE → 把 FILE 纳入事务保护（必须在修改它之前调用）
+# 首次 Track 快照当前内容；文件不存在则记为「回滚时删除」；重复 Track 只记第一次。
+jsonTxTrack() {
+    local file="$1"
+    [[ -z "${_JSON_TX_DIR:-}" || -z "${file}" ]] && return 1
+    local entry
+    for entry in "${_JSON_TX_FILES[@]}"; do
+        [[ "${entry}" == "${file}" ]] && return 0
+    done
+    local idx=${#_JSON_TX_FILES[@]}
+    if [[ -f "${file}" ]]; then
+        cp -p "${file}" "${_JSON_TX_DIR}/${idx}.snap" || return 1
+    fi
+    _JSON_TX_FILES+=("${file}")
+    return 0
+}
+
+# jsonTxRollback → 所有 Track 过的文件恢复到快照（Track 前不存在的删除），关闭事务
+jsonTxRollback() {
+    [[ -z "${_JSON_TX_DIR:-}" ]] && return 1
+    local i file
+    for ((i = ${#_JSON_TX_FILES[@]} - 1; i >= 0; i--)); do
+        file="${_JSON_TX_FILES[$i]}"
+        if [[ -f "${_JSON_TX_DIR}/${i}.snap" ]]; then
+            cp -p "${_JSON_TX_DIR}/${i}.snap" "${file}"
+        else
+            rm -f "${file}"
+        fi
+    done
+    rm -rf "${_JSON_TX_DIR}"
+    _JSON_TX_DIR=
+    _JSON_TX_FILES=()
+    return 0
+}
+
+# jsonTxCommit → 丢弃快照并关闭事务（写入在修改时已落盘，本调用只做收尾）
+jsonTxCommit() {
+    [[ -z "${_JSON_TX_DIR:-}" ]] && return 1
+    rm -rf "${_JSON_TX_DIR}"
+    _JSON_TX_DIR=
+    _JSON_TX_FILES=()
+    return 0
 }

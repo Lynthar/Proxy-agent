@@ -404,6 +404,75 @@ assert_equals '{"outbounds":[{"type":"direct","tag":"IPv6_out","domain_resolver"
 _dsDetect=$(echo "${_dsOut}" | jq -e '[.outbounds[]? | has("domain_strategy")] | any' >/dev/null 2>&1 && echo hit || echo clean)
 assert_equals "clean" "${_dsDetect}" "migrated fragment no longer triggers detection filter"
 
+# 账户字段映射三列契约（注册表 cell 错一格 = 账户操作静默写错文件/字段，B01/B02/X1/N-4 全是这一族）
+# 每行 core:id:期望值；来源是真实模板与读取端（xray-07 用户在 inbounds[1]，[0] 是 dokodemo）
+while IFS=: read -r _c _id _want; do
+    assert_equals "${_want}" "$(getProtocolUsersPath "${_c}" "${_id}")" "usersPath(core=${_c},id=${_id})"
+done <<'CELLS'
+1:0:.inbounds[0].settings.clients
+1:1:.inbounds[0].settings.clients
+1:3:.inbounds[0].settings.clients
+1:4:.inbounds[0].settings.clients
+1:7:.inbounds[1].settings.clients
+1:11:.inbounds[0].settings.clients
+1:12:.inbounds[0].settings.clients
+1:6:.inbounds[0].users
+1:9:.inbounds[0].users
+2:0:.inbounds[0].users
+2:7:.inbounds[0].users
+2:10:.inbounds[0].users
+2:14:.inbounds[0].users
+CELLS
+while IFS=: read -r _c _id _want; do
+    assert_equals "${_want}" "$(getProtocolIdField "${_c}" "${_id}")" "idField(core=${_c},id=${_id})"
+done <<'CELLS'
+1:0:id
+1:4:password
+1:6:password
+1:9:uuid
+1:12:id
+2:0:uuid
+2:4:password
+2:9:uuid
+2:10:password
+2:14:password
+CELLS
+while IFS=: read -r _c _id _want; do
+    assert_equals "${_want}" "$(getProtocolNameField "${_c}" "${_id}")" "nameField(core=${_c},id=${_id})"
+done <<'CELLS'
+1:0:email
+1:6:name
+1:12:email
+2:0:name
+2:10:username
+2:14:name
+CELLS
+assert_true "! getProtocolUsersPath 1 10" "usersPath rejects naive on Xray core"
+assert_true "! getProtocolUsersPath 2 12" "usersPath rejects XHTTP on sing-box core"
+assert_true "! getProtocolNameField 2 20" "nameField rejects socks internal inbound (no name)"
+assert_true "! getProtocolIdField 3 0" "idField rejects unknown core"
+
+# jsonTx 事务契约：Rollback 恢复快照并删除事务内新建的文件；Commit 保留写入
+_txDir=$(mktemp -d)
+echo '{"a":1}' >"${_txDir}/x.json"
+jsonTxBegin "${_txDir}"
+jsonTxTrack "${_txDir}/x.json"
+echo '{"a":2}' >"${_txDir}/x.json"
+jsonTxTrack "${_txDir}/new.json"
+echo '{"b":1}' >"${_txDir}/new.json"
+jsonTxRollback
+assert_equals '{"a":1}' "$(cat "${_txDir}/x.json")" "jsonTxRollback restores tracked file to snapshot"
+assert_true "[[ ! -f ${_txDir}/new.json ]]" "jsonTxRollback deletes files created inside the tx"
+assert_true "[[ -z \$(find "${_txDir}" -maxdepth 1 -name '.txn.*' -print -quit) ]]" "jsonTxRollback removes snapshot dir"
+jsonTxBegin "${_txDir}"
+jsonTxTrack "${_txDir}/x.json"
+echo '{"a":3}' >"${_txDir}/x.json"
+jsonTxCommit
+assert_equals '{"a":3}' "$(cat "${_txDir}/x.json")" "jsonTxCommit keeps modifications"
+assert_true "[[ -z \$(find "${_txDir}" -maxdepth 1 -name '.txn.*' -print -quit) ]]" "jsonTxCommit removes snapshot dir"
+assert_true "! jsonTxTrack ${_txDir}/x.json" "jsonTxTrack outside a tx returns error"
+rm -rf "${_txDir}"
+
 echo ""
 
 # ============================================================================
