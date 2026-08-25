@@ -3441,12 +3441,12 @@ installSingBox() {
 
         echoContent green " ---> 最新版本:${version}"
 
-        # 前置版本守门：下载前就拒绝 < 1.11，避免低版本二进制落盘后再退出留残留
+        # 前置版本守门：下载前就拒绝低于最低版本，避免低版本二进制落盘后再退出留残留
         # （兜底的 post-extract 版本检查保留，作为 belt-and-suspenders）
         local _targetVer="${version#v}"
         if [[ -n "${_targetVer}" ]] && ! versionGreaterOrEqual "${_targetVer}" "${SINGBOX_MIN_VERSION}"; then
             echoContent red " ---> 目标 sing-box 版本 ${version} 低于本脚本要求的最低版本 ${SINGBOX_MIN_VERSION}"
-            echoContent yellow " ---> 路由级 sniff/resolve action 在 sing-box 1.11 引入；旧版本会启动失败"
+            echoContent yellow " ---> 路由级 sniff/resolve action 需 1.11、domain_resolver 与新格式 DNS 需 1.12；旧版本会启动失败"
             echoContent yellow " ---> 参见 https://sing-box.sagernet.org/migration/"
             exit 1
         fi
@@ -9472,8 +9472,8 @@ EOF
     fi
 
     # 已有 01_direct_outbound.json 含 domain_strategy 时自动剥离（in-place migration）。
-    # 1.13 仅打 deprecation 警告，1.16 会 FATAL；现在剥掉避免后续踩坑 + 让 sing-box 启动
-    # 日志干净。
+    # 1.12 起仅打 deprecation 警告，1.14 移除后会 FATAL；现在剥掉避免后续踩坑 +
+    # 让 sing-box 启动日志干净。
     local _directOut="/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json"
     if [[ -f "${_directOut}" ]] && jq -e . "${_directOut}" >/dev/null 2>&1; then
         if jq -e '[.outbounds[]? | has("domain_strategy")] | any' "${_directOut}" >/dev/null 2>&1; then

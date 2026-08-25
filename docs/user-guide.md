@@ -765,10 +765,11 @@ pasly  # → 16 → 重启
 
 **适用对象**：自己手动改过 sing-box 配置文件、或者使用很旧版本（脚本之前的）安装了 sing-box 的用户。
 
-**现象**：升级 sing-box 内核到 1.13+ 后，老配置可能因 `domain_strategy` / `default_domain_resolver` / `sniff` schema 变更而 FATAL 拒绝启动。
+**现象**：升级 sing-box 内核到 1.13+ 后，老配置可能因 `domain_strategy` / `default_domain_resolver` / `sniff` schema 变更而 FATAL 拒绝启动。出站上的 `domain_strategy` 在 1.12 弃用、**1.14 移除**。
 
 **怎么处理**：
-- 脚本本身在多次 commit（`f718bdd` / `a7e56b2` / `3152def`）已自动剥离/迁移这些字段，跑一次 `pasly doctor` 看 Config 段是否 PASS 即可
+- 脚本本身已自动剥离/迁移这些字段，跑一次 `pasly doctor` 看 Config 段是否 PASS 即可
+- 出站的 `domain_strategy` 会在每次启动合并配置时自动改写成等价的 `domain_resolver`，看到「已把旧版 outbound domain_strategy 迁移为 domain_resolver」是正常的，只打印一次
 - 如果 FAIL：菜单 9 重装一次受影响的协议、或菜单 22 → 4 找一个旧版本备份回滚
 
 ### 新增的可用工具
