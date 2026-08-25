@@ -45,7 +45,7 @@ After install, launch the management menu with `pasly`.
 - **Memory**: 512 MB+
 - **Privilege**: root
 - **Bash**: ≥ 4.3 (the script uses namerefs and negative array indices; the stock bash 4.2 on CentOS 7 is not supported)
-- **sing-box**: ≥ 1.11 (auto-satisfied by the installer's "always pull latest" policy; the script's config uses route-level sniff/resolve actions introduced in 1.11)
+- **sing-box**: ≥ 1.12 (auto-satisfied by the installer's "always pull latest" policy; the script's config uses route-level sniff/resolve actions from 1.11 plus `domain_resolver` and the new-format DNS servers from 1.12)
 
 ## Language Selection
 
