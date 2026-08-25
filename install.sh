@@ -462,9 +462,30 @@ compareVersions() {
 }
 
 # 检查更新并显示提示
+# 启动路径的更新检查带 24h 本地缓存——GitHub 不通时不必每次打开菜单都等满 curl 超时；
+# 手动更新入口（updateV2RayAgent）直接调 getLatestReleaseVersion，不走缓存
 checkForUpdates() {
-    local latestVersion
-    latestVersion=$(getLatestReleaseVersion)
+    local latestVersion=
+    local cacheFile="/etc/Proxy-agent/latest_version_cache"
+
+    if [[ -f "${cacheFile}" ]]; then
+        local cacheMtime cacheAge
+        cacheMtime=$(stat -c %Y "${cacheFile}" 2>/dev/null || echo 0)
+        cacheAge=$(($(date +%s) - cacheMtime))
+        if [[ ${cacheAge} -lt 86400 ]]; then
+            latestVersion=$(cat "${cacheFile}")
+            if ! [[ "${latestVersion}" =~ ^v[0-9][0-9.]*$ ]]; then
+                latestVersion=
+            fi
+        fi
+    fi
+
+    if [[ -z "${latestVersion}" ]]; then
+        latestVersion=$(getLatestReleaseVersion)
+        if [[ "${latestVersion}" =~ ^v[0-9][0-9.]*$ ]] && [[ -d /etc/Proxy-agent ]] && ! isDryRun; then
+            echo "${latestVersion}" >"${cacheFile}"
+        fi
+    fi
 
     if [[ -n "${latestVersion}" ]]; then
         if compareVersions "${SCRIPT_VERSION}" "${latestVersion}"; then
@@ -1506,7 +1527,11 @@ readInstallProtocolType() {
         if echo "${row}" | grep -q ss2022_inbounds; then
             currentInstallProtocolType="${currentInstallProtocolType}14,"
             if [[ "${coreKind}" == "2" ]]; then
-                frontingType=14_ss2022_inbounds
+                # ss2022 的 users[].password 是派生 uPSK、逆推不出 UUID——14_ 排序恒最后，
+                # 无条件赋值会覆盖其他协议；只在没有别的身份源时才让它当 frontingType
+                if [[ -z "${frontingType}" ]]; then
+                    frontingType=14_ss2022_inbounds
+                fi
                 ss2022Port=$(jq .inbounds[0].listen_port "${row}.json")
             fi
         fi
@@ -1837,7 +1862,11 @@ readConfigHostPathUUID() {
             fi
         fi
     elif [[ "${coreKind}" == "2" ]]; then
-        if [[ -n "${frontingType}" ]]; then
+        # fronting 落在 ss2022 上且装有 Reality 时改用 Reality 文件当身份源——ss2022 的 password 是派生 uPSK
+        if [[ "${frontingType}" == "14_ss2022_inbounds" && -n "${frontingTypeReality}" ]]; then
+            currentUUID=$(jq -r .inbounds[0].users[0].uuid ${configPath}${frontingTypeReality}.json)
+            currentClients=$(jq -r .inbounds[0].users ${configPath}${frontingTypeReality}.json)
+        elif [[ -n "${frontingType}" ]]; then
             currentHost=$(jq -r .inbounds[0].tls.server_name ${configPath}${frontingType}.json)
             if echo ${currentInstallProtocolType} | grep -q ",11," && [[ "${currentHost}" == "null" ]]; then
                 currentHost=$(grep 'server_name' <${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf | awk '{print $2}')
@@ -3004,7 +3033,8 @@ initRandomPath() {
     local chars="abcdefghijklmnopqrtuxyz"
     local initCustomPath=
     local charLen=${#chars}
-    for i in {1..4}; do
+    # 8 位 ≈ 2^36（23^8）；4 位只有 28 万组合，对 nginx 枚举几分钟即穷尽
+    for i in {1..8}; do
         local idx
         idx=$(randomNum 0 $((charLen - 1)))
         initCustomPath+="${chars:idx:1}"
@@ -3038,10 +3068,11 @@ randomPathFunction() {
             initRandomPath
             currentPath=${customPath}
         else
-            # URL path 片段白名单：字母数字与 . _ -，长度 1-32（点号放行是为了 api.v1 这种写法）。
-            # 引号/斜杠/空白/jq-shell 元字符一律禁——它会同时嵌入 JSON、Nginx location 与 fallback path。
-            if ! [[ "${customPath}" =~ ^[A-Za-z0-9._-]{1,32}$ ]]; then
-                echoContent red " ---> 路径格式非法，仅允许字母数字及 . _ -，长度 1-32"
+            # URL path 片段白名单：字母数字与 . _ -，长度 4-32（点号放行是为了 api.v1 这种写法；
+            # 下限 4 挡住 /a 这类可枚举短路径）。引号/斜杠/空白/jq-shell 元字符一律禁——
+            # 它会同时嵌入 JSON、Nginx location 与 fallback path。
+            if ! [[ "${customPath}" =~ ^[A-Za-z0-9._-]{4,32}$ ]]; then
+                echoContent red " ---> 路径格式非法，仅允许字母数字及 . _ -，长度 4-32"
                 exit 1
             fi
             if [[ "${customPath: -2}" == "ws" ]]; then
@@ -3304,8 +3335,11 @@ renewalTLS() {
             tlsStatus="已过期"
         fi
 
+        # BusyBox 的 date -d @epoch 支持随版本而异——GNU 写法失败时退 BusyBox 的 -D %s，再退裸 epoch
+        local certGenDate
+        certGenDate=$(date -d "@${modifyTime}" +"%F %H:%M:%S" 2>/dev/null || date -u -D %s -d "${modifyTime}" +"%F %H:%M:%S" 2>/dev/null || echo "${modifyTime}")
         echoContent skyBlue " ---> 证书检查日期:$(date "+%F %H:%M:%S")"
-        echoContent skyBlue " ---> 证书生成日期:$(date -d @"${modifyTime}" +"%F %H:%M:%S")"
+        echoContent skyBlue " ---> 证书生成日期:${certGenDate}"
         echoContent skyBlue " ---> 证书生成天数:${days}"
         echoContent skyBlue " ---> 证书剩余天数:"${tlsStatus}
         echoContent skyBlue " ---> 证书过期前最后一天自动更新，如更新失败请手动更新"
@@ -3320,8 +3354,36 @@ renewalTLS() {
                 handleSingBox stop
             fi
 
-            sudo "$HOME/.acme.sh/acme.sh" --cron --home "$HOME/.acme.sh"
-            sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${domain}" --fullchainpath /etc/Proxy-agent/tls/"${domain}.crt" --keypath /etc/Proxy-agent/tls/"${domain}.key" --ecc
+            # 这是唯一的续期入口（acme.sh 自身的 cron 已被 installCronTLS 删除），
+            # 写半截/错配直接 reload 会断线到下次人工介入——先备份，验证不过就还原旧证书再拉起服务
+            local renewCertFile="/etc/Proxy-agent/tls/${domain}.crt"
+            local renewKeyFile="/etc/Proxy-agent/tls/${domain}.key"
+            cp -fp "${renewCertFile}" "${renewCertFile}.renew-bak" 2>/dev/null
+            cp -fp "${renewKeyFile}" "${renewKeyFile}.renew-bak" 2>/dev/null
+
+            local renewFailed=
+            if ! sudo "$HOME/.acme.sh/acme.sh" --cron --home "$HOME/.acme.sh"; then
+                echoContent red " ---> $(t TLS_RENEW_ACME_FAILED)"
+                renewFailed=true
+            elif ! sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${domain}" --fullchainpath "${renewCertFile}" --keypath "${renewKeyFile}" --ecc; then
+                echoContent red " ---> $(t TLS_RENEW_INSTALL_FAILED)"
+                renewFailed=true
+            elif ! verifyCertKeyMatch "${renewCertFile}" "${renewKeyFile}"; then
+                echoContent red " ---> $(t TLS_RENEW_VERIFY_FAILED)"
+                renewFailed=true
+            fi
+
+            if [[ -n "${renewFailed}" ]]; then
+                if [[ -f "${renewCertFile}.renew-bak" && -f "${renewKeyFile}.renew-bak" ]]; then
+                    cp -fp "${renewCertFile}.renew-bak" "${renewCertFile}"
+                    cp -fp "${renewKeyFile}.renew-bak" "${renewKeyFile}"
+                fi
+                rm -f "${renewCertFile}.renew-bak" "${renewKeyFile}.renew-bak"
+                reloadCore
+                handleNginx start
+                return 1
+            fi
+            rm -f "${renewCertFile}.renew-bak" "${renewKeyFile}.renew-bak"
             reloadCore
             handleNginx start
         else
@@ -4276,7 +4338,13 @@ initSingBoxClients() {
                 ss2022UserKeyLen=32
             fi
             local ss2022UserKey
-            ss2022UserKey=$(echo -n "${uuid}" | head -c "${ss2022UserKeyLen}" | base64)
+            # currentClients 来自 ss2022 inbound 时 password 已是派生 uPSK（16B→22 字符+"=="、32B→43 字符+"="；
+            # UUID 恒 36 位含连字符不会误中），二次派生会静默改写全部存量用户密码
+            if [[ "${uuid}" =~ ^[A-Za-z0-9+/]{22}==$ || "${uuid}" =~ ^[A-Za-z0-9+/]{43}=$ ]]; then
+                ss2022UserKey="${uuid}"
+            else
+                ss2022UserKey=$(echo -n "${uuid}" | head -c "${ss2022UserKeyLen}" | base64)
+            fi
             users=$(echo "${users}" | jq \
                 --arg password "${ss2022UserKey}" \
                 --arg name "${name}-SS2022" \
@@ -4757,6 +4825,15 @@ ensureDirectOutbound() {
 EOF
 }
 
+# local 型 DNS server（走系统解析器），给 IPv4_out/IPv6_out 的 domain_resolver 引用。
+# 文件名排在 01_dns.json 之后：dns.final 默认取首个 server，chain 场景的 google 不能被抢占。
+ensureSingBoxLocalDns() {
+    if [[ -z "${singBoxConfigPath}" ]]; then
+        return 1
+    fi
+    jsonWriteFile "${singBoxConfigPath}02_dns_local.json" '{"dns":{"servers":[{"type":"local","tag":"local"}]}}'
+}
+
 addSingBoxOutbound() {
     local tag=$1
     local type="ipv4"
@@ -4764,6 +4841,9 @@ addSingBoxOutbound() {
     if echo "${tag}" | grep -q "IPv6"; then
         type=ipv6
     fi
+    # 强制地址族用 domain_resolver（dial 字段 domain_strategy 已在 1.12 弃用、1.14 移除），
+    # 它引用的 local server 由 02_dns_local.json 提供
+    ensureSingBoxLocalDns
     if [[ -n "${detour}" ]]; then
         cat <<EOF >"${singBoxConfigPath}${tag}.json"
 {
@@ -4772,7 +4852,10 @@ addSingBoxOutbound() {
              "type": "direct",
              "tag": "${tag}",
              "detour": "${detour}",
-             "domain_strategy": "${type}_only"
+             "domain_resolver": {
+                 "server": "local",
+                 "strategy": "${type}_only"
+             }
         }
     ]
 }
@@ -4796,7 +4879,10 @@ EOF
         {
              "type": "direct",
              "tag": "${tag}",
-             "domain_strategy": "${type}_only"
+             "domain_resolver": {
+                 "server": "local",
+                 "strategy": "${type}_only"
+             }
         }
     ]
 }
@@ -5126,6 +5212,22 @@ singBoxMergeConfig() {
     done
     if [[ ${_orphanCleaned} -eq 1 ]]; then
         echoContent yellow " ---> 已移除已废弃的「域名黑名单」配置片段（功能已下线，详见用户指南升级与迁移提示）"
+    fi
+
+    # 一次性迁移：outbound 的 domain_strategy（1.12 弃用、1.14 移除）换成等价的
+    # domain_resolver{local}——local 走系统解析器，与旧字段的隐式默认一致
+    local _dsFile _dsMigrated=0
+    for _dsFile in "${fragmentDir}"*.json; do
+        [[ -f "${_dsFile}" ]] || continue
+        if jq -e '[.outbounds[]? | has("domain_strategy")] | any' "${_dsFile}" >/dev/null 2>&1; then
+            if jsonModifyFile "${_dsFile}" '.outbounds |= map(if has("domain_strategy") then .domain_resolver = {server: "local", strategy: .domain_strategy} | del(.domain_strategy) else . end)'; then
+                _dsMigrated=1
+            fi
+        fi
+    done
+    if [[ ${_dsMigrated} -eq 1 ]]; then
+        ensureSingBoxLocalDns
+        echoContent yellow " ---> $(t SINGBOX_DOMAIN_STRATEGY_MIGRATED)"
     fi
 
     if ! tmpFile=$(mktemp /tmp/Proxy-agent-singbox-merge-XXXXXX.json); then
@@ -9489,7 +9591,7 @@ EOF
 EOF
     fi
 
-    # 确保直连出站存在。outbound 不带 domain_strategy（sing-box 1.12 弃用 / 1.16 删除）：
+    # 确保直连出站存在。outbound 不带 domain_strategy（sing-box 1.12 弃用 / 1.14 删除）：
     # chain proxy 流量在 chain_route.json 的 resolve action 里按 prefer_ipv4 解析；
     # 非 chain 流量由客户端送 IP，outbound 自己不发起域名解析。
     if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json" ]]; then
@@ -9511,7 +9613,7 @@ EOF
     local _directOut="/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json"
     if [[ -f "${_directOut}" ]] && jq -e . "${_directOut}" >/dev/null 2>&1; then
         if jq -e '[.outbounds[]? | has("domain_strategy")] | any' "${_directOut}" >/dev/null 2>&1; then
-            echoContent yellow " ---> 检测到旧版 01_direct_outbound.json 含 domain_strategy（1.16 移除），自动剥离"
+            echoContent yellow " ---> 检测到旧版 01_direct_outbound.json 含 domain_strategy（1.14 移除），自动剥离"
             local _migrated
             _migrated=$(jq '.outbounds |= map(del(.domain_strategy))' "${_directOut}" 2>/dev/null)
             if [[ -n "${_migrated}" ]]; then
@@ -9745,7 +9847,7 @@ setupChainExit() {
 }
 EOF
 
-    # 同步 direct 出站：不再写 domain_strategy（1.12 deprecated、1.16 移除）。
+    # 同步 direct 出站：不再写 domain_strategy（1.12 deprecated、1.14 移除）。
     # 用户选的策略由 chain_route.json 的 action: resolve 路由级 action 落地。
     cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
 {
@@ -11476,7 +11578,7 @@ removeChainProxy() {
     rm -f /etc/Proxy-agent/sing-box/conf/external_entry_info.json
 
     # 01_direct_outbound.json 不能删（共享基础出站），但旧 chain 装的 domain_strategy 会让
-    # 1.16 启动 FATAL——调 ensureDirectOutbound 重写为最小形态，剥掉 legacy 字段。
+    # 1.14 启动 FATAL——调 ensureDirectOutbound 重写为最小形态，剥掉 legacy 字段。
     if [[ -f "/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json" ]] && declare -F ensureDirectOutbound >/dev/null 2>&1; then
         ensureDirectOutbound
     fi
@@ -14498,6 +14600,12 @@ setupExternalAsSingleExit() {
 
     echoContent yellow "\n$(t EXT_CONFIGURING): ${nodeName}"
 
+    # chain_route.json 的 default_domain_resolver 引用 01_dns.json 的 google tag，
+    # 该文件只有 ensureSingBoxInstalled 会创建——纯 sing-box 安装没有它，缺了 1.13 起启动即 FATAL
+    if ! ensureSingBoxInstalled; then
+        return 1
+    fi
+
     # 生成出站配置
     local outboundConfig
     outboundConfig=$(generateExternalOutboundConfig "${nodeId}" "chain_external_outbound")
@@ -16094,6 +16202,22 @@ initRandomSalt() {
     done
     echo "${initCustomPath}"
 }
+# 读取自定义 salt：回车走随机，<8 位拒绝重询。
+# 订阅 URL 由 md5(email+salt) 派生且 nginx 侧无鉴权，弱 salt 会让 URL 可枚举、泄漏完整节点配置。
+readSubscribeSalt() {
+    subscribeSalt=
+    while true; do
+        read -r -p "$(t SUBSCRIBE_SALT_PROMPT)" subscribeSalt
+        if [[ -z "${subscribeSalt}" ]]; then
+            subscribeSalt=$(initRandomSalt)
+            break
+        elif [[ ${#subscribeSalt} -lt 8 ]]; then
+            echoContent red " ---> $(t SUBSCRIBE_SALT_TOO_SHORT)"
+        else
+            break
+        fi
+    done
+}
 # 订阅
 subscribe() {
     readInstallProtocolType
@@ -16115,18 +16239,14 @@ subscribe() {
                 if [[ "${historySaltStatus}" == "y" ]]; then
                     subscribeSalt=$(cat /etc/Proxy-agent/subscribe_local/subscribeSalt)
                 else
-                    read -r -p "请输入salt值, [回车]使用随机:" subscribeSalt
+                    readSubscribeSalt
                 fi
             else
                 subscribeSalt=$(cat /etc/Proxy-agent/subscribe_local/subscribeSalt)
             fi
         else
-            read -r -p "请输入salt值, [回车]使用随机:" subscribeSalt
+            readSubscribeSalt
             showStatus=
-        fi
-
-        if [[ -z "${subscribeSalt}" ]]; then
-            subscribeSalt=$(initRandomSalt)
         fi
         echoContent yellow "\n ---> Salt: ${subscribeSalt}"
 
