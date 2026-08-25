@@ -1079,3 +1079,7 @@ MSG_SINGBOX_DOMAIN_STRATEGY_MIGRATED="已把旧版 outbound domain_strategy 迁�
 MSG_TLS_RENEW_ACME_FAILED="acme.sh 续期失败，保留现有证书并恢复服务"
 MSG_TLS_RENEW_INSTALL_FAILED="证书安装失败，已还原旧证书并恢复服务"
 MSG_TLS_RENEW_VERIFY_FAILED="新证书与私钥校验不匹配，已还原旧证书并恢复服务"
+MSG_ACCOUNT_TX_BEGIN_FAILED="无法创建账户变更事务快照，操作已取消"
+MSG_ACCOUNT_TX_FILE_MISSING="协议配置文件缺失，本次账户变更已整体回滚"
+MSG_ACCOUNT_TX_WRITE_FAILED="写入协议配置失败，本次账户变更已整体回滚"
+MSG_ACCOUNT_TX_VALIDATE_FAILED="内核配置校验未通过，本次账户变更已整体回滚"

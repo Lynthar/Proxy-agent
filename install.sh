@@ -7523,6 +7523,95 @@ customUserEmail() {
     fi
 }
 
+# 把一次账户变更（add UUID EMAIL / del INDEX）按协议注册表应用到全部已装协议。
+# 全程 jsonTx 事务：任一文件写失败即整体回滚；落盘后、reload 前先过内核级校验，
+# 校验不过同样回滚——磁盘与在跑服务保持变更前状态。
+applyAccountChangeAllProtocols() {
+    local action=$1
+    local arg1=$2
+    local arg2=$3
+
+    # 快照建在安装根下（与 xray/ 和 sing-box/ 两个目标目录同文件系统，恢复用 cp 才可靠）
+    if ! jsonTxBegin "${PROXY_AGENT_DIR}"; then
+        echoContent red " ---> $(t ACCOUNT_TX_BEGIN_FAILED)"
+        return 1
+    fi
+
+    local protocolId targetDir targetFile usersPath clients newContent
+    local touchedXray= touchedSingBox=
+    for protocolId in ${currentInstallProtocolType//,/ }; do
+        # 覆盖面与旧的手写分支一致：2/5/8 已废弃冻结，20 是内部 inbound，12 仅 Xray
+        case "${protocolId}" in
+        0 | 1 | 3 | 4 | 6 | 7 | 9 | 10 | 11 | 12 | 13 | 14) ;;
+        *) continue ;;
+        esac
+        if [[ "${protocolId}" == "12" && "${coreKind}" != "1" ]]; then
+            continue
+        fi
+
+        # hy2/tuic 恒在 sing-box 树（Xray 内核下是 sidecar），其余跟随当前内核目录
+        targetDir="${configPath}"
+        if [[ "${protocolId}" == "6" || "${protocolId}" == "9" ]]; then
+            targetDir="${singBoxConfigPath}"
+        fi
+        targetFile=$(getProtocolConfigPath "${protocolId}" "${targetDir}")
+        usersPath=$(getProtocolUsersPath "${coreKind}" "${protocolId}")
+        if [[ -z "${targetFile}" || -z "${usersPath}" || ! -f "${targetFile}" ]]; then
+            echoContent red " ---> $(t ACCOUNT_TX_FILE_MISSING) [$(getProtocolDisplayName "${protocolId}")]"
+            jsonTxRollback
+            return 1
+        fi
+
+        if ! jsonTxTrack "${targetFile}"; then
+            echoContent red " ---> $(t ACCOUNT_TX_BEGIN_FAILED)"
+            jsonTxRollback
+            return 1
+        fi
+
+        if [[ "${action}" == "add" ]]; then
+            if [[ "${coreKind}" == "1" ]]; then
+                clients=$(initXrayClients "${protocolId}" "${arg1}" "${arg2}")
+            else
+                clients=$(initSingBoxClients "${protocolId}" "${arg1}" "${arg2}")
+            fi
+            newContent=$(jq --argjson newClients "${clients}" "${usersPath} = \$newClients" "${targetFile}" 2>/dev/null)
+        else
+            newContent=$(jq --argjson idx "${arg1}" "del(${usersPath}[\$idx])" "${targetFile}" 2>/dev/null)
+        fi
+        if [[ -z "${newContent}" ]] || ! jsonWriteFile "${targetFile}" "${newContent}" false; then
+            echoContent red " ---> $(t ACCOUNT_TX_WRITE_FAILED) [$(getProtocolDisplayName "${protocolId}")]"
+            jsonTxRollback
+            return 1
+        fi
+
+        if [[ "${targetDir}" == "${singBoxConfigPath}" && -n "${singBoxConfigPath}" ]]; then
+            touchedSingBox=true
+        else
+            touchedXray=true
+        fi
+    done
+
+    # 提交前内核级校验，失败即回滚。先 xray（-test 无副作用）后 sing-box（merge 会写 config.json，
+    # 但 handleSingBox start 每次重新 merge，回滚后的下一次启动会覆盖掉它）
+    if [[ -n "${touchedXray}" && "${coreKind}" == "1" && -f "/etc/Proxy-agent/xray/xray" ]] &&
+        /etc/Proxy-agent/xray/xray help run 2>/dev/null | grep -q -- "-test"; then
+        if ! /etc/Proxy-agent/xray/xray run -test -confdir /etc/Proxy-agent/xray/conf >/dev/null 2>&1; then
+            echoContent red " ---> $(t ACCOUNT_TX_VALIDATE_FAILED)"
+            jsonTxRollback
+            return 1
+        fi
+    fi
+    if [[ -n "${touchedSingBox}" && -f "/etc/Proxy-agent/sing-box/sing-box" ]]; then
+        if ! singBoxMergeConfig; then
+            echoContent red " ---> $(t ACCOUNT_TX_VALIDATE_FAILED)"
+            jsonTxRollback
+            return 1
+        fi
+    fi
+
+    jsonTxCommit
+}
+
 # 添加用户
 addUser() {
     read -r -p "请输入要添加的用户数量:" userNum
@@ -7531,16 +7620,8 @@ addUser() {
         echoContent red " ---> 输入有误，请重新输入"
         exit 1
     fi
-    local userConfig=
-    if [[ "${coreKind}" == "1" ]]; then
-        userConfig=".inbounds[0].settings.clients"
-    elif [[ "${coreKind}" == "2" ]]; then
-        userConfig=".inbounds[0].users"
-    fi
-
     while [[ ${userNum} -gt 0 ]]; do
         readConfigHostPathUUID
-        local users=
         ((userNum--)) || true
 
         customUUID
@@ -7549,146 +7630,9 @@ addUser() {
         uuid=${currentCustomUUID}
         email=${currentCustomEmail}
 
-        # VLESS TCP
-        if echo "${currentInstallProtocolType}" | grep -q ",0,"; then
-            local clients=
-            if [[ "${coreKind}" == "1" ]]; then
-                clients=$(initXrayClients 0 "${uuid}" "${email}")
-            elif [[ "${coreKind}" == "2" ]]; then
-                clients=$(initSingBoxClients 0 "${uuid}" "${email}")
-            fi
-            clients=$(jq -r "${userConfig} = ${clients}" ${configPath}02_VLESS_TCP_inbounds.json)
-            echo "${clients}" | jq . >${configPath}02_VLESS_TCP_inbounds.json
-        fi
-
-        # VLESS WS
-        if echo "${currentInstallProtocolType}" | grep -q ",1,"; then
-            local clients=
-            if [[ "${coreKind}" == "1" ]]; then
-                clients=$(initXrayClients 1 "${uuid}" "${email}")
-            elif [[ "${coreKind}" == "2" ]]; then
-                clients=$(initSingBoxClients 1 "${uuid}" "${email}")
-            fi
-
-            clients=$(jq -r "${userConfig} = ${clients}" ${configPath}03_VLESS_WS_inbounds.json)
-            echo "${clients}" | jq . >${configPath}03_VLESS_WS_inbounds.json
-        fi
-
-        # trojan grpc - 已移除
-
-        # VMess WS
-        if echo "${currentInstallProtocolType}" | grep -q ",3,"; then
-            local clients=
-            if [[ "${coreKind}" == "1" ]]; then
-                clients=$(initXrayClients 3 "${uuid}" "${email}")
-            elif [[ "${coreKind}" == "2" ]]; then
-                clients=$(initSingBoxClients 3 "${uuid}" "${email}")
-            fi
-
-            clients=$(jq -r "${userConfig} = ${clients}" ${configPath}05_VMess_WS_inbounds.json)
-            echo "${clients}" | jq . >${configPath}05_VMess_WS_inbounds.json
-        fi
-        # trojan tcp
-        if echo "${currentInstallProtocolType}" | grep -q ",4,"; then
-            local clients=
-            if [[ "${coreKind}" == "1" ]]; then
-                clients=$(initXrayClients 4 "${uuid}" "${email}")
-            elif [[ "${coreKind}" == "2" ]]; then
-                clients=$(initSingBoxClients 4 "${uuid}" "${email}")
-            fi
-            clients=$(jq -r "${userConfig} = ${clients}" ${configPath}04_trojan_TCP_inbounds.json)
-            echo "${clients}" | jq . >${configPath}04_trojan_TCP_inbounds.json
-        fi
-
-        # vless grpc - 已移除
-
-        # vless reality vision
-        if echo "${currentInstallProtocolType}" | grep -q ",7,"; then
-            local clients=
-            local realityUserConfig=
-            if [[ "${coreKind}" == "1" ]]; then
-                clients=$(initXrayClients 7 "${uuid}" "${email}")
-                realityUserConfig=".inbounds[1].settings.clients"
-            elif [[ "${coreKind}" == "2" ]]; then
-                clients=$(initSingBoxClients 7 "${uuid}" "${email}")
-                realityUserConfig=".inbounds[0].users"
-            fi
-            clients=$(jq -r "${realityUserConfig} = ${clients}" ${configPath}07_VLESS_vision_reality_inbounds.json)
-            echo "${clients}" | jq . >${configPath}07_VLESS_vision_reality_inbounds.json
-        fi
-
-        # vless reality grpc - 已移除
-
-        # vless reality xhttp（仅 Xray 内核；漏掉这条分支会让新用户拿不到 XHTTP 凭据）
-        if echo "${currentInstallProtocolType}" | grep -q ",12," && [[ "${coreKind}" == "1" ]]; then
-            local clients=
-            clients=$(initXrayClients 12 "${uuid}" "${email}")
-            clients=$(jq -r ".inbounds[0].settings.clients = ${clients}" ${configPath}12_VLESS_XHTTP_inbounds.json)
-            echo "${clients}" | jq . >${configPath}12_VLESS_XHTTP_inbounds.json
-        fi
-
-        # hysteria2
-        if echo ${currentInstallProtocolType} | grep -q ",6,"; then
-            local clients=
-
-            if [[ "${coreKind}" == "1" ]]; then
-                clients=$(initXrayClients 6 "${uuid}" "${email}")
-            elif [[ -n "${singBoxConfigPath}" ]]; then
-                clients=$(initSingBoxClients 6 "${uuid}" "${email}")
-            fi
-
-            clients=$(jq -r ".inbounds[0].users = ${clients}" "${singBoxConfigPath}06_hysteria2_inbounds.json")
-            echo "${clients}" | jq . >"${singBoxConfigPath}06_hysteria2_inbounds.json"
-        fi
-
-        # tuic
-        if echo ${currentInstallProtocolType} | grep -q ",9,"; then
-            local clients=
-            if [[ "${coreKind}" == "1" ]]; then
-                clients=$(initXrayClients 9 "${uuid}" "${email}")
-            elif [[ "${coreKind}" == "2" ]]; then
-                clients=$(initSingBoxClients 9 "${uuid}" "${email}")
-            fi
-
-            clients=$(jq -r ".inbounds[0].users = ${clients}" "${singBoxConfigPath}09_tuic_inbounds.json")
-
-            echo "${clients}" | jq . >"${singBoxConfigPath}09_tuic_inbounds.json"
-        fi
-        # naive
-        if echo ${currentInstallProtocolType} | grep -q ",10,"; then
-            local clients=
-            clients=$(initSingBoxClients 10 "${uuid}" "${email}")
-            clients=$(jq -r ".inbounds[0].users = ${clients}" "${singBoxConfigPath}10_naive_inbounds.json")
-
-            echo "${clients}" | jq . >"${singBoxConfigPath}10_naive_inbounds.json"
-        fi
-        # VMess WS
-        if echo "${currentInstallProtocolType}" | grep -q ",11,"; then
-            local clients=
-            if [[ "${coreKind}" == "1" ]]; then
-                clients=$(initXrayClients 11 "${uuid}" "${email}")
-            elif [[ "${coreKind}" == "2" ]]; then
-                clients=$(initSingBoxClients 11 "${uuid}" "${email}")
-            fi
-
-            clients=$(jq -r "${userConfig} = ${clients}" ${configPath}11_VMess_HTTPUpgrade_inbounds.json)
-            echo "${clients}" | jq . >${configPath}11_VMess_HTTPUpgrade_inbounds.json
-        fi
-        # anytls
-        if echo "${currentInstallProtocolType}" | grep -q ",13,"; then
-            local clients=
-            clients=$(initSingBoxClients 13 "${uuid}" "${email}")
-
-            clients=$(jq -r "${userConfig} = ${clients}" ${configPath}13_anytls_inbounds.json)
-            echo "${clients}" | jq . >${configPath}13_anytls_inbounds.json
-        fi
-        # Shadowsocks 2022
-        if echo "${currentInstallProtocolType}" | grep -q ",14,"; then
-            local clients=
-            clients=$(initSingBoxClients 14 "${uuid}" "${email}")
-
-            clients=$(jq -r "${userConfig} = ${clients}" ${configPath}14_ss2022_inbounds.json)
-            echo "${clients}" | jq . >${configPath}14_ss2022_inbounds.json
+        if ! applyAccountChangeAllProtocols add "${uuid}" "${email}"; then
+            manageAccount 1
+            return
         fi
     done
     reloadCore
@@ -7708,115 +7652,35 @@ removeUser() {
         userConfigType="${frontingTypeReality}"
     fi
 
-    local uuid=
     if [[ -n "${userConfigType}" ]]; then
-        if [[ "${coreKind}" == "1" ]]; then
-            jq -r -c '(.inbounds[0].settings.clients // .inbounds[1].settings.clients)[]?|.email' ${configPath}${userConfigType}.json | awk '{print NR""":"$0}'
-            read -r -p "请选择要删除的用户编号[仅支持单个删除]:" delUserIndex
-            # 必须是正整数；非法输入直接清空，跳过后续删除分支，避免注入进 jq 过滤器
-            if ! [[ "${delUserIndex}" =~ ^[1-9][0-9]*$ ]]; then
-                echoContent red " ---> 用户编号必须为正整数"
-                delUserIndex=
-            elif [[ $(jq -r '(.inbounds[0].settings.clients // .inbounds[1].settings.clients)?|length' ${configPath}${userConfigType}.json) -lt ${delUserIndex} ]]; then
-                echoContent red " ---> 选择错误"
-                delUserIndex=
-            else
-                delUserIndex=$((delUserIndex - 1))
-            fi
-        elif [[ "${coreKind}" == "2" ]]; then
-            jq -r -c .inbounds[0].users[].name//.inbounds[0].users[].username ${configPath}${userConfigType}.json | awk '{print NR""":"$0}'
-            read -r -p "请选择要删除的用户编号[仅支持单个删除]:" delUserIndex
-            if ! [[ "${delUserIndex}" =~ ^[1-9][0-9]*$ ]]; then
-                echoContent red " ---> 用户编号必须为正整数"
-                delUserIndex=
-            elif [[ $(jq -r '.inbounds[0].users|length' ${configPath}${userConfigType}.json) -lt ${delUserIndex} ]]; then
-                echoContent red " ---> 选择错误"
-                delUserIndex=
-            else
-                delUserIndex=$((delUserIndex - 1))
-            fi
+        # 列表字段按注册表取（fronting 可能是 TLS/Reality/naive/ss2022，路径与名字段各不同）
+        local frontingProtocolId listUsersPath listNameField
+        frontingProtocolId=$(parseProtocolIdFromFileName "${userConfigType}.json")
+        listUsersPath=$(getProtocolUsersPath "${coreKind}" "${frontingProtocolId}")
+        listNameField=$(getProtocolNameField "${coreKind}" "${frontingProtocolId}")
+        if [[ -z "${listUsersPath}" || -z "${listNameField}" ]]; then
+            echoContent red " ---> $(t ACCOUNT_TX_FILE_MISSING) [${userConfigType}]"
+            manageAccount 1
+            return
+        fi
+        jq -r "${listUsersPath}[].${listNameField}" "${configPath}${userConfigType}.json" | awk '{print NR""":"$0}'
+        read -r -p "请选择要删除的用户编号[仅支持单个删除]:" delUserIndex
+        # 必须是正整数；非法输入直接清空，跳过后续删除分支，避免注入进 jq 过滤器
+        if ! [[ "${delUserIndex}" =~ ^[1-9][0-9]*$ ]]; then
+            echoContent red " ---> 用户编号必须为正整数"
+            delUserIndex=
+        elif [[ $(jq -r "${listUsersPath}|length" "${configPath}${userConfigType}.json") -lt ${delUserIndex} ]]; then
+            echoContent red " ---> 选择错误"
+            delUserIndex=
+        else
+            delUserIndex=$((delUserIndex - 1))
         fi
     fi
 
     if [[ -n "${delUserIndex}" ]]; then
-
-        # 以下 jq 调用统一使用 --argjson idx 传入用户编号，避免过滤器字符串拼接
-        if echo ${currentInstallProtocolType} | grep -q ",0,"; then
-            local vlessVision
-            vlessVision=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].settings.clients[$idx]//.inbounds[0].users[$idx])' ${configPath}02_VLESS_TCP_inbounds.json)
-            echo "${vlessVision}" | jq . >${configPath}02_VLESS_TCP_inbounds.json
-        fi
-        if echo ${currentInstallProtocolType} | grep -q ",1,"; then
-            local vlessWSResult
-            # sing-box 侧用户在 .users——缺这个回退时 del 是静默 no-op，用户删除后凭据仍有效
-            vlessWSResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].settings.clients[$idx]//.inbounds[0].users[$idx])' ${configPath}03_VLESS_WS_inbounds.json)
-            echo "${vlessWSResult}" | jq . >${configPath}03_VLESS_WS_inbounds.json
-        fi
-
-        # Trojan gRPC - 已移除
-
-        if echo ${currentInstallProtocolType} | grep -q ",3,"; then
-            local vmessWSResult
-            vmessWSResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].settings.clients[$idx]//.inbounds[0].users[$idx])' ${configPath}05_VMess_WS_inbounds.json)
-            echo "${vmessWSResult}" | jq . >${configPath}05_VMess_WS_inbounds.json
-        fi
-
-        # VLESS gRPC - 已移除
-
-        if echo ${currentInstallProtocolType} | grep -q ",4,"; then
-            local trojanTCPResult
-            trojanTCPResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].settings.clients[$idx]//.inbounds[0].users[$idx])' ${configPath}04_trojan_TCP_inbounds.json)
-            echo "${trojanTCPResult}" | jq . >${configPath}04_trojan_TCP_inbounds.json
-        fi
-
-        if echo ${currentInstallProtocolType} | grep -q ",7,"; then
-            local vlessRealityResult
-            vlessRealityResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].settings.clients[$idx]//.inbounds[1].settings.clients[$idx]//.inbounds[0].users[$idx])' ${configPath}07_VLESS_vision_reality_inbounds.json)
-            echo "${vlessRealityResult}" | jq . >${configPath}07_VLESS_vision_reality_inbounds.json
-        fi
-        # VLESS Reality gRPC - 已移除
-
-        # VLESS Reality XHTTP（仅 Xray 内核；漏掉这条分支会让删除后的凭据在 XHTTP 上继续有效）
-        if echo ${currentInstallProtocolType} | grep -q ",12," && [[ "${coreKind}" == "1" ]]; then
-            local vlessXHTTPResult
-            vlessXHTTPResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].settings.clients[$idx])' ${configPath}12_VLESS_XHTTP_inbounds.json)
-            echo "${vlessXHTTPResult}" | jq . >${configPath}12_VLESS_XHTTP_inbounds.json
-        fi
-
-        if echo ${currentInstallProtocolType} | grep -q ",6,"; then
-            local hysteriaResult
-            hysteriaResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].users[$idx]//.inbounds[0].users[$idx])' "${singBoxConfigPath}06_hysteria2_inbounds.json")
-            echo "${hysteriaResult}" | jq . >"${singBoxConfigPath}06_hysteria2_inbounds.json"
-        fi
-        if echo ${currentInstallProtocolType} | grep -q ",9,"; then
-            local tuicResult
-            tuicResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].users[$idx]//.inbounds[0].users[$idx])' "${singBoxConfigPath}09_tuic_inbounds.json")
-            echo "${tuicResult}" | jq . >"${singBoxConfigPath}09_tuic_inbounds.json"
-        fi
-        if echo ${currentInstallProtocolType} | grep -q ",10,"; then
-            local naiveResult
-            naiveResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].users[$idx]//.inbounds[0].users[$idx])' "${singBoxConfigPath}10_naive_inbounds.json")
-            echo "${naiveResult}" | jq . >"${singBoxConfigPath}10_naive_inbounds.json"
-        fi
-        # VMess HTTPUpgrade
-        # 必须走 ${configPath}（两个内核都对）：Xray 下 singBoxConfigPath 为空，按旧写法
-        # jq 读不到文件、空输出经 jq . 落盘会把配置写成 0 字节，重启后 Xray 拒绝启动
-        if echo ${currentInstallProtocolType} | grep -q ",11,"; then
-            local vmessHTTPUpgradeResult
-            vmessHTTPUpgradeResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].settings.clients[$idx]//.inbounds[0].users[$idx])' "${configPath}11_VMess_HTTPUpgrade_inbounds.json")
-            echo "${vmessHTTPUpgradeResult}" | jq . >"${configPath}11_VMess_HTTPUpgrade_inbounds.json"
-        fi
-        # AnyTLS（与 SS2022 同为 sing-box 专属，订阅 shape 一致）
-        if echo ${currentInstallProtocolType} | grep -q ",13,"; then
-            local anytlsResult
-            anytlsResult=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].users[$idx])' "${singBoxConfigPath}13_anytls_inbounds.json")
-            echo "${anytlsResult}" | jq . >"${singBoxConfigPath}13_anytls_inbounds.json"
-        fi
-        # Shadowsocks 2022
-        if echo ${currentInstallProtocolType} | grep -q ",14,"; then
-            local ss2022Result
-            ss2022Result=$(jq -r --argjson idx "${delUserIndex}" 'del(.inbounds[0].users[$idx])' "${singBoxConfigPath}14_ss2022_inbounds.json")
-            echo "${ss2022Result}" | jq . >"${singBoxConfigPath}14_ss2022_inbounds.json"
+        if ! applyAccountChangeAllProtocols del "${delUserIndex}"; then
+            manageAccount 1
+            return
         fi
         reloadCore
         readNginxSubscribe
