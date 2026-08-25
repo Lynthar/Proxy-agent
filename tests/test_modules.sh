@@ -383,6 +383,27 @@ _ss2022Len32=$(echo -n "${_ss2022Uuid}" | head -c 32 | base64 | base64 -d | wc -
 assert_equals "16" "${_ss2022Len16}" "SS2022 aes-128-gcm uPSK decodes to 16 bytes"
 assert_equals "32" "${_ss2022Len32}" "SS2022 aes-256-gcm/chacha20 uPSK decodes to 32 bytes"
 
+# uPSK 直通判定契约（回归 N-4：来自 ss2022 inbound 的 password 已是派生 uPSK，
+# 二次派生会静默改写存量密码；镜像 install.sh initSingBoxClients id-14 的直通正则）
+_upskDetect() {
+    [[ "$1" =~ ^[A-Za-z0-9+/]{22}==$ || "$1" =~ ^[A-Za-z0-9+/]{43}=$ ]] && echo pass || echo derive
+}
+_upsk16=$(echo -n "${_ss2022Uuid}" | head -c 16 | base64)
+_upsk32=$(echo -n "${_ss2022Uuid}" | head -c 32 | base64)
+assert_equals "pass" "$(_upskDetect "${_upsk16}")" "uPSK passthrough matches 16-byte derived key"
+assert_equals "pass" "$(_upskDetect "${_upsk32}")" "uPSK passthrough matches 32-byte derived key"
+assert_equals "derive" "$(_upskDetect "${_ss2022Uuid}")" "uPSK passthrough rejects raw 36-char UUID"
+assert_equals "derive" "$(_upskDetect "short")" "uPSK passthrough rejects short strings"
+
+# domain_strategy → domain_resolver 迁移过滤器语义（回归 N-3：sing-box 1.14 移除该字段，
+# 镜像 install.sh singBoxMergeConfig 的迁移 jq）
+_dsFilter='.outbounds |= map(if has("domain_strategy") then .domain_resolver = {server: "local", strategy: .domain_strategy} | del(.domain_strategy) else . end)'
+_dsIn='{"outbounds":[{"type":"direct","tag":"IPv6_out","domain_strategy":"ipv6_only"},{"type":"direct","tag":"direct"}]}'
+_dsOut=$(echo "${_dsIn}" | jq -c "${_dsFilter}")
+assert_equals '{"outbounds":[{"type":"direct","tag":"IPv6_out","domain_resolver":{"server":"local","strategy":"ipv6_only"}},{"type":"direct","tag":"direct"}]}' "${_dsOut}" "domain_strategy migration rewrites field and keeps clean outbounds"
+_dsDetect=$(echo "${_dsOut}" | jq -e '[.outbounds[]? | has("domain_strategy")] | any' >/dev/null 2>&1 && echo hit || echo clean)
+assert_equals "clean" "${_dsDetect}" "migrated fragment no longer triggers detection filter"
+
 echo ""
 
 # ============================================================================

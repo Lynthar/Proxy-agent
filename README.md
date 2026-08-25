@@ -55,10 +55,69 @@ pasly                     # 菜单内选择 21
 V2RAY_LANG=en pasly       # 环境变量临时覆盖
 ```
 
+选择会持久化到 `/etc/Proxy-agent/lang_pref`，之后每次运行自动加载。
+
+## 目录结构
+
+```
+/etc/Proxy-agent/
+├── install.sh          # 主脚本
+├── VERSION
+├── lang_pref           # 语言偏好
+├── backup/             # 版本化备份（脚本 + 配置快照）
+├── xray/               # Xray-core 二进制与 conf/
+├── sing-box/           # sing-box 二进制与 conf/
+├── tls/                # TLS 证书
+├── subscribe/          # 订阅文件
+├── lib/                # 共用 shell 模块
+└── shell/lang/         # 语言文件
+```
+
+## 菜单地图
+
+```
+==============================================================
+1. 安装 / 重新安装            选核心 + 完整安装
+2. 任意组合安装               自选协议组合
+3. 链式代理管理               入口 / 中继 / 出口 / 多链路
+4. Hysteria2 管理
+5. REALITY 管理
+6. Tuic 管理
+7. 用户管理                   增删 / 查看 / 订阅
+8. 伪装站管理                 Nginx 伪装站部署
+9. 证书管理                   Let's Encrypt / Buypass
+11. 分流工具                  WARP / IPv6 / SOCKS5 / DNS
+12. 添加新端口
+16. Core 管理                 升级 / 切换
+17. 更新脚本                  SHA256 校验，失败自动回滚
+18. 安装 BBR、DD 脚本
+19. 一键无域名 Reality 安装
+20. 卸载脚本
+21. 切换语言
+22. 脚本版本管理              备份 / 回滚 / 列出快照
+23. 系统诊断（只读）
+==============================================================
+```
+
+10 / 13 / 14 / 15 是移除或隐藏菜单留下的空号，有意保留。
+
+子命令也可直接用（不进菜单，跑完即退出）：
+
+```bash
+pasly doctor          # 等同菜单 23
+pasly --dry-run       # 计划模式：安装 / 卸载 / 链式代理只打印不执行
+DRY_RUN=1 pasly       # 同 --dry-run
+```
+
 ## 文档
 
 - [使用指南](docs/user-guide.md)
+- [SELinux 说明](docs/selinux.md)
 - [English README](README.en.md)
+
+## 参与贡献
+
+欢迎在 [GitHub](https://github.com/Lynthar/Proxy-agent) 提 issue 与 pull request。
 
 ## 致谢
 

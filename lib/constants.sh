@@ -166,9 +166,9 @@ readonly XRAY_BINARY="${V2RAY_AGENT_DIR}/xray/xray"
 readonly SINGBOX_BINARY="${V2RAY_AGENT_DIR}/sing-box/sing-box"
 
 # 最低支持的 sing-box 版本
-# 1.11 引入了路由级 sniff/resolve action（参见官方 migration 文档）；1.12 移除了 inbound 级 sniff 字段
-# 本脚本使用路由级 sniff，必须 1.11+
-readonly SINGBOX_MIN_VERSION="1.11.0"
+# 路由级 sniff/resolve action 需 1.11+；生成的配置还用了 1.12 引入的
+# domain_resolver 与新格式 DNS server（{type,tag}），故必须 1.12+
+readonly SINGBOX_MIN_VERSION="1.12.0"
 
 # ============================================================================
 # 日志文件路径
