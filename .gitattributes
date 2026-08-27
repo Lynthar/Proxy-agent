@@ -1,0 +1,4 @@
+# 这里每个文件最终都跑在 Linux 服务器上，必须以 LF 到达。带 CR 的脚本
+# bash 会报 `$'\r': command not found`，而本仓是靠 curl | bash 装到别人
+# 机器上的——坏在对方那台，不在这里。
+* text=auto eol=lf
