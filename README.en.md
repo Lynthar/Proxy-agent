@@ -1,128 +1,174 @@
 # Proxy-agent
 
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
-[![GitHub Release](https://img.shields.io/github/v/release/Lynthar/Proxy-agent?label=Release)](https://github.com/Lynthar/Proxy-agent/releases)
-[![中文](https://img.shields.io/badge/中文-README-blue)](README.md)
+[![license](https://img.shields.io/github/license/Lynthar/Proxy-agent)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/Lynthar/Proxy-agent/ci.yml?branch=master&label=CI)](https://github.com/Lynthar/Proxy-agent/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/Lynthar/Proxy-agent)](https://github.com/Lynthar/Proxy-agent/releases)
 
-One-click installer and management menu for Xray-core / sing-box multi-protocol proxy stacks. Fork of [v2ray-agent](https://github.com/mack-a/v2ray-agent) by @mack-a.
+One-click Xray-core / sing-box multi-protocol proxy installer with chained proxy: entry, relay and exit multi-hop
 
-## Quick Install
+English | [简体中文](README.md)
+
+Install it, type `pasly`, and follow the prompts. The script carries both
+Xray-core and sing-box.
+
+What I put the extra work into is **chained proxying**: an entry box, a relay
+and an exit chained into multiple hops; one machine can host several chains with
+traffic split across them; and existing third-party SS / Trojan / SOCKS5 nodes
+can be plugged in as exits. The rest covers a masquerade site, certificate
+issuance, subscription files, WARP routing, self-update and version rollback.
+Bilingual.
+
+## Install
+
+Needs root, bash 4.3 or newer, amd64 or arm64.
 
 ```bash
 wget -P /root -N https://github.com/Lynthar/Proxy-agent/releases/latest/download/install.sh && chmod 700 /root/install.sh && /root/install.sh
 ```
 
-> **Alpine users: run `apk add bash wget` first** (the script requires bash).
+On Alpine, `apk add bash wget` first.
 
-After install, launch the management menu with `pasly`.
-
-## Supported Protocols
-
-| Protocol | Transport | Notes |
-|---|---|---|
-| VLESS | TCP/Vision · WS · XHTTP · Reality | Recommended |
-| VMess | WS · HTTPUpgrade | CDN-friendly |
-| Trojan | TCP | HTTPS disguise |
-| Hysteria2 | QUIC | High-speed UDP |
-| TUIC | QUIC | Low-latency UDP |
-| NaiveProxy | HTTP/2 | Anti-detection |
-| AnyTLS · Shadowsocks 2022 | — | General purpose |
-
-## Core Features
-
-- **Dual-core** — Xray-core and sing-box, auto-detected and switchable
-- **Chain proxy** — exit / relay / entry multi-hop, multi-chain split routing, Xray+sing-box hybrid outbounds
-- **External nodes** — plug third-party SS / Trojan / SOCKS5 nodes into the chain as exits
-- **Atomic JSON writes** + snapshot-based config backup and rollback
-- **Checksum-verified self-update** — SHA256 verification of the downloaded `install.sh`, auto-restore from backup on mismatch
-- **Read-only diagnostic** (`pasly doctor`) and **dry-run plan mode** (`pasly --dry-run`)
-- **Bilingual UI** — Chinese / English, switch via menu or `V2RAY_LANG` env variable
-
-## Requirements
-
-- **OS**: Debian 9+, Ubuntu 18+, CentOS/RHEL 8+, Alpine 3+ (Ubuntu 16 is explicitly rejected by the script)
-- **Arch**: amd64, arm64
-- **Memory**: 512 MB+
-- **Privilege**: root
-- **Bash**: ≥ 4.3 (the script uses namerefs and negative array indices; the stock bash 4.2 on CentOS 7 is not supported)
-- **sing-box**: ≥ 1.12 (auto-satisfied by the installer's "always pull latest" policy; the script's config uses route-level sniff/resolve actions from 1.11 plus `domain_resolver` and the new-format DNS servers from 1.12)
-
-## Language Selection
+On first run the script fetches `lib_bundle.tar.gz` from the release, checks its
+SHA256, and only then moves it into place — if the check fails it touches
+nothing. If you'd rather read the code before running it, cloning works too, and
+skips that bootstrap entirely when `lib/` sits next to `install.sh`:
 
 ```bash
-pasly                     # Menu option 21
-V2RAY_LANG=en pasly       # Temporary override via env var
+git clone https://github.com/Lynthar/Proxy-agent.git
+cd Proxy-agent && sudo ./install.sh
 ```
 
-The selection is persisted to `/etc/Proxy-agent/lang_pref` and auto-loaded on subsequent runs.
+## Usage
 
-## Directory Layout
-
-```
-/etc/Proxy-agent/
-├── install.sh          # Main script
-├── VERSION
-├── lang_pref           # Language preference
-├── backup/             # Versioned backups (script + config snapshots)
-├── xray/               # Xray-core binary and conf/
-├── sing-box/           # sing-box binary and conf/
-├── tls/                # TLS certificates
-├── subscribe/          # Subscription files
-├── lib/                # Shared shell modules
-└── shell/lang/         # Language files
-```
-
-## Menu Map
+Type `pasly` and press enter; this is what you get:
 
 ```
 ==============================================================
-1. Install / Reinstall       Core selection + full install
-2. Custom Install            Pick protocol combination
-3. Chain Proxy               Entry / relay / exit / multi-chain
-4. Hysteria2 Management
-5. REALITY Management
-6. TUIC Management
-7. User Management           Add / remove / view / subscribe
-8. Camouflage Site           Nginx decoy deployment
-9. Certificate Management    Let's Encrypt / Buypass
-11. Routing Tools            WARP / IPv6 / SOCKS5 / DNS
-12. Add Port
-16. Core Management          Upgrade / switch
-17. Update Script            Checked against SHA256, auto-rollback on failure
-18. BBR
-19. One-click No-domain Reality install
-20. Uninstall
-21. Switch Language
-22. Script Version Management   Backup / rollback / list snapshots
-23. System Doctor            Read-only diagnostic
+Author: Lynthar
+Version: v1.3.7
+Github: https://github.com/Lynthar/Proxy-agent
+Description: Multi-Protocol Proxy Script
+1.Install
+2.Custom Combination Install
+3.Chain Proxy Management
+4.Hysteria2 Management
+5.REALITY Management
+6.Tuic Management
+-------------------------Tool Management-----------------------------
+7.User Management
+8.Disguise Site Management
+9.Certificate Management
+11.Routing Tools
+12.Add New Port
+-------------------------Version Management-----------------------------
+16.Core Management
+17.Update Script
+18.Install BBR/DD Script
+19.One-click Reality (no domain)
+-------------------------Script Management-----------------------------
+20.Uninstall Script
+21.切换语言 / Switch Language
+22.Script Version Management
+23.System Doctor (read-only)
 ==============================================================
 ```
 
-Numbers 10 / 13 / 14 / 15 are intentional gaps from removed or hidden menus.
+For historical reasons, 10, 13, 14 and 15 are gaps left by removed or hidden
+entries.
 
-Subcommands also work (no menu prompt, exits after running):
+Three subcommands run and exit without entering the menu:
 
 ```bash
-pasly doctor          # Same as menu 23
-pasly --dry-run       # Plan mode: install/uninstall/chain-proxy actions print only
-DRY_RUN=1 pasly       # Same as --dry-run
+pasly doctor       # read-only diagnostics; this one doesn't need root
+pasly --dry-run    # plan mode: install / uninstall / chaining print, never run (same as -n)
+V2RAY_LANG=en pasly
 ```
+
+## Protocols
+
+13 live protocols:
+
+| Family | Protocols |
+|---|---|
+| VLESS | TCP/Vision · WS · Reality Vision · XHTTP |
+| VMess | WS · HTTPUpgrade |
+| Others | Trojan TCP · Hysteria2 · TUIC · NaiveProxy · AnyTLS · Shadowsocks 2022 · SOCKS5 |
+
+In a chain, Xray and sing-box can mix on the way out, and third-party nodes can
+be attached as exits. Every hop is a sing-box shadowsocks outbound with
+sing-box's own h2mux multiplexing on top, so when the inbound is Xray, traffic
+is handed to sing-box locally and leaves from there.
+
+## Configuration
+
+There's no single config file. Configuration is generated by the menu and lives
+under `/etc/Proxy-agent/` (`xray/conf/`, `sing-box/conf/config/`, `tls/`,
+`subscribe/`, `backup/`).
+
+Seven environment variables:
+
+| Variable | Effect |
+|---|---|
+| `V2RAY_LANG` | Switch language for one run (`en` / `zh`); beats the saved `lang_pref` |
+| `DRY_RUN=1` | Plan mode, same as `--dry-run` |
+| `PROXY_AGENT_DIR` | Install root, default `/etc/Proxy-agent` |
+| `PROXY_AGENT_NO_BOOTSTRAP` | Disable the `lib/` bootstrap download |
+| `PROXY_AGENT_BOOTSTRAP_REF` / `_MODE` | Which ref and mode the bootstrap pulls |
+| `PROXY_AGENT_SELINUX_NONFATAL` | Don't exit under SELinux enforcing |
+
+## Limitations
+
+- **It isn't a panel.** A TTY menu, no web UI, no API, and no accounting of
+  traffic, expiry or per-user quotas.
+- **Three gRPC variants are deprecated**: Trojan gRPC, VLESS gRPC and VLESS
+  vision gRPC are still in the registry but marked deprecated. Don't build new
+  deployments on them.
+- **CentOS 7 won't work.** Its bash is 4.2.46, below the 4.3 the script requires
+  at the top — nameref and negative array indices fail quietly on 4.2, so it
+  refuses to run instead.
+- **Uninstalling doesn't reclaim firewall rules.** The allow rules stay, though
+  by then nothing is listening on those ports.
+- **Bulk user imports get slow.** Twenty or so users makes no noticeable
+  difference; measured, 400 users take about 4.7s and 800 about 10s.
+- **The English UI may still be incomplete.** The message keys are in sync, but
+  some interactive paths, custom core installation among them, still print
+  Chinese.
+
+## Differences from upstream
+
+Upstream is [mack-a/v2ray-agent](https://github.com/mack-a/v2ray-agent). What
+this fork adds on top: chained proxying and third-party node attachment, the
+read-only `doctor`, `--dry-run` plan mode, script version snapshots and
+rollback, SHA256 verification for self-update and bootstrap, a bilingual UI, and
+CI gates.
 
 ## Documentation
 
-- [User Guide](docs/user-guide.md)
-- [SELinux Notes](docs/selinux.md)
+- [User guide](docs/user-guide.md) — command reference, feature index,
+  troubleshooting, FAQ. Written in Chinese.
+- [SELinux notes](docs/selinux.md) — where the script sends you when it exits
+  under enforcing mode.
 
-## Contributing
+## Security
 
-Issues and pull requests are welcome on [GitHub](https://github.com/Lynthar/Proxy-agent).
+This runs as root, edits systemd and firewall rules, and updates itself.
 
-## Credits
+**Self-update and bootstrap both verify SHA256.** On a mismatch it restores the
+previous script from `backup/`, or simply leaves the target alone.
 
-- [mack-a/v2ray-agent](https://github.com/mack-a/v2ray-agent) — original project
-- [XTLS/Xray-core](https://github.com/XTLS/Xray-core)
-- [SagerNet/sing-box](https://github.com/SagerNet/sing-box)
+**It installs a few third-party components for you**: acme.sh through its official
+installer, BBR through a third-party script, and the Xray and sing-box binaries
+from their own GitHub releases. None of these are version-pinned. The masquerade
+site assets are a GitHub archive zip with no checksum — static files that never
+enter an execution path.
+
+**Under SELinux enforcing the script exits** and points at `docs/selinux.md`.
+That's deliberate.
+
+There's no private channel for vulnerability reports yet, so please don't open
+public issues for sensitive findings.
 
 ## License
 
-[AGPL-3.0](LICENSE)
+GNU Affero General Public License v3.0 — see [LICENSE](LICENSE). Upstream
+mack-a/v2ray-agent is AGPL-3.0 as well.
