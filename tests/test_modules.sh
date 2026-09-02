@@ -558,6 +558,28 @@ assert_equals '{"route":{"rule_set":[{"tag":"a","type":"remote","url":"u"},{"tag
 _rsDetour=$(printf '%s\n%s' '{"outbounds":[{"type":"selector","tag":"sel"}]}' '{"outbounds":[{"type":"direct","tag":"01_direct_outbound"},{"type":"direct","tag":"direct"}]}' | jq -r '.outbounds[]? | select(.type == "direct") | .tag' | head -1)
 assert_equals "01_direct_outbound" "${_rsDetour}" "http client detour picks the first direct outbound across fragments"
 
+# geosite 分类清单匹配：名字可带引号也可不带，大小写不敏感，规则里的域名不算分类
+_gsList=$(mktemp)
+cat > "${_gsList}" <<'EOF'
+lists:
+  - name: "google"
+    length: 1
+    rules:
+      - "domain:google.com"
+  - name: geolocation-!cn
+    length: 1
+    rules:
+      - "domain:example.org"
+EOF
+assert_equals 0 "$(geositeListHasCategory "${_gsList}" "google"; echo $?)" "geositeListHasCategory: quoted name matches"
+assert_equals 0 "$(geositeListHasCategory "${_gsList}" "Google"; echo $?)" "geositeListHasCategory: match is case-insensitive"
+assert_equals 0 "$(geositeListHasCategory "${_gsList}" "geolocation-!cn"; echo $?)" "geositeListHasCategory: unquoted name with ! matches"
+assert_equals 1 "$(geositeListHasCategory "${_gsList}" "google.com"; echo $?)" "geositeListHasCategory: rule domains are not categories"
+assert_equals 1 "$(geositeListHasCategory "${_gsList}" "goo"; echo $?)" "geositeListHasCategory: prefix does not match"
+assert_equals 1 "$(geositeListHasCategory "${_gsList}" ""; echo $?)" "geositeListHasCategory: empty name never matches"
+assert_equals 1 "$(geositeListHasCategory "/nonexistent/dlc.yml" "google"; echo $?)" "geositeListHasCategory: missing list means no category"
+rm -f "${_gsList}"
+
 # ============================================================================
 
 echo "=============================================="

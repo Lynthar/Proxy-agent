@@ -177,6 +177,21 @@ isYesInput() {
 }
 
 # ============================================================================
+# geosite 分类清单
+# ============================================================================
+
+# geositeListHasCategory LISTFILE NAME → 0 表示 NAME 是清单里的一个分类（大小写不敏感）。
+# LISTFILE 是 v2fly domain-list-community 发布的 dlc.dat_plain.yml，条目形如 `- name: "google"`
+geositeListHasCategory() {
+    local listFile="$1" name="${2,,}"
+    if [[ ! -s "${listFile}" || -z "${name}" ]]; then
+        return 1
+    fi
+    sed -nE 's/^[[:space:]]*-[[:space:]]*name:[[:space:]]*"?([^"[:space:]]+)"?[[:space:]]*$/\1/p' "${listFile}" \
+        | tr '[:upper:]' '[:lower:]' | grep -qxF -- "${name}"
+}
+
+# ============================================================================
 # 分享链接 / ACME 参数拼装
 # ============================================================================
 

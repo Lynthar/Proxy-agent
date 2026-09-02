@@ -39,6 +39,7 @@ readonly SINGBOX_CONFIG_DIR="${V2RAY_AGENT_DIR}/sing-box/conf/config"
 readonly TLS_CERT_DIR="${V2RAY_AGENT_DIR}/tls"
 readonly SUBSCRIBE_DIR="${V2RAY_AGENT_DIR}/subscribe"
 readonly SUBSCRIBE_LOCAL_DIR="${V2RAY_AGENT_DIR}/subscribe_local"
+readonly GEOSITE_LIST_FILE="${PROXY_AGENT_DIR}/geosite/dlc.dat_plain.yml"
 
 # ============================================================================
 # 配置文件名映射 —— XX_协议名_inbounds.json
