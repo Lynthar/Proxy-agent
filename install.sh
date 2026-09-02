@@ -4717,8 +4717,45 @@ initTuicProtocol() {
     fi
 }
 
-# initSingBoxRouteConfig DOMAIN_CSV NAME_SUFFIX → {"domainRules":[],"ruleSet":[]}
-# 内部先探测 geosite 可用性，不可用时只出 domainRules。
+# geosite 分类清单：v2fly domain-list-community 发布的 dlc.dat_plain.yml，sing-geosite 沿用同一套名字。
+# 本地缺失或超过 30 天就重新下载；下载失败时留用旧文件，一份都没有才返回失败
+ensureGeositeCategoryList() {
+    local dir tmp
+    dir=$(dirname "${GEOSITE_LIST_FILE}")
+    if [[ -s "${GEOSITE_LIST_FILE}" ]] && [[ -z "$(find "${GEOSITE_LIST_FILE}" -mtime +30 2>/dev/null)" ]]; then
+        return 0
+    fi
+    mkdir -p "${dir}"
+    tmp=$(mktemp "${dir}/dlc.XXXXXX") || return 1
+    if curl -fsSL --connect-timeout 10 -m 120 -o "${tmp}" "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat_plain.yml" 2>/dev/null \
+        && grep -qE '^[[:space:]]*-[[:space:]]*name:' "${tmp}"; then
+        mv -f "${tmp}" "${GEOSITE_LIST_FILE}"
+        return 0
+    fi
+    rm -f "${tmp}"
+    echoContent yellow " ---> $(t GEOSITE_LIST_DOWNLOAD_FAILED)"
+    [[ -s "${GEOSITE_LIST_FILE}" ]]
+}
+
+# geositeCategoryExists NAME → 0 表示 NAME 是 geosite 分类；清单拿不到时一律按不是处理
+geositeCategoryExists() {
+    ensureGeositeCategoryList || return 1
+    geositeListHasCategory "${GEOSITE_LIST_FILE}" "$1"
+}
+
+# xrayDomainRuleValue ENTRY → Xray 路由/DNS 的域名匹配项：geosite 分类给 "geosite:NAME"，其余给
+# "domain:ENTRY"。分类名没有点，带点的直接判为域名；统一小写，geosite 文件名区分大小写
+xrayDomainRuleValue() {
+    local entry="${1,,}"
+    if [[ "${entry}" != *.* ]] && geositeCategoryExists "${entry}"; then
+        printf 'geosite:%s\n' "${entry}"
+    else
+        printf 'domain:%s\n' "${entry}"
+    fi
+}
+
+# initSingBoxRules DOMAIN_CSV NAME_SUFFIX → {"domainRules":[],"ruleSet":[]}
+# geosite 分类走 remote rule_set，其余出 domain_regex
 initSingBoxRules() {
     local domainRules=[]
     local ruleSet=[]
@@ -4726,19 +4763,13 @@ initSingBoxRules() {
         if [[ -z "${line}" ]]; then
             continue
         fi
-        local geositeStatus
-        # 添加超时和错误处理
-        geositeStatus=$(curl -s --connect-timeout 5 --max-time 10 \
-            "https://api.github.com/repos/SagerNet/sing-geosite/contents/geosite-${line}.srs?ref=rule-set" 2>/dev/null | jq -r '.message // empty')
-
-        # 如果API返回null或空(即文件存在)，使用rule_set
-        # 如果API失败或返回错误消息，回退到domain_regex
-        if [[ -z "${geositeStatus}" ]]; then
-            ruleSet=$(echo "${ruleSet}" | jq -r ". += [{\"tag\":\"${line}_$2\",\"type\":\"remote\",\"format\":\"binary\",\"url\":\"https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-${line}.srs\",\"http_client\":\"rule_set_http\"}]")
+        line="${line,,}"
+        if [[ "${line}" != *.* ]] && geositeCategoryExists "${line}"; then
+            ruleSet=$(echo "${ruleSet}" | jq -r --arg tag "${line}_$2" --arg url "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-${line}.srs" \
+                '. += [{tag: $tag, type: "remote", format: "binary", url: $url, http_client: "rule_set_http"}]')
         else
-            # 转义域名中的点号用于正则表达式
             local escapedLine="${line//./\\.}"
-            domainRules=$(echo "${domainRules}" | jq -r ". += [\"^([a-zA-Z0-9_-]+\\\\.)*${escapedLine}\"]")
+            domainRules=$(echo "${domainRules}" | jq -r --arg reg "^([a-zA-Z0-9_-]+\\.)*${escapedLine}" '. += [$reg]')
         fi
     done < <(echo "$1" | tr ',' '\n' | grep -v '^$' | sort -u)
     echo "{ \"domainRules\":${domainRules},\"ruleSet\":${ruleSet}}"
@@ -9031,26 +9062,15 @@ addXrayRouting() {
         if [[ -z "${line}" ]]; then
             continue
         fi
-        # 放行一般 geosite 标识（字母数字 _ - .），拒绝其他（避免 URL/过滤器污染）
-        if ! [[ "${line}" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
+        # 放行域名与 geosite 分类名（字母数字 ! _ - .），拒绝其他（避免 URL/过滤器污染）
+        if ! [[ "${line}" =~ ^[A-Za-z0-9!._-]{1,64}$ ]]; then
             echoContent yellow " ---> 跳过非法域名条目: ${line}"
             continue
         fi
         if echo "${routingRule}" | grep -qF "${line}"; then
             echoContent yellow " ---> ${line}已存在，跳过"
         else
-            local geositeStatus
-            # 添加超时和错误处理
-            geositeStatus=$(curl -s --connect-timeout 5 --max-time 10 \
-                "https://api.github.com/repos/v2fly/domain-list-community/contents/data/${line}" 2>/dev/null | jq -r '.message // empty')
-
-            # 如果API返回空(文件存在)，使用geosite格式
-            # 如果API失败或返回错误消息，回退到domain格式
-            if [[ -z "${geositeStatus}" ]]; then
-                routingRule=$(echo "${routingRule}" | jq -r --arg line "${line}" '.domain += ["geosite:" + $line]')
-            else
-                routingRule=$(echo "${routingRule}" | jq -r --arg line "${line}" '.domain += ["domain:" + $line]')
-            fi
+            routingRule=$(echo "${routingRule}" | jq -r --arg rule "$(xrayDomainRuleValue "${line}")" '.domain += [$rule]')
         fi
     done < <(echo "${domain}" | tr ',' '\n')
 
@@ -14905,7 +14925,10 @@ setUnlockSNI() {
             read -r -p "请按照上面示例录入域名:" xrayDomainList
             local hosts={}
             while read -r domain; do
-                hosts=$(echo "${hosts}" | jq -r ".\"geosite:${domain}\"=\"${setSNIP}\"")
+                if [[ -z "${domain}" ]]; then
+                    continue
+                fi
+                hosts=$(echo "${hosts}" | jq -r --arg key "$(xrayDomainRuleValue "${domain}")" --arg value "${setSNIP}" '. + {($key): $value}')
             done < <(echo "${xrayDomainList}" | tr ',' '\n')
             cat <<EOF >${configPath}11_dns.json
 {
@@ -14941,17 +14964,7 @@ addXrayDNSConfig() {
         if [[ -z "${line}" ]]; then
             continue
         fi
-        local geositeStatus
-        # 添加超时和错误处理
-        geositeStatus=$(curl -s --connect-timeout 5 --max-time 10 \
-            "https://api.github.com/repos/v2fly/domain-list-community/contents/data/${line}" 2>/dev/null | jq -r '.message // empty')
-
-        # 如果API返回空(文件存在)，使用geosite格式
-        if [[ -z "${geositeStatus}" ]]; then
-            domains=$(echo "${domains}" | jq -r '. += ["geosite:'"${line}"'"]')
-        else
-            domains=$(echo "${domains}" | jq -r '. += ["domain:'"${line}"'"]')
-        fi
+        domains=$(echo "${domains}" | jq -r --arg rule "$(xrayDomainRuleValue "${line}")" '. += [$rule]')
     done < <(echo "${domainList}" | tr ',' '\n')
 
     if [[ "${coreKind}" == "1" ]]; then
