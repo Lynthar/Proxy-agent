@@ -537,6 +537,17 @@ rm -rf "${TEST_JSON_DIR}"
 
 # ============================================================================
 # 测试结果汇总
+# Reality 分享链接的 pqv 参数：verify 为空时不得产出 "pqv=&" 这种空参数
+assert_equals "" "$(realityPqvParam "")" "realityPqvParam: empty verify yields nothing"
+assert_equals "" "$(realityPqvParam "" qr)" "realityPqvParam: empty verify yields nothing in qr form"
+assert_equals "&pqv=abc_-123" "$(realityPqvParam "abc_-123")" "realityPqvParam: url form"
+assert_equals "%26pqv%3Dabc_-123" "$(realityPqvParam "abc_-123" qr)" "realityPqvParam: qr form is percent-encoded"
+
+# acme.sh -d 参数：非通配符只签用户填的域名，不追加根域（公共后缀下根域不归用户）
+assert_equals "-d 'a.b.example.com'" "$(acmeIssueDomainArgs "a.b.example.com" "b.example.com" "n")" "acmeIssueDomainArgs: non-wildcard signs only the requested host"
+assert_equals "-d 'a.b.example.com'" "$(acmeIssueDomainArgs "a.b.example.com" "b.example.com" "")" "acmeIssueDomainArgs: empty answer means non-wildcard"
+assert_equals "-d '*.b.example.com' -d 'b.example.com'" "$(acmeIssueDomainArgs "a.b.example.com" "b.example.com" "y")" "acmeIssueDomainArgs: wildcard signs *.parent plus parent"
+
 # ============================================================================
 
 echo "=============================================="

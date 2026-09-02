@@ -176,6 +176,35 @@ isYesInput() {
     esac
 }
 
+# ============================================================================
+# 分享链接 / ACME 参数拼装
+# ============================================================================
+
+# realityPqvParam VERIFY [qr] → "&pqv=VERIFY"；qr 形态输出百分号编码的 "%26pqv%3DVERIFY"。
+# VERIFY 为空输出空串——否则链接里会出现 pqv=&… 这种空参数
+realityPqvParam() {
+    local verify="$1"
+    if [[ -z "${verify}" ]]; then
+        return 0
+    fi
+    if [[ "$2" == "qr" ]]; then
+        printf '%%26pqv%%3D%s' "${verify}"
+    else
+        printf '&pqv=%s' "${verify}"
+    fi
+}
+
+# acmeIssueDomainArgs DOMAIN PARENT WILDCARD → acme.sh --issue 的 -d 参数串（值带单引号，供 bash -c 拼装）。
+# WILDCARD 为是时签 *.PARENT + PARENT，否则只签 DOMAIN——非通配符再追加 PARENT，
+# 公共后缀下的域名（xx.dpdns.org）会因根域不归用户而签发失败
+acmeIssueDomainArgs() {
+    if isYesInput "$3"; then
+        printf -- "-d '*.%s' -d '%s'" "$2" "$2"
+    else
+        printf -- "-d '%s'" "$1"
+    fi
+}
+
 # Dry-run 计划模式：DRY_RUN=1 时 mutator 入口回显计划并直接返回，不写配置、不申请证书、
 # 不改 firewall、不重启服务。bootstrap 与 doctor 不受影响。
 
