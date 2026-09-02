@@ -548,6 +548,16 @@ assert_equals "-d 'a.b.example.com'" "$(acmeIssueDomainArgs "a.b.example.com" "b
 assert_equals "-d 'a.b.example.com'" "$(acmeIssueDomainArgs "a.b.example.com" "b.example.com" "")" "acmeIssueDomainArgs: empty answer means non-wildcard"
 assert_equals "-d '*.b.example.com' -d 'b.example.com'" "$(acmeIssueDomainArgs "a.b.example.com" "b.example.com" "y")" "acmeIssueDomainArgs: wildcard signs *.parent plus parent"
 
+# rule_set 下载通道字段按内核归一化（镜像 install.sh normalizeSingBoxRuleSetHttpClient 的两条 jq）
+_rsFwd='.route.rule_set |= map(if has("download_detour") then .http_client = "rule_set_http" | del(.download_detour) else . end)'
+_rsBack='.route.rule_set |= map(del(.http_client))'
+_rsIn='{"route":{"rule_set":[{"tag":"a","type":"remote","url":"u","download_detour":"01_direct_outbound"},{"tag":"b","type":"local","path":"p"}]}}'
+_rsOut=$(echo "${_rsIn}" | jq -c "${_rsFwd}")
+assert_equals '{"route":{"rule_set":[{"tag":"a","type":"remote","url":"u","http_client":"rule_set_http"},{"tag":"b","type":"local","path":"p"}]}}' "${_rsOut}" "rule_set forward migration swaps download_detour for http_client"
+assert_equals '{"route":{"rule_set":[{"tag":"a","type":"remote","url":"u"},{"tag":"b","type":"local","path":"p"}]}}' "$(echo "${_rsOut}" | jq -c "${_rsBack}")" "rule_set backward migration strips http_client for pre-1.14 cores"
+_rsDetour=$(printf '%s\n%s' '{"outbounds":[{"type":"selector","tag":"sel"}]}' '{"outbounds":[{"type":"direct","tag":"01_direct_outbound"},{"type":"direct","tag":"direct"}]}' | jq -r '.outbounds[]? | select(.type == "direct") | .tag' | head -1)
+assert_equals "01_direct_outbound" "${_rsDetour}" "http client detour picks the first direct outbound across fragments"
+
 # ============================================================================
 
 echo "=============================================="

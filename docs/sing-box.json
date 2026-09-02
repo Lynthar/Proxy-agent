@@ -4,6 +4,12 @@
     "level": "info",
     "timestamp": true
   },
+  "http_clients": [
+    {
+      "tag": "rule_set_http",
+      "detour": "direct"
+    }
+  ],
   "experimental": {
     "clash_api": {
       "external_controller": "127.0.0.1:9090",
@@ -24,8 +30,7 @@
         "server": "1.1.1.1",
         "server_port": 443,
         "detour": "自动选择",
-        "path": "/dns-query",
-        "domain_resolver": "dns_resolver"
+        "path": "/dns-query"
       },
       {
         "tag": "dns_direct",
@@ -33,18 +38,12 @@
         "server": "dns.alidns.com",
         "server_port": 443,
         "path": "/dns-query",
-        "domain_resolver": "dns_resolver"
+        "domain_resolver": "local"
       },
       {
         "tag": "google",
         "type": "tls",
-        "server": "8.8.4.4",
-        "domain_resolver": "dns_resolver"
-      },
-      {
-        "tag": "dns_resolver",
-        "type": "udp",
-        "server": "114.114.114.114"
+        "server": "8.8.4.4"
       },
       {
         "type": "local",
@@ -73,7 +72,6 @@
         "server": "dns_proxy"
       }
     ],
-    "independent_cache": true,
     "strategy": "prefer_ipv4",
     "final": "dns_direct"
   },
@@ -114,8 +112,7 @@
     {
       "type": "urltest",
       "tag": "自动选择",
-      "outbounds": [
-      ],
+      "outbounds": [],
       "url": "https://www.gstatic.com/generate_204",
       "interval": "3m",
       "tolerance": 50,
@@ -124,8 +121,7 @@
     {
       "type": "selector",
       "tag": "手动切换",
-      "outbounds": [
-      ]
+      "outbounds": []
     },
     {
       "type": "selector",
@@ -210,10 +206,8 @@
     }
   ],
   "route": {
-    "default_domain_resolver": {
-      "server": "dns_resolver",
-      "strategy": "prefer_ipv4"
-    },
+    "default_http_client": "rule_set_http",
+    "default_domain_resolver": "local",
     "rule_set": [
       {
         "tag": "geosite-category-ads-all",
@@ -458,4 +452,3 @@
     "auto_detect_interface": true
   }
 }
-

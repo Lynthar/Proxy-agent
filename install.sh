@@ -3499,7 +3499,7 @@ installSingBox() {
             # 版本守门（兜底）：配置用 1.11+ 的路由级 sniff/resolve action，1.11 以下不识别会启动失败。
             # 下载前已按 tag 检查过一次，这里用实际二进制版本再验一次。
             local installedSingBoxVer
-            installedSingBoxVer=$(/etc/Proxy-agent/sing-box/sing-box version 2>/dev/null | head -1 | awk '{print $3}')
+            installedSingBoxVer=$(singBoxInstalledVersion)
             if [[ -z "${installedSingBoxVer}" ]]; then
                 # 解析格式变化会让守门被静默跳过——显式告警让这种情况可见
                 echoContent yellow " ---> 无法解析 sing-box 版本号（格式可能已变），跳过兜底版本校验"
@@ -3511,7 +3511,7 @@ installSingBox() {
             fi
         fi
     else
-        echoContent green " ---> 当前版本:v$(/etc/Proxy-agent/sing-box/sing-box version | grep "sing-box version" | awk '{print $3}')"
+        echoContent green " ---> 当前版本:v$(singBoxInstalledVersion)"
 
         version=$(curl -s --connect-timeout 10 "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=30" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
         if [[ -n "${version}" ]]; then
@@ -4734,7 +4734,7 @@ initSingBoxRules() {
         # 如果API返回null或空(即文件存在)，使用rule_set
         # 如果API失败或返回错误消息，回退到domain_regex
         if [[ -z "${geositeStatus}" ]]; then
-            ruleSet=$(echo "${ruleSet}" | jq -r ". += [{\"tag\":\"${line}_$2\",\"type\":\"remote\",\"format\":\"binary\",\"url\":\"https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-${line}.srs\",\"download_detour\":\"01_direct_outbound\"}]")
+            ruleSet=$(echo "${ruleSet}" | jq -r ". += [{\"tag\":\"${line}_$2\",\"type\":\"remote\",\"format\":\"binary\",\"url\":\"https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-${line}.srs\",\"http_client\":\"rule_set_http\"}]")
         else
             # 转义域名中的点号用于正则表达式
             local escapedLine="${line//./\\.}"
@@ -4830,6 +4830,71 @@ ensureSingBoxLocalDns() {
         return 1
     fi
     jsonWriteFile "${singBoxConfigPath}02_dns_local.json" '{"dns":{"servers":[{"type":"local","tag":"local"}]}}'
+}
+
+# 读运行中 sing-box 内核版本（形如 1.14.0）；二进制缺失或输出异常时为空
+singBoxInstalledVersion() {
+    /etc/Proxy-agent/sing-box/sing-box version 2>/dev/null | awk '/^sing-box version/ {print $3; exit}'
+}
+
+# 顶层 http_clients 片段：remote rule_set 的下载通道。detour 取片段里第一个 direct 出站
+# （主安装是 01_direct_outbound，纯链式安装是 direct），一个都没有就走默认出站
+ensureSingBoxHttpClient() {
+    local fragmentDir="$1"
+    local detour client
+    detour=$(cat "${fragmentDir}"*.json 2>/dev/null | jq -r '.outbounds[]? | select(.type == "direct") | .tag' 2>/dev/null | head -1)
+    client='{"tag":"rule_set_http"}'
+    if [[ -n "${detour}" ]]; then
+        client=$(jq -cn --arg d "${detour}" '{tag:"rule_set_http",detour:$d}')
+    fi
+    jsonWriteFile "${fragmentDir}02_http_client.json" "{\"http_clients\":[${client}],\"route\":{\"default_http_client\":\"rule_set_http\"}}"
+}
+
+# sing-box 1.14 起 remote rule_set 用 http_client 引用顶层 http_clients（download_detour 与隐式
+# 默认 client 同在 1.14 弃用、1.15 起启动 FATAL），1.14 以下又不识别这两个字段。写入端只写
+# 新形态，这里在合并前按运行中的内核把片段统一成它认得的那一种。
+normalizeSingBoxRuleSetHttpClient() {
+    local fragmentDir="$1"
+    local ver file hasRemote=0 changed=0
+    ver=$(singBoxInstalledVersion)
+    if [[ -z "${ver}" ]]; then
+        return 0
+    fi
+    if versionGreaterOrEqual "${ver}" "1.14.0"; then
+        for file in "${fragmentDir}"*.json; do
+            [[ -f "${file}" ]] || continue
+            if jq -e '[.route.rule_set[]? | has("download_detour")] | any' "${file}" >/dev/null 2>&1; then
+                if jsonModifyFile "${file}" '.route.rule_set |= map(if has("download_detour") then .http_client = "rule_set_http" | del(.download_detour) else . end)'; then
+                    changed=1
+                fi
+            fi
+            if jq -e '[.route.rule_set[]? | .type == "remote"] | any' "${file}" >/dev/null 2>&1; then
+                hasRemote=1
+            fi
+        done
+        if [[ ${hasRemote} -eq 1 ]]; then
+            ensureSingBoxHttpClient "${fragmentDir}"
+        fi
+        if [[ ${changed} -eq 1 ]]; then
+            echoContent yellow " ---> $(t SINGBOX_RULESET_HTTP_CLIENT_MIGRATED)"
+        fi
+    else
+        for file in "${fragmentDir}"*.json; do
+            [[ -f "${file}" ]] || continue
+            if jq -e '[.route.rule_set[]? | has("http_client")] | any' "${file}" >/dev/null 2>&1; then
+                if jsonModifyFile "${file}" '.route.rule_set |= map(del(.http_client))'; then
+                    changed=1
+                fi
+            fi
+        done
+        if [[ -f "${fragmentDir}02_http_client.json" ]]; then
+            rm -f "${fragmentDir}02_http_client.json"
+            changed=1
+        fi
+        if [[ ${changed} -eq 1 ]]; then
+            echoContent yellow " ---> $(t SINGBOX_RULESET_HTTP_CLIENT_STRIPPED)"
+        fi
+    fi
 }
 
 addSingBoxOutbound() {
@@ -5227,6 +5292,8 @@ singBoxMergeConfig() {
         ensureSingBoxLocalDns
         echoContent yellow " ---> $(t SINGBOX_DOMAIN_STRATEGY_MIGRATED)"
     fi
+
+    normalizeSingBoxRuleSetHttpClient "${fragmentDir}"
 
     if ! tmpFile=$(mktemp /tmp/Proxy-agent-singbox-merge-XXXXXX.json); then
         echoContent red " ---> sing-box 配置合并失败：无法创建临时文件"
@@ -13036,7 +13103,7 @@ generateMultiChainRouteConfig() {
                         "type": "remote",
                         "format": "binary",
                         "url": $url,
-                        "download_detour": "direct",
+                        "http_client": "rule_set_http",
                         "update_interval": "1d"
                     }]')
                 fi
@@ -13091,7 +13158,7 @@ generateMultiChainRouteConfig() {
                     "type": "remote",
                     "format": "binary",
                     "url": $url,
-                    "download_detour": "direct",
+                    "http_client": "rule_set_http",
                     "update_interval": "1d"
                 }]')
             fi
