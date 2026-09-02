@@ -593,6 +593,33 @@ rm -f "${LEGACY_SOCKS5_FILE}"
 echo ""
 
 # ============================================================================
+# 测试 Reality minClientVer 补齐（镜像 install.sh ensureRealityMinClientVer 的 jq）
+# 缺则补、有则留、非 Reality 入站不动
+# ============================================================================
+
+echo -e "${YELLOW}=== 测试 Reality minClientVer 补齐 ===${NC}"
+
+MINVER_FILE="${MOCK_ROOT}/etc/Proxy-agent/xray/conf/07_minver_test.json"
+cat > "${MINVER_FILE}" <<'EOF'
+{"inbounds":[{"tag":"dokodemo","protocol":"dokodemo-door","settings":{"address":"127.0.0.1"}},{"tag":"reality","protocol":"vless","streamSettings":{"security":"reality","realitySettings":{"maxTimeDiff":60000}}},{"tag":"kept","protocol":"vless","streamSettings":{"security":"reality","realitySettings":{"minClientVer":"26.3.27"}}}]}
+EOF
+MINVER_DETECT='[.inbounds[]? | (.streamSettings.realitySettings | type) == "object" and (.streamSettings.realitySettings | has("minClientVer") | not)] | any'
+MINVER_FILTER='.inbounds |= map(if (.streamSettings.realitySettings | type) == "object" and (.streamSettings.realitySettings | has("minClientVer") | not) then .streamSettings.realitySettings.minClientVer = "1.8.0" else . end)'
+assert_equals "true" "$(jq -r "${MINVER_DETECT}" "${MINVER_FILE}")" "minClientVer 检测：缺字段的 Reality 入站命中"
+if jsonModifyFile "${MINVER_FILE}" "${MINVER_FILTER}" false; then
+    assert_equals "1.8.0" "$(jq -r '.inbounds[1].streamSettings.realitySettings.minClientVer' "${MINVER_FILE}")" "minClientVer 补齐：缺字段的入站补成 1.8.0"
+    assert_equals "26.3.27" "$(jq -r '.inbounds[2].streamSettings.realitySettings.minClientVer' "${MINVER_FILE}")" "minClientVer 补齐：已有值不改"
+    assert_equals "false" "$(jq -r '.inbounds[0] | has("streamSettings")' "${MINVER_FILE}")" "minClientVer 补齐：非 Reality 入站不动"
+    assert_equals "false" "$(jq -r "${MINVER_DETECT}" "${MINVER_FILE}")" "minClientVer 检测：补齐后不再命中"
+else
+    echo -e "${RED}✗${NC} minClientVer 补齐失败"
+    ((TESTS_FAILED++))
+fi
+rm -f "${MINVER_FILE}"
+
+echo ""
+
+# ============================================================================
 # 测试 removeUser 删除过滤器语义（镜像 install.sh removeUser 的 jq 过滤器）
 # 回归背景：只写 .settings.clients 的过滤器在 sing-box 形态（.users）上是静默
 # no-op——命令成功退出但用户没删掉，凭据继续有效
