@@ -4079,12 +4079,26 @@ removeLegacyAllowInsecure() {
     fi
 }
 
+# 老 Reality 配置缺 minClientVer 的补成 REALITY_MIN_CLIENT_VER，已有值不动（理由见该常量）
+ensureRealityMinClientVer() {
+    local file
+    for file in /etc/Proxy-agent/xray/conf/07_VLESS_vision_reality_inbounds.json /etc/Proxy-agent/xray/conf/12_VLESS_XHTTP_inbounds.json; do
+        [[ -f "${file}" ]] || continue
+        if jq -e '[.inbounds[]? | (.streamSettings.realitySettings | type) == "object" and (.streamSettings.realitySettings | has("minClientVer") | not)] | any' "${file}" >/dev/null 2>&1; then
+            if jsonModifyFile "${file}" ".inbounds |= map(if (.streamSettings.realitySettings | type) == \"object\" and (.streamSettings.realitySettings | has(\"minClientVer\") | not) then .streamSettings.realitySettings.minClientVer = \"${REALITY_MIN_CLIENT_VER}\" else . end)"; then
+                echoContent yellow " ---> $(t XRAY_REALITY_MIN_CLIENT_VER_SET "${REALITY_MIN_CLIENT_VER}")"
+            fi
+        fi
+    done
+}
+
 # 操作xray
 handleXray() {
     local startResult=0
 
     if [[ "$1" == "start" ]]; then
         removeLegacyAllowInsecure
+        ensureRealityMinClientVer
     fi
 
     if [[ -n $(find /bin /usr/bin -name "systemctl") ]] && [[ -n $(find /etc/systemd/system/ -name "xray.service") ]]; then
@@ -5619,6 +5633,7 @@ EOF
             "publicKey": "${realityPublicKey}",
             "mldsa65Seed": "${realityMldsa65Seed}",
             "mldsa65Verify": "${realityMldsa65Verify}",
+            "minClientVer": "${REALITY_MIN_CLIENT_VER}",
             "maxTimeDiff": 60000,
             "shortIds": [
                 "${realityShortId1}",
@@ -5767,6 +5782,7 @@ EOF
           "publicKey": "${realityPublicKey}",
           "mldsa65Seed": "${realityMldsa65Seed}",
           "mldsa65Verify": "${realityMldsa65Verify}",
+          "minClientVer": "${REALITY_MIN_CLIENT_VER}",
           "maxTimeDiff": 60000,
           "shortIds": [
             "${realityShortId1}",

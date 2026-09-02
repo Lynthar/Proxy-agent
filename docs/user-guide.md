@@ -771,6 +771,7 @@ pasly  # → 16 → 重启
 - 脚本本身已自动剥离/迁移这些字段，跑一次 `pasly doctor` 看 Config 段是否 PASS 即可
 - 出站的 `domain_strategy` 会在每次启动合并配置时自动改写成等价的 `domain_resolver`，看到「已把旧版 outbound domain_strategy 迁移为 domain_resolver」是正常的，只打印一次
 - rule_set 的 `download_detour` 同样在每次启动合并时自动改成 1.14 的 `http_client` + 顶层 `http_clients`（1.14 弃用、1.15 起拒绝启动）；内核还在 1.14 以下时反向剥离，升级内核后自动恢复。看到「已把 rule_set 的 download_detour 迁移为 http_client」或「已剥离 rule_set 的 http_client 字段」都是正常的
+- Reality 入站现在显式写 `minClientVer: 1.8.0`（老配置在 Xray 启动前自动补上，看到「已为 Reality 入站补上 minClientVer」是正常的）：Xray-core 26.7 起不写就默认 26.3.27，会拒绝 sing-box / mihomo 这类客户端，而脚本自己发的订阅就包含它们。只用新版 Xray 客户端、想跟随 Xray 收紧策略的，可以手动改成 `26.3.27`
 - 如果 FAIL：菜单 9 重装一次受影响的协议、或菜单 22 → 4 找一个旧版本备份回滚
 
 ### 新增的可用工具

@@ -171,6 +171,11 @@ readonly SINGBOX_BINARY="${V2RAY_AGENT_DIR}/sing-box/sing-box"
 # domain_resolver 与新格式 DNS server（{type,tag}），故必须 1.12+
 readonly SINGBOX_MIN_VERSION="1.12.0"
 
+# Reality 入站显式写的最低客户端版本。Xray-core 26.7 起未写时默认 26.3.27，会拒掉脚本自己
+# 发的 sing-box/clash 订阅（sing-box 系客户端报 1.8.1、mihomo 报 1.8.2）；只用 Xray 客户端、
+# 想跟随 Xray 收紧策略的用户可手动改成 26.3.27
+readonly REALITY_MIN_CLIENT_VER="1.8.0"
+
 # ============================================================================
 # 日志文件路径
 # ============================================================================
