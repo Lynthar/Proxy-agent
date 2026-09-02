@@ -1193,7 +1193,6 @@ initVar() {
     # Reality
     realityPrivateKey=
     realityServerName=
-    realityDestDomain=
 
 
     # wget show progress
@@ -1827,6 +1826,7 @@ readConfigHostPathUUID() {
     currentHost=
     currentPort=
     currentCDNAddress=
+    xrayVLESSRealityVisionPort=
     singBoxVMessWSPath=
     singBoxVLESSWSPath=
     singBoxVMessHTTPUpgradePath=
@@ -2830,10 +2830,8 @@ selectAcmeInstallSSL() {
 
 # 安装SSL证书
 acmeInstallSSL() {
-    local dnsAPIDomain="${tlsDomain}"
-    if [[ "${dnsAPIStatus}" == "y" ]]; then
-        dnsAPIDomain="*.${dnsTLSDomain}"
-    fi
+    local acmeDomainArgs
+    acmeDomainArgs=$(acmeIssueDomainArgs "${tlsDomain}" "${dnsTLSDomain}" "${dnsAPIStatus}")
 
     if [[ "${dnsAPIType}" == "cloudflare" ]]; then
         echoContent green " ---> DNS API 生成证书中"
@@ -2845,7 +2843,7 @@ acmeInstallSSL() {
 export CF_Token="${cfAPIToken}"
 ACME_ENV_EOF
         # shellcheck source=/dev/null
-        sudo bash -c "source '${acmeEnvFile}' && '$HOME/.acme.sh/acme.sh' --issue -d '${dnsAPIDomain}' -d '${dnsTLSDomain}' --dns dns_cf -k ec-256 --server '${sslType}' ${sslIPv6}" 2>&1 | tee -a /etc/Proxy-agent/tls/acme.log >/dev/null
+        sudo bash -c "source '${acmeEnvFile}' && '$HOME/.acme.sh/acme.sh' --issue ${acmeDomainArgs} --dns dns_cf -k ec-256 --server '${sslType}' ${sslIPv6}" 2>&1 | tee -a /etc/Proxy-agent/tls/acme.log >/dev/null
         rm -f "${acmeEnvFile}"
     elif [[ "${dnsAPIType}" == "aliyun" ]]; then
         echoContent green " --->  DNS API 生成证书中"
@@ -2858,7 +2856,7 @@ export Ali_Key="${aliKey}"
 export Ali_Secret="${aliSecret}"
 ACME_ENV_EOF
         # shellcheck source=/dev/null
-        sudo bash -c "source '${acmeEnvFile}' && '$HOME/.acme.sh/acme.sh' --issue -d '${dnsAPIDomain}' -d '${dnsTLSDomain}' --dns dns_ali -k ec-256 --server '${sslType}' ${sslIPv6}" 2>&1 | tee -a /etc/Proxy-agent/tls/acme.log >/dev/null
+        sudo bash -c "source '${acmeEnvFile}' && '$HOME/.acme.sh/acme.sh' --issue ${acmeDomainArgs} --dns dns_ali -k ec-256 --server '${sslType}' ${sslIPv6}" 2>&1 | tee -a /etc/Proxy-agent/tls/acme.log >/dev/null
         rm -f "${acmeEnvFile}"
     else
         echoContent green " ---> 生成证书中"
@@ -6367,14 +6365,17 @@ EOF
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40${add}%3A${port}%3Fencryption%3Dnone%26security%3Dtls%26type%3Dws%26host%3D${currentHost}%26fp%3Dchrome%26sni%3D${currentHost}%26path%3D${path}%23${email}"
 
     elif [[ "${type}" == "vlessXHTTP" ]]; then
+        local pqvParam pqvParamQr
+        pqvParam=$(realityPqvParam "${currentRealityMldsa65Verify}")
+        pqvParamQr=$(realityPqvParam "${currentRealityMldsa65Verify}" qr)
 
         echoContent yellow " ---> 通用格式(VLESS+reality+XHTTP)"
-        echoContent green "    vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality&type=xhttp&sni=${xrayVLESSRealityXHTTPServerName}&host=${xrayVLESSRealityXHTTPServerName}&fp=chrome&path=${path}&pbk=${currentRealityXHTTPPublicKey}&sid=${currentRealityXHTTPShortId}#${email}\n"
+        echoContent green "    vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality${pqvParam}&type=xhttp&sni=${xrayVLESSRealityXHTTPServerName}&host=${xrayVLESSRealityXHTTPServerName}&fp=chrome&path=${path}&pbk=${currentRealityXHTTPPublicKey}&sid=${currentRealityXHTTPShortId}#${email}\n"
 
         echoContent yellow " ---> 格式化明文(VLESS+reality+XHTTP)"
-        echoContent green "协议类型:VLESS reality，地址:$(getPublicIP)，publicKey:${currentRealityXHTTPPublicKey}，shortId: ${currentRealityXHTTPShortId},serverNames：${xrayVLESSRealityXHTTPServerName}，端口:${port}，路径：${path}，SNI:${xrayVLESSRealityXHTTPServerName}，伪装域名:${xrayVLESSRealityXHTTPServerName}，用户ID:${id}，传输方式:xhttp，账户名:${email}\n"
+        echoContent green "协议类型:VLESS reality，地址:$(getPublicIP)，publicKey:${currentRealityXHTTPPublicKey}，shortId: ${currentRealityXHTTPShortId}${currentRealityMldsa65Verify:+，pqv=${currentRealityMldsa65Verify}}，serverNames：${xrayVLESSRealityXHTTPServerName}，端口:${port}，路径：${path}，SNI:${xrayVLESSRealityXHTTPServerName}，伪装域名:${xrayVLESSRealityXHTTPServerName}，用户ID:${id}，传输方式:xhttp，账户名:${email}\n"
         cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
-vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality&type=xhttp&sni=${xrayVLESSRealityXHTTPServerName}&fp=chrome&path=${path}&pbk=${currentRealityXHTTPPublicKey}&sid=${currentRealityXHTTPShortId}#${email}
+vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality${pqvParam}&type=xhttp&sni=${xrayVLESSRealityXHTTPServerName}&fp=chrome&path=${path}&pbk=${currentRealityXHTTPPublicKey}&sid=${currentRealityXHTTPShortId}#${email}
 EOF
 
         # clashMeta（mihomo）订阅：reality-opts 必须含 publicKey + shortId，
@@ -6401,7 +6402,7 @@ EOF
 EOF
 
         echoContent yellow " ---> 二维码 VLESS(VLESS+reality+XHTTP)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40$(getPublicIP)%3A${port}%3Fencryption%3Dnone%26security%3Dreality%26type%3Dxhttp%26sni%3D${xrayVLESSRealityXHTTPServerName}%26fp%3Dchrome%26path%3D${path}%26host%3D${xrayVLESSRealityXHTTPServerName}%26pbk%3D${currentRealityXHTTPPublicKey}%26sid%3D${currentRealityXHTTPShortId}%23${email}\n"
+        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40$(getPublicIP)%3A${port}%3Fencryption%3Dnone%26security%3Dreality${pqvParamQr}%26type%3Dxhttp%26sni%3D${xrayVLESSRealityXHTTPServerName}%26fp%3Dchrome%26path%3D${path}%26host%3D${xrayVLESSRealityXHTTPServerName}%26pbk%3D${currentRealityXHTTPPublicKey}%26sid%3D${currentRealityXHTTPShortId}%23${email}\n"
 
     elif
         [[ "${type}" == "vlessgrpc" ]]
@@ -6555,19 +6556,21 @@ EOF
     elif [[ "${type}" == "vlessReality" ]]; then
         local realityServerName=${xrayVLESSRealityServerName}
         local publicKey=${currentRealityPublicKey}
-        local realityMldsa65Verify=${currentRealityMldsa65Verify}
+        local pqvParam pqvParamQr
+        pqvParam=$(realityPqvParam "${currentRealityMldsa65Verify}")
+        pqvParamQr=$(realityPqvParam "${currentRealityMldsa65Verify}" qr)
 
         if [[ "${coreKind}" == "2" ]]; then
             realityServerName=${singBoxVLESSRealityVisionServerName}
             publicKey=${singBoxVLESSRealityPublicKey}
         fi
         echoContent yellow " ---> 通用格式(VLESS+reality+uTLS+Vision)"
-        echoContent green "    vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality&pqv=${realityMldsa65Verify}&type=tcp&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=${currentRealityShortId}&flow=xtls-rprx-vision#${email}\n"
+        echoContent green "    vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality${pqvParam}&type=tcp&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=${currentRealityShortId}&flow=xtls-rprx-vision#${email}\n"
 
         echoContent yellow " ---> 格式化明文(VLESS+reality+uTLS+Vision)"
-        echoContent green "协议类型:VLESS reality，地址:$(getPublicIP)，publicKey:${publicKey}，shortId: ${currentRealityShortId}，pqv=${realityMldsa65Verify}，serverNames：${realityServerName}，端口:${port}，用户ID:${id}，传输方式:tcp，账户名:${email}\n"
+        echoContent green "协议类型:VLESS reality，地址:$(getPublicIP)，publicKey:${publicKey}，shortId: ${currentRealityShortId}${currentRealityMldsa65Verify:+，pqv=${currentRealityMldsa65Verify}}，serverNames：${realityServerName}，端口:${port}，用户ID:${id}，传输方式:tcp，账户名:${email}\n"
         cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
-vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality&pqv=${realityMldsa65Verify}&type=tcp&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=${currentRealityShortId}&flow=xtls-rprx-vision#${email}
+vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality${pqvParam}&type=tcp&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=${currentRealityShortId}&flow=xtls-rprx-vision#${email}
 EOF
         cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
   - name: "${email}"
@@ -6590,12 +6593,14 @@ EOF
         echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
 
         echoContent yellow " ---> 二维码 VLESS(VLESS+reality+uTLS+Vision)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40$(getPublicIP)%3A${port}%3Fencryption%3Dnone%26security%3Dreality%26type%3Dtcp%26sni%3D${realityServerName}%26fp%3Dchrome%26pbk%3D${publicKey}%26sid%3D${currentRealityShortId}%26flow%3Dxtls-rprx-vision%23${email}\n"
+        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40$(getPublicIP)%3A${port}%3Fencryption%3Dnone%26security%3Dreality${pqvParamQr}%26type%3Dtcp%26sni%3D${realityServerName}%26fp%3Dchrome%26pbk%3D${publicKey}%26sid%3D${currentRealityShortId}%26flow%3Dxtls-rprx-vision%23${email}\n"
 
     elif [[ "${type}" == "vlessRealityGRPC" ]]; then
         local realityServerName=${xrayVLESSRealityServerName}
         local publicKey=${currentRealityPublicKey}
-        local realityMldsa65Verify=${currentRealityMldsa65Verify}
+        local pqvParam pqvParamQr
+        pqvParam=$(realityPqvParam "${currentRealityMldsa65Verify}")
+        pqvParamQr=$(realityPqvParam "${currentRealityMldsa65Verify}" qr)
 
         if [[ "${coreKind}" == "2" ]]; then
             realityServerName=${singBoxVLESSRealityGRPCServerName}
@@ -6603,14 +6608,12 @@ EOF
         fi
 
         echoContent yellow " ---> 通用格式(VLESS+reality+uTLS+gRPC)"
-        # pqv=${realityMldsa65Verify}&
-        echoContent green "    vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality&type=grpc&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=${currentRealityShortId}&path=grpc&serviceName=grpc#${email}\n"
+        echoContent green "    vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality${pqvParam}&type=grpc&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=${currentRealityShortId}&path=grpc&serviceName=grpc#${email}\n"
 
         echoContent yellow " ---> 格式化明文(VLESS+reality+uTLS+gRPC)"
-        # pqv=${realityMldsa65Verify}，
-        echoContent green "协议类型:VLESS reality，serviceName:grpc，地址:$(getPublicIP)，publicKey:${publicKey}，shortId: ${currentRealityShortId}，serverNames：${realityServerName}，端口:${port}，用户ID:${id}，传输方式:gRPC，client-fingerprint：chrome，账户名:${email}\n"
+        echoContent green "协议类型:VLESS reality，serviceName:grpc，地址:$(getPublicIP)，publicKey:${publicKey}，shortId: ${currentRealityShortId}${currentRealityMldsa65Verify:+，pqv=${currentRealityMldsa65Verify}}，serverNames：${realityServerName}，端口:${port}，用户ID:${id}，传输方式:gRPC，client-fingerprint：chrome，账户名:${email}\n"
         cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
-vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality&pqv=${realityMldsa65Verify}&type=grpc&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=${currentRealityShortId}&path=grpc&serviceName=grpc#${email}
+vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality${pqvParam}&type=grpc&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=${currentRealityShortId}&path=grpc&serviceName=grpc#${email}
 EOF
         cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
   - name: "${email}"
@@ -6634,7 +6637,7 @@ EOF
         echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
 
         echoContent yellow " ---> 二维码 VLESS(VLESS+reality+uTLS+gRPC)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40$(getPublicIP)%3A${port}%3Fencryption%3Dnone%26security%3Dreality%26type%3Dgrpc%26sni%3D${realityServerName}%26fp%3Dchrome%26pbk%3D${publicKey}%26sid%3D${currentRealityShortId}%26path%3Dgrpc%26serviceName%3Dgrpc%23${email}\n"
+        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40$(getPublicIP)%3A${port}%3Fencryption%3Dnone%26security%3Dreality${pqvParamQr}%26type%3Dgrpc%26sni%3D${realityServerName}%26fp%3Dchrome%26pbk%3D${publicKey}%26sid%3D${currentRealityShortId}%26path%3Dgrpc%26serviceName%3Dgrpc%23${email}\n"
     elif [[ "${type}" == "tuic" ]]; then
         local tuicUUID=
         tuicUUID=$(echo "${id}" | awk -F "[_]" '{print $1}')
@@ -6796,6 +6799,16 @@ EOF
 
 }
 
+# Reality 订阅端口按内核取：两个端口变量各自只在自己内核的读取路径里赋值，同一会话
+# 切换内核后旧值残留，拼接在一起就成了 443443
+getRealitySubscriptionPort() {
+    if [[ "${coreKind}" == "2" ]]; then
+        printf '%s\n' "${singBoxVLESSRealityVisionPort}"
+    else
+        printf '%s\n' "${xrayVLESSRealityVisionPort}"
+    fi
+}
+
 # 账号
 showAccounts() {
     readInstallType
@@ -6930,7 +6943,7 @@ showAccounts() {
 
             echoContent skyBlue "\n ---> 账号:${email}"
             echo
-            defaultBase64Code vlessReality "${xrayVLESSRealityVisionPort}${singBoxVLESSRealityVisionPort}" "${email}" "$(echo "${user}" | jq -r .id//.uuid)"
+            defaultBase64Code vlessReality "$(getRealitySubscriptionPort)" "${email}" "$(echo "${user}" | jq -r .id//.uuid)"
         done
     fi
     # VLESS reality gRPC - 已移除
@@ -16409,7 +16422,7 @@ initRealityMldsa65() {
         length=$(/etc/Proxy-agent/xray/xray tls ping "${realityServerName}:${realityDomainPort}" | grep "Certificate chain's total length:" | awk '{print $5}' | head -1)
 
         if [ "$length" -gt 3500 ]; then
-            if [[ -n "${currentRealityMldsa65}" && -z "${lastInstallationConfig}" ]]; then
+            if [[ -n "${currentRealityMldsa65Seed}" && -z "${lastInstallationConfig}" ]]; then
                 read -r -p "读取到上次安装记录，是否使用上次安装时的Seed/Verify ？[y/n]:" historyMldsa65Status
                 if [[ "${historyMldsa65Status}" == "y" ]]; then
                     realityMldsa65Seed=${currentRealityMldsa65Seed}
@@ -16431,17 +16444,18 @@ initRealityMldsa65() {
         echoContent green " 目标域名不支持X25519MLKEM768，忽略ML-DSA-65。"
     fi
 }
-# 检查reality域名是否符合
+# checkRealityDest DOMAIN：目标域名挂在 Cloudflare 代理后面时，Reality 会把 VPS 变成别人的
+# 免费中转，命中要用户二次确认；探测失败（无网/超时）按未命中放行
 checkRealityDest() {
-    local traceResult=
-    traceResult=$(curl -s "https://$(echo "${realityDestDomain}" | cut -d ':' -f 1)/cdn-cgi/trace" | grep "visit_scheme=https")
+    local traceResult
+    traceResult=$(curl -s --connect-timeout 5 --max-time 10 "https://$1/cdn-cgi/trace" 2>/dev/null | grep "visit_scheme=https")
     if [[ -n "${traceResult}" ]]; then
-        echoContent red "\n ---> 检测到使用的域名，托管在cloudflare并开启了代理，使用此类型域名可能导致VPS流量被其他人使用[不建议使用]\n"
-        read -r -p "是否继续 ？[y/n]" setRealityDestStatus
-        if [[ "${setRealityDestStatus}" != 'y' ]]; then
+        echoContent red "\n ---> $(t REALITY_CF_WARNING)\n"
+        read -r -p "$(t PROMPT_CONTINUE):" setRealityDestStatus
+        if ! isYesInput "${setRealityDestStatus}"; then
             exit 1
         fi
-        echoContent yellow "\n ---> 忽略风险，继续使用"
+        echoContent yellow "\n ---> $(t REALITY_IGNORE_RISK)"
     fi
 }
 
@@ -16519,6 +16533,7 @@ initRealityClientServersName() {
         fi
     fi
 
+    checkRealityDest "${realityServerName}"
     echoContent yellow "\n ---> 客户端可用域名: ${realityServerName}:${realityDomainPort}\n"
 }
 # 初始化reality端口
