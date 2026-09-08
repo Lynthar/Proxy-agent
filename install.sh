@@ -1766,8 +1766,8 @@ readSingBoxConfig() {
         fi
         if [[ -f "${singBoxConfigPath}06_hysteria2_inbounds.json" ]]; then
             hysteriaPort=$(jq -r '.inbounds[0].listen_port' "${singBoxConfigPath}06_hysteria2_inbounds.json")
-            # 写入时 up_mbps=下行速度、down_mbps=上行速度（见 initSingBoxHysteria2Config，
-            # 符合 Hysteria2 "服务端上行=客户端下行" 语义）。读回必须按同一约定还原，
+            # 落盘约定：up_mbps 存下行速度、down_mbps 存上行速度（Hysteria2 的
+            # "服务端上行=客户端下行" 语义）。读回必须按同一约定还原，
             # 否则改配置 / 重新生成订阅时会把上下行对调。
             hysteria2ClientDownloadSpeed=$(jq -r '.inbounds[0].up_mbps' "${singBoxConfigPath}06_hysteria2_inbounds.json")
             hysteria2ClientUploadSpeed=$(jq -r '.inbounds[0].down_mbps' "${singBoxConfigPath}06_hysteria2_inbounds.json")
@@ -3224,7 +3224,7 @@ updateSELinuxHTTPPortT() {
 # 操作Nginx
 handleNginx() {
 
-    if ! echo "${selectCustomInstallType}" | grep -qwE ",7,|,8,|,7,8," && [[ -z $(pgrep -f "nginx") ]] && [[ "$1" == "start" ]]; then
+    if ! echo "${selectCustomInstallType}" | grep -qwE ",7,|,8,|,7,8," && [[ -z $(pgrep -x "nginx") ]] && [[ "$1" == "start" ]]; then
         if [[ "${release}" == "alpine" ]]; then
             rc-service nginx start 2>/etc/Proxy-agent/nginx_error.log
         else
@@ -3233,7 +3233,7 @@ handleNginx() {
 
         sleep 0.5
 
-        if [[ -z $(pgrep -f "nginx") ]]; then
+        if [[ -z $(pgrep -x "nginx") ]]; then
             echoContent red " ---> Nginx启动失败"
             echoContent red " ---> 请将下方日志反馈给开发者"
             nginx
@@ -3244,7 +3244,7 @@ handleNginx() {
             echoContent green " ---> Nginx启动成功"
         fi
 
-    elif [[ -n $(pgrep -f "nginx") ]] && [[ "$1" == "stop" ]]; then
+    elif [[ -n $(pgrep -x "nginx") ]] && [[ "$1" == "stop" ]]; then
 
         if [[ "${release}" == "alpine" ]]; then
             rc-service nginx stop
@@ -3253,8 +3253,10 @@ handleNginx() {
         fi
         sleep 0.5
 
-        if [[ -z ${btDomain} && -n $(pgrep -f "nginx") ]]; then
-            pgrep -f "nginx" | xargs kill -9
+        # 必须按进程名精确匹配：pgrep -f "nginx" 按整条命令行子串匹配，
+        # root 下会连 "vim nginx.conf"、"tail -f …/nginx/error.log" 一起 kill -9。
+        if [[ -z ${btDomain} && -n $(pgrep -x "nginx") ]]; then
+            pgrep -x "nginx" | xargs kill -9
         fi
         echoContent green " ---> Nginx关闭成功"
     fi
@@ -4187,13 +4189,6 @@ initXrayClients() {
                 --arg email "${email}-VLESS_Reality_XHTTP" \
                 '. += [{id: $id, email: $email}]')
         fi
-        # Trojan gRPC (id 2, 已废弃)
-        if [[ "${type}" == *",2,"* ]]; then
-            users=$(echo "${users}" | jq \
-                --arg password "${uuid}" \
-                --arg email "${email}-Trojan_gRPC" \
-                '. += [{password: $password, email: $email}]')
-        fi
         # VMess WS (id 3)
         if [[ "${type}" == *",3,"* ]]; then
             users=$(echo "${users}" | jq \
@@ -4208,13 +4203,6 @@ initXrayClients() {
                 --arg email "${email}-trojan_tcp" \
                 '. += [{password: $password, email: $email}]')
         fi
-        # VLESS gRPC (id 5, 已废弃)
-        if [[ "${type}" == *",5,"* ]]; then
-            users=$(echo "${users}" | jq \
-                --arg id "${uuid}" \
-                --arg email "${email}-vless_grpc" \
-                '. += [{id: $id, email: $email}]')
-        fi
         # Hysteria2 (id 6) -- 历史上 Xray 路径也写过这个分支，保留原 schema
         if [[ "${type}" == *",6,"* ]]; then
             users=$(echo "${users}" | jq \
@@ -4228,13 +4216,6 @@ initXrayClients() {
                 --arg id "${uuid}" \
                 --arg email "${email}-vless_reality_vision" \
                 '. += [{id: $id, email: $email, flow: "xtls-rprx-vision"}]')
-        fi
-        # VLESS Reality gRPC (id 8, 已废弃)
-        if [[ "${type}" == *",8,"* ]]; then
-            users=$(echo "${users}" | jq \
-                --arg id "${uuid}" \
-                --arg email "${email}-vless_reality_grpc" \
-                '. += [{id: $id, email: $email, flow: ""}]')
         fi
         # TUIC (id 9) -- Xray 路径与 sing-box 共用 currentClients，保留原 schema
         if [[ "${type}" == *",9,"* ]]; then
@@ -4371,30 +4352,6 @@ initSingBoxClients() {
         fi
     done < <(echo "${currentClients}" | jq -c '.[]')
     echo "${users}"
-}
-
-# 初始化hysteria端口
-initHysteriaPort() {
-    readSingBoxConfig
-    if [[ -n "${hysteriaPort}" ]]; then
-        read -r -p "读取到上次安装时的端口，是否使用上次安装时的端口？[y/n]:" historyHysteriaPortStatus
-        if [[ "${historyHysteriaPortStatus}" == "y" ]]; then
-            echoContent yellow "\n ---> 端口: ${hysteriaPort}"
-        else
-            hysteriaPort=
-        fi
-    fi
-
-    if [[ -z "${hysteriaPort}" ]]; then
-        echoContent yellow "请输入Hysteria端口[回车随机10000-30000]，不可与其他服务重复"
-        # 回车随机；非法/越界 → 重新提示
-        if ! readValidPort "端口:" hysteriaPort "RANDOM" 10000 30000; then
-            initHysteriaPort "$2"
-            return
-        fi
-    fi
-    allowPort "${hysteriaPort}"
-    allowPort "${hysteriaPort}" "udp"
 }
 
 # 初始化hysteria网络信息
@@ -4606,10 +4563,16 @@ deletePortHoppingRules() {
         done
         sudo firewall-cmd --reload
     else
-        iptables -t nat -L PREROUTING --line-numbers | grep "Proxy-agent_${type}_portHopping" | awk '{print $1}' | while read -r line; do
-            iptables -t nat -D PREROUTING 1
+        # 必须按读到的行号降序删：本脚本的规则是 -A 追加在链尾，固定删
+        # PREROUTING 1 删的是别人的规则；升序删则每删一条后面的行号就前移一位。
+        local hoppingLines line
+        hoppingLines=$(iptables -t nat -L PREROUTING --line-numbers | grep "Proxy-agent_${type}_portHopping" | awk '{print $1}' | sort -rn)
+        if [[ -n "${hoppingLines}" ]]; then
+            while read -r line; do
+                iptables -t nat -D PREROUTING "${line}"
+            done <<<"${hoppingLines}"
             sudo netfilter-persistent save
-        done
+        fi
     fi
 }
 
@@ -4658,37 +4621,6 @@ portHoppingMenu() {
     else
         portHoppingMenu
     fi
-}
-
-# 初始化tuic端口
-initTuicPort() {
-    readSingBoxConfig
-    if [[ -n "${tuicPort}" ]]; then
-        read -r -p "读取到上次安装时的端口，是否使用上次安装时的端口？[y/n]:" historyTuicPortStatus
-        if [[ "${historyTuicPortStatus}" == "y" ]]; then
-            echoContent yellow "\n ---> 端口: ${tuicPort}"
-        else
-            tuicPort=
-        fi
-    fi
-
-    if [[ -z "${tuicPort}" ]]; then
-        echoContent yellow "请输入Tuic端口[回车随机10000-30000]，不可与其他服务重复"
-        read -r -p "端口:" tuicPort
-        if [[ -z "${tuicPort}" ]]; then
-            tuicPort=$(randomNum 10000 30000)
-        fi
-    fi
-    if [[ -z ${tuicPort} ]]; then
-        echoContent red " ---> 端口不可为空"
-        initTuicPort "$2"
-    elif ((tuicPort < 1 || tuicPort > 65535)); then
-        echoContent red " ---> 端口不合法"
-        initTuicPort "$2"
-    fi
-    echoContent green "\n ---> 端口: ${tuicPort}"
-    allowPort "${tuicPort}"
-    allowPort "${tuicPort}" "udp"
 }
 
 # 初始化tuic的协议
@@ -5195,50 +5127,6 @@ addSingBoxWireGuardEndpoints() {
                   "allowed_ips": ["0.0.0.0/0","::/0"]
                 }
             ]
-        }
-    ]
-}
-EOF
-}
-
-# 初始化 sing-box Hysteria2 配置
-initSingBoxHysteria2Config() {
-    echoContent skyBlue "\n进度 $1/${totalProgress} : 初始化Hysteria2配置"
-
-    initHysteriaPort
-    initHysteria2Network
-
-    # 构建obfs配置（如果启用）
-    # 用 jq -Rs 把密码转成合法 JSON string literal（含外层引号），
-    # 避免密码里出现 " 或 \ 等字符破坏 JSON 语法。
-    local hysteria2ObfsConfig=""
-    if [[ -n "${hysteria2ObfsPassword}" ]]; then
-        local _obfsPwJson
-        _obfsPwJson=$(printf '%s' "${hysteria2ObfsPassword}" | jq -Rs '.')
-        hysteria2ObfsConfig='"obfs": {"type": "salamander", "password": '"${_obfsPwJson}"'},'
-    fi
-
-    cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/hysteria2.json
-{
-    "inbounds": [
-        {
-            "type": "hysteria2",
-            "listen": "::",
-            "listen_port": ${hysteriaPort},
-            "users": $(initXrayClients 6),
-            "up_mbps":${hysteria2ClientDownloadSpeed},
-            "down_mbps":${hysteria2ClientUploadSpeed},
-            "ignore_client_bandwidth": false,
-            ${hysteria2ObfsConfig}
-            "tls": {
-                "enabled": true,
-                "server_name":"${currentHost}",
-                "alpn": [
-                    "h3"
-                ],
-                "certificate_path": "/etc/Proxy-agent/tls/${currentHost}.crt",
-                "key_path": "/etc/Proxy-agent/tls/${currentHost}.key"
-            }
         }
     ]
 }
@@ -6105,7 +5993,7 @@ EOF
         initHysteria2Network
 
         # 构建obfs配置（如果启用）
-        # 同 initSingBoxHysteria2Config：用 jq -Rs 把密码转成合法 JSON string literal，
+        # 用 jq -Rs 把密码转成合法 JSON string literal（含外层引号），
         # 避免密码含 " 或 \ 时破坏 JSON。
         local hysteria2ObfsConfig=""
         if [[ -n "${hysteria2ObfsPassword}" ]]; then
@@ -6518,40 +6406,6 @@ EOF
         echoContent yellow " ---> 二维码 VLESS(VLESS+reality+XHTTP)"
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40$(getPublicIP)%3A${port}%3Fencryption%3Dnone%26security%3Dreality${pqvParamQr}%26type%3Dxhttp%26sni%3D${xrayVLESSRealityXHTTPServerName}%26fp%3Dchrome%26path%3D${path}%26host%3D${xrayVLESSRealityXHTTPServerName}%26pbk%3D${currentRealityXHTTPPublicKey}%26sid%3D${currentRealityXHTTPShortId}%23${email}\n"
 
-    elif
-        [[ "${type}" == "vlessgrpc" ]]
-    then
-
-        echoContent yellow " ---> 通用格式(VLESS+gRPC+TLS)"
-        echoContent green "    vless://${id}@${add}:${port}?encryption=none&security=tls&type=grpc&host=${currentHost}&path=${currentPath}grpc&fp=chrome&serviceName=${currentPath}grpc&alpn=h2&sni=${currentHost}#${email}\n"
-
-        echoContent yellow " ---> 格式化明文(VLESS+gRPC+TLS)"
-        echoContent green "    协议类型:VLESS，地址:${add}，伪装域名/SNI:${currentHost}，端口:${port}，用户ID:${id}，安全:tls，传输方式:gRPC，alpn:h2，client-fingerprint: chrome,serviceName:${currentPath}grpc，账户名:${email}\n"
-
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
-vless://${id}@${add}:${port}?encryption=none&security=tls&type=grpc&host=${currentHost}&path=${currentPath}grpc&serviceName=${currentPath}grpc&fp=chrome&alpn=h2&sni=${currentHost}#${email}
-EOF
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
-  - name: "${email}"
-    type: vless
-    server: ${add}
-    port: ${port}
-    uuid: ${id}
-    udp: true
-    tls: true
-    network: grpc
-    client-fingerprint: chrome
-    servername: ${currentHost}
-    grpc-opts:
-      grpc-service-name: ${currentPath}grpc
-EOF
-
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\": \"vless\",\"server\": \"${add}\",\"server_port\": ${port},\"uuid\": \"${id}\",\"tls\": {  \"enabled\": true,  \"server_name\": \"${currentHost}\",  \"utls\": {    \"enabled\": true,    \"fingerprint\": \"chrome\"  }},\"packet_encoding\": \"xudp\",\"transport\": {  \"type\": \"grpc\",  \"service_name\": \"${currentPath}grpc\"}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
-
-        echoContent yellow " ---> 二维码 VLESS(VLESS+gRPC+TLS)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40${add}%3A${port}%3Fencryption%3Dnone%26security%3Dtls%26type%3Dgrpc%26host%3D${currentHost}%26serviceName%3D${currentPath}grpc%26fp%3Dchrome%26path%3D${currentPath}grpc%26sni%3D${currentHost}%26alpn%3Dh2%23${email}"
-
     elif [[ "${type}" == "trojan" ]]; then
         # URLEncode
         echoContent yellow " ---> Trojan(TLS)"
@@ -6576,33 +6430,6 @@ EOF
 
         echoContent yellow " ---> 二维码 Trojan(TLS)"
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=trojan%3a%2f%2f${id}%40${currentHost}%3a${port}%3fpeer%3d${currentHost}%26fp%3Dchrome%26sni%3d${currentHost}%26alpn%3Dhttp/1.1%23${email}\n"
-
-    elif [[ "${type}" == "trojangrpc" ]]; then
-        # URLEncode
-
-        echoContent yellow " ---> Trojan gRPC(TLS)"
-        echoContent green "    trojan://${id}@${add}:${port}?encryption=none&peer=${currentHost}&fp=chrome&security=tls&type=grpc&sni=${currentHost}&alpn=h2&path=${currentPath}trojangrpc&serviceName=${currentPath}trojangrpc#${email}\n"
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
-trojan://${id}@${add}:${port}?encryption=none&peer=${currentHost}&security=tls&type=grpc&fp=chrome&sni=${currentHost}&alpn=h2&path=${currentPath}trojangrpc&serviceName=${currentPath}trojangrpc#${email}
-EOF
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
-  - name: "${email}"
-    server: ${add}
-    port: ${port}
-    type: trojan
-    password: ${id}
-    network: grpc
-    sni: ${currentHost}
-    udp: true
-    grpc-opts:
-      grpc-service-name: ${currentPath}trojangrpc
-EOF
-
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"trojan\",\"server\":\"${add}\",\"server_port\":${port},\"password\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"transport\":{\"type\":\"grpc\",\"service_name\":\"${currentPath}trojangrpc\",\"idle_timeout\":\"15s\",\"ping_timeout\":\"15s\",\"permit_without_stream\":false},\"multiplex\":{\"enabled\":false,\"protocol\":\"smux\",\"max_streams\":32}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
-
-        echoContent yellow " ---> 二维码 Trojan gRPC(TLS)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=trojan%3a%2f%2f${id}%40${add}%3a${port}%3Fencryption%3Dnone%26fp%3Dchrome%26security%3Dtls%26peer%3d${currentHost}%26type%3Dgrpc%26sni%3d${currentHost}%26path%3D${currentPath}trojangrpc%26alpn%3Dh2%26serviceName%3D${currentPath}trojangrpc%23${email}\n"
 
     elif [[ "${type}" == "hysteria" ]]; then
         echoContent yellow " ---> Hysteria(TLS)"
@@ -6709,49 +6536,6 @@ EOF
         echoContent yellow " ---> 二维码 VLESS(VLESS+reality+uTLS+Vision)"
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40$(getPublicIP)%3A${port}%3Fencryption%3Dnone%26security%3Dreality${pqvParamQr}%26type%3Dtcp%26sni%3D${realityServerName}%26fp%3Dchrome%26pbk%3D${publicKey}%26sid%3D${currentRealityShortId}%26flow%3Dxtls-rprx-vision%23${email}\n"
 
-    elif [[ "${type}" == "vlessRealityGRPC" ]]; then
-        local realityServerName=${xrayVLESSRealityServerName}
-        local publicKey=${currentRealityPublicKey}
-        local pqvParam pqvParamQr
-        pqvParam=$(realityPqvParam "${currentRealityMldsa65Verify}")
-        pqvParamQr=$(realityPqvParam "${currentRealityMldsa65Verify}" qr)
-
-        if [[ "${coreKind}" == "2" ]]; then
-            realityServerName=${singBoxVLESSRealityGRPCServerName}
-            publicKey=${singBoxVLESSRealityPublicKey}
-        fi
-
-        echoContent yellow " ---> 通用格式(VLESS+reality+uTLS+gRPC)"
-        echoContent green "    vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality${pqvParam}&type=grpc&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=${currentRealityShortId}&path=grpc&serviceName=grpc#${email}\n"
-
-        echoContent yellow " ---> 格式化明文(VLESS+reality+uTLS+gRPC)"
-        echoContent green "协议类型:VLESS reality，serviceName:grpc，地址:$(getPublicIP)，publicKey:${publicKey}，shortId: ${currentRealityShortId}${currentRealityMldsa65Verify:+，pqv=${currentRealityMldsa65Verify}}，serverNames：${realityServerName}，端口:${port}，用户ID:${id}，传输方式:gRPC，client-fingerprint：chrome，账户名:${email}\n"
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
-vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality${pqvParam}&type=grpc&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=${currentRealityShortId}&path=grpc&serviceName=grpc#${email}
-EOF
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
-  - name: "${email}"
-    type: vless
-    server: $(getPublicIP)
-    port: ${port}
-    uuid: ${id}
-    network: grpc
-    tls: true
-    udp: true
-    servername: ${realityServerName}
-    reality-opts:
-      public-key: ${publicKey}
-      short-id: ${currentRealityShortId}
-    grpc-opts:
-      grpc-service-name: "grpc"
-    client-fingerprint: chrome
-EOF
-
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vless\",\"server\":\"$(getPublicIP)\",\"server_port\":${port},\"uuid\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${realityServerName}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"},\"reality\":{\"enabled\":true,\"public_key\":\"${publicKey}\",\"short_id\":\"${currentRealityShortId}\"}},\"packet_encoding\":\"xudp\",\"transport\":{\"type\":\"grpc\",\"service_name\":\"grpc\"}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
-
-        echoContent yellow " ---> 二维码 VLESS(VLESS+reality+uTLS+gRPC)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40$(getPublicIP)%3A${port}%3Fencryption%3Dnone%26security%3Dreality${pqvParamQr}%26type%3Dgrpc%26sni%3D${realityServerName}%26fp%3Dchrome%26pbk%3D${publicKey}%26sid%3D${currentRealityShortId}%26path%3Dgrpc%26serviceName%3Dgrpc%23${email}\n"
     elif [[ "${type}" == "tuic" ]]; then
         local tuicUUID=
         tuicUUID=$(echo "${id}" | awk -F "[_]" '{print $1}')
@@ -7423,7 +7207,11 @@ addCorePort() {
                     continue
                 fi
                 if [[ -n "${configPath}" && -n "${port}" ]]; then
-                    find "${configPath}" -maxdepth 1 -type f -name "*${port}*" -exec rm -f {} \;
+                    # 只删这三个精确文件名。通配 "*${port}*" 会让端口 2 命中
+                    # 02_VLESS_TCP / 12_VLESS_XHTTP，紧随的 reloadCore 就把协议停了。
+                    rm -f "${configPath}02_dokodemodoor_inbounds_${port}.json" \
+                        "${configPath}02_dokodemodoor_inbounds_${port}_default.json" \
+                        "${configPath}02_dokodemodoor_inbounds_hysteria_${port}.json"
                 fi
 
                 local fileName=
@@ -7494,14 +7282,16 @@ EOF
     elif [[ "${selectNewPortType}" == "3" ]]; then
         find ${configPath} -name "*dokodemodoor*" | grep -v "hysteria" | awk -F "[c][o][n][f][/]" '{print $2}' | awk -F "[_]" '{print $4}' | awk -F "[.]" '{print ""NR""":"$1}'
         read -r -p "请输入要删除的端口编号:" portIndex
-        # 编号必须是正整数：非法输入拦在 grep 模式之外，避免 regex 元字符误匹配
+        # 编号必须是正整数：非法输入拦在匹配之外，避免元字符误匹配
         if ! [[ "${portIndex}" =~ ^[1-9][0-9]*$ ]]; then
             echoContent red "\n ---> 编号必须为正整数"
             addCorePort
             return
         fi
         local dokoConfig
-        dokoConfig=$(find ${configPath} -name "*dokodemodoor*" | grep -v "hysteria" | awk -F "[c][o][n][f][/]" '{print $2}' | awk -F "[_]" '{print $4}' | awk -F "[.]" '{print ""NR""":"$1}' | grep -F "${portIndex}:")
+        # 编号列必须整列比较。子串匹配下编号 1 会同时命中 11、21，
+        # 拼出带换行的文件名，rm 报错而端口其实没删掉。
+        dokoConfig=$(find ${configPath} -name "*dokodemodoor*" | grep -v "hysteria" | awk -F "[c][o][n][f][/]" '{print $2}' | awk -F "[_]" '{print $4}' | awk -F "[.]" '{print ""NR""":"$1}' | awk -F ':' -v idx="${portIndex}" '$1 == idx')
         if [[ -n "${dokoConfig}" ]]; then
             rm "${configPath}02_dokodemodoor_inbounds_$(echo "${dokoConfig}" | awk -F "[:]" '{print $2}').json"
             local hysteriaDokodemodoorFilePath=
