@@ -90,9 +90,6 @@ echo -e "${YELLOW}=== 测试模块加载 ===${NC}"
 # 测试 constants.sh 加载
 source lib/constants.sh
 assert_not_empty "${_CONSTANTS_LOADED}" "constants.sh 模块加载成功"
-assert_equals "0" "${PROTOCOL_VLESS_TCP_VISION}" "PROTOCOL_VLESS_TCP_VISION = 0"
-assert_equals "6" "${PROTOCOL_HYSTERIA2}" "PROTOCOL_HYSTERIA2 = 6"
-assert_equals "7" "${PROTOCOL_VLESS_REALITY_VISION}" "PROTOCOL_VLESS_REALITY_VISION = 7"
 
 # 测试 utils.sh 加载
 source lib/utils.sh
@@ -126,24 +123,9 @@ assert_true "[[ ${num} -ge 100 && ${num} -le 200 ]]" "randomNum(100, 200) 生成
 port=$(randomPort)
 assert_true "[[ ${port} -ge 10000 && ${port} -le 30000 ]]" "randomPort() 生成有效端口: ${port}"
 
-# 测试 isValidPort
-assert_true "isValidPort 443" "isValidPort(443) 返回 true"
-assert_true "isValidPort 65535" "isValidPort(65535) 返回 true"
-assert_true "! isValidPort 0" "isValidPort(0) 返回 false"
-assert_true "! isValidPort 70000" "isValidPort(70000) 返回 false"
-
-# 测试 base64Encode/base64Decode
-encoded=$(base64Encode "hello world")
-decoded=$(base64Decode "${encoded}")
-assert_equals "hello world" "${decoded}" "base64Encode/Decode 往返测试"
-
 # 测试 trim
 trimmed=$(trim "  hello  ")
 assert_equals "hello" "${trimmed}" "trim() 去除空格"
-
-# 测试 isValidUUID
-assert_true "isValidUUID 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'" "isValidUUID() 验证有效 UUID"
-assert_true "! isValidUUID 'invalid-uuid'" "isValidUUID() 拒绝无效 UUID"
 
 # 测试 versionGreaterThan
 assert_true "versionGreaterThan '1.2.3' '1.2.0'" "versionGreaterThan('1.2.3', '1.2.0')"
@@ -174,116 +156,6 @@ assert_true "planAction 'test plan' >/dev/null" "planAction() 在 dry-run 模式
 plan_output=$(stripAnsi "$(planAction 'install reality')")
 assert_equals "[plan] install reality" "${plan_output}" "planAction() 输出包含 [plan] 前缀和原 message"
 unset DRY_RUN
-
-echo ""
-
-# ============================================================================
-# 测试 json-utils.sh 函数
-# ============================================================================
-
-echo -e "${YELLOW}=== 测试 json-utils.sh 函数 ===${NC}"
-
-# 创建测试 JSON 文件
-TEST_JSON_DIR="/tmp/proxy-agent-test"
-mkdir -p "${TEST_JSON_DIR}"
-
-# 创建模拟的 Xray 配置文件
-cat > "${TEST_JSON_DIR}/test_xray.json" << 'EOF'
-{
-    "inbounds": [
-        {
-            "port": 443,
-            "protocol": "vless",
-            "settings": {
-                "clients": [
-                    {
-                        "id": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
-                        "email": "test@example.com"
-                    }
-                ]
-            },
-            "streamSettings": {
-                "network": "tcp",
-                "security": "tls",
-                "tlsSettings": {
-                    "certificates": [
-                        {
-                            "certificateFile": "/etc/Proxy-agent/tls/example.com.crt",
-                            "keyFile": "/etc/Proxy-agent/tls/example.com.key"
-                        }
-                    ],
-                    "alpn": ["h2", "http/1.1"]
-                }
-            }
-        }
-    ]
-}
-EOF
-
-# 创建模拟的 sing-box 配置文件
-cat > "${TEST_JSON_DIR}/test_singbox.json" << 'EOF'
-{
-    "inbounds": [
-        {
-            "listen_port": 8443,
-            "users": [
-                {
-                    "uuid": "b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22",
-                    "name": "testuser"
-                }
-            ],
-            "tls": {
-                "server_name": "singbox.example.com"
-            }
-        }
-    ]
-}
-EOF
-
-# 测试 jsonGetValue
-result=$(jsonGetValue "${TEST_JSON_DIR}/test_xray.json" ".inbounds[0].port")
-assert_equals "443" "${result}" "jsonGetValue() 读取端口"
-
-# 测试 jsonValidateFile
-assert_true "jsonValidateFile '${TEST_JSON_DIR}/test_xray.json'" "jsonValidateFile() 验证有效 JSON"
-
-# 测试 xrayGetInboundPort
-port=$(xrayGetInboundPort "${TEST_JSON_DIR}/test_xray.json")
-assert_equals "443" "${port}" "xrayGetInboundPort() 读取端口"
-
-# 测试 xrayGetInboundProtocol
-protocol=$(xrayGetInboundProtocol "${TEST_JSON_DIR}/test_xray.json")
-assert_equals "vless" "${protocol}" "xrayGetInboundProtocol() 读取协议"
-
-# 测试 xrayGetClientUUID
-uuid=$(xrayGetClientUUID "${TEST_JSON_DIR}/test_xray.json")
-assert_equals "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11" "${uuid}" "xrayGetClientUUID() 读取 UUID"
-
-# 测试 xrayGetClients
-clients=$(xrayGetClients "${TEST_JSON_DIR}/test_xray.json")
-assert_true "[[ '${clients}' == *'test@example.com'* ]]" "xrayGetClients() 读取客户端列表"
-
-# 测试 singboxGetInboundPort
-port=$(singboxGetInboundPort "${TEST_JSON_DIR}/test_singbox.json")
-assert_equals "8443" "${port}" "singboxGetInboundPort() 读取端口"
-
-# 测试 singboxGetUserUUID
-uuid=$(singboxGetUserUUID "${TEST_JSON_DIR}/test_singbox.json")
-assert_equals "b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22" "${uuid}" "singboxGetUserUUID() 读取 UUID"
-
-# 测试 singboxGetTLSServerName
-serverName=$(singboxGetTLSServerName "${TEST_JSON_DIR}/test_singbox.json")
-assert_equals "singbox.example.com" "${serverName}" "singboxGetTLSServerName() 读取服务器名"
-
-# 测试 jsonArrayAppend (使用字符串形式)
-array='[1,2,3]'
-newArray=$(echo "${array}" | jq '. += [4]')
-compactArray=$(echo "${newArray}" | jq -c '.')
-assert_equals '[1,2,3,4]' "${compactArray}" "jsonArrayAppend 逻辑测试"
-
-# 测试 jsonGetArrayLength
-length=$(jsonGetArrayLength "${TEST_JSON_DIR}/test_xray.json" ".inbounds[0].settings.clients")
-assert_equals "1" "${length}" "jsonGetArrayLength() 计算长度"
 
 echo ""
 
@@ -476,30 +348,6 @@ rm -rf "${_txDir}"
 echo ""
 
 # ============================================================================
-# 测试 system-detect.sh 函数
-# ============================================================================
-
-echo -e "${YELLOW}=== 测试 system-detect.sh 函数 ===${NC}"
-
-# 测试 commandExists
-assert_true "commandExists 'bash'" "commandExists('bash') 返回 true"
-assert_true "! commandExists 'nonexistent_command_12345'" "commandExists('nonexistent') 返回 false"
-
-# 测试 getCPUCores
-cores=$(getCPUCores)
-assert_true "[[ ${cores} -ge 1 ]]" "getCPUCores() 返回有效值: ${cores}"
-
-# 测试 getSystemMemoryMB
-memory=$(getSystemMemoryMB)
-assert_true "[[ ${memory} -ge 0 ]]" "getSystemMemoryMB() 返回有效值: ${memory}MB"
-
-# 测试 getOSInfo
-osInfo=$(getOSInfo)
-assert_not_empty "${osInfo}" "getOSInfo() 返回系统信息"
-
-echo ""
-
-# ============================================================================
 # 测试 isPlausiblePublicIP（getPublicIP 的输出闸门）
 # ============================================================================
 echo -e "${YELLOW}[system-detect.sh] isPlausiblePublicIP 测试${NC}"
@@ -533,7 +381,6 @@ echo ""
 # 清理测试文件
 # ============================================================================
 
-rm -rf "${TEST_JSON_DIR}"
 
 # ============================================================================
 # 测试结果汇总

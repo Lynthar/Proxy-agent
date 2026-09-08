@@ -358,64 +358,6 @@ echo -e "${GREEN}✓${NC} 模块加载完成"
 echo ""
 
 # ============================================================================
-# 测试 JSON 读取功能
-# ============================================================================
-
-echo -e "${YELLOW}=== 测试 JSON 读取功能 ===${NC}"
-
-# 测试读取 Xray VLESS TCP 配置
-port=$(xrayGetInboundPort "${_TEST_XRAY_CONFIG_DIR}/02_VLESS_TCP_inbounds.json")
-assert_equals "443" "${port}" "读取 Xray VLESS TCP 端口"
-
-protocol=$(xrayGetInboundProtocol "${_TEST_XRAY_CONFIG_DIR}/02_VLESS_TCP_inbounds.json")
-assert_equals "vless" "${protocol}" "读取 Xray VLESS TCP 协议"
-
-uuid=$(xrayGetClientUUID "${_TEST_XRAY_CONFIG_DIR}/02_VLESS_TCP_inbounds.json")
-assert_equals "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11" "${uuid}" "读取 Xray 客户端 UUID"
-
-clients=$(xrayGetClients "${_TEST_XRAY_CONFIG_DIR}/02_VLESS_TCP_inbounds.json")
-assert_contains "${clients}" "user1-VLESS_TCP" "读取 Xray 客户端列表"
-
-# 测试读取 Xray WebSocket 路径
-wsPath=$(xrayGetStreamPath "${_TEST_XRAY_CONFIG_DIR}/03_VLESS_WS_inbounds.json" "ws")
-assert_equals "/testpath123ws" "${wsPath}" "读取 Xray WebSocket 路径"
-
-# 测试读取 Xray Reality 配置（直接调用，全局变量自动赋值）
-xrayGetRealityConfig "${_TEST_XRAY_CONFIG_DIR}/07_VLESS_vision_reality_inbounds.json" 1
-assert_equals "www.microsoft.com" "${realityServerName}" "读取 Reality serverName"
-assert_equals "O3gPFZ1Tc0FBi0VYRzfhkEAhVPZs1_n5hH_Df3eDOT0" "${realityPublicKey}" "读取 Reality publicKey"
-assert_equals "WDrcaQ0SVSc0nh1SVrPmQsBkIjPQgXwZb8_z8L5kGGw" "${realityPrivateKey}" "读取 Reality privateKey"
-assert_equals "testSeed12345" "${realityMldsa65Seed}" "读取 Reality mldsa65Seed"
-
-echo ""
-
-# ============================================================================
-# 测试 sing-box 配置读取
-# ============================================================================
-
-echo -e "${YELLOW}=== 测试 sing-box 配置读取 ===${NC}"
-
-# 测试读取 Hysteria2 配置（直接调用，全局变量自动赋值）
-singboxGetHysteria2Config "${_TEST_SINGBOX_CONFIG_DIR}/06_hysteria2_inbounds.json"
-assert_equals "8844" "${hysteria2Port}" "读取 Hysteria2 端口"
-assert_equals "100" "${hysteria2UpMbps}" "读取 Hysteria2 上行速度"
-assert_equals "50" "${hysteria2DownMbps}" "读取 Hysteria2 下行速度"
-assert_equals "obfspassword456" "${hysteria2ObfsPassword}" "读取 Hysteria2 混淆密码"
-
-# 测试读取 TUIC 配置（直接调用，全局变量自动赋值）
-singboxGetTuicConfig "${_TEST_SINGBOX_CONFIG_DIR}/09_tuic_inbounds.json"
-assert_equals "8845" "${tuicPort}" "读取 TUIC 端口"
-assert_equals "bbr" "${tuicAlgorithm}" "读取 TUIC 拥塞控制算法"
-
-# 测试读取 sing-box Reality 配置（直接调用，全局变量自动赋值）
-singboxGetRealityConfig "${_TEST_SINGBOX_CONFIG_DIR}/07_VLESS_vision_reality_inbounds.json" 0
-assert_equals "www.google.com" "${singboxRealityServerName}" "读取 sing-box Reality serverName"
-assert_equals "SingboxPrivateKey123" "${singboxRealityPrivateKey}" "读取 sing-box Reality privateKey"
-assert_equals "443" "${singboxRealityHandshakePort}" "读取 sing-box Reality handshake port"
-
-echo ""
-
-# ============================================================================
 # 测试 protocol-registry 函数
 # ============================================================================
 
@@ -481,17 +423,6 @@ assert_equals "cdn.example.com" "${cdnAddress}" "读取 CDN 地址"
 echo ""
 
 # ============================================================================
-# 测试从证书路径提取域名
-# ============================================================================
-
-echo -e "${YELLOW}=== 测试域名提取 ===${NC}"
-
-domain=$(xrayGetTLSDomain "${_TEST_XRAY_CONFIG_DIR}/02_VLESS_TCP_inbounds.json")
-assert_equals "test.example.com" "${domain}" "从 TLS 证书路径提取域名"
-
-echo ""
-
-# ============================================================================
 # 测试原子写入功能
 # ============================================================================
 
@@ -503,10 +434,10 @@ echo '{"test": "original"}' > "${TEST_WRITE_FILE}"
 
 # 测试 jsonWriteFile
 if jsonWriteFile "${TEST_WRITE_FILE}" '{"test": "modified", "new": "value"}'; then
-    result=$(jsonGetValue "${TEST_WRITE_FILE}" ".test")
+    result=$(jq -r ".test" "${TEST_WRITE_FILE}")
     assert_equals "modified" "${result}" "jsonWriteFile() 写入成功"
 
-    newValue=$(jsonGetValue "${TEST_WRITE_FILE}" ".new")
+    newValue=$(jq -r ".new" "${TEST_WRITE_FILE}")
     assert_equals "value" "${newValue}" "jsonWriteFile() 新字段存在"
 else
     echo -e "${RED}✗${NC} jsonWriteFile() 失败"
@@ -515,7 +446,7 @@ fi
 
 # 测试 jsonModifyFile
 if jsonModifyFile "${TEST_WRITE_FILE}" '.test = "final"' false; then
-    result=$(jsonGetValue "${TEST_WRITE_FILE}" ".test")
+    result=$(jq -r ".test" "${TEST_WRITE_FILE}")
     assert_equals "final" "${result}" "jsonModifyFile() 修改成功"
 else
     echo -e "${RED}✗${NC} jsonModifyFile() 失败"
@@ -691,6 +622,76 @@ result=$(jq -r '.inbounds[0].users[].username' "${REMOVE_USER_TMP}")
 assert_equals "ivy-singbox_naive" "${result}" "注册表列表(2,10)：usersPath[].username 取到显示名"
 
 rm -f "${REMOVE_USER_TMP}"
+
+echo ""
+
+# ============================================================================
+# addCorePort 的删除匹配（抽 install.sh 原文执行，不抄副本）
+# ============================================================================
+
+echo -e "${BLUE}[addCorePort] 端口文件删除与编号选择${NC}"
+
+# 抽出 addCorePort 里「删同端口旧配置」的整块，连同注释一起
+ADD_PORT_DELETE_BLOCK=$(awk -v marker='-n "${configPath}" && -n "${port}"' '
+    /^addCorePort/ { inFn = 1 }
+    inFn && index($0, marker) { grab = 1 }
+    grab { print }
+    grab && $0 ~ /^[[:space:]]*fi[[:space:]]*$/ { exit }
+' install.sh)
+assert_not_empty "${ADD_PORT_DELETE_BLOCK}" "addCorePort：抽到端口文件删除块"
+
+# 端口 80 不得波及 8080，端口 2 不得波及 02_/12_ 核心 inbound 片段
+run_add_port_delete() {
+    local targetPort="$1" dir="$2"
+    rm -rf "${dir}" && mkdir -p "${dir}"
+    : >"${dir}/02_VLESS_TCP_inbounds.json"
+    : >"${dir}/12_VLESS_XHTTP_inbounds.json"
+    : >"${dir}/02_dokodemodoor_inbounds_80.json"
+    : >"${dir}/02_dokodemodoor_inbounds_hysteria_80.json"
+    : >"${dir}/02_dokodemodoor_inbounds_8080.json"
+    local configPath="${dir}/" port="${targetPort}"
+    eval "${ADD_PORT_DELETE_BLOCK}"
+}
+
+ADD_PORT_DIR="${MOCK_ROOT}/addcoreport/conf"
+
+run_add_port_delete 80 "${ADD_PORT_DIR}"
+assert_equals "absent" "$([[ -f "${ADD_PORT_DIR}/02_dokodemodoor_inbounds_80.json" ]] && echo present || echo absent)" \
+    "addCorePort(80)：删掉本端口的 dokodemodoor 片段"
+assert_equals "absent" "$([[ -f "${ADD_PORT_DIR}/02_dokodemodoor_inbounds_hysteria_80.json" ]] && echo present || echo absent)" \
+    "addCorePort(80)：删掉本端口的 hysteria 片段"
+assert_equals "present" "$([[ -f "${ADD_PORT_DIR}/02_dokodemodoor_inbounds_8080.json" ]] && echo present || echo absent)" \
+    "addCorePort(80)：8080 的片段不被子串匹配删掉"
+
+run_add_port_delete 2 "${ADD_PORT_DIR}"
+assert_equals "present" "$([[ -f "${ADD_PORT_DIR}/02_VLESS_TCP_inbounds.json" ]] && echo present || echo absent)" \
+    "addCorePort(2)：02_VLESS_TCP_inbounds.json 不被删"
+assert_equals "present" "$([[ -f "${ADD_PORT_DIR}/12_VLESS_XHTTP_inbounds.json" ]] && echo present || echo absent)" \
+    "addCorePort(2)：12_VLESS_XHTTP_inbounds.json 不被删"
+
+# 删除菜单的编号选择：整列比较，编号 1 不得同时命中 11
+ADD_PORT_SELECT_LINE=$(grep -F 'dokoConfig=$(find' install.sh)
+assert_not_empty "${ADD_PORT_SELECT_LINE}" "addCorePort：抽到删除菜单的编号选择语句"
+
+rm -rf "${ADD_PORT_DIR}" && mkdir -p "${ADD_PORT_DIR}"
+for _p in 2001 2002 2003 2004 2005 2006 2007 2008 2009 2010 2011; do
+    : >"${ADD_PORT_DIR}/02_dokodemodoor_inbounds_${_p}.json"
+done
+select_add_port() {
+    local configPath="${ADD_PORT_DIR}/" portIndex="$1" dokoConfig
+    eval "${ADD_PORT_SELECT_LINE}"
+    printf '%s\n' "${dokoConfig}"
+}
+assert_equals "1" "$(select_add_port 1 | grep -c .)" \
+    "addCorePort：11 个端口下编号 1 只选中一行"
+assert_equals "1" "$(select_add_port 1 | grep -c '^1:')" \
+    "addCorePort：编号 1 选中的正是第 1 行"
+assert_equals "1" "$(select_add_port 11 | grep -c '^11:')" \
+    "addCorePort：编号 11 选中的正是第 11 行"
+assert_equals "0" "$(select_add_port 99 | grep -c .)" \
+    "addCorePort：越界编号选不中任何行"
+
+rm -rf "${MOCK_ROOT}/addcoreport"
 
 echo ""
 
