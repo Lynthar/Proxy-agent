@@ -45,7 +45,7 @@ Type `pasly` and press enter; this is what you get:
 ```
 ==============================================================
 Author: Lynthar
-Version: v1.3.7
+Version: v1.3.8
 Github: https://github.com/Lynthar/Proxy-agent
 Description: Multi-Protocol Proxy Script
 1.Install
