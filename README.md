@@ -40,7 +40,7 @@ cd Proxy-agent && sudo ./install.sh
 ```
 ==============================================================
 作者: Lynthar
-当前版本: v1.3.7
+当前版本: v1.3.8
 Github: https://github.com/Lynthar/Proxy-agent
 描述: 八合一共存脚本
 1.安装
