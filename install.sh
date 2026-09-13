@@ -5135,7 +5135,7 @@ EOF
 
 # sing-box Tuic安装
 singBoxTuicInstall() {
-    if ! echo "${currentInstallProtocolType}" | grep -qE ",0,|,1,|,2,|,3,|,4,|,5,|,6,|,9,|,10,"; then
+    if ! echo "${currentInstallProtocolType}" | grep -qE ",0,|,1,|,2,|,3,|,4,|,5,|,6,|,9,|,10,|,11,|,13,"; then
         echoContent red "\n ---> 由于需要依赖证书，如安装Tuic，请先安装带有TLS标识协议"
         exit 1
     fi
@@ -5151,7 +5151,7 @@ singBoxTuicInstall() {
 
 # sing-box hy2安装
 singBoxHysteria2Install() {
-    if ! echo "${currentInstallProtocolType}" | grep -qE ",0,|,1,|,2,|,3,|,4,|,5,|,6,|,9,|,10,"; then
+    if ! echo "${currentInstallProtocolType}" | grep -qE ",0,|,1,|,2,|,3,|,4,|,5,|,6,|,9,|,10,|,11,|,13,"; then
         echoContent red "\n ---> 由于需要依赖证书，如安装Hysteria2，请先安装带有TLS标识协议"
         exit 1
     fi
@@ -6043,6 +6043,7 @@ EOF
     "inbounds": [
         {
             "type": "trojan",
+            "tag": "trojanTCP",
             "listen": "::",
             "listen_port": ${result[-1]},
             "users": $(initSingBoxClients 4),

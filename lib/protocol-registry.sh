@@ -150,21 +150,14 @@ getProtocolInboundTag() {
 # 协议属性查询
 # ============================================================================
 
-# 检查协议是否需要 TLS 证书
-# 返回: 0=需要, 1=不需要
+# 检查协议是否需要 tls/ 下的 ACME 域名证书（Hysteria2/TUIC 的模板与装机流程都要它）
+# 返回: 0=需要, 1=不需要（Reality / ss2022 / socks5）
 protocolRequiresTLS() {
     local protocolId="$1"
 
     case "${protocolId}" in
-        0|1|2|3|4|5|10|11|13)
-            return 0
-            ;;
-        6|7|8|9|12|14|20)
-            return 1  # Reality / UDP / 自签
-            ;;
-        *)
-            return 1
-            ;;
+        0|1|2|3|4|5|6|9|10|11|13) return 0 ;;
+        *) return 1 ;;
     esac
 }
 
