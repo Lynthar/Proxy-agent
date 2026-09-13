@@ -177,20 +177,13 @@ assert_equals "07_VLESS_vision_reality_inbounds.json" "${filename}" "getProtocol
 
 # 测试 getProtocolDisplayName
 name=$(getProtocolDisplayName 0)
-assert_equals "VLESS+TCP/TLS_Vision" "${name}" "getProtocolDisplayName(0)"
+assert_equals "VLESS+TCP[TLS_Vision]" "${name}" "getProtocolDisplayName(0)"
 
 name=$(getProtocolDisplayName 6)
 assert_equals "Hysteria2" "${name}" "getProtocolDisplayName(6)"
 
 name=$(getProtocolDisplayName 7)
 assert_equals "VLESS+Reality+Vision" "${name}" "getProtocolDisplayName(7)"
-
-# 测试 getProtocolShortName
-shortName=$(getProtocolShortName 0)
-assert_equals "vless_vision" "${shortName}" "getProtocolShortName(0)"
-
-shortName=$(getProtocolShortName 6)
-assert_equals "hysteria2" "${shortName}" "getProtocolShortName(6)"
 
 # 测试 protocolRequiresTLS
 assert_true "protocolRequiresTLS 0" "VLESS_TCP_VISION requires TLS"
@@ -200,32 +193,11 @@ assert_true "protocolRequiresTLS 6" "Hysteria2 requires TLS (ACME cert under tls
 assert_true "protocolRequiresTLS 9" "TUIC requires TLS (ACME cert under tls/)"
 assert_true "! protocolRequiresTLS 14" "SS2022 does not require TLS"
 
-# 测试 protocolUsesReality
-assert_true "protocolUsesReality 7" "Protocol 7 uses Reality"
-assert_true "protocolUsesReality 8" "Protocol 8 uses Reality"
-assert_true "protocolUsesReality 12" "Protocol 12 uses Reality"
-assert_true "! protocolUsesReality 0" "Protocol 0 does not use Reality"
-
-# 测试 protocolUsesUDP
-assert_true "protocolUsesUDP 6" "Hysteria2 uses UDP"
-assert_true "protocolUsesUDP 9" "TUIC uses UDP"
-assert_true "! protocolUsesUDP 0" "VLESS_TCP does not use UDP"
-
-# 测试 protocolSupportsCDN
-assert_true "protocolSupportsCDN 1" "VLESS_WS supports CDN"
-assert_true "protocolSupportsCDN 3" "VMess_WS supports CDN"
-assert_true "! protocolSupportsCDN 0" "VLESS_TCP does not support CDN"
-assert_true "! protocolSupportsCDN 7" "Reality does not support CDN"
-
-# 测试 getProtocolTransport
-transport=$(getProtocolTransport 0)
-assert_equals "tcp" "${transport}" "getProtocolTransport(0) = tcp"
-
-transport=$(getProtocolTransport 1)
-assert_equals "ws" "${transport}" "getProtocolTransport(1) = ws"
-
-transport=$(getProtocolTransport 6)
-assert_equals "quic" "${transport}" "getProtocolTransport(6) = quic"
+# 测试 anyProtocolRequiresTLS（三处装机白名单的派生源）
+assert_true 'anyProtocolRequiresTLS ",0,7,"' "anyProtocolRequiresTLS: VLESS_TCP + Reality needs a cert"
+assert_true 'anyProtocolRequiresTLS ",7,6,"' "anyProtocolRequiresTLS: Reality + Hysteria2 needs a cert"
+assert_true '! anyProtocolRequiresTLS ",7,12,14,"' "anyProtocolRequiresTLS: Reality/XHTTP/SS2022 only needs none"
+assert_true '! anyProtocolRequiresTLS ""' "anyProtocolRequiresTLS: empty selection needs none"
 
 # 测试 parseProtocolIdFromFileName
 id=$(parseProtocolIdFromFileName "02_VLESS_TCP_inbounds.json")

@@ -93,10 +93,10 @@ jsonModifyFile() {
 # 多文件写事务（Begin → Track 逐文件快照 → 修改 → Commit / Rollback）
 # ============================================================================
 
-# jsonTxBegin [BASE_DIR=/etc/Proxy-agent] → 0=事务已开启
+# jsonTxBegin [BASE_DIR=${PROXY_AGENT_DIR}] → 0=事务已开启
 # 快照目录建在 BASE_DIR 下（与目标文件同文件系统，恢复用 cp 不依赖 rename 语义）。
 jsonTxBegin() {
-    local baseDir="${1:-/etc/Proxy-agent}"
+    local baseDir="${1:-${PROXY_AGENT_DIR}}"
     [[ -d "${baseDir}" ]] || return 1
     _JSON_TX_DIR=$(mktemp -d "${baseDir}/.txn.XXXXXX") || return 1
     _JSON_TX_FILES=()

@@ -70,56 +70,29 @@ parseProtocolIdFromFileName() {
 # 协议显示名称
 # ============================================================================
 
-# 获取协议显示名称
+# 协议显示名（主菜单「已安装协议」行、账户事务报错行、链式分流菜单共用同一套文案）
 # 参数: $1 - 协议ID
-# 输出: 显示名称
 getProtocolDisplayName() {
     local protocolId="$1"
 
     case "${protocolId}" in
-        0)  echo "VLESS+TCP/TLS_Vision" ;;
-        1)  echo "VLESS+WS+TLS" ;;
-        2)  echo "Trojan+gRPC+TLS" ;;
-        3)  echo "VMess+WS+TLS" ;;
-        4)  echo "Trojan+TCP+TLS" ;;
-        5)  echo "VLESS+gRPC+TLS" ;;
+        0)  echo "VLESS+TCP[TLS_Vision]" ;;
+        1)  echo "VLESS+WS[TLS]" ;;
+        2)  echo "Trojan+gRPC[TLS]" ;;
+        3)  echo "VMess+WS[TLS]" ;;
+        4)  echo "Trojan+TCP[TLS]" ;;
+        5)  echo "VLESS+gRPC[TLS]" ;;
         6)  echo "Hysteria2" ;;
         7)  echo "VLESS+Reality+Vision" ;;
         8)  echo "VLESS+Reality+gRPC" ;;
-        9)  echo "TUIC" ;;
+        9)  echo "Tuic" ;;
         10) echo "Naive" ;;
-        11) echo "VMess+HTTPUpgrade+TLS" ;;
+        11) echo "VMess+TLS+HTTPUpgrade" ;;
         12) echo "VLESS+Reality+XHTTP" ;;
         13) echo "AnyTLS" ;;
-        14) echo "Shadowsocks 2022" ;;
+        14) echo "SS2022" ;;
         20) echo "SOCKS5" ;;
         *)  echo "Unknown" ;;
-    esac
-}
-
-# 获取协议短名称（用于订阅链接/URL）
-# 参数: $1 - 协议ID
-getProtocolShortName() {
-    local protocolId="$1"
-
-    case "${protocolId}" in
-        0)  echo "vless_vision" ;;
-        1)  echo "vless_ws" ;;
-        2)  echo "trojan_grpc" ;;
-        3)  echo "vmess_ws" ;;
-        4)  echo "trojan_tcp" ;;
-        5)  echo "vless_grpc" ;;
-        6)  echo "hysteria2" ;;
-        7)  echo "vless_reality_vision" ;;
-        8)  echo "vless_reality_grpc" ;;
-        9)  echo "tuic" ;;
-        10) echo "naive" ;;
-        11) echo "vmess_httpupgrade" ;;
-        12) echo "vless_reality_xhttp" ;;
-        13) echo "anytls" ;;
-        14) echo "ss2022" ;;
-        20) echo "socks5" ;;
-        *)  echo "unknown" ;;
     esac
 }
 
@@ -161,54 +134,13 @@ protocolRequiresTLS() {
     esac
 }
 
-# 检查协议是否使用 Reality
-protocolUsesReality() {
-    local protocolId="$1"
-
-    case "${protocolId}" in
-        7|8|12) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-# 检查协议是否使用 UDP
-protocolUsesUDP() {
-    local protocolId="$1"
-
-    case "${protocolId}" in
-        6|9) return 0 ;;  # Hysteria2, TUIC
-        *) return 1 ;;
-    esac
-}
-
-# 检查协议是否支持 CDN
-protocolSupportsCDN() {
-    local protocolId="$1"
-
-    case "${protocolId}" in
-        1|3|5|11|12) return 0 ;;  # WS / gRPC / HTTPUpgrade / XHTTP
-        *) return 1 ;;
-    esac
-}
-
-# 获取协议传输类型
-# 输出: tcp / ws / grpc / httpupgrade / xhttp / quic / http2 / anytls / shadowsocks / socks5
-getProtocolTransport() {
-    local protocolId="$1"
-
-    case "${protocolId}" in
-        0|4|7)  echo "tcp" ;;
-        1|3)    echo "ws" ;;
-        2|5|8)  echo "grpc" ;;
-        11)     echo "httpupgrade" ;;
-        12)     echo "xhttp" ;;
-        6|9)    echo "quic" ;;
-        10)     echo "http2" ;;
-        13)     echo "anytls" ;;
-        14)     echo "shadowsocks" ;;
-        20)     echo "socks5" ;;
-        *)      echo "unknown" ;;
-    esac
+# anyProtocolRequiresTLS ",0,6," → 0=清单里至少一个协议需要证书（装机前要不要先申请 TLS）
+anyProtocolRequiresTLS() {
+    local protocolId
+    for protocolId in ${1//,/ }; do
+        protocolRequiresTLS "${protocolId}" && return 0
+    done
+    return 1
 }
 
 # ============================================================================
