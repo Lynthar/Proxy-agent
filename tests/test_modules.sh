@@ -196,7 +196,9 @@ assert_equals "hysteria2" "${shortName}" "getProtocolShortName(6)"
 assert_true "protocolRequiresTLS 0" "VLESS_TCP_VISION requires TLS"
 assert_true "protocolRequiresTLS 1" "VLESS_WS requires TLS"
 assert_true "! protocolRequiresTLS 7" "VLESS_REALITY_VISION does not require TLS (uses Reality)"
-assert_true "! protocolRequiresTLS 6" "Hysteria2 does not require TLS (uses self-signed)"
+assert_true "protocolRequiresTLS 6" "Hysteria2 requires TLS (ACME cert under tls/)"
+assert_true "protocolRequiresTLS 9" "TUIC requires TLS (ACME cert under tls/)"
+assert_true "! protocolRequiresTLS 14" "SS2022 does not require TLS"
 
 # 测试 protocolUsesReality
 assert_true "protocolUsesReality 7" "Protocol 7 uses Reality"

@@ -696,6 +696,38 @@ rm -rf "${MOCK_ROOT}/addcoreport"
 echo ""
 
 # ============================================================================
+# sing-box inbound 模板 ↔ registry：tag 列与 certificate_path 列不能各说各话
+# ============================================================================
+
+echo -e "${BLUE}[initSingBoxConfig] 模板 tag / 证书引用与 registry 交叉钉${NC}"
+
+# 只抽 initSingBoxConfig 内 cat <<EOF >…/NN_xxx_inbounds.json 到 EOF 的块，一块一行：文件名|tag|有无证书
+SINGBOX_TEMPLATE_ROWS=$(awk '
+    /^initSingBoxConfig\(\)/ { inFn = 1 }
+    inFn && !inBlk && /^}/ { inFn = 0 }
+    inFn && /cat <<EOF >/ && match($0, /[0-9][0-9]_[A-Za-z0-9_]+_inbounds\.json/) {
+        name = substr($0, RSTART, RLENGTH); tag = ""; cert = "no"; inBlk = 1; next
+    }
+    inBlk && /^EOF$/ { print name "|" tag "|" cert; inBlk = 0 }
+    inBlk && /"tag"/ { t = $0; sub(/.*"tag"[ ]*:[ ]*"/, "", t); sub(/".*/, "", t); tag = t }
+    inBlk && /certificate_path/ { cert = "yes" }
+' install.sh)
+assert_not_empty "${SINGBOX_TEMPLATE_ROWS}" "initSingBoxConfig：抽到 inbound 模板块"
+
+while IFS='|' read -r _tplName _tplTag _tplCert; do
+    [[ -z "${_tplName}" ]] && continue
+    _tplId=$(parseProtocolIdFromFileName "${_tplName}")
+    assert_equals "$(getProtocolInboundTag "${_tplId}")" "${_tplTag}" \
+        "模板 ${_tplName} 的 tag 等于 getProtocolInboundTag(${_tplId})"
+    if [[ "${_tplCert}" == "yes" ]]; then
+        assert_equals "0" "$(protocolRequiresTLS "${_tplId}"; echo $?)" \
+            "模板 ${_tplName} 引用 tls/ 证书 ⇒ protocolRequiresTLS(${_tplId})"
+    fi
+done <<< "${SINGBOX_TEMPLATE_ROWS}"
+
+echo ""
+
+# ============================================================================
 # 测试结果汇总
 # ============================================================================
 
