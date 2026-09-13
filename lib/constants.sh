@@ -8,10 +8,29 @@
 readonly _CONSTANTS_LOADED=1
 
 # ============================================================================
-# 配置目录路径
+# 安装根与布局：根可由环境变量覆盖（install.sh 开头已校验），其余全部派生，主脚本不再写字面量
 # ============================================================================
 
-readonly PROXY_AGENT_DIR="/etc/Proxy-agent"
+readonly PROXY_AGENT_DIR="${PROXY_AGENT_DIR:-/etc/Proxy-agent}"
+readonly XRAY_DIR="${PROXY_AGENT_DIR}/xray"
+readonly XRAY_BIN="${XRAY_DIR}/xray"
+readonly XRAY_CONF_DIR="${XRAY_DIR}/conf"
+readonly SINGBOX_DIR="${PROXY_AGENT_DIR}/sing-box"
+readonly SINGBOX_BIN="${SINGBOX_DIR}/sing-box"
+readonly SINGBOX_CONF_DIR="${SINGBOX_DIR}/conf"
+readonly SINGBOX_FRAGMENT_DIR="${SINGBOX_CONF_DIR}/config"
+readonly SINGBOX_MERGED_CONFIG="${SINGBOX_CONF_DIR}/config.json"
+# 链式代理与外部节点的状态文件住在 sing-box/conf 根，不是 conf/config/ 片段目录，merge 不读它们
+readonly CHAIN_EXIT_INFO="${SINGBOX_CONF_DIR}/chain_exit_info.json"
+readonly CHAIN_RELAY_INFO="${SINGBOX_CONF_DIR}/chain_relay_info.json"
+readonly CHAIN_ENTRY_INFO="${SINGBOX_CONF_DIR}/chain_entry_info.json"
+readonly CHAIN_MULTI_INFO="${SINGBOX_CONF_DIR}/chain_multi_info.json"
+readonly EXTERNAL_NODE_FILE="${SINGBOX_CONF_DIR}/external_node_info.json"
+readonly TLS_DIR="${PROXY_AGENT_DIR}/tls"
+readonly SUBSCRIBE_DIR="${PROXY_AGENT_DIR}/subscribe"
+readonly SUBSCRIBE_LOCAL_DIR="${PROXY_AGENT_DIR}/subscribe_local"
+readonly SUBSCRIBE_REMOTE_DIR="${PROXY_AGENT_DIR}/subscribe_remote"
+readonly WARP_DIR="${PROXY_AGENT_DIR}/warp"
 readonly GEOSITE_LIST_FILE="${PROXY_AGENT_DIR}/geosite/dlc.dat_plain.yml"
 
 # ============================================================================

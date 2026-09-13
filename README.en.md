@@ -111,7 +111,7 @@ Seven environment variables:
 |---|---|
 | `V2RAY_LANG` | Switch language for one run (`en` / `zh`); beats the saved `lang_pref` |
 | `DRY_RUN=1` | Plan mode, same as `--dry-run` |
-| `PROXY_AGENT_DIR` | Install root, default `/etc/Proxy-agent` |
+| `PROXY_AGENT_DIR` | Install root, default `/etc/Proxy-agent`; a non-default root must be set on every invocation (including the crontab renewal entries and `pasly`), the script does not remember it |
 | `PROXY_AGENT_NO_BOOTSTRAP` | Disable the `lib/` bootstrap download |
 | `PROXY_AGENT_BOOTSTRAP_REF` / `_MODE` | Which ref and mode the bootstrap pulls |
 | `PROXY_AGENT_SELINUX_NONFATAL` | Don't exit under SELinux enforcing |

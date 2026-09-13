@@ -103,7 +103,7 @@ sing-box 的 shadowsocks 出站，还开了 sing-box 特有的 h2mux 多路复�
 |---|---|
 | `V2RAY_LANG` | 临时切语言（`en` / `zh`），优先于持久化的 `lang_pref` |
 | `DRY_RUN=1` | 计划模式，等价 `--dry-run` |
-| `PROXY_AGENT_DIR` | 安装根目录，默认 `/etc/Proxy-agent` |
+| `PROXY_AGENT_DIR` | 安装根目录，默认 `/etc/Proxy-agent`；改用别的目录时每次调用都要带上它（含 crontab 里的续签任务与 `pasly`），脚本不记住这个选择 |
 | `PROXY_AGENT_NO_BOOTSTRAP` | 禁用 `lib/` 自举下载 |
 | `PROXY_AGENT_BOOTSTRAP_REF` / `_MODE` | 自举拉取的 ref 与模式 |
 | `PROXY_AGENT_SELINUX_NONFATAL` | SELinux enforcing 下不退出 |

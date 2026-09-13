@@ -728,6 +728,110 @@ done <<< "${SINGBOX_TEMPLATE_ROWS}"
 echo ""
 
 # ============================================================================
+# showInstallStatus 的协议行（抽 install.sh 原文执行，不抄副本）
+# ============================================================================
+
+echo -e "${BLUE}[showInstallStatus] 协议显示行${NC}"
+
+SHOW_STATUS_FN=$(sed -n '/^showInstallStatus() {/,/^}/p' install.sh)
+assert_not_empty "${SHOW_STATUS_FN}" "showInstallStatus：抽到函数原文"
+
+# 子 shell 里跑：桩掉进程探测与重扫盘，echoContent 只留文本并去掉行尾 \c，t 只留键名
+render_install_status() (
+    coreKind="$1"; currentInstallProtocolType="$2"
+    pgrep() { :; }
+    readInstallProtocolType() { :; }
+    echoContent() { local s="$2"; printf '%s\n' "${s% \\c}"; }
+    t() { printf '%s' "$1"; }
+    eval "${SHOW_STATUS_FN}"
+    showInstallStatus
+)
+
+assert_equals "$(printf '%s\n' '\nCORE_CURRENT_STOPPED' 'PROTOCOLS_INSTALLED:' \
+    'VLESS+TCP[TLS_Vision]' 'VLESS+WS[TLS]' 'Trojan+gRPC[TLS]' 'VMess+WS[TLS]' 'Trojan+TCP[TLS]' \
+    'VLESS+gRPC[TLS]' 'Hysteria2' 'VLESS+Reality+Vision' 'VLESS+Reality+gRPC' 'Tuic' 'Naive' \
+    'VMess+TLS+HTTPUpgrade' 'VLESS+Reality+XHTTP' 'AnyTLS' 'SS2022' '')" \
+    "$(render_install_status 2 ",0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,")" \
+    "showInstallStatus：全部 15 个协议按 ID 升序、用菜单文案显示"
+assert_equals "$(printf '%s\n' '\nCORE_CURRENT_STOPPED' 'PROTOCOLS_INSTALLED:' 'VLESS+Reality+Vision' 'Tuic' 'Naive' '')" \
+    "$(render_install_status 1 ",10,9,7,")" \
+    "showInstallStatus：显示顺序按 ID 数值、与状态串顺序无关"
+assert_equals "$(printf '%s\n' '\nCORE_CURRENT_STOPPED')" \
+    "$(render_install_status 2 "")" \
+    "showInstallStatus：没有协议时不打协议行"
+
+echo ""
+
+# ============================================================================
+# registry 是协议文件名的唯一真源；安装根只能从 PROXY_AGENT_DIR 派生
+# ============================================================================
+
+echo -e "${BLUE}[registry / 布局] install.sh 的协议文件名与安装根${NC}"
+
+UNREGISTERED_NAMES=$(comm -23 \
+    <(grep -oE '[0-9]{2}_[A-Za-z0-9]+(_[A-Za-z0-9]+)*_inbounds\.json' install.sh | sort -u) \
+    <(grep -oE '[0-9]{2}_[A-Za-z0-9]+(_[A-Za-z0-9]+)*_inbounds\.json' lib/protocol-registry.sh | sort -u))
+assert_equals "" "${UNREGISTERED_NAMES}" "install.sh 里出现的每个 *_inbounds.json 文件名都在 registry 里"
+
+HARDCODED_ROOT=$(grep -n '/etc/Proxy-agent' install.sh lib/*.sh | grep -v 'PROXY_AGENT_DIR:-/etc/Proxy-agent')
+assert_equals "" "${HARDCODED_ROOT}" "install.sh 与 lib/ 不再写死 /etc/Proxy-agent（只剩默认值惯用法）"
+
+OVERRIDE_LAYOUT=$(env PROXY_AGENT_DIR=/tmp/pa-override bash -c \
+    'source lib/constants.sh; echo "${XRAY_BIN} ${SINGBOX_FRAGMENT_DIR} ${TLS_DIR} ${CHAIN_MULTI_INFO}"')
+assert_equals "/tmp/pa-override/xray/xray /tmp/pa-override/sing-box/conf/config /tmp/pa-override/tls /tmp/pa-override/sing-box/conf/chain_multi_info.json" \
+    "${OVERRIDE_LAYOUT}" "PROXY_AGENT_DIR 覆盖后整套布局跟着走"
+
+# 安装根合法性：抽 install.sh 开头那行 [[ … =~ … ]] 原文，在干净的 bash 里执行（本 shell 的 PROXY_AGENT_DIR 已 readonly）
+ROOT_CHECK_LINE=$(grep -F 'if [[ ! "${PROXY_AGENT_DIR}" =~' install.sh)
+assert_not_empty "${ROOT_CHECK_LINE}" "抽到安装根合法性检查"
+root_verdict() {
+    env PROXY_AGENT_DIR="$1" bash -c "${ROOT_CHECK_LINE} echo reject; else echo accept; fi"
+}
+for _root in /etc/Proxy-agent /opt/pa /srv/.hidden/pa; do
+    assert_equals "accept" "$(root_verdict "${_root}")" "安装根 ${_root} 合法"
+done
+for _root in / /opt /etc/.. "/a b/c" relative/x '/opt/pa*' /etc/Proxy-agent/..; do
+    assert_equals "reject" "$(root_verdict "${_root}")" "安装根 ${_root} 被拒绝（unInstall 会 rm -rf 它）"
+done
+
+echo ""
+
+# ============================================================================
+# 写侧：initXrayClients / initSingBoxClients 产出的用户对象带 registry 声明的身份与显示名字段
+# ============================================================================
+
+echo -e "${BLUE}[clients] 写侧用户字段 ↔ registry 账户列${NC}"
+
+CLIENTS_FNS=$(sed -n '/^initXrayClients() {/,/^}/p;/^initSingBoxClients() {/,/^}/p' install.sh)
+assert_not_empty "${CLIENTS_FNS}" "抽到 initXrayClients / initSingBoxClients 原文"
+
+render_clients() (
+    currentClients='[{"uuid":"11111111-2222-3333-4444-555555555555","name":"alice-VLESS_TCP/TLS_Vision"}]'
+    eval "${CLIENTS_FNS}"
+    if [[ "$1" == "1" ]]; then initXrayClients "$2"; else initSingBoxClients "$2"; fi
+)
+
+REGISTRY_IDS=$(for _n in $(grep -oE '[0-9]{2}_[A-Za-z0-9_]+_inbounds\.json' lib/protocol-registry.sh | sort -u); do
+    parseProtocolIdFromFileName "${_n}"; done | sort -nu)
+for _core in 1 2; do
+    for _pid in ${REGISTRY_IDS}; do
+        _idField=$(getProtocolIdField "${_core}" "${_pid}") || continue
+        _nameField=$(getProtocolNameField "${_core}" "${_pid}")
+        _keys=$(render_clients "${_core}" "${_pid}" 2>/dev/null | jq -r '.[0] // empty | keys[]' 2>/dev/null | tr '\n' ' ')
+        if [[ -z "${_keys}" ]]; then
+            echo "  - core ${_core} id ${_pid}: 生成器没有这个分支，跳过"
+            continue
+        fi
+        assert_contains " ${_keys}" " ${_idField} " "core ${_core} id ${_pid}: 写侧带 registry 身份字段 ${_idField}"
+        if [[ -n "${_nameField}" ]]; then
+            assert_contains " ${_keys}" " ${_nameField} " "core ${_core} id ${_pid}: 写侧带 registry 显示名字段 ${_nameField}"
+        fi
+    done
+done
+
+echo ""
+
+# ============================================================================
 # 测试结果汇总
 # ============================================================================
 

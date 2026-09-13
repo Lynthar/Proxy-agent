@@ -43,7 +43,7 @@ trap '_cleanup' EXIT
 # 模块加载：lib/ 存在则加载模块化组件
 # ============================================================================
 
-# 解析符号链接：pasly 是 /usr/bin/pasly → /etc/Proxy-agent/install.sh 的
+# 解析符号链接：pasly 是 /usr/bin/pasly → ${PROXY_AGENT_DIR}/install.sh 的
 # symlink。不解析的话 _SCRIPT_DIR 会停在 /usr/bin，找不到 lib/。
 # readlink -f 在 BusyBox（Alpine）和 GNU coreutils 上都默认支持。
 _SCRIPT_PATH="${BASH_SOURCE[0]}"
@@ -52,11 +52,21 @@ if command -v readlink >/dev/null 2>&1; then
 fi
 _SCRIPT_DIR="$(cd "$(dirname "${_SCRIPT_PATH}")" && pwd)"
 
+# 安装根：环境变量可覆盖，lib/constants.sh 的整套布局都从它派生。unInstall 会对它 rm -rf，
+# 所以只收「至少两级、只含 [A-Za-z0-9._-]」的绝对路径，根目录 / 一级目录 / 带通配符的一律拒绝。
+PROXY_AGENT_DIR="${PROXY_AGENT_DIR:-/etc/Proxy-agent}"
+PROXY_AGENT_DIR="${PROXY_AGENT_DIR%/}"
+if [[ ! "${PROXY_AGENT_DIR}" =~ ^(/\.*[A-Za-z0-9_-][A-Za-z0-9._-]*){2,}$ ]]; then
+    echo "[Proxy-agent] PROXY_AGENT_DIR 必须是至少两级、只含 [A-Za-z0-9._-] 的绝对路径：${PROXY_AGENT_DIR}" >&2
+    echo "[Proxy-agent] PROXY_AGENT_DIR must be an absolute path at least two levels deep, using only [A-Za-z0-9._-]: ${PROXY_AGENT_DIR}" >&2
+    exit 1
+fi
+
 # lib/ 优先与 install.sh 同级；否则回退到运行时安装根下的 lib/。
 # 让"pasly 调用"和"用户重新 wget /root/install.sh 但本机已装过一次"
 # 这两条路径都能找到模块。
-_LIB_FALLBACK_DIR="/etc/Proxy-agent/lib"
-_LANG_FALLBACK_DIR="/etc/Proxy-agent/shell/lang"
+_LIB_FALLBACK_DIR="${PROXY_AGENT_DIR}/lib"
+_LANG_FALLBACK_DIR="${PROXY_AGENT_DIR}/shell/lang"
 _LIB_DIR="${_SCRIPT_DIR}/lib"
 if [[ ! -d "${_LIB_DIR}" && -d "${_LIB_FALLBACK_DIR}" ]]; then
     _LIB_DIR="${_LIB_FALLBACK_DIR}"
@@ -305,11 +315,11 @@ if [[ -z "${_lib_health_ok}" && -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
             fi
         done
 
-        # VERSION 部署到 /etc/Proxy-agent/VERSION，让 _load_version 走本地文件档而非每次打 API。
+        # VERSION 部署到 ${PROXY_AGENT_DIR}/VERSION，让 _load_version 走本地文件档而非每次打 API。
         # 失败不致命。
         if [[ -f "${tmpDir}/VERSION" ]]; then
-            mkdir -p /etc/Proxy-agent 2>/dev/null
-            mv -f "${tmpDir}/VERSION" /etc/Proxy-agent/VERSION 2>/dev/null || true
+            mkdir -p ${PROXY_AGENT_DIR} 2>/dev/null
+            mv -f "${tmpDir}/VERSION" ${PROXY_AGENT_DIR}/VERSION 2>/dev/null || true
         fi
 
         rm -rf "${tmpDir}"
@@ -344,6 +354,7 @@ _required_lib_fns=(
     parseProtocolIdFromFileName
     getProtocolDisplayName
     getProtocolInboundTag
+    anyProtocolRequiresTLS
 )
 _missing_lib_fns=()
 for _fn in "${_required_lib_fns[@]}"; do
@@ -370,7 +381,7 @@ unset _LIB_DIR _LIB_FALLBACK_DIR _LANG_FALLBACK_DIR _SCRIPT_PATH _module _fn _re
 # ============================================================================
 _load_version() {
     local versionFile="${_SCRIPT_DIR}/VERSION"
-    local installedVersionFile="/etc/Proxy-agent/VERSION"
+    local installedVersionFile="${PROXY_AGENT_DIR}/VERSION"
 
     # 优先从脚本目录读取
     if [[ -f "${versionFile}" ]]; then
@@ -466,7 +477,7 @@ compareVersions() {
 # 手动更新入口（updateV2RayAgent）直接调 getLatestReleaseVersion，不走缓存
 checkForUpdates() {
     local latestVersion=
-    local cacheFile="/etc/Proxy-agent/latest_version_cache"
+    local cacheFile="${PROXY_AGENT_DIR}/latest_version_cache"
 
     if [[ -f "${cacheFile}" ]]; then
         local cacheMtime cacheAge
@@ -482,7 +493,7 @@ checkForUpdates() {
 
     if [[ -z "${latestVersion}" ]]; then
         latestVersion=$(getLatestReleaseVersion)
-        if [[ "${latestVersion}" =~ ^v[0-9][0-9.]*$ ]] && [[ -d /etc/Proxy-agent ]] && ! isDryRun; then
+        if [[ "${latestVersion}" =~ ^v[0-9][0-9.]*$ ]] && [[ -d ${PROXY_AGENT_DIR} ]] && ! isDryRun; then
             echo "${latestVersion}" >"${cacheFile}"
         fi
     fi
@@ -1334,27 +1345,27 @@ readInstallType() {
     singBoxConfigPath=
 
     # 1.检测安装目录
-    if [[ -d "/etc/Proxy-agent" ]]; then
-        if [[ -f "/etc/Proxy-agent/xray/xray" ]]; then
+    if [[ -d "${PROXY_AGENT_DIR}" ]]; then
+        if [[ -f "${XRAY_BIN}" ]]; then
             # 检测xray-core
-            if [[ -d "/etc/Proxy-agent/xray/conf" ]] && [[ -f "/etc/Proxy-agent/xray/conf/02_VLESS_TCP_inbounds.json" || -f "/etc/Proxy-agent/xray/conf/02_trojan_TCP_inbounds.json" || -f "/etc/Proxy-agent/xray/conf/07_VLESS_vision_reality_inbounds.json" ]]; then
+            if [[ -d "${XRAY_CONF_DIR}" ]] && [[ -f "${XRAY_CONF_DIR}/02_VLESS_TCP_inbounds.json" || -f "${XRAY_CONF_DIR}/04_trojan_TCP_inbounds.json" || -f "${XRAY_CONF_DIR}/07_VLESS_vision_reality_inbounds.json" ]]; then
                 # xray-core
-                configPath=/etc/Proxy-agent/xray/conf/
-                ctlPath=/etc/Proxy-agent/xray/xray
+                configPath=${XRAY_CONF_DIR}/
+                ctlPath=${XRAY_BIN}
                 coreKind=1
                 if [[ -f "${configPath}07_VLESS_vision_reality_inbounds.json" ]]; then
                     realityStatus=1
                 fi
-                if [[ -f "/etc/Proxy-agent/sing-box/sing-box" ]] && [[ -f "/etc/Proxy-agent/sing-box/conf/config/06_hysteria2_inbounds.json" || -f "/etc/Proxy-agent/sing-box/conf/config/09_tuic_inbounds.json" ]]; then
-                    singBoxConfigPath=/etc/Proxy-agent/sing-box/conf/config/
+                if [[ -f "${SINGBOX_BIN}" ]] && [[ -f "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" || -f "${SINGBOX_FRAGMENT_DIR}/09_tuic_inbounds.json" ]]; then
+                    singBoxConfigPath=${SINGBOX_FRAGMENT_DIR}/
                 fi
             fi
-        elif [[ -f "/etc/Proxy-agent/sing-box/sing-box" && -f "/etc/Proxy-agent/sing-box/conf/config.json" ]]; then
+        elif [[ -f "${SINGBOX_BIN}" && -f "${SINGBOX_MERGED_CONFIG}" ]]; then
             # 检测sing-box
-            ctlPath=/etc/Proxy-agent/sing-box/sing-box
+            ctlPath=${SINGBOX_BIN}
             coreKind=2
-            configPath=/etc/Proxy-agent/sing-box/conf/config/
-            singBoxConfigPath=/etc/Proxy-agent/sing-box/conf/config/
+            configPath=${SINGBOX_FRAGMENT_DIR}/
+            singBoxConfigPath=${SINGBOX_FRAGMENT_DIR}/
         fi
     fi
 }
@@ -1582,9 +1593,9 @@ checkBTPanel() {
                     checkBTPanel
                 else
                     domain=${btDomain}
-                    if [[ ! -f "/etc/Proxy-agent/tls/${btDomain}.crt" && ! -f "/etc/Proxy-agent/tls/${btDomain}.key" ]]; then
-                        ln -s "/www/server/panel/vhost/cert/${btDomain}/fullchain.pem" "/etc/Proxy-agent/tls/${btDomain}.crt"
-                        ln -s "/www/server/panel/vhost/cert/${btDomain}/privkey.pem" "/etc/Proxy-agent/tls/${btDomain}.key"
+                    if [[ ! -f "${TLS_DIR}/${btDomain}.crt" && ! -f "${TLS_DIR}/${btDomain}.key" ]]; then
+                        ln -s "/www/server/panel/vhost/cert/${btDomain}/fullchain.pem" "${TLS_DIR}/${btDomain}.crt"
+                        ln -s "/www/server/panel/vhost/cert/${btDomain}/privkey.pem" "${TLS_DIR}/${btDomain}.key"
                     fi
 
                     nginxStaticPath="/www/wwwroot/${btDomain}/html/"
@@ -1625,9 +1636,9 @@ check1Panel() {
                     check1Panel
                 else
                     domain=${btDomain}
-                    if [[ ! -f "/etc/Proxy-agent/tls/${btDomain}.crt" && ! -f "/etc/Proxy-agent/tls/${btDomain}.key" ]]; then
-                        ln -s "/opt/1panel/apps/openresty/openresty/www/sites/${btDomain}/ssl/fullchain.pem" "/etc/Proxy-agent/tls/${btDomain}.crt"
-                        ln -s "/opt/1panel/apps/openresty/openresty/www/sites/${btDomain}/ssl/privkey.pem" "/etc/Proxy-agent/tls/${btDomain}.key"
+                    if [[ ! -f "${TLS_DIR}/${btDomain}.crt" && ! -f "${TLS_DIR}/${btDomain}.key" ]]; then
+                        ln -s "/opt/1panel/apps/openresty/openresty/www/sites/${btDomain}/ssl/fullchain.pem" "${TLS_DIR}/${btDomain}.crt"
+                        ln -s "/opt/1panel/apps/openresty/openresty/www/sites/${btDomain}/ssl/privkey.pem" "${TLS_DIR}/${btDomain}.key"
                     fi
 
                     nginxStaticPath="/opt/1panel/apps/openresty/openresty/www/sites/${btDomain}/index/"
@@ -1789,18 +1800,18 @@ readLastInstallationConfig() {
 unInstallSingBox() {
     local type=$1
     if [[ -n "${singBoxConfigPath}" ]]; then
-        if grep -q 'tuic' </etc/Proxy-agent/sing-box/conf/config.json && [[ "${type}" == "tuic" ]]; then
+        if grep -q 'tuic' <${SINGBOX_MERGED_CONFIG} && [[ "${type}" == "tuic" ]]; then
             rm "${singBoxConfigPath}09_tuic_inbounds.json"
             echoContent green " ---> 删除sing-box tuic配置成功"
         fi
 
-        if grep -q 'hysteria2' </etc/Proxy-agent/sing-box/conf/config.json && [[ "${type}" == "hysteria2" ]]; then
+        if grep -q 'hysteria2' <${SINGBOX_MERGED_CONFIG} && [[ "${type}" == "hysteria2" ]]; then
             rm "${singBoxConfigPath}06_hysteria2_inbounds.json"
             echoContent green " ---> 删除sing-box hysteria2配置成功"
         fi
         # 删除合并后的 config.json，让下一次 handleSingBox start 走 singBoxMergeConfig 重新生成。
         # 用绝对路径而非 ${singBoxConfigPath}（后者是 .../config/ 片段目录，不是 config.json 父目录）。
-        rm -f /etc/Proxy-agent/sing-box/conf/config.json
+        rm -f ${SINGBOX_MERGED_CONFIG}
     fi
 
     readInstallType
@@ -1812,7 +1823,7 @@ unInstallSingBox() {
     else
         handleSingBox stop
         rm /etc/systemd/system/sing-box.service
-        rm -rf /etc/Proxy-agent/sing-box/*
+        rm -rf ${SINGBOX_DIR}/*
         echoContent green " ---> sing-box 卸载完成"
     fi
 }
@@ -1924,8 +1935,8 @@ readConfigHostPathUUID() {
             # currentPath=${currentPath::-2}
         fi
     fi
-    if [[ -f "/etc/Proxy-agent/cdn" ]] && [[ -n "$(head -1 /etc/Proxy-agent/cdn)" ]]; then
-        currentCDNAddress=$(head -1 /etc/Proxy-agent/cdn)
+    if [[ -f "${PROXY_AGENT_DIR}/cdn" ]] && [[ -n "$(head -1 ${PROXY_AGENT_DIR}/cdn)" ]]; then
+        currentCDNAddress=$(head -1 ${PROXY_AGENT_DIR}/cdn)
     else
         currentCDNAddress="${currentHost}"
     fi
@@ -1952,62 +1963,12 @@ showInstallStatus() {
         readInstallProtocolType
 
         if [[ -n ${currentInstallProtocolType} ]]; then
+            local pid
             echoContent yellow "$(t PROTOCOLS_INSTALLED): \c"
-        fi
-        if echo ${currentInstallProtocolType} | grep -q ",0,"; then
-            echoContent yellow "VLESS+TCP[TLS_Vision] \c"
-        fi
-
-        if echo ${currentInstallProtocolType} | grep -q ",1,"; then
-            echoContent yellow "VLESS+WS[TLS] \c"
-        fi
-
-        if echo ${currentInstallProtocolType} | grep -q ",2,"; then
-            echoContent yellow "Trojan+gRPC[TLS] \c"
-        fi
-
-        if echo ${currentInstallProtocolType} | grep -q ",3,"; then
-            echoContent yellow "VMess+WS[TLS] \c"
-        fi
-
-        if echo ${currentInstallProtocolType} | grep -q ",4,"; then
-            echoContent yellow "Trojan+TCP[TLS] \c"
-        fi
-
-        if echo ${currentInstallProtocolType} | grep -q ",5,"; then
-            echoContent yellow "VLESS+gRPC[TLS] \c"
-        fi
-        if echo ${currentInstallProtocolType} | grep -q ",6,"; then
-            echoContent yellow "Hysteria2 \c"
-        fi
-        if echo ${currentInstallProtocolType} | grep -q ",7,"; then
-            echoContent yellow "VLESS+Reality+Vision \c"
-        fi
-        if echo ${currentInstallProtocolType} | grep -q ",8,"; then
-            echoContent yellow "VLESS+Reality+gRPC \c"
-        fi
-        if echo ${currentInstallProtocolType} | grep -q ",9,"; then
-            echoContent yellow "Tuic \c"
-        fi
-        if echo ${currentInstallProtocolType} | grep -q ",10,"; then
-            echoContent yellow "Naive \c"
-        fi
-        if echo ${currentInstallProtocolType} | grep -q ",11,"; then
-            echoContent yellow "VMess+TLS+HTTPUpgrade \c"
-        fi
-        if echo ${currentInstallProtocolType} | grep -q ",12,"; then
-            echoContent yellow "VLESS+Reality+XHTTP \c"
-        fi
-        if echo ${currentInstallProtocolType} | grep -q ",13,"; then
-            echoContent yellow "AnyTLS \c"
-        fi
-        if echo ${currentInstallProtocolType} | grep -q ",14,"; then
-            echoContent yellow "SS2022 \c"
-        fi
-        # 协议列表所有分支都用 \c 抑制换行；这里在分支结束后补一个换行，
-        # 避免后续菜单首项被拼在协议行末（fork 时删掉了上游"推广区"那条
-        # 以 \n 起始的分隔符，自然顶替这个换行的兜底也没了）。
-        if [[ -n ${currentInstallProtocolType} ]]; then
+            # 各项用 \c 抑制换行、按 ID 升序打印；末尾补一个换行，否则菜单首项会接在协议行末
+            for pid in $(tr ',' '\n' <<<"${currentInstallProtocolType}" | sort -n); do
+                echoContent yellow "$(getProtocolDisplayName "${pid}") \c"
+            done
             echo
         fi
     fi
@@ -2017,11 +1978,11 @@ showInstallStatus() {
 cleanUp() {
     if [[ "$1" == "xrayDel" ]]; then
         handleXray stop
-        rm -rf /etc/Proxy-agent/xray/*
+        rm -rf ${XRAY_DIR}/*
     elif [[ "$1" == "singBoxDel" ]]; then
         handleSingBox stop
-        rm -rf /etc/Proxy-agent/sing-box/conf/config.json >/dev/null 2>&1
-        rm -rf /etc/Proxy-agent/sing-box/conf/config/* >/dev/null 2>&1
+        rm -rf ${SINGBOX_MERGED_CONFIG} >/dev/null 2>&1
+        rm -rf ${SINGBOX_FRAGMENT_DIR}/* >/dev/null 2>&1
     fi
 }
 initVar "${1:-}"
@@ -2042,42 +2003,42 @@ readSingBoxConfig
 # 初始化安装目录
 mkdirTools() {
     # TLS证书目录 - 设置严格权限保护私钥
-    mkdir -p /etc/Proxy-agent/tls
-    chmod 700 /etc/Proxy-agent/tls
+    mkdir -p ${TLS_DIR}
+    chmod 700 ${TLS_DIR}
 
     # subscribe_local/_remote 存明文节点配置（含 UUID），收紧到 root-only；
     # nginx 只读对外发布目录 subscribe/，不受影响
-    mkdir -p /etc/Proxy-agent/subscribe_local/default
-    mkdir -p /etc/Proxy-agent/subscribe_local/clashMeta
-    chmod 700 /etc/Proxy-agent/subscribe_local
+    mkdir -p ${SUBSCRIBE_LOCAL_DIR}/default
+    mkdir -p ${SUBSCRIBE_LOCAL_DIR}/clashMeta
+    chmod 700 ${SUBSCRIBE_LOCAL_DIR}
 
-    mkdir -p /etc/Proxy-agent/subscribe_remote/default
-    mkdir -p /etc/Proxy-agent/subscribe_remote/clashMeta
-    chmod 700 /etc/Proxy-agent/subscribe_remote
+    mkdir -p ${SUBSCRIBE_REMOTE_DIR}/default
+    mkdir -p ${SUBSCRIBE_REMOTE_DIR}/clashMeta
+    chmod 700 ${SUBSCRIBE_REMOTE_DIR}
 
-    mkdir -p /etc/Proxy-agent/subscribe/default
-    mkdir -p /etc/Proxy-agent/subscribe/clashMetaProfiles
-    mkdir -p /etc/Proxy-agent/subscribe/clashMeta
+    mkdir -p ${SUBSCRIBE_DIR}/default
+    mkdir -p ${SUBSCRIBE_DIR}/clashMetaProfiles
+    mkdir -p ${SUBSCRIBE_DIR}/clashMeta
 
-    mkdir -p /etc/Proxy-agent/subscribe/sing-box
-    mkdir -p /etc/Proxy-agent/subscribe/sing-box_profiles
-    mkdir -p /etc/Proxy-agent/subscribe_local/sing-box
+    mkdir -p ${SUBSCRIBE_DIR}/sing-box
+    mkdir -p ${SUBSCRIBE_DIR}/sing-box_profiles
+    mkdir -p ${SUBSCRIBE_LOCAL_DIR}/sing-box
 
     # Xray配置目录 - 设置适当权限
-    mkdir -p /etc/Proxy-agent/xray/conf
-    chmod 700 /etc/Proxy-agent/xray/conf
-    mkdir -p /etc/Proxy-agent/xray/reality_scan
-    mkdir -p /etc/Proxy-agent/xray/tmp
+    mkdir -p ${XRAY_CONF_DIR}
+    chmod 700 ${XRAY_CONF_DIR}
+    mkdir -p ${XRAY_DIR}/reality_scan
+    mkdir -p ${XRAY_DIR}/tmp
     mkdir -p /etc/systemd/system/
     mkdir -p /tmp/Proxy-agent-tls/
 
     # WARP配置目录 - 包含私钥
-    mkdir -p /etc/Proxy-agent/warp
-    chmod 700 /etc/Proxy-agent/warp
+    mkdir -p ${WARP_DIR}
+    chmod 700 ${WARP_DIR}
 
     # sing-box配置目录 - 设置适当权限
-    mkdir -p /etc/Proxy-agent/sing-box/conf/config
-    chmod 700 /etc/Proxy-agent/sing-box/conf
+    mkdir -p ${SINGBOX_FRAGMENT_DIR}
+    chmod 700 ${SINGBOX_CONF_DIR}
 
     mkdir -p /usr/share/nginx/html/
 }
@@ -2111,8 +2072,8 @@ installTools() {
 
     echoContent green " ---> $(t INSTALL_CHECKING)"
 
-    ${upgrade} >/etc/Proxy-agent/install.log 2>&1
-    if grep <"/etc/Proxy-agent/install.log" -q "changed"; then
+    ${upgrade} >${PROXY_AGENT_DIR}/install.log 2>&1
+    if grep <"${PROXY_AGENT_DIR}/install.log" -q "changed"; then
         ${updateReleaseInfoChange} >/dev/null 2>&1
     fi
 
@@ -2261,11 +2222,11 @@ installTools() {
     else
         if [[ ! -d "$HOME/.acme.sh" ]] || [[ -d "$HOME/.acme.sh" && -z $(find "$HOME/.acme.sh/acme.sh") ]]; then
             echoContent green " ---> 安装acme.sh"
-            curl -s https://get.acme.sh | sh >/etc/Proxy-agent/tls/acme.log 2>&1
+            curl -s https://get.acme.sh | sh >${TLS_DIR}/acme.log 2>&1
 
             if [[ ! -d "$HOME/.acme.sh" ]] || [[ -z $(find "$HOME/.acme.sh/acme.sh") ]]; then
                 echoContent red "  acme安装失败--->"
-                tail -n 100 /etc/Proxy-agent/tls/acme.log
+                tail -n 100 ${TLS_DIR}/acme.log
                 echoContent yellow "错误排查:"
                 echoContent red "  1.获取Github文件失败，请等待Github恢复后尝试，恢复进度可查看 [https://www.githubstatus.com/]"
                 echoContent red "  2.acme.sh脚本出现bug，可查看[https://github.com/acmesh-official/acme.sh] issues"
@@ -2631,7 +2592,7 @@ singBoxNginxConfig() {
     nginxVersion=$(nginx -v 2>&1)
 
     local singBoxNginxSSL=
-    singBoxNginxSSL="ssl_certificate /etc/Proxy-agent/tls/${domain}.crt;ssl_certificate_key /etc/Proxy-agent/tls/${domain}.key;"
+    singBoxNginxSSL="ssl_certificate ${TLS_DIR}/${domain}.crt;ssl_certificate_key ${TLS_DIR}/${domain}.key;"
 
     if echo "${nginxVersion}" | grep -q "1.25" && [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $3}') -gt 0 ]] || [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $2}') -gt 25 ]]; then
         nginxH2Conf="listen ${port} so_keepalive=on ssl;http2 on;"
@@ -2810,7 +2771,7 @@ switchSSLType() {
             echoContent red " ---> buypass不支持API申请证书"
             exit 1
         fi
-        echo "${sslType}" >/etc/Proxy-agent/tls/ssl_type
+        echo "${sslType}" >${TLS_DIR}/ssl_type
     fi
 }
 
@@ -2843,7 +2804,7 @@ acmeInstallSSL() {
 export CF_Token="${cfAPIToken}"
 ACME_ENV_EOF
         # shellcheck source=/dev/null
-        sudo bash -c "source '${acmeEnvFile}' && '$HOME/.acme.sh/acme.sh' --issue ${acmeDomainArgs} --dns dns_cf -k ec-256 --server '${sslType}' ${sslIPv6}" 2>&1 | tee -a /etc/Proxy-agent/tls/acme.log >/dev/null
+        sudo bash -c "source '${acmeEnvFile}' && '$HOME/.acme.sh/acme.sh' --issue ${acmeDomainArgs} --dns dns_cf -k ec-256 --server '${sslType}' ${sslIPv6}" 2>&1 | tee -a ${TLS_DIR}/acme.log >/dev/null
         rm -f "${acmeEnvFile}"
     elif [[ "${dnsAPIType}" == "aliyun" ]]; then
         echoContent green " --->  DNS API 生成证书中"
@@ -2856,11 +2817,11 @@ export Ali_Key="${aliKey}"
 export Ali_Secret="${aliSecret}"
 ACME_ENV_EOF
         # shellcheck source=/dev/null
-        sudo bash -c "source '${acmeEnvFile}' && '$HOME/.acme.sh/acme.sh' --issue ${acmeDomainArgs} --dns dns_ali -k ec-256 --server '${sslType}' ${sslIPv6}" 2>&1 | tee -a /etc/Proxy-agent/tls/acme.log >/dev/null
+        sudo bash -c "source '${acmeEnvFile}' && '$HOME/.acme.sh/acme.sh' --issue ${acmeDomainArgs} --dns dns_ali -k ec-256 --server '${sslType}' ${sslIPv6}" 2>&1 | tee -a ${TLS_DIR}/acme.log >/dev/null
         rm -f "${acmeEnvFile}"
     else
         echoContent green " ---> 生成证书中"
-        sudo "$HOME/.acme.sh/acme.sh" --issue -d "${tlsDomain}" --standalone -k ec-256 --server "${sslType}" ${sslIPv6} 2>&1 | tee -a /etc/Proxy-agent/tls/acme.log >/dev/null
+        sudo "$HOME/.acme.sh/acme.sh" --issue -d "${tlsDomain}" --standalone -k ec-256 --server "${sslType}" ${sslIPv6} 2>&1 | tee -a ${TLS_DIR}/acme.log >/dev/null
     fi
 }
 # 自定义端口
@@ -2921,11 +2882,11 @@ installTLS() {
     local tlsDomain=${domain}
 
     # 安装tls
-    if [[ -f "/etc/Proxy-agent/tls/${tlsDomain}.crt" && -f "/etc/Proxy-agent/tls/${tlsDomain}.key" && -n $(cat "/etc/Proxy-agent/tls/${tlsDomain}.crt") ]] || [[ -d "$HOME/.acme.sh/${tlsDomain}_ecc" && -f "$HOME/.acme.sh/${tlsDomain}_ecc/${tlsDomain}.key" && -f "$HOME/.acme.sh/${tlsDomain}_ecc/${tlsDomain}.cer" ]] || [[ "${installedDNSAPIStatus}" == "true" ]]; then
+    if [[ -f "${TLS_DIR}/${tlsDomain}.crt" && -f "${TLS_DIR}/${tlsDomain}.key" && -n $(cat "${TLS_DIR}/${tlsDomain}.crt") ]] || [[ -d "$HOME/.acme.sh/${tlsDomain}_ecc" && -f "$HOME/.acme.sh/${tlsDomain}_ecc/${tlsDomain}.key" && -f "$HOME/.acme.sh/${tlsDomain}_ecc/${tlsDomain}.cer" ]] || [[ "${installedDNSAPIStatus}" == "true" ]]; then
         echoContent green " ---> 检测到证书"
         renewalTLS
 
-        if [[ -z $(find /etc/Proxy-agent/tls/ -name "${tlsDomain}.crt") ]] || [[ -z $(find /etc/Proxy-agent/tls/ -name "${tlsDomain}.key") ]] || [[ -z $(cat "/etc/Proxy-agent/tls/${tlsDomain}.crt") ]]; then
+        if [[ -z $(find ${TLS_DIR}/ -name "${tlsDomain}.crt") ]] || [[ -z $(find ${TLS_DIR}/ -name "${tlsDomain}.key") ]] || [[ -z $(cat "${TLS_DIR}/${tlsDomain}.crt") ]]; then
             if [[ "${installedDNSAPIStatus}" == "true" ]]; then
                 # 验证通配符证书确实存在于 acme.sh 中（目录名以字面 *. 开头）
                 local wildcardCertDir wildcardCertFile
@@ -2936,16 +2897,16 @@ installTLS() {
                 if [[ -n "${wildcardCertFile}" ]]; then
                     local wildcardDomain
                     wildcardDomain=$(basename "${wildcardCertDir}" | sed 's/_ecc$//')
-                    sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${wildcardDomain}" --fullchainpath "/etc/Proxy-agent/tls/${tlsDomain}.crt" --keypath "/etc/Proxy-agent/tls/${tlsDomain}.key" --ecc >/dev/null
+                    sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${wildcardDomain}" --fullchainpath "${TLS_DIR}/${tlsDomain}.crt" --keypath "${TLS_DIR}/${tlsDomain}.key" --ecc >/dev/null
                 else
                     echoContent red " ---> 未找到有效的通配符证书，将尝试申请新证书"
                     installedDNSAPIStatus=""
-                    rm -rf /etc/Proxy-agent/tls/*
+                    rm -rf ${TLS_DIR}/*
                     installTLS "$1"
                     return
                 fi
             else
-                sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${tlsDomain}" --fullchainpath "/etc/Proxy-agent/tls/${tlsDomain}.crt" --keypath "/etc/Proxy-agent/tls/${tlsDomain}.key" --ecc >/dev/null
+                sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${tlsDomain}" --fullchainpath "${TLS_DIR}/${tlsDomain}.crt" --keypath "${TLS_DIR}/${tlsDomain}.key" --ecc >/dev/null
             fi
 
         else
@@ -2954,7 +2915,7 @@ installTLS() {
                     echoContent yellow " ---> 如未过期或者自定义证书请选择[n]\n"
                     read -r -p "是否重新安装？[y/n]:" reInstallStatus
                     if [[ "${reInstallStatus}" == "y" ]]; then
-                        rm -rf /etc/Proxy-agent/tls/*
+                        rm -rf ${TLS_DIR}/*
                         installTLS "$1"
                     fi
                 fi
@@ -2980,26 +2941,26 @@ installTLS() {
             if [[ -n "${wildcardCertDir}" ]]; then
                 local wildcardDomain
                 wildcardDomain=$(basename "${wildcardCertDir}" | sed 's/_ecc$//')
-                sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${wildcardDomain}" --fullchainpath "/etc/Proxy-agent/tls/${tlsDomain}.crt" --keypath "/etc/Proxy-agent/tls/${tlsDomain}.key" --ecc >/dev/null
+                sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${wildcardDomain}" --fullchainpath "${TLS_DIR}/${tlsDomain}.crt" --keypath "${TLS_DIR}/${tlsDomain}.key" --ecc >/dev/null
             else
                 echoContent red " ---> 通配符证书目录不存在"
             fi
         else
-            sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${tlsDomain}" --fullchainpath "/etc/Proxy-agent/tls/${tlsDomain}.crt" --keypath "/etc/Proxy-agent/tls/${tlsDomain}.key" --ecc >/dev/null
+            sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${tlsDomain}" --fullchainpath "${TLS_DIR}/${tlsDomain}.crt" --keypath "${TLS_DIR}/${tlsDomain}.key" --ecc >/dev/null
         fi
 
-        if [[ ! -f "/etc/Proxy-agent/tls/${tlsDomain}.crt" || ! -f "/etc/Proxy-agent/tls/${tlsDomain}.key" ]] || [[ -z $(cat "/etc/Proxy-agent/tls/${tlsDomain}.key") || -z $(cat "/etc/Proxy-agent/tls/${tlsDomain}.crt") ]]; then
-            tail -n 10 /etc/Proxy-agent/tls/acme.log
+        if [[ ! -f "${TLS_DIR}/${tlsDomain}.crt" || ! -f "${TLS_DIR}/${tlsDomain}.key" ]] || [[ -z $(cat "${TLS_DIR}/${tlsDomain}.key") || -z $(cat "${TLS_DIR}/${tlsDomain}.crt") ]]; then
+            tail -n 10 ${TLS_DIR}/acme.log
             if [[ ${installTLSCount} == "1" ]]; then
                 echoContent red " ---> TLS安装失败，请检查acme日志"
-                echoContent yellow "     日志文件: /etc/Proxy-agent/tls/acme.log"
+                echoContent yellow "     日志文件: ${TLS_DIR}/acme.log"
                 exit 1
             fi
 
             installTLSCount=1
             echo
 
-            if tail -n 10 /etc/Proxy-agent/tls/acme.log | grep -q "Could not validate email address as valid"; then
+            if tail -n 10 ${TLS_DIR}/acme.log | grep -q "Could not validate email address as valid"; then
                 echoContent red " ---> 邮箱无法通过SSL厂商验证，请重新输入"
                 echo
                 customSSLEmail "validate email"
@@ -3011,13 +2972,13 @@ installTLS() {
 
         # 验证证书与私钥匹配
         echoContent green " ---> 验证证书与私钥..."
-        if ! verifyCertKeyMatch "/etc/Proxy-agent/tls/${tlsDomain}.crt" "/etc/Proxy-agent/tls/${tlsDomain}.key"; then
+        if ! verifyCertKeyMatch "${TLS_DIR}/${tlsDomain}.crt" "${TLS_DIR}/${tlsDomain}.key"; then
             echoContent red " ---> 证书验证失败，请检查证书文件"
             exit 1
         fi
 
         # 验证证书有效期
-        verifyCertExpiry "/etc/Proxy-agent/tls/${tlsDomain}.crt"
+        verifyCertExpiry "${TLS_DIR}/${tlsDomain}.crt"
 
         echoContent green " ---> TLS生成成功"
     else
@@ -3201,9 +3162,9 @@ nginxBlog() {
 # 修改http_port_t端口
 updateSELinuxHTTPPortT() {
 
-    $(find /usr/bin /usr/sbin | grep -w journalctl) -xe >/etc/Proxy-agent/nginx_error.log 2>&1
+    $(find /usr/bin /usr/sbin | grep -w journalctl) -xe >${PROXY_AGENT_DIR}/nginx_error.log 2>&1
 
-    if find /usr/bin /usr/sbin | grep -q -w semanage && find /usr/bin /usr/sbin | grep -q -w getenforce && grep -E "31300|31302" </etc/Proxy-agent/nginx_error.log | grep -q "Permission denied"; then
+    if find /usr/bin /usr/sbin | grep -q -w semanage && find /usr/bin /usr/sbin | grep -q -w getenforce && grep -E "31300|31302" <${PROXY_AGENT_DIR}/nginx_error.log | grep -q "Permission denied"; then
         echoContent red " ---> 检查SELinux端口是否开放"
         if ! $(find /usr/bin /usr/sbin | grep -w semanage) port -l | grep http_port | grep -q 31300; then
             $(find /usr/bin /usr/sbin | grep -w semanage) port -a -t http_port_t -p tcp 31300
@@ -3226,9 +3187,9 @@ handleNginx() {
 
     if ! echo "${selectCustomInstallType}" | grep -qwE ",7,|,8,|,7,8," && [[ -z $(pgrep -x "nginx") ]] && [[ "$1" == "start" ]]; then
         if [[ "${release}" == "alpine" ]]; then
-            rc-service nginx start 2>/etc/Proxy-agent/nginx_error.log
+            rc-service nginx start 2>${PROXY_AGENT_DIR}/nginx_error.log
         else
-            systemctl start nginx 2>/etc/Proxy-agent/nginx_error.log
+            systemctl start nginx 2>${PROXY_AGENT_DIR}/nginx_error.log
         fi
 
         sleep 0.5
@@ -3237,7 +3198,7 @@ handleNginx() {
             echoContent red " ---> Nginx启动失败"
             echoContent red " ---> 请将下方日志反馈给开发者"
             nginx
-            if grep -q "journalctl -xe" </etc/Proxy-agent/nginx_error.log; then
+            if grep -q "journalctl -xe" <${PROXY_AGENT_DIR}/nginx_error.log; then
                 updateSELinuxHTTPPortT
             fi
         else
@@ -3266,12 +3227,12 @@ handleNginx() {
 installCronTLS() {
     if [[ -z "${btDomain}" ]]; then
         echoContent skyBlue "\n进度 $1/${totalProgress} : 添加定时维护证书"
-        crontab -l >/etc/Proxy-agent/backup_crontab.cron
+        crontab -l >${PROXY_AGENT_DIR}/backup_crontab.cron
         local historyCrontab
-        historyCrontab=$(sed '/v2ray-agent/d;/Proxy-agent/d;/acme.sh/d' /etc/Proxy-agent/backup_crontab.cron)
-        echo "${historyCrontab}" >/etc/Proxy-agent/backup_crontab.cron
-        echo "30 1 * * * /bin/bash /etc/Proxy-agent/install.sh RenewTLS >> /etc/Proxy-agent/crontab_tls.log 2>&1" >>/etc/Proxy-agent/backup_crontab.cron
-        crontab /etc/Proxy-agent/backup_crontab.cron
+        historyCrontab=$(sed '/v2ray-agent/d;/Proxy-agent/d;/acme.sh/d' ${PROXY_AGENT_DIR}/backup_crontab.cron)
+        echo "${historyCrontab}" >${PROXY_AGENT_DIR}/backup_crontab.cron
+        echo "30 1 * * * /bin/bash ${PROXY_AGENT_DIR}/install.sh RenewTLS >> ${PROXY_AGENT_DIR}/crontab_tls.log 2>&1" >>${PROXY_AGENT_DIR}/backup_crontab.cron
+        crontab ${PROXY_AGENT_DIR}/backup_crontab.cron
         echoContent green "\n ---> 添加定时维护证书成功"
     fi
 }
@@ -3283,9 +3244,9 @@ installCronUpdateGeo() {
             exit 1
         fi
         echoContent skyBlue "\n进度 1/1 : 添加定时更新geo文件"
-        crontab -l >/etc/Proxy-agent/backup_crontab.cron
-        echo "35 1 * * * /bin/bash /etc/Proxy-agent/install.sh UpdateGeo >> /etc/Proxy-agent/crontab_tls.log 2>&1" >>/etc/Proxy-agent/backup_crontab.cron
-        crontab /etc/Proxy-agent/backup_crontab.cron
+        crontab -l >${PROXY_AGENT_DIR}/backup_crontab.cron
+        echo "35 1 * * * /bin/bash ${PROXY_AGENT_DIR}/install.sh UpdateGeo >> ${PROXY_AGENT_DIR}/crontab_tls.log 2>&1" >>${PROXY_AGENT_DIR}/backup_crontab.cron
+        crontab ${PROXY_AGENT_DIR}/backup_crontab.cron
         echoContent green "\n ---> 添加定时更新geo文件成功"
     fi
 }
@@ -3302,8 +3263,8 @@ renewalTLS() {
         domain=${tlsDomain}
     fi
 
-    if [[ -f "/etc/Proxy-agent/tls/ssl_type" ]]; then
-        if grep -q "buypass" <"/etc/Proxy-agent/tls/ssl_type"; then
+    if [[ -f "${TLS_DIR}/ssl_type" ]]; then
+        if grep -q "buypass" <"${TLS_DIR}/ssl_type"; then
             sslRenewalDays=180
         fi
     fi
@@ -3356,8 +3317,8 @@ renewalTLS() {
 
             # 这是唯一的续期入口（acme.sh 自身的 cron 已被 installCronTLS 删除），
             # 写半截/错配直接 reload 会断线到下次人工介入——先备份，验证不过就还原旧证书再拉起服务
-            local renewCertFile="/etc/Proxy-agent/tls/${domain}.crt"
-            local renewKeyFile="/etc/Proxy-agent/tls/${domain}.key"
+            local renewCertFile="${TLS_DIR}/${domain}.crt"
+            local renewKeyFile="${TLS_DIR}/${domain}.key"
             cp -fp "${renewCertFile}" "${renewCertFile}.renew-bak" 2>/dev/null
             cp -fp "${renewKeyFile}" "${renewKeyFile}.renew-bak" 2>/dev/null
 
@@ -3389,7 +3350,7 @@ renewalTLS() {
         else
             echoContent green " ---> 证书有效"
         fi
-    elif [[ -f "/etc/Proxy-agent/tls/${tlsDomain}.crt" && -f "/etc/Proxy-agent/tls/${tlsDomain}.key" && -n $(cat "/etc/Proxy-agent/tls/${tlsDomain}.crt") ]]; then
+    elif [[ -f "${TLS_DIR}/${tlsDomain}.crt" && -f "${TLS_DIR}/${tlsDomain}.key" && -n $(cat "${TLS_DIR}/${tlsDomain}.crt") ]]; then
         echoContent yellow " ---> 检测到使用自定义证书，无法执行renew操作。"
     else
         echoContent red " ---> 未安装"
@@ -3401,7 +3362,7 @@ installSingBox() {
     readInstallType
     echoContent skyBlue "\n进度  $1/${totalProgress} : 安装sing-box"
 
-    if [[ ! -f "/etc/Proxy-agent/sing-box/sing-box" ]]; then
+    if [[ ! -f "${SINGBOX_BIN}" ]]; then
 
         # 缓存原始响应，区分"GitHub 完全访问不到"vs"访问到但筛选后为空"两种失败模式
         # per_page=30：与 Xray 对齐，足以覆盖近期所有稳定版
@@ -3451,17 +3412,17 @@ installSingBox() {
             exit 1
         fi
 
-        local singBoxTarFile="/etc/Proxy-agent/sing-box/sing-box-${version/v/}${singBoxCoreCPUVendor}.tar.gz"
-        local singBoxChecksumFile="/etc/Proxy-agent/sing-box/sing-box_${version/v/}_checksums.txt"
+        local singBoxTarFile="${SINGBOX_DIR}/sing-box-${version/v/}${singBoxCoreCPUVendor}.tar.gz"
+        local singBoxChecksumFile="${SINGBOX_DIR}/sing-box_${version/v/}_checksums.txt"
         local singBoxTarFileName="sing-box-${version/v/}${singBoxCoreCPUVendor}.tar.gz"
 
         # 下载sing-box核心文件和校验和文件
         if [[ "${release}" == "alpine" ]]; then
-            wget -c -q -P /etc/Proxy-agent/sing-box/ "https://github.com/SagerNet/sing-box/releases/download/${version}/${singBoxTarFileName}"
-            wget -c -q -P /etc/Proxy-agent/sing-box/ "https://github.com/SagerNet/sing-box/releases/download/${version}/sing-box_${version/v/}_checksums.txt"
+            wget -c -q -P ${SINGBOX_DIR}/ "https://github.com/SagerNet/sing-box/releases/download/${version}/${singBoxTarFileName}"
+            wget -c -q -P ${SINGBOX_DIR}/ "https://github.com/SagerNet/sing-box/releases/download/${version}/sing-box_${version/v/}_checksums.txt"
         else
-            wget -c -q ${wgetShowProgressStatus} -P /etc/Proxy-agent/sing-box/ "https://github.com/SagerNet/sing-box/releases/download/${version}/${singBoxTarFileName}"
-            wget -c -q ${wgetShowProgressStatus} -P /etc/Proxy-agent/sing-box/ "https://github.com/SagerNet/sing-box/releases/download/${version}/sing-box_${version/v/}_checksums.txt"
+            wget -c -q ${wgetShowProgressStatus} -P ${SINGBOX_DIR}/ "https://github.com/SagerNet/sing-box/releases/download/${version}/${singBoxTarFileName}"
+            wget -c -q ${wgetShowProgressStatus} -P ${SINGBOX_DIR}/ "https://github.com/SagerNet/sing-box/releases/download/${version}/sing-box_${version/v/}_checksums.txt"
         fi
 
         if [[ ! -f "${singBoxTarFile}" ]]; then
@@ -3492,11 +3453,11 @@ installSingBox() {
                 echoContent yellow " ---> 警告: 未能获取校验信息，跳过完整性验证"
             fi
 
-            tar zxvf "${singBoxTarFile}" -C "/etc/Proxy-agent/sing-box/" >/dev/null 2>&1
+            tar zxvf "${singBoxTarFile}" -C "${SINGBOX_DIR}/" >/dev/null 2>&1
 
-            mv "/etc/Proxy-agent/sing-box/sing-box-${version/v/}${singBoxCoreCPUVendor}/sing-box" /etc/Proxy-agent/sing-box/sing-box
-            rm -rf /etc/Proxy-agent/sing-box/sing-box-*
-            chmod 655 /etc/Proxy-agent/sing-box/sing-box
+            mv "${SINGBOX_DIR}/sing-box-${version/v/}${singBoxCoreCPUVendor}/sing-box" ${SINGBOX_BIN}
+            rm -rf ${SINGBOX_DIR}/sing-box-*
+            chmod 655 ${SINGBOX_BIN}
 
             # 版本守门（兜底）：配置用 1.11+ 的路由级 sniff/resolve action，1.11 以下不识别会启动失败。
             # 下载前已按 tag 检查过一次，这里用实际二进制版本再验一次。
@@ -3526,13 +3487,13 @@ installSingBox() {
             read -r -p "是否更新、升级？[y/n]:" reInstallSingBoxStatus
             if isYesInput "${reInstallSingBoxStatus}"; then
                 # 先挪走而不是删掉：下载/校验失败时恢复原二进制，避免服务下次重启后拉不起来
-                local singBoxUpgradeBakBin="/etc/Proxy-agent/sing-box/sing-box.update-bak"
-                mv -f /etc/Proxy-agent/sing-box/sing-box "${singBoxUpgradeBakBin}"
+                local singBoxUpgradeBakBin="${SINGBOX_DIR}/sing-box.update-bak"
+                mv -f ${SINGBOX_BIN} "${singBoxUpgradeBakBin}"
                 if installSingBox "$1"; then
                     rm -f "${singBoxUpgradeBakBin}"
                     return 0
                 fi
-                mv -f "${singBoxUpgradeBakBin}" /etc/Proxy-agent/sing-box/sing-box
+                mv -f "${singBoxUpgradeBakBin}" ${SINGBOX_BIN}
                 echoContent red " ---> $(t UPDATE_CORE_FAIL_RESTORED)"
                 return 1
             fi
@@ -3541,7 +3502,7 @@ installSingBox() {
 
     # 最终防线：函数返回前确认二进制确实就位
     # 上面任何路径若漏掉显式 return，都会被这里兜住，避免 caller 在二进制缺失时继续执行
-    if [[ ! -f "/etc/Proxy-agent/sing-box/sing-box" ]]; then
+    if [[ ! -f "${SINGBOX_BIN}" ]]; then
         return 1
     fi
     return 0
@@ -3559,7 +3520,7 @@ installXray() {
 
     echoContent skyBlue "\n进度  $1/${totalProgress} : 安装Xray"
 
-    if [[ ! -f "/etc/Proxy-agent/xray/xray" ]]; then
+    if [[ ! -f "${XRAY_BIN}" ]]; then
 
         # 缓存原始响应，区分"GitHub 完全访问不到"vs"访问到但筛选后为空"两种失败模式
         # per_page=30：XTLS 偶尔会连续发好几个 prerelease，5 个窗口太窄；30 个足以覆盖近期所有稳定版
@@ -3599,16 +3560,16 @@ installXray() {
 
         echoContent green " ---> Xray-core版本:${version}"
 
-        local xrayZipFile="/etc/Proxy-agent/xray/${xrayCoreCPUVendor}.zip"
-        local xrayDgstFile="/etc/Proxy-agent/xray/${xrayCoreCPUVendor}.zip.dgst"
+        local xrayZipFile="${XRAY_DIR}/${xrayCoreCPUVendor}.zip"
+        local xrayDgstFile="${XRAY_DIR}/${xrayCoreCPUVendor}.zip.dgst"
 
         # 下载Xray核心文件
         if [[ "${release}" == "alpine" ]]; then
-            wget -c -q -P /etc/Proxy-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip"
-            wget -c -q -P /etc/Proxy-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip.dgst"
+            wget -c -q -P ${XRAY_DIR}/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip"
+            wget -c -q -P ${XRAY_DIR}/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip.dgst"
         else
-            wget -c -q ${wgetShowProgressStatus} -P /etc/Proxy-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip"
-            wget -c -q ${wgetShowProgressStatus} -P /etc/Proxy-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip.dgst"
+            wget -c -q ${wgetShowProgressStatus} -P ${XRAY_DIR}/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip"
+            wget -c -q ${wgetShowProgressStatus} -P ${XRAY_DIR}/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip.dgst"
         fi
 
         if [[ ! -f "${xrayZipFile}" ]]; then
@@ -3639,37 +3600,37 @@ installXray() {
                 echoContent yellow " ---> 警告: 未能获取校验信息，跳过完整性验证"
             fi
 
-            unzip -o "${xrayZipFile}" -d /etc/Proxy-agent/xray >/dev/null
+            unzip -o "${xrayZipFile}" -d ${XRAY_DIR} >/dev/null
             rm -f "${xrayZipFile}" "${xrayDgstFile}"
 
             version=$(curl -s https://api.github.com/repos/Loyalsoldier/v2ray-rules-dat/releases?per_page=1 | jq -r '.[]|.tag_name')
             echoContent skyBlue "------------------------Version-------------------------------"
             echo "version:${version}"
-            rm /etc/Proxy-agent/xray/geo* >/dev/null 2>&1
+            rm ${XRAY_DIR}/geo* >/dev/null 2>&1
 
             if [[ "${release}" == "alpine" ]]; then
-                wget -c -q -P /etc/Proxy-agent/xray/ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geosite.dat"
-                wget -c -q -P /etc/Proxy-agent/xray/ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geoip.dat"
+                wget -c -q -P ${XRAY_DIR}/ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geosite.dat"
+                wget -c -q -P ${XRAY_DIR}/ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geoip.dat"
             else
-                wget -c -q ${wgetShowProgressStatus} -P /etc/Proxy-agent/xray/ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geosite.dat"
-                wget -c -q ${wgetShowProgressStatus} -P /etc/Proxy-agent/xray/ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geoip.dat"
+                wget -c -q ${wgetShowProgressStatus} -P ${XRAY_DIR}/ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geosite.dat"
+                wget -c -q ${wgetShowProgressStatus} -P ${XRAY_DIR}/ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geoip.dat"
             fi
 
-            chmod 655 /etc/Proxy-agent/xray/xray
+            chmod 655 ${XRAY_BIN}
         fi
     else
         if [[ -z "${lastInstallationConfig}" ]]; then
-            echoContent green " ---> Xray-core版本:$(/etc/Proxy-agent/xray/xray --version | awk '{print $2}' | head -1)"
+            echoContent green " ---> Xray-core版本:$(${XRAY_BIN} --version | awk '{print $2}' | head -1)"
             read -r -p "是否更新、升级？[y/n]:" reInstallXrayStatus
             if isYesInput "${reInstallXrayStatus}"; then
                 # 先挪走而不是删掉：下载/校验失败时恢复原二进制，避免服务下次重启后拉不起来
-                local xrayUpgradeBakBin="/etc/Proxy-agent/xray/xray.update-bak"
-                mv -f /etc/Proxy-agent/xray/xray "${xrayUpgradeBakBin}"
+                local xrayUpgradeBakBin="${XRAY_DIR}/xray.update-bak"
+                mv -f ${XRAY_BIN} "${xrayUpgradeBakBin}"
                 if installXray "$1" "$2"; then
                     rm -f "${xrayUpgradeBakBin}"
                     return 0
                 fi
-                mv -f "${xrayUpgradeBakBin}" /etc/Proxy-agent/xray/xray
+                mv -f "${xrayUpgradeBakBin}" ${XRAY_BIN}
                 echoContent red " ---> $(t UPDATE_CORE_FAIL_RESTORED)"
                 return 1
             fi
@@ -3678,7 +3639,7 @@ installXray() {
 
     # 最终防线：函数返回前确认二进制确实就位
     # 上面任何路径若漏掉显式 return，都会被这里兜住，避免 caller 在二进制缺失时继续执行
-    if [[ ! -f "/etc/Proxy-agent/xray/xray" ]]; then
+    if [[ ! -f "${XRAY_BIN}" ]]; then
         return 1
     fi
     return 0
@@ -3766,7 +3727,7 @@ updateGeoSite() {
 # 调用侧先 mv 旧二进制到 .update-bak（而非 rm），让本分支的失败路径有东西可恢复。
 updateXray() {
     readInstallType
-    local xrayBakBin="/etc/Proxy-agent/xray/xray.update-bak"
+    local xrayBakBin="${XRAY_DIR}/xray.update-bak"
 
     if [[ -z "${coreKind}" || "${coreKind}" != "1" ]]; then
         if [[ -n "${1:-}" ]]; then
@@ -3776,28 +3737,28 @@ updateXray() {
         fi
 
         if [[ -z "${version}" ]]; then
-            [[ -f "${xrayBakBin}" ]] && mv -f "${xrayBakBin}" /etc/Proxy-agent/xray/xray
+            [[ -f "${xrayBakBin}" ]] && mv -f "${xrayBakBin}" ${XRAY_BIN}
             echoContent red " ---> $(t UPDATE_CORE_VERSION_FAIL)"
             return 1
         fi
 
         echoContent green " ---> Xray-core版本:${version}"
 
-        local xrayZipFile="/etc/Proxy-agent/xray/${xrayCoreCPUVendor}.zip"
+        local xrayZipFile="${XRAY_DIR}/${xrayCoreCPUVendor}.zip"
         local xrayDgstFile="${xrayZipFile}.dgst"
         # 清掉可能的残留半截文件——wget -c 会在其上续传拼出损坏包
         rm -f "${xrayZipFile}" "${xrayDgstFile}"
         if [[ "${release}" == "alpine" ]]; then
-            wget -c -q -P /etc/Proxy-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip"
-            wget -c -q -P /etc/Proxy-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip.dgst"
+            wget -c -q -P ${XRAY_DIR}/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip"
+            wget -c -q -P ${XRAY_DIR}/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip.dgst"
         else
-            wget -c -q ${wgetShowProgressStatus} -P /etc/Proxy-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip"
-            wget -c -q ${wgetShowProgressStatus} -P /etc/Proxy-agent/xray/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip.dgst"
+            wget -c -q ${wgetShowProgressStatus} -P ${XRAY_DIR}/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip"
+            wget -c -q ${wgetShowProgressStatus} -P ${XRAY_DIR}/ "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip.dgst"
         fi
 
         if [[ ! -s "${xrayZipFile}" ]]; then
             rm -f "${xrayZipFile}" "${xrayDgstFile}"
-            [[ -f "${xrayBakBin}" ]] && mv -f "${xrayBakBin}" /etc/Proxy-agent/xray/xray
+            [[ -f "${xrayBakBin}" ]] && mv -f "${xrayBakBin}" ${XRAY_BIN}
             echoContent red " ---> $(t UPDATE_CORE_DL_FAIL_KEEP)"
             return 1
         fi
@@ -3807,7 +3768,7 @@ updateXray() {
         if [[ -n "${expectedHash}" ]]; then
             if ! verifySHA256 "${xrayZipFile}" "${expectedHash}"; then
                 rm -f "${xrayZipFile}" "${xrayDgstFile}"
-                [[ -f "${xrayBakBin}" ]] && mv -f "${xrayBakBin}" /etc/Proxy-agent/xray/xray
+                [[ -f "${xrayBakBin}" ]] && mv -f "${xrayBakBin}" ${XRAY_BIN}
                 echoContent red " ---> $(t UPDATE_CORE_VERIFY_FAIL_KEEP)"
                 return 1
             fi
@@ -3816,18 +3777,18 @@ updateXray() {
             echoContent yellow " ---> 警告: 未能获取校验信息，跳过完整性验证"
         fi
 
-        if ! unzip -o "${xrayZipFile}" -d /etc/Proxy-agent/xray >/dev/null || [[ ! -f "/etc/Proxy-agent/xray/xray" ]]; then
+        if ! unzip -o "${xrayZipFile}" -d ${XRAY_DIR} >/dev/null || [[ ! -f "${XRAY_BIN}" ]]; then
             rm -f "${xrayZipFile}" "${xrayDgstFile}"
-            [[ -f "${xrayBakBin}" ]] && mv -f "${xrayBakBin}" /etc/Proxy-agent/xray/xray
+            [[ -f "${xrayBakBin}" ]] && mv -f "${xrayBakBin}" ${XRAY_BIN}
             echoContent red " ---> $(t UPDATE_CORE_EXTRACT_FAIL_KEEP)"
             return 1
         fi
         rm -f "${xrayZipFile}" "${xrayDgstFile}" "${xrayBakBin}"
-        chmod 655 /etc/Proxy-agent/xray/xray
+        chmod 655 ${XRAY_BIN}
         handleXray stop
         handleXray start
     else
-        echoContent green " ---> 当前版本:v$(/etc/Proxy-agent/xray/xray --version | awk '{print $2}' | head -1)"
+        echoContent green " ---> 当前版本:v$(${XRAY_BIN} --version | awk '{print $2}' | head -1)"
         remoteVersion=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=30" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
 
         echoContent green " ---> 最新版本:${remoteVersion}"
@@ -3841,17 +3802,17 @@ updateXray() {
         if [[ -n "${1:-}" ]]; then
             read -r -p "回退版本为${version}，是否继续？[y/n]:" rollbackXrayStatus
             if [[ "${rollbackXrayStatus}" == "y" ]]; then
-                echoContent green " ---> 当前Xray-core版本:$(/etc/Proxy-agent/xray/xray --version | awk '{print $2}' | head -1)"
+                echoContent green " ---> 当前Xray-core版本:$(${XRAY_BIN} --version | awk '{print $2}' | head -1)"
 
-                mv -f /etc/Proxy-agent/xray/xray "${xrayBakBin}"
+                mv -f ${XRAY_BIN} "${xrayBakBin}"
                 updateXray "${version}"
             else
                 echoContent green " ---> 放弃回退版本"
             fi
-        elif [[ "${version}" == "v$(/etc/Proxy-agent/xray/xray --version | awk '{print $2}' | head -1)" ]]; then
+        elif [[ "${version}" == "v$(${XRAY_BIN} --version | awk '{print $2}' | head -1)" ]]; then
             read -r -p "当前版本与最新版相同，是否重新安装？[y/n]:" reInstallXrayStatus
             if [[ "${reInstallXrayStatus}" == "y" ]]; then
-                mv -f /etc/Proxy-agent/xray/xray "${xrayBakBin}"
+                mv -f ${XRAY_BIN} "${xrayBakBin}"
                 updateXray
             else
                 echoContent green " ---> 放弃重新安装"
@@ -3859,7 +3820,7 @@ updateXray() {
         else
             read -r -p "最新版本为:${version}，是否更新？[y/n]:" installXrayStatus
             if [[ "${installXrayStatus}" == "y" ]]; then
-                mv -f /etc/Proxy-agent/xray/xray "${xrayBakBin}"
+                mv -f ${XRAY_BIN} "${xrayBakBin}"
                 updateXray
             else
                 echoContent green " ---> 放弃更新"
@@ -3891,8 +3852,8 @@ installAlpineStartup() {
 #!/sbin/openrc-run
 
 description="sing-box service"
-command="/etc/Proxy-agent/sing-box/sing-box"
-command_args="run -c /etc/Proxy-agent/sing-box/conf/config.json"
+command="${SINGBOX_BIN}"
+command_args="run -c ${SINGBOX_MERGED_CONFIG}"
 command_background=true
 pidfile="/var/run/sing-box.pid"
 EOF
@@ -3901,8 +3862,8 @@ EOF
 #!/sbin/openrc-run
 
 description="xray service"
-command="/etc/Proxy-agent/xray/xray"
-command_args="run -confdir /etc/Proxy-agent/xray/conf"
+command="${XRAY_BIN}"
+command_args="run -confdir ${XRAY_CONF_DIR}"
 command_background=true
 pidfile="/var/run/xray.pid"
 EOF
@@ -3914,7 +3875,7 @@ EOF
 # sing-box开机自启
 installSingBoxService() {
     echoContent skyBlue "\n进度  $1/${totalProgress} : 配置sing-box开机自启"
-    execStart='/etc/Proxy-agent/sing-box/sing-box run -c /etc/Proxy-agent/sing-box/conf/config.json'
+    execStart="${SINGBOX_BIN} run -c ${SINGBOX_MERGED_CONFIG}"
 
     if [[ -n $(find /bin /usr/bin -name "systemctl") && "${release}" != "alpine" ]]; then
         rm -rf /etc/systemd/system/sing-box.service
@@ -3952,7 +3913,7 @@ EOF
 # Xray开机自启
 installXrayService() {
     echoContent skyBlue "\n进度  $1/${totalProgress} : 配置Xray开机自启"
-    execStart='/etc/Proxy-agent/xray/xray run -confdir /etc/Proxy-agent/xray/conf'
+    execStart="${XRAY_BIN} run -confdir ${XRAY_CONF_DIR}"
     if [[ -n $(find /bin /usr/bin -name "systemctl") ]]; then
         rm -rf /etc/systemd/system/xray.service
         touch /etc/systemd/system/xray.service
@@ -4054,7 +4015,7 @@ handleSingBox() {
                 echoContent yellow "\n ---> 最近日志:"
                 journalctl -u sing-box.service --no-pager -n 15 2>/dev/null || true
             fi
-            echoContent yellow "\n请手动执行【 /etc/Proxy-agent/sing-box/sing-box run -c /etc/Proxy-agent/sing-box/conf/config.json 】，查看详细错误日志"
+            echoContent yellow "\n请手动执行【 ${SINGBOX_BIN} run -c ${SINGBOX_MERGED_CONFIG} 】，查看详细错误日志"
             exit 1
         fi
     elif [[ "$1" == "stop" ]]; then
@@ -4071,7 +4032,7 @@ handleSingBox() {
 # 剥离旧版 socks5_outbound.json 里的 allowInsecure（Xray-core ≥ v26.2.6 遇 true 拒绝启动）。
 # 只剥字段、保留出站与分流规则——删出站会让命中规则的流量静默直连。
 removeLegacyAllowInsecure() {
-    local legacySocks5Outbound="/etc/Proxy-agent/xray/conf/socks5_outbound.json"
+    local legacySocks5Outbound="${XRAY_CONF_DIR}/socks5_outbound.json"
     if [[ -f "${legacySocks5Outbound}" ]] && grep -q '"allowInsecure"' "${legacySocks5Outbound}"; then
         if jsonModifyFile "${legacySocks5Outbound}" 'del(.outbounds[]?.streamSettings.tlsSettings.allowInsecure)'; then
             echoContent yellow " ---> $(t XRAY_ALLOWINSECURE_STRIPPED)"
@@ -4084,7 +4045,7 @@ removeLegacyAllowInsecure() {
 # 老 Reality 配置缺 minClientVer 的补成 REALITY_MIN_CLIENT_VER，已有值不动（理由见该常量）
 ensureRealityMinClientVer() {
     local file
-    for file in /etc/Proxy-agent/xray/conf/07_VLESS_vision_reality_inbounds.json /etc/Proxy-agent/xray/conf/12_VLESS_XHTTP_inbounds.json; do
+    for file in ${XRAY_CONF_DIR}/07_VLESS_vision_reality_inbounds.json ${XRAY_CONF_DIR}/12_VLESS_XHTTP_inbounds.json; do
         [[ -f "${file}" ]] || continue
         if jq -e '[.inbounds[]? | (.streamSettings.realitySettings | type) == "object" and (.streamSettings.realitySettings | has("minClientVer") | not)] | any' "${file}" >/dev/null 2>&1; then
             if jsonModifyFile "${file}" ".inbounds |= map(if (.streamSettings.realitySettings | type) == \"object\" and (.streamSettings.realitySettings | has(\"minClientVer\") | not) then .streamSettings.realitySettings.minClientVer = \"${REALITY_MIN_CLIENT_VER}\" else . end)"; then
@@ -4131,7 +4092,7 @@ handleXray() {
                 echoContent yellow "\n ---> 最近日志:"
                 journalctl -u xray.service --no-pager -n 15 2>/dev/null || true
             fi
-            echoContent yellow "\n请手动执行【/etc/Proxy-agent/xray/xray -confdir /etc/Proxy-agent/xray/conf】查看详细错误日志"
+            echoContent yellow "\n请手动执行【${XRAY_BIN} -confdir ${XRAY_CONF_DIR}】查看详细错误日志"
             exit 1
         fi
     elif [[ "$1" == "stop" ]]; then
@@ -4811,7 +4772,7 @@ ensureSingBoxLocalDns() {
 
 # 读运行中 sing-box 内核版本（形如 1.14.0）；二进制缺失或输出异常时为空
 singBoxInstalledVersion() {
-    /etc/Proxy-agent/sing-box/sing-box version 2>/dev/null | awk '/^sing-box version/ {print $3; exit}'
+    ${SINGBOX_BIN} version 2>/dev/null | awk '/^sing-box version/ {print $3; exit}'
 }
 
 # 顶层 http_clients 片段：remote rule_set 的下载通道。detour 取片段里第一个 direct 出站
@@ -4942,7 +4903,7 @@ addXrayOutbound() {
     fi
 
     if [[ -n "${domainStrategy}" ]]; then
-        cat <<EOF >"/etc/Proxy-agent/xray/conf/${tag}.json"
+        cat <<EOF >"${XRAY_CONF_DIR}/${tag}.json"
 {
     "outbounds":[
         {
@@ -4958,7 +4919,7 @@ EOF
     fi
     # direct
     if echo "${tag}" | grep -q "direct"; then
-        cat <<EOF >"/etc/Proxy-agent/xray/conf/${tag}.json"
+        cat <<EOF >"${XRAY_CONF_DIR}/${tag}.json"
 {
     "outbounds":[
         {
@@ -4974,7 +4935,7 @@ EOF
     fi
     # blackhole
     if echo "${tag}" | grep -q "blackhole"; then
-        cat <<EOF >"/etc/Proxy-agent/xray/conf/${tag}.json"
+        cat <<EOF >"${XRAY_CONF_DIR}/${tag}.json"
 {
     "outbounds":[
         {
@@ -4986,7 +4947,7 @@ EOF
 EOF
     fi
     if echo "${tag}" | grep -q "wireguard_out_IPv4"; then
-        cat <<EOF >"/etc/Proxy-agent/xray/conf/${tag}.json"
+        cat <<EOF >"${XRAY_CONF_DIR}/${tag}.json"
 {
   "outbounds": [
     {
@@ -5016,7 +4977,7 @@ EOF
 EOF
     fi
     if echo "${tag}" | grep -q "wireguard_out_IPv6"; then
-        cat <<EOF >"/etc/Proxy-agent/xray/conf/${tag}.json"
+        cat <<EOF >"${XRAY_CONF_DIR}/${tag}.json"
 {
   "outbounds": [
     {
@@ -5046,7 +5007,7 @@ EOF
 EOF
     fi
     if echo "${tag}" | grep -q "vmess-out"; then
-        cat <<EOF >"/etc/Proxy-agent/xray/conf/${tag}.json"
+        cat <<EOF >"${XRAY_CONF_DIR}/${tag}.json"
 {
   "outbounds": [
     {
@@ -5089,8 +5050,8 @@ EOF
 # 删除 Xray-core出站
 removeXrayOutbound() {
     local tag=$1
-    if [[ -f "/etc/Proxy-agent/xray/conf/${tag}.json" ]]; then
-        rm "/etc/Proxy-agent/xray/conf/${tag}.json" >/dev/null 2>&1
+    if [[ -f "${XRAY_CONF_DIR}/${tag}.json" ]]; then
+        rm "${XRAY_CONF_DIR}/${tag}.json" >/dev/null 2>&1
     fi
 }
 # 移除sing-box配置
@@ -5135,7 +5096,7 @@ EOF
 
 # sing-box Tuic安装
 singBoxTuicInstall() {
-    if ! echo "${currentInstallProtocolType}" | grep -qE ",0,|,1,|,2,|,3,|,4,|,5,|,6,|,9,|,10,|,11,|,13,"; then
+    if ! anyProtocolRequiresTLS "${currentInstallProtocolType}"; then
         echoContent red "\n ---> 由于需要依赖证书，如安装Tuic，请先安装带有TLS标识协议"
         exit 1
     fi
@@ -5151,7 +5112,7 @@ singBoxTuicInstall() {
 
 # sing-box hy2安装
 singBoxHysteria2Install() {
-    if ! echo "${currentInstallProtocolType}" | grep -qE ",0,|,1,|,2,|,3,|,4,|,5,|,6,|,9,|,10,|,11,|,13,"; then
+    if ! anyProtocolRequiresTLS "${currentInstallProtocolType}"; then
         echoContent red "\n ---> 由于需要依赖证书，如安装Hysteria2，请先安装带有TLS标识协议"
         exit 1
     fi
@@ -5191,8 +5152,8 @@ writeChainInfoAtomic() {
 # 合并 config：不先 rm 旧文件——merge 自带 O_TRUNC，先 rm 会制造"失败即丢文件"的窗口，
 # systemd 会进 restart loop。输出到 mktemp，sing-box check 通过才原子 mv。
 singBoxMergeConfig() {
-    local targetFile="/etc/Proxy-agent/sing-box/conf/config.json"
-    local fragmentDir="/etc/Proxy-agent/sing-box/conf/config/"
+    local targetFile="${SINGBOX_MERGED_CONFIG}"
+    local fragmentDir="${SINGBOX_FRAGMENT_DIR}/"
     local tmpFile mergeOutput mergeResult checkOutput checkResult
 
     # 一次性迁移：移除已下线的「菜单 15 域名黑名单」遗留片段。
@@ -5234,7 +5195,7 @@ singBoxMergeConfig() {
     fi
 
     # sing-box merge 接受绝对输出路径；省 -D 避免它把相对名拼到 conf/ 根。
-    mergeOutput=$(/etc/Proxy-agent/sing-box/sing-box merge "${tmpFile}" -C "${fragmentDir}" 2>&1)
+    mergeOutput=$(${SINGBOX_BIN} merge "${tmpFile}" -C "${fragmentDir}" 2>&1)
     mergeResult=$?
 
     if [[ ${mergeResult} -ne 0 ]]; then
@@ -5253,7 +5214,7 @@ singBoxMergeConfig() {
 
     # 运行时校验：sing-box check 检查端口冲突、tag 唯一性、协议字段一致性
     # 等 merge 不查的项。失败保留旧 config.json，不替换。
-    checkOutput=$(/etc/Proxy-agent/sing-box/sing-box check -c "${tmpFile}" 2>&1)
+    checkOutput=$(${SINGBOX_BIN} check -c "${tmpFile}" 2>&1)
     checkResult=$?
     if [[ ${checkResult} -ne 0 ]]; then
         echoContent red " ---> sing-box 配置校验失败（保留旧配置）"
@@ -5298,11 +5259,11 @@ initSingBoxPort() {
 initXrayConfig() {
     echoContent skyBlue "\n进度 $2/${totalProgress} : 初始化Xray配置"
     echo
-    # 二进制预检：本函数依赖 /etc/Proxy-agent/xray/xray 生成 UUID（5152/5165 行）。
+    # 二进制预检：本函数依赖 ${XRAY_BIN} 生成 UUID（5152/5165 行）。
     # 主安装路径已在 installXray 失败时退出，这里是 belt-and-suspenders，覆盖 addUser 等独立调用。
-    if [[ ! -f "/etc/Proxy-agent/xray/xray" ]]; then
+    if [[ ! -f "${XRAY_BIN}" ]]; then
         echoContent red " ---> Xray-core 二进制不存在，无法初始化配置"
-        echoContent yellow "     预期路径: /etc/Proxy-agent/xray/xray"
+        echoContent yellow "     预期路径: ${XRAY_BIN}"
         exit 1
     fi
     local uuid=
@@ -5330,7 +5291,7 @@ initXrayConfig() {
             fi
             uuid=${customUUID}
         else
-            uuid=$(/etc/Proxy-agent/xray/xray uuid)
+            uuid=$(${XRAY_BIN} uuid)
         fi
 
         echoContent yellow "\n请输入自定义用户名[需合法]，[回车]随机用户名"
@@ -5347,7 +5308,7 @@ initXrayConfig() {
     if [[ -z "${addClientsStatus}" && -z "${uuid}" ]]; then
         addClientsStatus=
         echoContent red "\n ---> uuid读取错误，随机生成"
-        uuid=$(/etc/Proxy-agent/xray/xray uuid)
+        uuid=$(${XRAY_BIN} uuid)
     fi
 
     if [[ -n "${uuid}" ]]; then
@@ -5357,12 +5318,12 @@ initXrayConfig() {
     fi
 
     # log
-    if [[ ! -f "/etc/Proxy-agent/xray/conf/00_log.json" ]]; then
+    if [[ ! -f "${XRAY_CONF_DIR}/00_log.json" ]]; then
 
-        cat <<EOF >/etc/Proxy-agent/xray/conf/00_log.json
+        cat <<EOF >${XRAY_CONF_DIR}/00_log.json
 {
   "log": {
-    "error": "/etc/Proxy-agent/xray/error.log",
+    "error": "${XRAY_DIR}/error.log",
     "loglevel": "warning",
     "dnsLog": false
   }
@@ -5370,11 +5331,11 @@ initXrayConfig() {
 EOF
     fi
 
-    if [[ ! -f "/etc/Proxy-agent/xray/conf/12_policy.json" ]]; then
+    if [[ ! -f "${XRAY_CONF_DIR}/12_policy.json" ]]; then
         local handshakeVal connIdleVal
         handshakeVal=$(randomNum 1 4)
         connIdleVal=$(randomNum 250 300)
-        cat <<EOF >/etc/Proxy-agent/xray/conf/12_policy.json
+        cat <<EOF >${XRAY_CONF_DIR}/12_policy.json
 {
   "policy": {
       "levels": {
@@ -5390,8 +5351,8 @@ EOF
 
     addXrayOutbound "z_direct_outbound"
     # dns
-    if [[ ! -f "/etc/Proxy-agent/xray/conf/11_dns.json" ]]; then
-        cat <<EOF >/etc/Proxy-agent/xray/conf/11_dns.json
+    if [[ ! -f "${XRAY_CONF_DIR}/11_dns.json" ]]; then
+        cat <<EOF >${XRAY_CONF_DIR}/11_dns.json
 {
     "dns": {
         "servers": [
@@ -5402,7 +5363,7 @@ EOF
 EOF
     fi
     # routing
-    cat <<EOF >/etc/Proxy-agent/xray/conf/09_routing.json
+    cat <<EOF >${XRAY_CONF_DIR}/09_routing.json
 {
   "routing": {
     "rules": [
@@ -5426,7 +5387,7 @@ EOF
     # trojan
     if echo "${selectCustomInstallType}" | grep -q ",4," || [[ "$1" == "all" ]]; then
         fallbacksList='{"dest":31296,"xver":1},{"alpn":"h2","dest":31302,"xver":1}'
-        cat <<EOF >/etc/Proxy-agent/xray/conf/04_trojan_TCP_inbounds.json
+        cat <<EOF >${XRAY_CONF_DIR}/04_trojan_TCP_inbounds.json
 {
 "inbounds":[
 	{
@@ -5455,13 +5416,13 @@ EOF
 }
 EOF
     elif [[ -z "${3:-}" ]]; then
-        rm /etc/Proxy-agent/xray/conf/04_trojan_TCP_inbounds.json >/dev/null 2>&1
+        rm ${XRAY_CONF_DIR}/04_trojan_TCP_inbounds.json >/dev/null 2>&1
     fi
 
     # VLESS_WS_TLS
     if echo "${selectCustomInstallType}" | grep -q ",1," || [[ "$1" == "all" ]]; then
         fallbacksList=${fallbacksList}',{"path":"/'${customPath}'ws","dest":31297,"xver":1}'
-        cat <<EOF >/etc/Proxy-agent/xray/conf/03_VLESS_WS_inbounds.json
+        cat <<EOF >${XRAY_CONF_DIR}/03_VLESS_WS_inbounds.json
 {
 "inbounds":[
     {
@@ -5486,7 +5447,7 @@ EOF
 }
 EOF
     elif [[ -z "${3:-}" ]]; then
-        rm /etc/Proxy-agent/xray/conf/03_VLESS_WS_inbounds.json >/dev/null 2>&1
+        rm ${XRAY_CONF_DIR}/03_VLESS_WS_inbounds.json >/dev/null 2>&1
     fi
     # VLESS_Reality_XHTTP_TLS
     if echo "${selectCustomInstallType}" | grep -q ",12," || [[ "$1" == "all" ]]; then
@@ -5495,7 +5456,7 @@ EOF
         initRealityKey
         initRealityShortIds
         initRealityMldsa65
-        cat <<EOF >/etc/Proxy-agent/xray/conf/12_VLESS_XHTTP_inbounds.json
+        cat <<EOF >${XRAY_CONF_DIR}/12_VLESS_XHTTP_inbounds.json
 {
 "inbounds":[
     {
@@ -5542,11 +5503,11 @@ EOF
 }
 EOF
     elif [[ -z "${3:-}" ]]; then
-        rm /etc/Proxy-agent/xray/conf/12_VLESS_XHTTP_inbounds.json >/dev/null 2>&1
+        rm ${XRAY_CONF_DIR}/12_VLESS_XHTTP_inbounds.json >/dev/null 2>&1
     fi
     if echo "${selectCustomInstallType}" | grep -q ",3," || [[ "$1" == "all" ]]; then
         fallbacksList=${fallbacksList}',{"path":"/'${customPath}'vws","dest":31299,"xver":1}'
-        cat <<EOF >/etc/Proxy-agent/xray/conf/05_VMess_WS_inbounds.json
+        cat <<EOF >${XRAY_CONF_DIR}/05_VMess_WS_inbounds.json
 {
     "inbounds":[
         {
@@ -5570,18 +5531,18 @@ EOF
 }
 EOF
     elif [[ -z "${3:-}" ]]; then
-        rm /etc/Proxy-agent/xray/conf/05_VMess_WS_inbounds.json >/dev/null 2>&1
+        rm ${XRAY_CONF_DIR}/05_VMess_WS_inbounds.json >/dev/null 2>&1
     fi
     # VLESS_gRPC - 已移除，推荐使用XHTTP
     # gRPC协议已废弃，清理旧配置文件
     if [[ -z "${3:-}" ]]; then
-        rm /etc/Proxy-agent/xray/conf/06_VLESS_gRPC_inbounds.json >/dev/null 2>&1
+        rm ${XRAY_CONF_DIR}/06_VLESS_gRPC_inbounds.json >/dev/null 2>&1
     fi
 
     # VLESS Vision
     if echo "${selectCustomInstallType}" | grep -q ",0," || [[ "$1" == "all" ]]; then
 
-        cat <<EOF >/etc/Proxy-agent/xray/conf/02_VLESS_TCP_inbounds.json
+        cat <<EOF >${XRAY_CONF_DIR}/02_VLESS_TCP_inbounds.json
 {
     "inbounds":[
         {
@@ -5604,8 +5565,8 @@ EOF
               "minVersion": "1.2",
               "certificates": [
                 {
-                  "certificateFile": "/etc/Proxy-agent/tls/${domain}.crt",
-                  "keyFile": "/etc/Proxy-agent/tls/${domain}.key",
+                  "certificateFile": "${TLS_DIR}/${domain}.crt",
+                  "keyFile": "${TLS_DIR}/${domain}.key",
                   "ocspStapling": 3600
                 }
               ]
@@ -5616,7 +5577,7 @@ EOF
 }
 EOF
     elif [[ -z "${3:-}" ]]; then
-        rm /etc/Proxy-agent/xray/conf/02_VLESS_TCP_inbounds.json >/dev/null 2>&1
+        rm ${XRAY_CONF_DIR}/02_VLESS_TCP_inbounds.json >/dev/null 2>&1
     fi
 
     # VLESS_TCP/reality
@@ -5628,7 +5589,7 @@ EOF
         initRealityKey
         initRealityShortIds
         initRealityMldsa65
-        cat <<EOF >/etc/Proxy-agent/xray/conf/07_VLESS_vision_reality_inbounds.json
+        cat <<EOF >${XRAY_CONF_DIR}/07_VLESS_vision_reality_inbounds.json
 {
   "inbounds": [
     {
@@ -5714,8 +5675,8 @@ EOF
     # Reality 靠内层 realitySettings.target 兜底反代真实伪装站，改成命中会让鉴权失败或暴露
     # fingerprint。不要"修"它们。
     elif [[ -z "${3:-}" ]]; then
-        rm /etc/Proxy-agent/xray/conf/07_VLESS_vision_reality_inbounds.json >/dev/null 2>&1
-        rm /etc/Proxy-agent/xray/conf/08_VLESS_vision_gRPC_inbounds.json >/dev/null 2>&1
+        rm ${XRAY_CONF_DIR}/07_VLESS_vision_reality_inbounds.json >/dev/null 2>&1
+        rm ${XRAY_CONF_DIR}/08_VLESS_vision_gRPC_inbounds.json >/dev/null 2>&1
     fi
     installSniffing
     if [[ -z "${3:-}" ]]; then
@@ -5754,11 +5715,11 @@ initSingBoxConfig() {
     echoContent skyBlue "\n进度 $2/${totalProgress} : 初始化sing-box配置"
 
     echo
-    # 二进制预检：本函数依赖 /etc/Proxy-agent/sing-box/sing-box 生成 UUID。
+    # 二进制预检：本函数依赖 ${SINGBOX_BIN} 生成 UUID。
     # 主安装路径已在 installSingBox 失败时退出，这里是 belt-and-suspenders，覆盖独立调用。
-    if [[ ! -f "/etc/Proxy-agent/sing-box/sing-box" ]]; then
+    if [[ ! -f "${SINGBOX_BIN}" ]]; then
         echoContent red " ---> sing-box 二进制不存在，无法初始化配置"
-        echoContent yellow "     预期路径: /etc/Proxy-agent/sing-box/sing-box"
+        echoContent yellow "     预期路径: ${SINGBOX_BIN}"
         exit 1
     fi
     local uuid=
@@ -5792,7 +5753,7 @@ initSingBoxConfig() {
             fi
             uuid=${customUUID}
         else
-            uuid=$(/etc/Proxy-agent/sing-box/sing-box generate uuid)
+            uuid=$(${SINGBOX_BIN} generate uuid)
         fi
 
         echoContent yellow "\n请输入自定义用户名[需合法]，[回车]随机用户名"
@@ -5809,7 +5770,7 @@ initSingBoxConfig() {
     if [[ -z "${addClientsStatus}" && -z "${uuid}" ]]; then
         addClientsStatus=
         echoContent red "\n ---> uuid读取错误，随机生成"
-        uuid=$(/etc/Proxy-agent/sing-box/sing-box generate uuid)
+        uuid=$(${SINGBOX_BIN} generate uuid)
     fi
 
     if [[ -n "${uuid}" ]]; then
@@ -5830,7 +5791,7 @@ initSingBoxConfig() {
         handleSingBox stop
 
         checkPortOpen "${result[-1]}" "${domain}"
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/02_VLESS_TCP_inbounds.json
+        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/02_VLESS_TCP_inbounds.json
 {
     "inbounds":[
         {
@@ -5842,15 +5803,15 @@ initSingBoxConfig() {
           "tls":{
             "server_name": "${sslDomain}",
             "enabled": true,
-            "certificate_path": "/etc/Proxy-agent/tls/${sslDomain}.crt",
-            "key_path": "/etc/Proxy-agent/tls/${sslDomain}.key"
+            "certificate_path": "${TLS_DIR}/${sslDomain}.crt",
+            "key_path": "${TLS_DIR}/${sslDomain}.key"
           }
         }
     ]
 }
 EOF
     elif [[ -z "${3:-}" ]]; then
-        rm /etc/Proxy-agent/sing-box/conf/config/02_VLESS_TCP_inbounds.json >/dev/null 2>&1
+        rm ${SINGBOX_FRAGMENT_DIR}/02_VLESS_TCP_inbounds.json >/dev/null 2>&1
     fi
 
     if echo "${selectCustomInstallType}" | grep -q ",1," || [[ "$1" == "all" ]]; then
@@ -5865,7 +5826,7 @@ EOF
         handleSingBox stop
         randomPathFunction
         checkPortOpen "${result[-1]}" "${domain}"
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/03_VLESS_WS_inbounds.json
+        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/03_VLESS_WS_inbounds.json
 {
     "inbounds":[
         {
@@ -5877,8 +5838,8 @@ EOF
           "tls":{
             "server_name": "${sslDomain}",
             "enabled": true,
-            "certificate_path": "/etc/Proxy-agent/tls/${sslDomain}.crt",
-            "key_path": "/etc/Proxy-agent/tls/${sslDomain}.key"
+            "certificate_path": "${TLS_DIR}/${sslDomain}.crt",
+            "key_path": "${TLS_DIR}/${sslDomain}.key"
           },
           "transport": {
             "type": "ws",
@@ -5891,7 +5852,7 @@ EOF
 }
 EOF
     elif [[ -z "${3:-}" ]]; then
-        rm /etc/Proxy-agent/sing-box/conf/config/03_VLESS_WS_inbounds.json >/dev/null 2>&1
+        rm ${SINGBOX_FRAGMENT_DIR}/03_VLESS_WS_inbounds.json >/dev/null 2>&1
     fi
 
     if echo "${selectCustomInstallType}" | grep -q ",3," || [[ "$1" == "all" ]]; then
@@ -5906,7 +5867,7 @@ EOF
         handleSingBox stop
         randomPathFunction
         checkPortOpen "${result[-1]}" "${domain}"
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/05_VMess_WS_inbounds.json
+        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/05_VMess_WS_inbounds.json
 {
     "inbounds":[
         {
@@ -5918,8 +5879,8 @@ EOF
           "tls":{
             "server_name": "${sslDomain}",
             "enabled": true,
-            "certificate_path": "/etc/Proxy-agent/tls/${sslDomain}.crt",
-            "key_path": "/etc/Proxy-agent/tls/${sslDomain}.key"
+            "certificate_path": "${TLS_DIR}/${sslDomain}.crt",
+            "key_path": "${TLS_DIR}/${sslDomain}.key"
           },
           "transport": {
             "type": "ws",
@@ -5932,7 +5893,7 @@ EOF
 }
 EOF
     elif [[ -z "${3:-}" ]]; then
-        rm /etc/Proxy-agent/sing-box/conf/config/05_VMess_WS_inbounds.json >/dev/null 2>&1
+        rm ${SINGBOX_FRAGMENT_DIR}/05_VMess_WS_inbounds.json >/dev/null 2>&1
     fi
 
     # VLESS_Reality_Vision
@@ -5945,7 +5906,7 @@ EOF
         echo
         mapfile -t result < <(initSingBoxPort "${singBoxVLESSRealityVisionPort}")
         echoContent green "\n ---> VLESS_Reality_Vision端口：${result[-1]}"
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/07_VLESS_vision_reality_inbounds.json
+        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/07_VLESS_vision_reality_inbounds.json
 {
   "inbounds": [
     {
@@ -5975,13 +5936,13 @@ EOF
 }
 EOF
     elif [[ -z "${3:-}" ]]; then
-        rm /etc/Proxy-agent/sing-box/conf/config/07_VLESS_vision_reality_inbounds.json >/dev/null 2>&1
+        rm ${SINGBOX_FRAGMENT_DIR}/07_VLESS_vision_reality_inbounds.json >/dev/null 2>&1
     fi
 
     # VLESS+Reality+gRPC - 已移除，推荐使用XHTTP
     # 清理旧配置文件
     if [[ -z "${3:-}" ]]; then
-        rm /etc/Proxy-agent/sing-box/conf/config/08_VLESS_vision_gRPC_inbounds.json >/dev/null 2>&1
+        rm ${SINGBOX_FRAGMENT_DIR}/08_VLESS_vision_gRPC_inbounds.json >/dev/null 2>&1
     fi
 
     if echo "${selectCustomInstallType}" | grep -q ",6," || [[ "$1" == "all" ]]; then
@@ -6002,7 +5963,7 @@ EOF
             hysteria2ObfsConfig='"obfs": {"type": "salamander", "password": '"${_obfsPwJson}"'},'
         fi
 
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/06_hysteria2_inbounds.json
+        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json
 {
     "inbounds": [
         {
@@ -6021,15 +5982,15 @@ EOF
                 "alpn": [
                     "h3"
                 ],
-                "certificate_path": "/etc/Proxy-agent/tls/${sslDomain}.crt",
-                "key_path": "/etc/Proxy-agent/tls/${sslDomain}.key"
+                "certificate_path": "${TLS_DIR}/${sslDomain}.crt",
+                "key_path": "${TLS_DIR}/${sslDomain}.key"
             }
         }
     ]
 }
 EOF
     elif [[ -z "${3:-}" ]]; then
-        rm /etc/Proxy-agent/sing-box/conf/config/06_hysteria2_inbounds.json >/dev/null 2>&1
+        rm ${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json >/dev/null 2>&1
     fi
 
     if echo "${selectCustomInstallType}" | grep -q ",4," || [[ "$1" == "all" ]]; then
@@ -6038,7 +5999,7 @@ EOF
         echo
         mapfile -t result < <(initSingBoxPort "${singBoxTrojanPort}")
         echoContent green "\n ---> Trojan端口：${result[-1]}"
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/04_trojan_TCP_inbounds.json
+        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/04_trojan_TCP_inbounds.json
 {
     "inbounds": [
         {
@@ -6050,15 +6011,15 @@ EOF
             "tls": {
                 "enabled": true,
                 "server_name":"${sslDomain}",
-                "certificate_path": "/etc/Proxy-agent/tls/${sslDomain}.crt",
-                "key_path": "/etc/Proxy-agent/tls/${sslDomain}.key"
+                "certificate_path": "${TLS_DIR}/${sslDomain}.crt",
+                "key_path": "${TLS_DIR}/${sslDomain}.key"
             }
         }
     ]
 }
 EOF
     elif [[ -z "${3:-}" ]]; then
-        rm /etc/Proxy-agent/sing-box/conf/config/04_trojan_TCP_inbounds.json >/dev/null 2>&1
+        rm ${SINGBOX_FRAGMENT_DIR}/04_trojan_TCP_inbounds.json >/dev/null 2>&1
     fi
 
     if echo "${selectCustomInstallType}" | grep -q ",9," || [[ "$1" == "all" ]]; then
@@ -6068,7 +6029,7 @@ EOF
         mapfile -t result < <(initSingBoxPort "${singBoxTuicPort}")
         echoContent green "\n ---> Tuic端口：${result[-1]}"
         initTuicProtocol
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/09_tuic_inbounds.json
+        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/09_tuic_inbounds.json
 {
      "inbounds": [
         {
@@ -6087,15 +6048,15 @@ EOF
                 "alpn": [
                     "h3"
                 ],
-                "certificate_path": "/etc/Proxy-agent/tls/${sslDomain}.crt",
-                "key_path": "/etc/Proxy-agent/tls/${sslDomain}.key"
+                "certificate_path": "${TLS_DIR}/${sslDomain}.crt",
+                "key_path": "${TLS_DIR}/${sslDomain}.key"
             }
         }
     ]
 }
 EOF
     elif [[ -z "${3:-}" ]]; then
-        rm /etc/Proxy-agent/sing-box/conf/config/09_tuic_inbounds.json >/dev/null 2>&1
+        rm ${SINGBOX_FRAGMENT_DIR}/09_tuic_inbounds.json >/dev/null 2>&1
     fi
 
     if echo "${selectCustomInstallType}" | grep -q ",10," || [[ "$1" == "all" ]]; then
@@ -6104,7 +6065,7 @@ EOF
         echo
         mapfile -t result < <(initSingBoxPort "${singBoxNaivePort}")
         echoContent green "\n ---> Naive端口：${result[-1]}"
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/10_naive_inbounds.json
+        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/10_naive_inbounds.json
 {
      "inbounds": [
         {
@@ -6116,15 +6077,15 @@ EOF
             "tls": {
                 "enabled": true,
                 "server_name":"${sslDomain}",
-                "certificate_path": "/etc/Proxy-agent/tls/${sslDomain}.crt",
-                "key_path": "/etc/Proxy-agent/tls/${sslDomain}.key"
+                "certificate_path": "${TLS_DIR}/${sslDomain}.crt",
+                "key_path": "${TLS_DIR}/${sslDomain}.key"
             }
         }
     ]
 }
 EOF
     elif [[ -z "${3:-}" ]]; then
-        rm /etc/Proxy-agent/sing-box/conf/config/10_naive_inbounds.json >/dev/null 2>&1
+        rm ${SINGBOX_FRAGMENT_DIR}/10_naive_inbounds.json >/dev/null 2>&1
     fi
     if echo "${selectCustomInstallType}" | grep -q ",11," || [[ "$1" == "all" ]]; then
         echoContent yellow "\n===================== 配置VMess+HTTPUpgrade =====================\n"
@@ -6141,7 +6102,7 @@ EOF
         checkPortOpen "${result[-1]}" "${domain}"
         singBoxNginxConfig "$1" "${result[-1]}"
         bootStartup nginx
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/11_VMess_HTTPUpgrade_inbounds.json
+        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/11_VMess_HTTPUpgrade_inbounds.json
 {
     "inbounds":[
         {
@@ -6159,7 +6120,7 @@ EOF
 }
 EOF
     elif [[ -z "${3:-}" ]]; then
-        rm /etc/Proxy-agent/sing-box/conf/config/11_VMess_HTTPUpgrade_inbounds.json >/dev/null 2>&1
+        rm ${SINGBOX_FRAGMENT_DIR}/11_VMess_HTTPUpgrade_inbounds.json >/dev/null 2>&1
     fi
 
     if echo "${selectCustomInstallType}" | grep -q ",13," || [[ "$1" == "all" ]]; then
@@ -6168,7 +6129,7 @@ EOF
         echo
         mapfile -t result < <(initSingBoxPort "${singBoxAnyTLSPort}")
         echoContent green "\n ---> AnyTLS端口：${result[-1]}"
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/13_anytls_inbounds.json
+        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/13_anytls_inbounds.json
 {
     "inbounds": [
         {
@@ -6180,15 +6141,15 @@ EOF
             "tls": {
                 "enabled": true,
                 "server_name":"${sslDomain}",
-                "certificate_path": "/etc/Proxy-agent/tls/${sslDomain}.crt",
-                "key_path": "/etc/Proxy-agent/tls/${sslDomain}.key"
+                "certificate_path": "${TLS_DIR}/${sslDomain}.crt",
+                "key_path": "${TLS_DIR}/${sslDomain}.key"
             }
         }
     ]
 }
 EOF
     elif [[ -z "${3:-}" ]]; then
-        rm /etc/Proxy-agent/sing-box/conf/config/13_anytls_inbounds.json >/dev/null 2>&1
+        rm ${SINGBOX_FRAGMENT_DIR}/13_anytls_inbounds.json >/dev/null 2>&1
     fi
 
     # Shadowsocks 2022
@@ -6197,7 +6158,7 @@ EOF
         echoContent skyBlue "\n开始配置Shadowsocks 2022协议"
         echo
         initSS2022Config
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/14_ss2022_inbounds.json
+        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/14_ss2022_inbounds.json
 {
     "inbounds": [
         {
@@ -6217,7 +6178,7 @@ EOF
 EOF
         echoContent green " ---> Shadowsocks 2022配置完成"
     elif [[ -z "${3:-}" ]]; then
-        rm /etc/Proxy-agent/sing-box/conf/config/14_ss2022_inbounds.json >/dev/null 2>&1
+        rm ${SINGBOX_FRAGMENT_DIR}/14_ss2022_inbounds.json >/dev/null 2>&1
     fi
 
     if [[ -z "${3:-}" ]]; then
@@ -6238,7 +6199,7 @@ EOF
         removeSingBoxConfig dns
 
         # 确保基础 direct 出站存在，sing-box 需要至少一个默认出站
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
+        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/01_direct_outbound.json
 {
     "outbounds": [
         {
@@ -6252,7 +6213,7 @@ EOF
 }
 # 初始化 sing-box订阅配置
 initSubscribeLocalConfig() {
-    rm -rf /etc/Proxy-agent/subscribe_local/sing-box/*
+    rm -rf ${SUBSCRIBE_LOCAL_DIR}/sing-box/*
 }
 # 通用
 defaultBase64Code() {
@@ -6264,8 +6225,8 @@ defaultBase64Code() {
     local path=$6
     local user=
     user=$(echo "${email}" | awk -F "[-]" '{print $1}')
-    if [[ ! -f "/etc/Proxy-agent/subscribe_local/sing-box/${user}" ]]; then
-        echo [] >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
+    if [[ ! -f "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}" ]]; then
+        echo [] >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
     fi
     local singBoxSubscribeLocalConfig=
     if [[ "${type}" == "vlesstcp" ]]; then
@@ -6275,10 +6236,10 @@ defaultBase64Code() {
 
         echoContent yellow " ---> 格式化明文(VLESS+TCP+TLS_Vision)"
         echoContent green "协议类型:VLESS，地址:${currentHost}，端口:${port}，用户ID:${id}，安全:tls，client-fingerprint: chrome，传输方式:tcp，flow:xtls-rprx-vision，账户名:${email}\n"
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/default/${user}"
 vless://${id}@${currentHost}:${port}?encryption=none&security=tls&type=tcp&host=${currentHost}&fp=chrome&headerType=none&sni=${currentHost}&flow=xtls-rprx-vision#${email}
 EOF
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/clashMeta/${user}"
   - name: "${email}"
     type: vless
     server: ${currentHost}
@@ -6290,8 +6251,8 @@ EOF
     flow: xtls-rprx-vision
     client-fingerprint: chrome
 EOF
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vless\",\"server\":\"${currentHost}\",\"server_port\":${port},\"uuid\":\"${id}\",\"flow\":\"xtls-rprx-vision\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"packet_encoding\":\"xudp\"}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vless\",\"server\":\"${currentHost}\",\"server_port\":${port},\"uuid\":\"${id}\",\"flow\":\"xtls-rprx-vision\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"packet_encoding\":\"xudp\"}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
         echoContent yellow " ---> 二维码 VLESS(VLESS+TCP+TLS_Vision)"
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40${currentHost}%3A${port}%3Fencryption%3Dnone%26fp%3Dchrome%26security%3Dtls%26type%3Dtcp%26${currentHost}%3D${currentHost}%26headerType%3Dnone%26sni%3D${currentHost}%26flow%3Dxtls-rprx-vision%23${email}\n"
@@ -6306,10 +6267,10 @@ EOF
         echoContent green "    vmess://${qrCodeBase64Default}\n"
         echoContent yellow " ---> 二维码 vmess(VMess+WS+TLS)"
 
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/default/${user}"
 vmess://${qrCodeBase64Default}
 EOF
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/clashMeta/${user}"
   - name: "${email}"
     type: vmess
     server: ${add}
@@ -6327,9 +6288,9 @@ EOF
       headers:
         Host: ${currentHost}
 EOF
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vmess\",\"server\":\"${add}\",\"server_port\":${port},\"uuid\":\"${id}\",\"alter_id\":0,\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"packet_encoding\":\"packetaddr\",\"transport\":{\"type\":\"ws\",\"path\":\"${path}\",\"max_early_data\":2048,\"early_data_header_name\":\"Sec-WebSocket-Protocol\"}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vmess\",\"server\":\"${add}\",\"server_port\":${port},\"uuid\":\"${id}\",\"alter_id\":0,\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"packet_encoding\":\"packetaddr\",\"transport\":{\"type\":\"ws\",\"path\":\"${path}\",\"max_early_data\":2048,\"early_data_header_name\":\"Sec-WebSocket-Protocol\"}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
 
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vmess://${qrCodeBase64Default}\n"
 
@@ -6341,10 +6302,10 @@ EOF
         echoContent yellow " ---> 格式化明文(VLESS+WS+TLS)"
         echoContent green "    协议类型:VLESS，地址:${add}，伪装域名/SNI:${currentHost}，端口:${port}，client-fingerprint: chrome,用户ID:${id}，安全:tls，传输方式:ws，路径:${path}，账户名:${email}\n"
 
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/default/${user}"
 vless://${id}@${add}:${port}?encryption=none&security=tls&type=ws&host=${currentHost}&sni=${currentHost}&fp=chrome&path=${path}#${email}
 EOF
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/clashMeta/${user}"
   - name: "${email}"
     type: vless
     server: ${add}
@@ -6361,8 +6322,8 @@ EOF
         Host: ${currentHost}
 EOF
 
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vless\",\"server\":\"${add}\",\"server_port\":${port},\"uuid\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"multiplex\":{\"enabled\":false,\"protocol\":\"smux\",\"max_streams\":32},\"packet_encoding\":\"xudp\",\"transport\":{\"type\":\"ws\",\"path\":\"${path}\",\"headers\":{\"Host\":\"${currentHost}\"}}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vless\",\"server\":\"${add}\",\"server_port\":${port},\"uuid\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"multiplex\":{\"enabled\":false,\"protocol\":\"smux\",\"max_streams\":32},\"packet_encoding\":\"xudp\",\"transport\":{\"type\":\"ws\",\"path\":\"${path}\",\"headers\":{\"Host\":\"${currentHost}\"}}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
         echoContent yellow " ---> 二维码 VLESS(VLESS+WS+TLS)"
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40${add}%3A${port}%3Fencryption%3Dnone%26security%3Dtls%26type%3Dws%26host%3D${currentHost}%26fp%3Dchrome%26sni%3D${currentHost}%26path%3D${path}%23${email}"
@@ -6377,13 +6338,13 @@ EOF
 
         echoContent yellow " ---> 格式化明文(VLESS+reality+XHTTP)"
         echoContent green "协议类型:VLESS reality，地址:$(getPublicIP)，publicKey:${currentRealityXHTTPPublicKey}，shortId: ${currentRealityXHTTPShortId}${currentRealityMldsa65Verify:+，pqv=${currentRealityMldsa65Verify}}，serverNames：${xrayVLESSRealityXHTTPServerName}，端口:${port}，路径：${path}，SNI:${xrayVLESSRealityXHTTPServerName}，伪装域名:${xrayVLESSRealityXHTTPServerName}，用户ID:${id}，传输方式:xhttp，账户名:${email}\n"
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/default/${user}"
 vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality${pqvParam}&type=xhttp&sni=${xrayVLESSRealityXHTTPServerName}&fp=chrome&path=${path}&pbk=${currentRealityXHTTPPublicKey}&sid=${currentRealityXHTTPShortId}#${email}
 EOF
 
         # clashMeta（mihomo）订阅：reality-opts 必须含 publicKey + shortId，
         # 否则 clashMeta 客户端连不上 Reality。
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/clashMeta/${user}"
   - name: "${email}"
     type: vless
     server: $(getPublicIP)
@@ -6412,11 +6373,11 @@ EOF
         echoContent yellow " ---> Trojan(TLS)"
         echoContent green "    trojan://${id}@${currentHost}:${port}?peer=${currentHost}&fp=chrome&sni=${currentHost}&alpn=http/1.1#${currentHost}_Trojan\n"
 
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/default/${user}"
 trojan://${id}@${currentHost}:${port}?peer=${currentHost}&fp=chrome&sni=${currentHost}&alpn=http/1.1#${email}_Trojan
 EOF
 
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/clashMeta/${user}"
   - name: "${email}"
     type: trojan
     server: ${currentHost}
@@ -6426,8 +6387,8 @@ EOF
     udp: true
     sni: ${currentHost}
 EOF
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"trojan\",\"server\":\"${currentHost}\",\"server_port\":${port},\"password\":\"${id}\",\"tls\":{\"alpn\":[\"http/1.1\"],\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"trojan\",\"server\":\"${currentHost}\",\"server_port\":${port},\"password\":\"${id}\",\"tls\":{\"alpn\":[\"http/1.1\"],\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
         echoContent yellow " ---> 二维码 Trojan(TLS)"
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=trojan%3a%2f%2f${id}%40${currentHost}%3a${port}%3fpeer%3d${currentHost}%26fp%3Dchrome%26sni%3d${currentHost}%26alpn%3Dhttp/1.1%23${email}\n"
@@ -6469,13 +6430,13 @@ EOF
         fi
 
         echoContent green "    hysteria2://${id}@${currentHost}:${singBoxHysteria2Port}?${multiPort}${obfsUrlParam}peer=${currentHost}&insecure=0&sni=${currentHost}&alpn=h3#${email}\n"
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/default/${user}"
 hysteria2://${id}@${currentHost}:${singBoxHysteria2Port}?${multiPort}${obfsUrlParam}peer=${currentHost}&insecure=0&sni=${currentHost}&alpn=h3#${email}
 EOF
         echoContent yellow " ---> v2rayN(hysteria+TLS)"
         echo "{\"server\": \"${currentHost}:${port}\",\"socks5\": { \"listen\": \"127.0.0.1:7798\", \"timeout\": 300},\"auth\":\"${id}\",\"tls\":{\"sni\":\"${currentHost}\"}}" | jq
 
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/clashMeta/${user}"
   - name: "${email}"
     type: hysteria2
     server: ${currentHost}
@@ -6489,8 +6450,8 @@ EOF
 ${clashMetaObfs}
 EOF
 
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"hysteria2\",\"server\":\"${currentHost}\",\"server_port\":${singBoxHysteria2Port},\"up_mbps\":${hysteria2ClientUploadSpeed},\"down_mbps\":${hysteria2ClientDownloadSpeed},\"password\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"alpn\":[\"h3\"]}${singBoxObfs}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"hysteria2\",\"server\":\"${currentHost}\",\"server_port\":${singBoxHysteria2Port},\"up_mbps\":${hysteria2ClientUploadSpeed},\"down_mbps\":${hysteria2ClientDownloadSpeed},\"password\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"alpn\":[\"h3\"]}${singBoxObfs}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
         echoContent yellow " ---> 二维码 Hysteria2(TLS)"
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=hysteria2%3A%2F%2F${id}%40${currentHost}%3A${singBoxHysteria2Port}%3F${multiPortEncode}${obfsUrlParamEncode}peer%3D${currentHost}%26insecure%3D0%26sni%3D${currentHost}%26alpn%3Dh3%23${email}\n"
@@ -6511,10 +6472,10 @@ EOF
 
         echoContent yellow " ---> 格式化明文(VLESS+reality+uTLS+Vision)"
         echoContent green "协议类型:VLESS reality，地址:$(getPublicIP)，publicKey:${publicKey}，shortId: ${currentRealityShortId}${currentRealityMldsa65Verify:+，pqv=${currentRealityMldsa65Verify}}，serverNames：${realityServerName}，端口:${port}，用户ID:${id}，传输方式:tcp，账户名:${email}\n"
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/default/${user}"
 vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality${pqvParam}&type=tcp&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=${currentRealityShortId}&flow=xtls-rprx-vision#${email}
 EOF
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/clashMeta/${user}"
   - name: "${email}"
     type: vless
     server: $(getPublicIP)
@@ -6531,8 +6492,8 @@ EOF
     client-fingerprint: chrome
 EOF
 
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vless\",\"server\":\"$(getPublicIP)\",\"server_port\":${port},\"uuid\":\"${id}\",\"flow\":\"xtls-rprx-vision\",\"tls\":{\"enabled\":true,\"server_name\":\"${realityServerName}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"},\"reality\":{\"enabled\":true,\"public_key\":\"${publicKey}\",\"short_id\":\"${currentRealityShortId}\"}},\"packet_encoding\":\"xudp\"}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vless\",\"server\":\"$(getPublicIP)\",\"server_port\":${port},\"uuid\":\"${id}\",\"flow\":\"xtls-rprx-vision\",\"tls\":{\"enabled\":true,\"server_name\":\"${realityServerName}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"},\"reality\":{\"enabled\":true,\"public_key\":\"${publicKey}\",\"short_id\":\"${currentRealityShortId}\"}},\"packet_encoding\":\"xudp\"}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
         echoContent yellow " ---> 二维码 VLESS(VLESS+reality+uTLS+Vision)"
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40$(getPublicIP)%3A${port}%3Fencryption%3Dnone%26security%3Dreality${pqvParamQr}%26type%3Dtcp%26sni%3D${realityServerName}%26fp%3Dchrome%26pbk%3D${publicKey}%26sid%3D${currentRealityShortId}%26flow%3Dxtls-rprx-vision%23${email}\n"
@@ -6552,13 +6513,13 @@ EOF
         echoContent yellow " ---> 格式化明文(Tuic+TLS)"
         echoContent green "    协议类型:Tuic，地址:${currentHost}，端口：${port}，uuid：${tuicUUID}，password：${tuicPassword}，congestion-controller:${tuicAlgorithm}，alpn: h3，账户名:${email}\n"
 
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/default/${user}"
 tuic://${tuicUUID}:${tuicPassword}@${currentHost}:${port}?congestion_control=${tuicAlgorithm}&alpn=h3&sni=${currentHost}&udp_relay_mode=quic&allow_insecure=0#${email}
 EOF
         echoContent yellow " ---> v2rayN(Tuic+TLS)"
         echo "{\"relay\": {\"server\": \"${currentHost}:${port}\",\"uuid\": \"${tuicUUID}\",\"password\": \"${tuicPassword}\",\"ip\": \"${currentHost}\",\"congestion_control\": \"${tuicAlgorithm}\",\"alpn\": [\"h3\"]},\"local\": {\"server\": \"127.0.0.1:7798\"},\"log_level\": \"warn\"}" | jq
 
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/clashMeta/${user}"
   - name: "${email}"
     server: ${currentHost}
     type: tuic
@@ -6573,8 +6534,8 @@ EOF
     sni: ${email}
 EOF
 
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\": \"tuic\",\"server\": \"${currentHost}\",\"server_port\": ${port},\"uuid\": \"${tuicUUID}\",\"password\": \"${tuicPassword}\",\"congestion_control\": \"${tuicAlgorithm}\",\"tls\": {\"enabled\": true,\"server_name\": \"${currentHost}\",\"alpn\": [\"h3\"]}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\": \"tuic\",\"server\": \"${currentHost}\",\"server_port\": ${port},\"uuid\": \"${tuicUUID}\",\"password\": \"${tuicPassword}\",\"congestion_control\": \"${tuicAlgorithm}\",\"tls\": {\"enabled\": true,\"server_name\": \"${currentHost}\",\"alpn\": [\"h3\"]}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
         echoContent yellow "\n ---> 二维码 Tuic"
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=tuic%3A%2F%2F${tuicUUID}%3A${tuicPassword}%40${currentHost}%3A${tuicPort}%3Fcongestion_control%3D${tuicAlgorithm}%26alpn%3Dh3%26sni%3D${currentHost}%26udp_relay_mode%3Dquic%26allow_insecure%3D0%23${email}\n"
@@ -6582,7 +6543,7 @@ EOF
         echoContent yellow " ---> Naive(TLS)"
 
         echoContent green "    naive+https://${email}:${id}@${currentHost}:${port}?padding=true#${email}\n"
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/default/${user}"
 naive+https://${email}:${id}@${currentHost}:${port}?padding=true#${email}
 EOF
         echoContent yellow " ---> 二维码 Naive(TLS)"
@@ -6597,10 +6558,10 @@ EOF
         echoContent green "    vmess://${qrCodeBase64Default}\n"
         echoContent yellow " ---> 二维码 vmess(VMess+HTTPUpgrade+TLS)"
 
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/default/${user}"
    vmess://${qrCodeBase64Default}
 EOF
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/clashMeta/${user}"
   - name: "${email}"
     type: vmess
     server: ${add}
@@ -6619,9 +6580,9 @@ EOF
        Host: ${currentHost}
      v2ray-http-upgrade: true
 EOF
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vmess\",\"server\":\"${add}\",\"server_port\":${port},\"uuid\":\"${id}\",\"security\":\"auto\",\"alter_id\":0,\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"packet_encoding\":\"packetaddr\",\"transport\":{\"type\":\"httpupgrade\",\"path\":\"${path}\"}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vmess\",\"server\":\"${add}\",\"server_port\":${port},\"uuid\":\"${id}\",\"security\":\"auto\",\"alter_id\":0,\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"packet_encoding\":\"packetaddr\",\"transport\":{\"type\":\"httpupgrade\",\"path\":\"${path}\"}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
 
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vmess://${qrCodeBase64Default}\n"
 
@@ -6632,10 +6593,10 @@ EOF
         echoContent green "协议类型:anytls，地址:${currentHost}，端口:${singBoxAnyTLSPort}，用户ID:${id}，传输方式:tcp，账户名:${email}\n"
 
         echoContent green "    anytls://${id}@${currentHost}:${singBoxAnyTLSPort}?peer=${currentHost}&insecure=0&sni=${currentHost}#${email}\n"
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/default/${user}"
 anytls://${id}@${currentHost}:${singBoxAnyTLSPort}?peer=${currentHost}&insecure=0&sni=${currentHost}#${email}
 EOF
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/clashMeta/${user}"
   - name: "${email}"
     type: anytls
     port: ${singBoxAnyTLSPort}
@@ -6649,8 +6610,8 @@ EOF
       - http/1.1
 EOF
 
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"anytls\",\"server\":\"${currentHost}\",\"server_port\":${singBoxAnyTLSPort},\"password\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\"}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"anytls\",\"server\":\"${currentHost}\",\"server_port\":${singBoxAnyTLSPort},\"password\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\"}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
         echoContent yellow " ---> 二维码 AnyTLS"
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=anytls%3A%2F%2F${id}%40${currentHost}%3A${singBoxAnyTLSPort}%3Fpeer%3D${currentHost}%26insecure%3D0%26sni%3D${currentHost}%23${email}\n"
@@ -6674,10 +6635,10 @@ EOF
         local ss2022UrlPassword
         ss2022UrlPassword=$(echo -n "${ss2022Method}:${ss2022Password}" | base64 | tr -d '\n')
         echoContent green "    ss://${ss2022UrlPassword}@${ss2022ServerAddr}:${port}#${email}\n"
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/default/${user}"
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/default/${user}"
 ss://${ss2022UrlPassword}@${ss2022ServerAddr}:${port}#${email}
 EOF
-        cat <<EOF >>"/etc/Proxy-agent/subscribe_local/clashMeta/${user}"
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/clashMeta/${user}"
   - name: "${email}"
     type: ss
     server: ${ss2022ServerAddr}
@@ -6687,8 +6648,8 @@ EOF
     udp: true
 EOF
 
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"shadowsocks\",\"server\":\"${ss2022ServerAddr}\",\"server_port\":${port},\"method\":\"${ss2022Method}\",\"password\":\"${ss2022Password}\",\"multiplex\":{\"enabled\":true}}]" "/etc/Proxy-agent/subscribe_local/sing-box/${user}")
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${user}"
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"shadowsocks\",\"server\":\"${ss2022ServerAddr}\",\"server_port\":${port},\"method\":\"${ss2022Method}\",\"password\":\"${ss2022Password}\",\"multiplex\":{\"enabled\":true}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
         echoContent yellow " ---> 二维码 SS2022"
         local ss2022QRCode
@@ -6991,14 +6952,14 @@ checkNginx302() {
 # 备份恢复nginx文件
 backupNginxConfig() {
     if [[ "$1" == "backup" ]]; then
-        cp ${nginxConfigPath}alone.conf /etc/Proxy-agent/alone_backup.conf
+        cp ${nginxConfigPath}alone.conf ${PROXY_AGENT_DIR}/alone_backup.conf
         echoContent green " ---> nginx配置文件备份成功"
     fi
 
-    if [[ "$1" == "restoreBackup" ]] && [[ -f "/etc/Proxy-agent/alone_backup.conf" ]]; then
-        cp /etc/Proxy-agent/alone_backup.conf ${nginxConfigPath}alone.conf
+    if [[ "$1" == "restoreBackup" ]] && [[ -f "${PROXY_AGENT_DIR}/alone_backup.conf" ]]; then
+        cp ${PROXY_AGENT_DIR}/alone_backup.conf ${nginxConfigPath}alone.conf
         echoContent green " ---> nginx配置文件恢复备份成功"
-        rm /etc/Proxy-agent/alone_backup.conf
+        rm ${PROXY_AGENT_DIR}/alone_backup.conf
     fi
 
 }
@@ -7351,7 +7312,7 @@ unInstall() {
         fi
     fi
 
-    rm -rf /etc/Proxy-agent
+    rm -rf ${PROXY_AGENT_DIR}
     rm -rf "${nginxConfigPath}alone.conf"
     rm -rf "${nginxConfigPath}checkPortOpen.conf" >/dev/null 2>&1
     rm -rf "${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf" >/dev/null 2>&1
@@ -7511,15 +7472,15 @@ applyAccountChangeAllProtocols() {
 
     # 提交前内核级校验，失败即回滚。先 xray（-test 无副作用）后 sing-box（merge 会写 config.json，
     # 但 handleSingBox start 每次重新 merge，回滚后的下一次启动会覆盖掉它）
-    if [[ -n "${touchedXray}" && "${coreKind}" == "1" && -f "/etc/Proxy-agent/xray/xray" ]] &&
-        /etc/Proxy-agent/xray/xray help run 2>/dev/null | grep -q -- "-test"; then
-        if ! /etc/Proxy-agent/xray/xray run -test -confdir /etc/Proxy-agent/xray/conf >/dev/null 2>&1; then
+    if [[ -n "${touchedXray}" && "${coreKind}" == "1" && -f "${XRAY_BIN}" ]] &&
+        ${XRAY_BIN} help run 2>/dev/null | grep -q -- "-test"; then
+        if ! ${XRAY_BIN} run -test -confdir ${XRAY_CONF_DIR} >/dev/null 2>&1; then
             echoContent red " ---> $(t ACCOUNT_TX_VALIDATE_FAILED)"
             jsonTxRollback
             return 1
         fi
     fi
-    if [[ -n "${touchedSingBox}" && -f "/etc/Proxy-agent/sing-box/sing-box" ]]; then
+    if [[ -n "${touchedSingBox}" && -f "${SINGBOX_BIN}" ]]; then
         if ! singBoxMergeConfig; then
             echoContent red " ---> $(t ACCOUNT_TX_VALIDATE_FAILED)"
             jsonTxRollback
@@ -7615,7 +7576,7 @@ removeUser() {
 # 快照 xray / sing-box / tls / lang_pref，供 backupScript 与 rollback 用。
 backupConfigSnapshot() {
     local destDir="$1"
-    local installDir="/etc/Proxy-agent"
+    local installDir="${PROXY_AGENT_DIR}"
     [[ -z "${destDir}" ]] && return 1
     mkdir -p "${destDir}" || return 1
 
@@ -7646,7 +7607,7 @@ backupConfigSnapshot() {
 # 调用方负责 stop/start，且必须先做 pre-restore 快照——失败时已替换的部分不自动回滚。
 restoreConfigSnapshot() {
     local sourceDir="$1"
-    local installDir="/etc/Proxy-agent"
+    local installDir="${PROXY_AGENT_DIR}"
     [[ -z "${sourceDir}" || ! -d "${sourceDir}" ]] && return 1
 
     local restored=0
@@ -7675,7 +7636,7 @@ restoreConfigSnapshot() {
 # 参数: $1 - 备份原因 (update/manual/rollback)
 backupScript() {
     local reason="${1:-manual}"
-    local installDir="/etc/Proxy-agent"
+    local installDir="${PROXY_AGENT_DIR}"
     local backupDir="${installDir}/backup"
     local maxBackups=5
 
@@ -7743,7 +7704,7 @@ EOF
 
 # 列出可用的脚本版本（本地备份 + GitHub 历史版本）
 listScriptVersions() {
-    local installDir="/etc/Proxy-agent"
+    local installDir="${PROXY_AGENT_DIR}"
     local backupDir="${installDir}/backup"
 
     echoContent skyBlue "\n$(t SCRIPT_VERSION_ROLLBACK)"
@@ -7826,7 +7787,7 @@ listScriptVersions() {
 
 # 回退脚本版本
 rollbackScript() {
-    local installDir="/etc/Proxy-agent"
+    local installDir="${PROXY_AGENT_DIR}"
     local backupDir="${installDir}/backup"
     local rawBase="https://raw.githubusercontent.com/Lynthar/Proxy-agent"
 
@@ -8038,8 +7999,8 @@ scriptVersionMenu() {
     echoContent red "\n=============================================================="
 
     local currentVersion=""
-    if [[ -f "/etc/Proxy-agent/VERSION" ]]; then
-        currentVersion=$(cat "/etc/Proxy-agent/VERSION" 2>/dev/null | tr -d '[:space:]')
+    if [[ -f "${PROXY_AGENT_DIR}/VERSION" ]]; then
+        currentVersion=$(cat "${PROXY_AGENT_DIR}/VERSION" 2>/dev/null | tr -d '[:space:]')
     fi
     echoContent green "$(t SCRIPT_VERSION_CURRENT): v${currentVersion:-unknown}\n"
 
@@ -8064,7 +8025,7 @@ scriptVersionMenu() {
         echoContent green " ---> $(t SCRIPT_BACKUP_SUCCESS): ${backupPath}"
         ;;
     4)
-        local backupDir="/etc/Proxy-agent/backup"
+        local backupDir="${PROXY_AGENT_DIR}/backup"
         echoContent skyBlue "\n$(t SCRIPT_VERSION_LIST)"
         echoContent red "=============================================================="
         if [[ -d "${backupDir}" ]]; then
@@ -8091,7 +8052,7 @@ scriptVersionMenu() {
 updateV2RayAgent() {
     echoContent skyBlue "\n进度  $1/${totalProgress} : 更新 Proxy-agent 脚本"
 
-    local installDir="/etc/Proxy-agent"
+    local installDir="${PROXY_AGENT_DIR}"
     local latestVersion=""
     local rawBase=""
 
@@ -8561,13 +8522,13 @@ checkLog() {
         tail -f ${defaultErrorPath}
         ;;
     4)
-        if [[ ! -f "/etc/Proxy-agent/crontab_tls.log" ]]; then
-            touch /etc/Proxy-agent/crontab_tls.log
+        if [[ ! -f "${PROXY_AGENT_DIR}/crontab_tls.log" ]]; then
+            touch ${PROXY_AGENT_DIR}/crontab_tls.log
         fi
-        tail -n 100 /etc/Proxy-agent/crontab_tls.log
+        tail -n 100 ${PROXY_AGENT_DIR}/crontab_tls.log
         ;;
     5)
-        tail -n 100 /etc/Proxy-agent/tls/acme.log
+        tail -n 100 ${TLS_DIR}/acme.log
         ;;
     6)
         echo >${defaultAccessPath}
@@ -8622,20 +8583,20 @@ checkLog() {
 # 脚本快捷方式
 aliasInstall() {
 
-    if [[ -f "$HOME/install.sh" ]] && [[ -d "/etc/Proxy-agent" ]] && grep -Eq "作者[:：]Lynthar|Proxy-agent" "$HOME/install.sh"; then
-        mv "$HOME/install.sh" /etc/Proxy-agent/install.sh
+    if [[ -f "$HOME/install.sh" ]] && [[ -d "${PROXY_AGENT_DIR}" ]] && grep -Eq "作者[:：]Lynthar|Proxy-agent" "$HOME/install.sh"; then
+        mv "$HOME/install.sh" ${PROXY_AGENT_DIR}/install.sh
 
         # 复制 VERSION 文件（如果存在于脚本目录）
         if [[ -f "${_SCRIPT_DIR}/VERSION" ]]; then
-            if ! cp -f "${_SCRIPT_DIR}/VERSION" /etc/Proxy-agent/VERSION; then
+            if ! cp -f "${_SCRIPT_DIR}/VERSION" ${PROXY_AGENT_DIR}/VERSION; then
                 echoContent yellow " ---> $(t INSTALL_STAGE_FAIL "VERSION")"
             fi
         fi
 
         # 复制 lib 目录（如果存在）；失败致命——pasly 会因找不到 lib 函数崩溃
         if [[ -d "${_SCRIPT_DIR}/lib" ]]; then
-            mkdir -p /etc/Proxy-agent/lib
-            if ! cp -rf "${_SCRIPT_DIR}/lib/"*.sh /etc/Proxy-agent/lib/; then
+            mkdir -p ${PROXY_AGENT_DIR}/lib
+            if ! cp -rf "${_SCRIPT_DIR}/lib/"*.sh ${PROXY_AGENT_DIR}/lib/; then
                 echoContent red " ---> $(t INSTALL_STAGE_FAIL "lib/*.sh")"
                 exit 1
             fi
@@ -8643,8 +8604,8 @@ aliasInstall() {
 
         # 复制 shell/lang 目录；失败致命——i18n 全失效
         if [[ -d "${_SCRIPT_DIR}/shell/lang" ]]; then
-            mkdir -p /etc/Proxy-agent/shell/lang
-            if ! cp -rf "${_SCRIPT_DIR}/shell/lang/"*.sh /etc/Proxy-agent/shell/lang/; then
+            mkdir -p ${PROXY_AGENT_DIR}/shell/lang
+            if ! cp -rf "${_SCRIPT_DIR}/shell/lang/"*.sh ${PROXY_AGENT_DIR}/shell/lang/; then
                 echoContent red " ---> $(t INSTALL_STAGE_FAIL "shell/lang/*.sh")"
                 exit 1
             fi
@@ -8654,7 +8615,7 @@ aliasInstall() {
         if [[ -d "/usr/bin/" ]]; then
             rm -f "/usr/bin/vasma"
             if [[ ! -f "/usr/bin/pasly" ]]; then
-                ln -s /etc/Proxy-agent/install.sh /usr/bin/pasly
+                ln -s ${PROXY_AGENT_DIR}/install.sh /usr/bin/pasly
                 chmod 700 /usr/bin/pasly
                 paslyType=true
             fi
@@ -8663,7 +8624,7 @@ aliasInstall() {
         elif [[ -d "/usr/sbin" ]]; then
             rm -f "/usr/sbin/vasma"
             if [[ ! -f "/usr/sbin/pasly" ]]; then
-                ln -s /etc/Proxy-agent/install.sh /usr/sbin/pasly
+                ln -s ${PROXY_AGENT_DIR}/install.sh /usr/sbin/pasly
                 chmod 700 /usr/sbin/pasly
                 paslyType=true
             fi
@@ -8950,22 +8911,22 @@ installSniffing() {
 
 # 读取第三方warp配置
 readConfigWarpReg() {
-    if [[ ! -f "/etc/Proxy-agent/warp/config" ]]; then
-        /etc/Proxy-agent/warp/warp-reg >/etc/Proxy-agent/warp/config
+    if [[ ! -f "${WARP_DIR}/config" ]]; then
+        ${WARP_DIR}/warp-reg >${WARP_DIR}/config
     fi
 
-    secretKeyWarpReg=$(grep <"/etc/Proxy-agent/warp/config" private_key | awk '{print $2}')
+    secretKeyWarpReg=$(grep <"${WARP_DIR}/config" private_key | awk '{print $2}')
 
-    addressWarpReg=$(grep <"/etc/Proxy-agent/warp/config" v6 | awk '{print $2}')
+    addressWarpReg=$(grep <"${WARP_DIR}/config" v6 | awk '{print $2}')
 
-    publicKeyWarpReg=$(grep <"/etc/Proxy-agent/warp/config" public_key | awk '{print $2}')
+    publicKeyWarpReg=$(grep <"${WARP_DIR}/config" public_key | awk '{print $2}')
 
-    reservedWarpReg=$(grep <"/etc/Proxy-agent/warp/config" reserved | awk -F "[:]" '{print $2}')
+    reservedWarpReg=$(grep <"${WARP_DIR}/config" reserved | awk -F "[:]" '{print $2}')
 
 }
 # 安装warp-reg工具
 installWarpReg() {
-    if [[ ! -f "/etc/Proxy-agent/warp/warp-reg" ]]; then
+    if [[ ! -f "${WARP_DIR}/warp-reg" ]]; then
         echo
         echoContent yellow "# 注意事项"
         echoContent yellow "# 依赖第三方程序，请熟知其中风险"
@@ -8984,15 +8945,15 @@ installWarpReg() {
             main-linux-arm) warpRegExpectedHash="7def80f34b206bbb44df24b7bd04edfc03e5507d0ae17ac379d15ef81a2ca33f" ;;
             esac
 
-            local warpRegTmp="/etc/Proxy-agent/warp/warp-reg.download"
+            local warpRegTmp="${WARP_DIR}/warp-reg.download"
             curl -sLo "${warpRegTmp}" "https://github.com/badafans/warp-reg/releases/download/v1.0/${warpRegCoreCPUVendor}"
             if [[ ! -s "${warpRegTmp}" ]] || { [[ -n "${warpRegExpectedHash}" ]] && ! verifySHA256 "${warpRegTmp}" "${warpRegExpectedHash}"; }; then
                 rm -f "${warpRegTmp}"
                 echoContent red " ---> $(t WARP_REG_VERIFY_FAIL)"
                 exit 1
             fi
-            mv -f "${warpRegTmp}" /etc/Proxy-agent/warp/warp-reg
-            chmod 655 /etc/Proxy-agent/warp/warp-reg
+            mv -f "${warpRegTmp}" ${WARP_DIR}/warp-reg
+            chmod 655 ${WARP_DIR}/warp-reg
 
         else
             echoContent yellow " ---> 放弃安装"
@@ -9065,11 +9026,11 @@ unInstallWireGuard() {
 
         if [[ "${type}" == "IPv4" ]]; then
             if [[ ! -f "${configPath}wireguard_out_IPv6.json" ]]; then
-                rm -rf /etc/Proxy-agent/warp/config >/dev/null 2>&1
+                rm -rf ${WARP_DIR}/config >/dev/null 2>&1
             fi
         elif [[ "${type}" == "IPv6" ]]; then
             if [[ ! -f "${configPath}wireguard_out_IPv4.json" ]]; then
-                rm -rf /etc/Proxy-agent/warp/config >/dev/null 2>&1
+                rm -rf ${WARP_DIR}/config >/dev/null 2>&1
             fi
         fi
     fi
@@ -9077,7 +9038,7 @@ unInstallWireGuard() {
     if [[ -n "${singBoxConfigPath}" ]]; then
         if [[ ! -f "${singBoxConfigPath}wireguard_endpoints_IPv6_route.json" && ! -f "${singBoxConfigPath}wireguard_endpoints_IPv4_route.json" ]]; then
             rm "${singBoxConfigPath}wireguard_outbound.json" >/dev/null 2>&1
-            rm -rf /etc/Proxy-agent/warp/config >/dev/null 2>&1
+            rm -rf ${WARP_DIR}/config >/dev/null 2>&1
         fi
     fi
 }
@@ -9309,21 +9270,21 @@ chainProxyWizard() {
 
 # 确保 sing-box 已安装
 ensureSingBoxInstalled() {
-    if [[ ! -f "/etc/Proxy-agent/sing-box/sing-box" ]]; then
+    if [[ ! -f "${SINGBOX_BIN}" ]]; then
         echoContent yellow "\n检测到 sing-box 未安装，正在安装..."
         installSingBox
-        if [[ ! -f "/etc/Proxy-agent/sing-box/sing-box" ]]; then
+        if [[ ! -f "${SINGBOX_BIN}" ]]; then
             echoContent red " ---> sing-box 安装失败"
             return 1
         fi
     fi
 
     # 确保配置目录存在
-    mkdir -p /etc/Proxy-agent/sing-box/conf/config/
+    mkdir -p ${SINGBOX_FRAGMENT_DIR}/
 
     # 确保基础配置存在
-    if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config/00_log.json" ]]; then
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/00_log.json
+    if [[ ! -f "${SINGBOX_FRAGMENT_DIR}/00_log.json" ]]; then
+        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/00_log.json
 {
     "log": {
         "disabled": false,
@@ -9336,7 +9297,7 @@ EOF
 
     # 确保 DNS 配置存在，并把 legacy 的 {tag,address} 迁到 1.12+ 的 {type,server}。
     # 不迁的话 merge 会以 ENABLE_DEPRECATED_LEGACY_DNS_SERVERS 为由 FATAL。
-    local _dnsConf="/etc/Proxy-agent/sing-box/conf/config/01_dns.json"
+    local _dnsConf="${SINGBOX_FRAGMENT_DIR}/01_dns.json"
     if [[ ! -f "${_dnsConf}" ]] || \
        { grep -q '"address"' "${_dnsConf}" 2>/dev/null && ! grep -q '"type"' "${_dnsConf}" 2>/dev/null; }; then
         if [[ -f "${_dnsConf}" ]]; then
@@ -9365,8 +9326,8 @@ EOF
     # 确保直连出站存在。outbound 不带 domain_strategy（sing-box 1.12 弃用 / 1.14 删除）：
     # chain proxy 流量在 chain_route.json 的 resolve action 里按 prefer_ipv4 解析；
     # 非 chain 流量由客户端送 IP，outbound 自己不发起域名解析。
-    if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json" ]]; then
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
+    if [[ ! -f "${SINGBOX_FRAGMENT_DIR}/01_direct_outbound.json" ]]; then
+        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/01_direct_outbound.json
 {
     "outbounds": [
         {
@@ -9381,7 +9342,7 @@ EOF
     # 已有 01_direct_outbound.json 含 domain_strategy 时自动剥离（in-place migration）。
     # 1.12 起仅打 deprecation 警告，1.14 移除后会 FATAL；现在剥掉避免后续踩坑 +
     # 让 sing-box 启动日志干净。
-    local _directOut="/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json"
+    local _directOut="${SINGBOX_FRAGMENT_DIR}/01_direct_outbound.json"
     if [[ -f "${_directOut}" ]] && jq -e . "${_directOut}" >/dev/null 2>&1; then
         if jq -e '[.outbounds[]? | has("domain_strategy")] | any' "${_directOut}" >/dev/null 2>&1; then
             echoContent yellow " ---> 检测到旧版 01_direct_outbound.json 含 domain_strategy（1.14 移除），自动剥离"
@@ -9395,7 +9356,7 @@ EOF
 
     # 已有 chain_route.json 缺 default_domain_resolver 时 in-place 补全——1.13 起缺它直接 FATAL。
     # 后续 chain* 流程会重写该文件，但用户只"重启 sing-box"不重跑配置就会卡住。
-    local _chainRoute="/etc/Proxy-agent/sing-box/conf/config/chain_route.json"
+    local _chainRoute="${SINGBOX_FRAGMENT_DIR}/chain_route.json"
     if [[ -f "${_chainRoute}" ]] && jq -e . "${_chainRoute}" >/dev/null 2>&1; then
         if ! jq -e '.route | has("default_domain_resolver")' "${_chainRoute}" >/dev/null 2>&1; then
             echoContent yellow " ---> 检测到旧版 chain_route.json 缺 default_domain_resolver，自动补全"
@@ -9422,7 +9383,7 @@ EOF
     fi
 
     if [[ "${needUpdateService}" == "true" ]]; then
-        local execStart='/etc/Proxy-agent/sing-box/sing-box run -c /etc/Proxy-agent/sing-box/conf/config.json'
+        local execStart="${SINGBOX_BIN} run -c ${SINGBOX_MERGED_CONFIG}"
 
         if [[ -n $(find /bin /usr/bin -name "systemctl") ]] && [[ "${release}" != "alpine" ]]; then
             cat <<EOF >/etc/systemd/system/sing-box.service
@@ -9455,8 +9416,8 @@ EOF
 
 name="sing-box"
 description="Sing-Box Service"
-command="/etc/Proxy-agent/sing-box/sing-box"
-command_args="run -c /etc/Proxy-agent/sing-box/conf/config.json"
+command="${SINGBOX_BIN}"
+command_args="run -c ${SINGBOX_MERGED_CONFIG}"
 command_background=true
 pidfile="/run/\${RC_SVCNAME}.pid"
 
@@ -9506,7 +9467,7 @@ setupChainExit() {
     fi
 
     # 检查是否已存在链式代理入站
-    if [[ -f "/etc/Proxy-agent/sing-box/conf/config/chain_inbound.json" ]]; then
+    if [[ -f "${SINGBOX_FRAGMENT_DIR}/chain_inbound.json" ]]; then
         echoContent yellow "\n检测到已存在链式代理配置"
         read -r -p "是否覆盖现有配置？[y/n]:" confirmOverwrite
         if [[ "${confirmOverwrite}" != "y" ]]; then
@@ -9600,7 +9561,7 @@ setupChainExit() {
 
     # 创建入站配置
     # sniff/resolve 通过路由级 action 实现（见下方 chain_route.json），inbound 不再带 sniff 字段
-    cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
+    cat <<EOF >${SINGBOX_FRAGMENT_DIR}/chain_inbound.json
 {
     "inbounds": [
         {
@@ -9620,7 +9581,7 @@ EOF
 
     # 同步 direct 出站：不再写 domain_strategy（1.12 deprecated、1.14 移除）。
     # 用户选的策略由 chain_route.json 的 action: resolve 路由级 action 落地。
-    cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
+    cat <<EOF >${SINGBOX_FRAGMENT_DIR}/01_direct_outbound.json
 {
     "outbounds": [
         {
@@ -9634,7 +9595,7 @@ EOF
     # 创建路由配置（链式入站走直连）：先 sniff 再按 domainStrategy 重解析，显式绑 inbound + timeout 1s。
     # default_domain_resolver 指向 01_dns.json 的 google tag——1.13 起没有它直接 FATAL。
     if [[ -n "${domainStrategy}" ]]; then
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
+        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/chain_route.json
 {
     "route": {
         "rules": [
@@ -9648,7 +9609,7 @@ EOF
 }
 EOF
     else
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
+        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/chain_route.json
 {
     "route": {
         "rules": [
@@ -9678,7 +9639,7 @@ EOF
 }
 EOF
 )
-    writeChainInfoAtomic "/etc/Proxy-agent/sing-box/conf/chain_exit_info.json" "${__chainExitInfo}" || return 1
+    writeChainInfoAtomic "${CHAIN_EXIT_INFO}" "${__chainExitInfo}" || return 1
 
     # 开放防火墙端口
     if [[ -n "${allowedIP}" ]]; then
@@ -9720,16 +9681,16 @@ EOF
 
 # 显示现有配置码
 showExistingChainCode() {
-    if [[ ! -f "/etc/Proxy-agent/sing-box/conf/chain_exit_info.json" ]]; then
+    if [[ ! -f "${CHAIN_EXIT_INFO}" ]]; then
         echoContent red " ---> 未找到出口节点配置信息"
         return 1
     fi
 
     local publicIP port method password
-    publicIP=$(jq -r '.ip' /etc/Proxy-agent/sing-box/conf/chain_exit_info.json)
-    port=$(jq -r '.port' /etc/Proxy-agent/sing-box/conf/chain_exit_info.json)
-    method=$(jq -r '.method' /etc/Proxy-agent/sing-box/conf/chain_exit_info.json)
-    password=$(jq -r '.password' /etc/Proxy-agent/sing-box/conf/chain_exit_info.json)
+    publicIP=$(jq -r '.ip' ${CHAIN_EXIT_INFO})
+    port=$(jq -r '.port' ${CHAIN_EXIT_INFO})
+    method=$(jq -r '.method' ${CHAIN_EXIT_INFO})
+    password=$(jq -r '.password' ${CHAIN_EXIT_INFO})
 
     echoContent green "\n=============================================================="
     echoContent green "现有出口节点配置"
@@ -10103,8 +10064,8 @@ setupChainRelay() {
     fi
 
     # 检查是否已存在链式代理配置
-    if [[ -f "/etc/Proxy-agent/sing-box/conf/config/chain_inbound.json" ]] || \
-       [[ -f "/etc/Proxy-agent/sing-box/conf/config/chain_outbound.json" ]]; then
+    if [[ -f "${SINGBOX_FRAGMENT_DIR}/chain_inbound.json" ]] || \
+       [[ -f "${SINGBOX_FRAGMENT_DIR}/chain_outbound.json" ]]; then
         echoContent yellow "\n检测到已存在链式代理配置"
         read -r -p "是否覆盖现有配置？[y/n]:" confirmOverwrite
         if [[ "${confirmOverwrite}" != "y" ]]; then
@@ -10172,7 +10133,7 @@ setupChainRelay() {
 
     # 创建入站配置 (接收上游流量)
     # sniff 通过路由级 action 实现（见 chain_route.json）
-    cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
+    cat <<EOF >${SINGBOX_FRAGMENT_DIR}/chain_inbound.json
 {
     "inbounds": [
         {
@@ -10224,12 +10185,12 @@ EOF
         echoContent red " ---> 链式出站配置生成失败"
         return 1
     fi
-    printf '%s\n' "${chainOutboundJson}" > /etc/Proxy-agent/sing-box/conf/config/chain_outbound.json
+    printf '%s\n' "${chainOutboundJson}" > ${SINGBOX_FRAGMENT_DIR}/chain_outbound.json
 
     # 创建路由配置
     # sing-box 1.11+ 路由级 sniff（中继节点不重解析，沿用上游已嗅探到的域名）
     # default_domain_resolver 见 chainExit 注释，1.13 起必填
-    cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
+    cat <<EOF >${SINGBOX_FRAGMENT_DIR}/chain_route.json
 {
     "route": {
         "rules": [
@@ -10264,7 +10225,7 @@ EOF
 }
 EOF
 )
-    writeChainInfoAtomic "/etc/Proxy-agent/sing-box/conf/chain_relay_info.json" "${__chainRelayInfo}" || return 1
+    writeChainInfoAtomic "${CHAIN_RELAY_INFO}" "${__chainRelayInfo}" || return 1
 
     # 开放防火墙端口
     allowPort "${chainPort}" "tcp"
@@ -10281,7 +10242,7 @@ EOF
     sleep 1
     if ! pgrep -x "sing-box" >/dev/null 2>&1; then
         echoContent red " ---> sing-box 启动失败"
-        echoContent yellow "请手动执行: /etc/Proxy-agent/sing-box/sing-box run -c /etc/Proxy-agent/sing-box/conf/config.json"
+        echoContent yellow "请手动执行: ${SINGBOX_BIN} run -c ${SINGBOX_MERGED_CONFIG}"
         return 1
     fi
 
@@ -10325,7 +10286,7 @@ setupChainEntryMultiHop() {
     fi
 
     # 检查是否已存在链式代理配置
-    if [[ -f "/etc/Proxy-agent/sing-box/conf/config/chain_outbound.json" ]]; then
+    if [[ -f "${SINGBOX_FRAGMENT_DIR}/chain_outbound.json" ]]; then
         echoContent yellow "\n检测到已存在链式代理配置"
         read -r -p "是否覆盖现有配置？[y/n]:" confirmOverwrite
         if [[ "${confirmOverwrite}" != "y" ]]; then
@@ -10339,7 +10300,7 @@ setupChainEntryMultiHop() {
     local hasXrayProtocols=false
     # 扫描 xray/conf 下所有已注册代理协议(含 WS/XHTTP/HTTPUpgrade 等，见 lib/protocol-registry.sh)；
     # 仅查 02/07/04 会漏掉 XHTTP 等 → hasXrayProtocols=false → 不建桥接/不改路由 → 链路静默失效
-    local _xrayProtos; _xrayProtos=$(scanInstalledProtocols "/etc/Proxy-agent/xray/conf/")
+    local _xrayProtos; _xrayProtos=$(scanInstalledProtocols "${XRAY_CONF_DIR}/")
     if [[ -n "${_xrayProtos//,/}" ]]; then
         hasXrayProtocols=true
         echoContent green " ---> 检测到 Xray 代理协议，将同时配置 Xray 链式转发"
@@ -10382,12 +10343,12 @@ setupChainEntryMultiHop() {
         echoContent red " ---> 链式出站配置生成失败"
         return 1
     fi
-    printf '%s\n' "${chainOutboundJson}" > /etc/Proxy-agent/sing-box/conf/config/chain_outbound.json
+    printf '%s\n' "${chainOutboundJson}" > ${SINGBOX_FRAGMENT_DIR}/chain_outbound.json
 
     # 如果有 Xray 代理协议，创建 SOCKS5 桥接入站
     # sniff/resolve 通过路由级 action 实现（解决出口机无 IPv6 的问题）
     if [[ "${hasXrayProtocols}" == "true" ]]; then
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json
+        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/chain_bridge_inbound.json
 {
     "inbounds": [
         {
@@ -10401,7 +10362,7 @@ setupChainEntryMultiHop() {
 EOF
         # 路由：先 sniff 嗅探域名，再 prefer_ipv4 重解析（替代 inbound 上的 domain_strategy）
         # default_domain_resolver 见 chainExit 注释，1.13 起必填
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
+        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/chain_route.json
 {
     "route": {
         "rules": [
@@ -10416,7 +10377,7 @@ EOF
 EOF
     else
         # 没有 Xray，直接设置 final
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
+        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/chain_route.json
 {
     "route": {
         "final": "chain_outbound",
@@ -10440,7 +10401,7 @@ EOF
 }
 EOF
 )
-    writeChainInfoAtomic "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json" "${__chainEntryInfo}" || return 1
+    writeChainInfoAtomic "${CHAIN_ENTRY_INFO}" "${__chainEntryInfo}" || return 1
 
     # 合并 sing-box 配置（统一走 singBoxMergeConfig，错误会带上 sing-box 实际报错前 20 行）
     if ! singBoxMergeConfig; then
@@ -10456,7 +10417,7 @@ EOF
     sleep 1
     if ! pgrep -x "sing-box" >/dev/null 2>&1; then
         echoContent red " ---> sing-box 启动失败"
-        echoContent yellow "请手动执行: /etc/Proxy-agent/sing-box/sing-box run -c /etc/Proxy-agent/sing-box/conf/config.json"
+        echoContent yellow "请手动执行: ${SINGBOX_BIN} run -c ${SINGBOX_MERGED_CONFIG}"
         return 1
     fi
     echoContent green " ---> sing-box 启动成功"
@@ -10466,7 +10427,7 @@ EOF
         echoContent yellow "正在配置 Xray 链式转发..."
 
         # 创建 Xray SOCKS5 出站 (指向 sing-box 桥接)
-        cat <<EOF >/etc/Proxy-agent/xray/conf/chain_outbound.json
+        cat <<EOF >${XRAY_CONF_DIR}/chain_outbound.json
 {
     "outbounds": [
         {
@@ -10486,12 +10447,12 @@ EOF
 EOF
 
         # 备份原路由配置
-        if [[ -f "/etc/Proxy-agent/xray/conf/09_routing.json" ]]; then
-            cp /etc/Proxy-agent/xray/conf/09_routing.json /etc/Proxy-agent/xray/conf/09_routing.json.bak.chain
+        if [[ -f "${XRAY_CONF_DIR}/09_routing.json" ]]; then
+            cp ${XRAY_CONF_DIR}/09_routing.json ${XRAY_CONF_DIR}/09_routing.json.bak.chain
         fi
 
         # 创建新的路由配置
-        cat <<EOF >/etc/Proxy-agent/xray/conf/09_routing.json
+        cat <<EOF >${XRAY_CONF_DIR}/09_routing.json
 {
     "routing": {
         "domainStrategy": "AsIs",
@@ -10530,7 +10491,7 @@ EOF
             echoContent green " ---> Xray 重启成功，链式转发已启用"
         else
             echoContent red " ---> Xray 重启失败"
-            echoContent yellow "请检查配置: /etc/Proxy-agent/xray/xray run -confdir /etc/Proxy-agent/xray/conf"
+            echoContent yellow "请检查配置: ${XRAY_BIN} run -confdir ${XRAY_CONF_DIR}"
             return 1
         fi
     fi
@@ -10580,7 +10541,7 @@ setupChainEntry() {
     fi
 
     # 检查是否已存在链式代理出站
-    if [[ -f "/etc/Proxy-agent/sing-box/conf/config/chain_outbound.json" ]]; then
+    if [[ -f "${SINGBOX_FRAGMENT_DIR}/chain_outbound.json" ]]; then
         echoContent yellow "\n检测到已存在链式代理配置"
         read -r -p "是否覆盖现有配置？[y/n]:" confirmOverwrite
         if [[ "${confirmOverwrite}" != "y" ]]; then
@@ -10594,7 +10555,7 @@ setupChainEntry() {
     local hasXrayProtocols=false
     # 扫描 xray/conf 下所有已注册代理协议(含 WS/XHTTP/HTTPUpgrade 等，见 lib/protocol-registry.sh)；
     # 仅查 02/07/04 会漏掉 XHTTP 等 → hasXrayProtocols=false → 不建桥接/不改路由 → 链路静默失效
-    local _xrayProtos; _xrayProtos=$(scanInstalledProtocols "/etc/Proxy-agent/xray/conf/")
+    local _xrayProtos; _xrayProtos=$(scanInstalledProtocols "${XRAY_CONF_DIR}/")
     if [[ -n "${_xrayProtos//,/}" ]]; then
         hasXrayProtocols=true
         echoContent green " ---> 检测到 Xray 代理协议，将同时配置 Xray 链式转发"
@@ -10630,12 +10591,12 @@ setupChainEntry() {
         echoContent red " ---> 链式出站配置生成失败"
         return 1
     fi
-    printf '%s\n' "${_chainOutboundJson}" > /etc/Proxy-agent/sing-box/conf/config/chain_outbound.json
+    printf '%s\n' "${_chainOutboundJson}" > ${SINGBOX_FRAGMENT_DIR}/chain_outbound.json
 
     # 如果有 Xray 代理协议，创建 SOCKS5 桥接入站
     # sniff/resolve 通过路由级 action 实现（解决出口机无 IPv6 的问题）
     if [[ "${hasXrayProtocols}" == "true" ]]; then
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json
+        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/chain_bridge_inbound.json
 {
     "inbounds": [
         {
@@ -10649,7 +10610,7 @@ setupChainEntry() {
 EOF
         # 路由：先 sniff 嗅探域名，再 prefer_ipv4 重解析（替代 inbound 上的 domain_strategy）
         # default_domain_resolver 见 chainExit 注释，1.13 起必填
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
+        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/chain_route.json
 {
     "route": {
         "rules": [
@@ -10664,7 +10625,7 @@ EOF
 EOF
     else
         # 没有 Xray，直接设置 final
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_route.json
+        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/chain_route.json
 {
     "route": {
         "final": "chain_outbound",
@@ -10689,7 +10650,7 @@ EOF
 }
 EOF
 )
-    writeChainInfoAtomic "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json" "${__chainEntryInfo}" || return 1
+    writeChainInfoAtomic "${CHAIN_ENTRY_INFO}" "${__chainEntryInfo}" || return 1
 
     # 合并 sing-box 配置（统一走 singBoxMergeConfig，错误会带上 sing-box 实际报错前 20 行）
     if ! singBoxMergeConfig; then
@@ -10705,7 +10666,7 @@ EOF
     sleep 1
     if ! pgrep -x "sing-box" >/dev/null 2>&1; then
         echoContent red " ---> sing-box 启动失败"
-        echoContent yellow "请手动执行: /etc/Proxy-agent/sing-box/sing-box run -c /etc/Proxy-agent/sing-box/conf/config.json"
+        echoContent yellow "请手动执行: ${SINGBOX_BIN} run -c ${SINGBOX_MERGED_CONFIG}"
         return 1
     fi
     echoContent green " ---> sing-box 启动成功"
@@ -10715,7 +10676,7 @@ EOF
         echoContent yellow "正在配置 Xray 链式转发..."
 
         # 创建 Xray SOCKS5 出站 (指向 sing-box 桥接)
-        cat <<EOF >/etc/Proxy-agent/xray/conf/chain_outbound.json
+        cat <<EOF >${XRAY_CONF_DIR}/chain_outbound.json
 {
     "outbounds": [
         {
@@ -10736,12 +10697,12 @@ EOF
 
         # 修改 Xray 路由，让流量走链式代理
         # 备份原路由配置
-        if [[ -f "/etc/Proxy-agent/xray/conf/09_routing.json" ]]; then
-            cp /etc/Proxy-agent/xray/conf/09_routing.json /etc/Proxy-agent/xray/conf/09_routing.json.bak.chain
+        if [[ -f "${XRAY_CONF_DIR}/09_routing.json" ]]; then
+            cp ${XRAY_CONF_DIR}/09_routing.json ${XRAY_CONF_DIR}/09_routing.json.bak.chain
         fi
 
         # 创建新的路由配置，默认出站改为 chain_proxy
-        cat <<EOF >/etc/Proxy-agent/xray/conf/09_routing.json
+        cat <<EOF >${XRAY_CONF_DIR}/09_routing.json
 {
     "routing": {
         "domainStrategy": "AsIs",
@@ -10780,7 +10741,7 @@ EOF
             echoContent green " ---> Xray 重启成功，链式转发已启用"
         else
             echoContent red " ---> Xray 重启失败"
-            echoContent yellow "请检查配置: /etc/Proxy-agent/xray/xray run -confdir /etc/Proxy-agent/xray/conf"
+            echoContent yellow "请检查配置: ${XRAY_BIN} run -confdir ${XRAY_CONF_DIR}"
             return 1
         fi
     fi
@@ -10806,7 +10767,7 @@ showChainStatus() {
     echoContent red "\n=============================================================="
 
     # 检查是否为多链路模式
-    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" ]]; then
+    if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
         showMultiChainStatus
         return $?
     fi
@@ -10817,13 +10778,13 @@ showChainStatus() {
     local status="❌ 未配置"
 
     # 检查是否为出口节点
-    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_exit_info.json" ]]; then
+    if [[ -f "${CHAIN_EXIT_INFO}" ]]; then
         role="出口节点 (Exit)"
         local ip port
-        ip=$(jq -r '.ip' /etc/Proxy-agent/sing-box/conf/chain_exit_info.json)
-        port=$(jq -r '.port' /etc/Proxy-agent/sing-box/conf/chain_exit_info.json)
+        ip=$(jq -r '.ip' ${CHAIN_EXIT_INFO})
+        port=$(jq -r '.port' ${CHAIN_EXIT_INFO})
         local allowedIP
-        allowedIP=$(jq -r '.allowed_ip' /etc/Proxy-agent/sing-box/conf/chain_exit_info.json)
+        allowedIP=$(jq -r '.allowed_ip' ${CHAIN_EXIT_INFO})
 
         # 检查 sing-box 是否运行
         if pgrep -x "sing-box" >/dev/null 2>&1; then
@@ -10846,14 +10807,14 @@ showChainStatus() {
         showExistingChainCode
 
     # 检查是否为中继节点
-    elif [[ -f "/etc/Proxy-agent/sing-box/conf/chain_relay_info.json" ]]; then
+    elif [[ -f "${CHAIN_RELAY_INFO}" ]]; then
         role="中继节点 (Relay)"
         local ip port totalHops
-        ip=$(jq -r '.ip' /etc/Proxy-agent/sing-box/conf/chain_relay_info.json)
-        port=$(jq -r '.port' /etc/Proxy-agent/sing-box/conf/chain_relay_info.json)
-        totalHops=$(jq -r '.total_hops' /etc/Proxy-agent/sing-box/conf/chain_relay_info.json)
+        ip=$(jq -r '.ip' ${CHAIN_RELAY_INFO})
+        port=$(jq -r '.port' ${CHAIN_RELAY_INFO})
+        totalHops=$(jq -r '.total_hops' ${CHAIN_RELAY_INFO})
         local downstreamHops
-        downstreamHops=$(jq -r '.downstream_hops' /etc/Proxy-agent/sing-box/conf/chain_relay_info.json)
+        downstreamHops=$(jq -r '.downstream_hops' ${CHAIN_RELAY_INFO})
 
         # 检查 sing-box 是否运行
         if pgrep -x "sing-box" >/dev/null 2>&1; then
@@ -10893,9 +10854,9 @@ showChainStatus() {
         showRelayChainCode
 
     # 检查是否为入口节点
-    elif [[ -f "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json" ]]; then
+    elif [[ -f "${CHAIN_ENTRY_INFO}" ]]; then
         local mode
-        mode=$(jq -r '.mode // "single_hop"' /etc/Proxy-agent/sing-box/conf/chain_entry_info.json)
+        mode=$(jq -r '.mode // "single_hop"' ${CHAIN_ENTRY_INFO})
 
         # 检查 sing-box 是否运行
         if pgrep -x "sing-box" >/dev/null 2>&1; then
@@ -10907,8 +10868,8 @@ showChainStatus() {
         if [[ "${mode}" == "multi_hop" ]]; then
             role="入口节点 (Entry) - 多跳模式"
             local hopCount hops
-            hopCount=$(jq -r '.hop_count' /etc/Proxy-agent/sing-box/conf/chain_entry_info.json)
-            hops=$(jq -r '.hops' /etc/Proxy-agent/sing-box/conf/chain_entry_info.json)
+            hopCount=$(jq -r '.hop_count' ${CHAIN_ENTRY_INFO})
+            hops=$(jq -r '.hops' ${CHAIN_ENTRY_INFO})
 
             echoContent green "╔══════════════════════════════════════════════════════════════╗"
             echoContent green "║                      链式代理状态                              ║"
@@ -10934,8 +10895,8 @@ showChainStatus() {
             echoContent green "╚══════════════════════════════════════════════════════════════╝"
         else
             role="入口节点 (Entry)"
-            exitIP=$(jq -r '.exit_ip' /etc/Proxy-agent/sing-box/conf/chain_entry_info.json)
-            exitPort=$(jq -r '.exit_port' /etc/Proxy-agent/sing-box/conf/chain_entry_info.json)
+            exitIP=$(jq -r '.exit_ip' ${CHAIN_ENTRY_INFO})
+            exitPort=$(jq -r '.exit_port' ${CHAIN_ENTRY_INFO})
 
             echoContent green "╔══════════════════════════════════════════════════════════════╗"
             echoContent green "║                      链式代理状态                              ║"
@@ -10954,17 +10915,17 @@ showChainStatus() {
 
 # 显示中继节点配置码
 showRelayChainCode() {
-    if [[ ! -f "/etc/Proxy-agent/sing-box/conf/chain_relay_info.json" ]]; then
+    if [[ ! -f "${CHAIN_RELAY_INFO}" ]]; then
         echoContent red " ---> 未找到中继节点配置信息"
         return 1
     fi
 
     local publicIP port method password downstreamHops
-    publicIP=$(jq -r '.ip' /etc/Proxy-agent/sing-box/conf/chain_relay_info.json)
-    port=$(jq -r '.port' /etc/Proxy-agent/sing-box/conf/chain_relay_info.json)
-    method=$(jq -r '.method' /etc/Proxy-agent/sing-box/conf/chain_relay_info.json)
-    password=$(jq -r '.password' /etc/Proxy-agent/sing-box/conf/chain_relay_info.json)
-    downstreamHops=$(jq -r '.downstream_hops' /etc/Proxy-agent/sing-box/conf/chain_relay_info.json)
+    publicIP=$(jq -r '.ip' ${CHAIN_RELAY_INFO})
+    port=$(jq -r '.port' ${CHAIN_RELAY_INFO})
+    method=$(jq -r '.method' ${CHAIN_RELAY_INFO})
+    password=$(jq -r '.password' ${CHAIN_RELAY_INFO})
+    downstreamHops=$(jq -r '.downstream_hops' ${CHAIN_RELAY_INFO})
 
     # 构建新的 hops 数组 (本机 + 下游所有节点)
     local newHops
@@ -10983,7 +10944,7 @@ showRelayChainCode() {
 # 测试链路连通性
 testChainConnection() {
     # 检测多链路模式，使用专用测试函数
-    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" ]]; then
+    if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
         testMultiChainConnection
         return $?
     fi
@@ -10996,28 +10957,28 @@ testChainConnection() {
     local firstHopPort=""
     local role=""
 
-    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json" ]]; then
+    if [[ -f "${CHAIN_ENTRY_INFO}" ]]; then
         role="entry"
         local mode
-        mode=$(jq -r '.mode // "single_hop"' /etc/Proxy-agent/sing-box/conf/chain_entry_info.json)
+        mode=$(jq -r '.mode // "single_hop"' ${CHAIN_ENTRY_INFO})
 
         if [[ "${mode}" == "multi_hop" ]]; then
             # 多跳模式，获取第一跳
-            firstHopIP=$(jq -r '.hops[0].ip' /etc/Proxy-agent/sing-box/conf/chain_entry_info.json)
-            firstHopPort=$(jq -r '.hops[0].port' /etc/Proxy-agent/sing-box/conf/chain_entry_info.json)
+            firstHopIP=$(jq -r '.hops[0].ip' ${CHAIN_ENTRY_INFO})
+            firstHopPort=$(jq -r '.hops[0].port' ${CHAIN_ENTRY_INFO})
         else
             # 单跳模式
-            firstHopIP=$(jq -r '.exit_ip' /etc/Proxy-agent/sing-box/conf/chain_entry_info.json)
-            firstHopPort=$(jq -r '.exit_port' /etc/Proxy-agent/sing-box/conf/chain_entry_info.json)
+            firstHopIP=$(jq -r '.exit_ip' ${CHAIN_ENTRY_INFO})
+            firstHopPort=$(jq -r '.exit_port' ${CHAIN_ENTRY_INFO})
         fi
 
-    elif [[ -f "/etc/Proxy-agent/sing-box/conf/chain_relay_info.json" ]]; then
+    elif [[ -f "${CHAIN_RELAY_INFO}" ]]; then
         role="relay"
         # 中继节点获取下游第一跳
-        firstHopIP=$(jq -r '.downstream_hops[0].ip' /etc/Proxy-agent/sing-box/conf/chain_relay_info.json)
-        firstHopPort=$(jq -r '.downstream_hops[0].port' /etc/Proxy-agent/sing-box/conf/chain_relay_info.json)
+        firstHopIP=$(jq -r '.downstream_hops[0].ip' ${CHAIN_RELAY_INFO})
+        firstHopPort=$(jq -r '.downstream_hops[0].port' ${CHAIN_RELAY_INFO})
 
-    elif [[ -f "/etc/Proxy-agent/sing-box/conf/chain_exit_info.json" ]]; then
+    elif [[ -f "${CHAIN_EXIT_INFO}" ]]; then
         role="exit"
         echoContent yellow "当前为出口节点，无需测试链路"
         echoContent yellow "请在入口节点测试连通性"
@@ -11066,8 +11027,8 @@ testChainConnection() {
     local viaProxy=()
     if [[ "${role}" == "entry" ]]; then
         local hasXray bridgePort
-        hasXray=$(jq -r '.has_xray // false' /etc/Proxy-agent/sing-box/conf/chain_entry_info.json 2>/dev/null)
-        bridgePort=$(jq -r '.bridge_port // empty' /etc/Proxy-agent/sing-box/conf/chain_entry_info.json 2>/dev/null)
+        hasXray=$(jq -r '.has_xray // false' ${CHAIN_ENTRY_INFO} 2>/dev/null)
+        bridgePort=$(jq -r '.bridge_port // empty' ${CHAIN_ENTRY_INFO} 2>/dev/null)
         if [[ "${hasXray}" == "true" && -n "${bridgePort}" ]]; then
             viaProxy=(--socks5 "127.0.0.1:${bridgePort}")
         fi
@@ -11111,7 +11072,7 @@ testChainConnection() {
 # 高级设置
 chainProxyAdvanced() {
     # 检查是否为多链路模式
-    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" ]]; then
+    if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
         multiChainAdvancedMenu
         return $?
     fi
@@ -11128,9 +11089,9 @@ chainProxyAdvanced() {
 
     case ${selectType} in
     1)
-        if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_exit_info.json" ]]; then
+        if [[ -f "${CHAIN_EXIT_INFO}" ]]; then
             showExistingChainCode
-        elif [[ -f "/etc/Proxy-agent/sing-box/conf/chain_relay_info.json" ]]; then
+        elif [[ -f "${CHAIN_RELAY_INFO}" ]]; then
             showRelayChainCode
         else
             echoContent red " ---> 当前不是出口或中继节点"
@@ -11152,13 +11113,13 @@ chainProxyAdvanced() {
 updateChainKey() {
     echoContent yellow "\n更新链式代理密钥"
 
-    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_exit_info.json" ]]; then
+    if [[ -f "${CHAIN_EXIT_INFO}" ]]; then
         # 出口节点
         local port method
-        port=$(jq -r '.port' /etc/Proxy-agent/sing-box/conf/chain_exit_info.json)
-        method=$(jq -r '.method' /etc/Proxy-agent/sing-box/conf/chain_exit_info.json)
+        port=$(jq -r '.port' ${CHAIN_EXIT_INFO})
+        method=$(jq -r '.method' ${CHAIN_EXIT_INFO})
         local publicIP
-        publicIP=$(jq -r '.ip' /etc/Proxy-agent/sing-box/conf/chain_exit_info.json)
+        publicIP=$(jq -r '.ip' ${CHAIN_EXIT_INFO})
 
         # 生成新密钥
         local newKey
@@ -11169,26 +11130,26 @@ updateChainKey() {
         tmpInboundFile=$(mktemp) || return 1
         chmod 600 "${tmpInboundFile}"
         if ! jq --arg key "${newKey}" '.inbounds[0].password = $key' \
-                /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json > "${tmpInboundFile}" 2>/dev/null \
+                ${SINGBOX_FRAGMENT_DIR}/chain_inbound.json > "${tmpInboundFile}" 2>/dev/null \
             || ! jq -e . "${tmpInboundFile}" >/dev/null 2>&1; then
             rm -f "${tmpInboundFile}"
-            echoContent red " ---> $(t CHAIN_INFO_WRITE_FAIL "/etc/Proxy-agent/sing-box/conf/config/chain_inbound.json")"
+            echoContent red " ---> $(t CHAIN_INFO_WRITE_FAIL "${SINGBOX_FRAGMENT_DIR}/chain_inbound.json")"
             return 1
         fi
-        mv "${tmpInboundFile}" /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
+        mv "${tmpInboundFile}" ${SINGBOX_FRAGMENT_DIR}/chain_inbound.json
 
         # 更新信息文件 - 使用安全的临时文件（同上校验）
         local tmpInfoFile
         tmpInfoFile=$(mktemp) || return 1
         chmod 600 "${tmpInfoFile}"
         if ! jq --arg key "${newKey}" '.password = $key' \
-                /etc/Proxy-agent/sing-box/conf/chain_exit_info.json > "${tmpInfoFile}" 2>/dev/null \
+                ${CHAIN_EXIT_INFO} > "${tmpInfoFile}" 2>/dev/null \
             || ! jq -e . "${tmpInfoFile}" >/dev/null 2>&1; then
             rm -f "${tmpInfoFile}"
-            echoContent red " ---> $(t CHAIN_INFO_WRITE_FAIL "/etc/Proxy-agent/sing-box/conf/chain_exit_info.json")"
+            echoContent red " ---> $(t CHAIN_INFO_WRITE_FAIL "${CHAIN_EXIT_INFO}")"
             return 1
         fi
-        mv "${tmpInfoFile}" /etc/Proxy-agent/sing-box/conf/chain_exit_info.json
+        mv "${tmpInfoFile}" ${CHAIN_EXIT_INFO}
 
         if ! singBoxMergeConfig; then
             return 1
@@ -11205,7 +11166,7 @@ updateChainKey() {
         echoContent skyBlue "${chainCode}"
         echoContent red "\n请更新入口节点配置！"
 
-    elif [[ -f "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json" ]]; then
+    elif [[ -f "${CHAIN_ENTRY_INFO}" ]]; then
         echoContent red " ---> 入口节点请从出口节点获取新配置码后重新配置"
     else
         echoContent red " ---> 未配置链式代理"
@@ -11217,10 +11178,10 @@ updateChainPort() {
     echoContent yellow "\n更新链式代理端口"
 
     local infoFile=""
-    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_exit_info.json" ]]; then
-        infoFile="/etc/Proxy-agent/sing-box/conf/chain_exit_info.json"
-    elif [[ -f "/etc/Proxy-agent/sing-box/conf/chain_relay_info.json" ]]; then
-        infoFile="/etc/Proxy-agent/sing-box/conf/chain_relay_info.json"
+    if [[ -f "${CHAIN_EXIT_INFO}" ]]; then
+        infoFile="${CHAIN_EXIT_INFO}"
+    elif [[ -f "${CHAIN_RELAY_INFO}" ]]; then
+        infoFile="${CHAIN_RELAY_INFO}"
     else
         echoContent red " ---> 仅出口或中继节点可修改端口"
         return 1
@@ -11244,13 +11205,13 @@ updateChainPort() {
     tmpInboundFile=$(mktemp) || return 1
     chmod 600 "${tmpInboundFile}"
     if ! jq --argjson port "${newPort}" '.inbounds[0].listen_port = $port' \
-            /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json > "${tmpInboundFile}" 2>/dev/null \
+            ${SINGBOX_FRAGMENT_DIR}/chain_inbound.json > "${tmpInboundFile}" 2>/dev/null \
         || ! jq -e . "${tmpInboundFile}" >/dev/null 2>&1; then
         rm -f "${tmpInboundFile}"
-        echoContent red " ---> $(t CHAIN_INFO_WRITE_FAIL "/etc/Proxy-agent/sing-box/conf/config/chain_inbound.json")"
+        echoContent red " ---> $(t CHAIN_INFO_WRITE_FAIL "${SINGBOX_FRAGMENT_DIR}/chain_inbound.json")"
         return 1
     fi
-    mv "${tmpInboundFile}" /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
+    mv "${tmpInboundFile}" ${SINGBOX_FRAGMENT_DIR}/chain_inbound.json
 
     # 更新信息文件 - 使用安全的临时文件（同上校验）
     local tmpInfoFile
@@ -11289,19 +11250,19 @@ showChainDetailConfig() {
     echoContent skyBlue "\n链式代理详细配置"
     echoContent red "\n=============================================================="
 
-    if [[ -f "/etc/Proxy-agent/sing-box/conf/config/chain_inbound.json" ]]; then
+    if [[ -f "${SINGBOX_FRAGMENT_DIR}/chain_inbound.json" ]]; then
         echoContent yellow "\n入站配置 (chain_inbound.json):"
-        jq . /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
+        jq . ${SINGBOX_FRAGMENT_DIR}/chain_inbound.json
     fi
 
-    if [[ -f "/etc/Proxy-agent/sing-box/conf/config/chain_outbound.json" ]]; then
+    if [[ -f "${SINGBOX_FRAGMENT_DIR}/chain_outbound.json" ]]; then
         echoContent yellow "\n出站配置 (chain_outbound.json):"
-        jq . /etc/Proxy-agent/sing-box/conf/config/chain_outbound.json
+        jq . ${SINGBOX_FRAGMENT_DIR}/chain_outbound.json
     fi
 
-    if [[ -f "/etc/Proxy-agent/sing-box/conf/config/chain_route.json" ]]; then
+    if [[ -f "${SINGBOX_FRAGMENT_DIR}/chain_route.json" ]]; then
         echoContent yellow "\n路由配置 (chain_route.json):"
-        jq . /etc/Proxy-agent/sing-box/conf/config/chain_route.json
+        jq . ${SINGBOX_FRAGMENT_DIR}/chain_route.json
     fi
 }
 
@@ -11314,14 +11275,14 @@ removeChainProxy() {
     local isMultiChain=false
     local isSingleChain=false
 
-    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" ]]; then
+    if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
         isMultiChain=true
         local chainCount
-        chainCount=$(jq -r '.chains | length' /etc/Proxy-agent/sing-box/conf/chain_multi_info.json 2>/dev/null || echo "0")
+        chainCount=$(jq -r '.chains | length' ${CHAIN_MULTI_INFO} 2>/dev/null || echo "0")
         echoContent yellow "\n检测到多链路分流模式，共 ${chainCount} 条链路"
-    elif [[ -f "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json" ]] || \
-         [[ -f "/etc/Proxy-agent/sing-box/conf/chain_exit_info.json" ]] || \
-         [[ -f "/etc/Proxy-agent/sing-box/conf/chain_relay_info.json" ]]; then
+    elif [[ -f "${CHAIN_ENTRY_INFO}" ]] || \
+         [[ -f "${CHAIN_EXIT_INFO}" ]] || \
+         [[ -f "${CHAIN_RELAY_INFO}" ]]; then
         isSingleChain=true
         echoContent yellow "\n检测到单链路模式"
     else
@@ -11335,52 +11296,52 @@ removeChainProxy() {
     fi
 
     # 删除 sing-box 配置文件 - 单链路模式
-    rm -f /etc/Proxy-agent/sing-box/conf/config/chain_inbound.json
-    rm -f /etc/Proxy-agent/sing-box/conf/config/chain_outbound.json
-    rm -f /etc/Proxy-agent/sing-box/conf/config/chain_route.json
-    rm -f /etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json
-    rm -f /etc/Proxy-agent/sing-box/conf/chain_exit_info.json
-    rm -f /etc/Proxy-agent/sing-box/conf/chain_entry_info.json
-    rm -f /etc/Proxy-agent/sing-box/conf/chain_relay_info.json
+    rm -f ${SINGBOX_FRAGMENT_DIR}/chain_inbound.json
+    rm -f ${SINGBOX_FRAGMENT_DIR}/chain_outbound.json
+    rm -f ${SINGBOX_FRAGMENT_DIR}/chain_route.json
+    rm -f ${SINGBOX_FRAGMENT_DIR}/chain_bridge_inbound.json
+    rm -f ${CHAIN_EXIT_INFO}
+    rm -f ${CHAIN_ENTRY_INFO}
+    rm -f ${CHAIN_RELAY_INFO}
 
     # 删除外部节点单链路配置（兼容旧配置）
-    rm -f /etc/Proxy-agent/sing-box/conf/config/external_outbound.json
-    rm -f /etc/Proxy-agent/sing-box/conf/config/external_route.json
-    rm -f /etc/Proxy-agent/sing-box/conf/external_entry_info.json
+    rm -f ${SINGBOX_FRAGMENT_DIR}/external_outbound.json
+    rm -f ${SINGBOX_FRAGMENT_DIR}/external_route.json
+    rm -f ${SINGBOX_CONF_DIR}/external_entry_info.json
 
     # 01_direct_outbound.json 不能删（共享基础出站），但旧 chain 装的 domain_strategy 会让
     # 1.14 启动 FATAL——调 ensureDirectOutbound 重写为最小形态，剥掉 legacy 字段。
-    if [[ -f "/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json" ]] && declare -F ensureDirectOutbound >/dev/null 2>&1; then
+    if [[ -f "${SINGBOX_FRAGMENT_DIR}/01_direct_outbound.json" ]] && declare -F ensureDirectOutbound >/dev/null 2>&1; then
         ensureDirectOutbound
     fi
 
     # 01_dns.json 是 chain 路由的 default_domain_resolver 依赖（grep 全文只有 chain 代码引用），
     # 非 chain 配置不需要。删除避免残留；下次安装 chain 时 ensureSingBoxInstalled 会重建。
-    rm -f /etc/Proxy-agent/sing-box/conf/config/01_dns.json
+    rm -f ${SINGBOX_FRAGMENT_DIR}/01_dns.json
 
     # 删除 sing-box 配置文件 - 多链路模式
     if [[ "${isMultiChain}" == "true" ]]; then
         # 删除所有链路出站配置文件
-        rm -f /etc/Proxy-agent/sing-box/conf/config/chain_outbound_*.json 2>/dev/null
+        rm -f ${SINGBOX_FRAGMENT_DIR}/chain_outbound_*.json 2>/dev/null
         # 删除多链路路由配置
-        rm -f /etc/Proxy-agent/sing-box/conf/config/chain_multi_route.json 2>/dev/null
+        rm -f ${SINGBOX_FRAGMENT_DIR}/chain_multi_route.json 2>/dev/null
         # 删除多链路信息文件
-        rm -f /etc/Proxy-agent/sing-box/conf/chain_multi_info.json
+        rm -f ${CHAIN_MULTI_INFO}
         echoContent yellow " ---> 已删除多链路分流配置"
     fi
 
     # 删除 Xray 链式代理配置
-    if [[ -f "/etc/Proxy-agent/xray/conf/chain_outbound.json" ]]; then
-        rm -f /etc/Proxy-agent/xray/conf/chain_outbound.json
+    if [[ -f "${XRAY_CONF_DIR}/chain_outbound.json" ]]; then
+        rm -f ${XRAY_CONF_DIR}/chain_outbound.json
         echoContent yellow " ---> 已删除 Xray 链式出站配置"
 
         # 恢复原路由配置
-        if [[ -f "/etc/Proxy-agent/xray/conf/09_routing.json.bak.chain" ]]; then
-            mv /etc/Proxy-agent/xray/conf/09_routing.json.bak.chain /etc/Proxy-agent/xray/conf/09_routing.json
+        if [[ -f "${XRAY_CONF_DIR}/09_routing.json.bak.chain" ]]; then
+            mv ${XRAY_CONF_DIR}/09_routing.json.bak.chain ${XRAY_CONF_DIR}/09_routing.json
             echoContent yellow " ---> 已恢复 Xray 原路由配置"
         else
             # 如果没有备份，创建默认路由配置
-            cat <<EOF >/etc/Proxy-agent/xray/conf/09_routing.json
+            cat <<EOF >${XRAY_CONF_DIR}/09_routing.json
 {
     "routing": {
         "rules": [
@@ -11431,7 +11392,7 @@ generateProtocolChainRoute() {
 
     # 检查是否存在 bridge inbound（Xray 桥接）
     local hasBridge=false
-    if [[ -f "/etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json" ]]; then
+    if [[ -f "${SINGBOX_FRAGMENT_DIR}/chain_bridge_inbound.json" ]]; then
         hasBridge=true
     fi
 
@@ -11476,14 +11437,14 @@ EOF
 )
     fi
 
-    echo "${routeConfig}" | jq . > /etc/Proxy-agent/sing-box/conf/config/chain_route.json
+    echo "${routeConfig}" | jq . > ${SINGBOX_FRAGMENT_DIR}/chain_route.json
 }
 
 # 保存协议分流偏好设置
 saveProtocolRoutingPreference() {
     local selection="$1"
     local protocolNames="$2"
-    local entryInfo="/etc/Proxy-agent/sing-box/conf/chain_entry_info.json"
+    local entryInfo="${CHAIN_ENTRY_INFO}"
 
     if [[ -f "${entryInfo}" ]]; then
         local updatedInfo
@@ -11502,25 +11463,25 @@ configureProtocolChainRouting() {
     echoContent yellow "$(t CHAIN_PROTOCOL_ROUTING_DESC2)\n"
 
     # 检查是否运行 sing-box 核心
-    if [[ ! -f "/etc/Proxy-agent/sing-box/sing-box" ]]; then
+    if [[ ! -f "${SINGBOX_BIN}" ]]; then
         echoContent red " ---> $(t CHAIN_PROTOCOL_SINGBOX_ONLY)"
         return 1
     fi
 
     # 检查是否为入口节点
-    if [[ ! -f "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json" ]]; then
+    if [[ ! -f "${CHAIN_ENTRY_INFO}" ]]; then
         echoContent red " ---> $(t CHAIN_PROTOCOL_NOT_ENTRY_NODE)"
         return 1
     fi
 
     # 检查链式代理出站是否已配置
-    if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config/chain_outbound.json" ]]; then
+    if [[ ! -f "${SINGBOX_FRAGMENT_DIR}/chain_outbound.json" ]]; then
         echoContent red " ---> $(t CHAIN_PROTOCOL_NO_CHAIN_OUTBOUND)"
         return 1
     fi
 
     # 获取已安装的协议（sing-box）
-    local cfgPath="/etc/Proxy-agent/sing-box/conf/config/"
+    local cfgPath="${SINGBOX_FRAGMENT_DIR}/"
     local installedProtocols=""
     local protocolCount=0
 
@@ -11748,7 +11709,7 @@ validateIpCidrs() {
 
 # 生成下一个可用的链路名称
 generateNextChainName() {
-    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+    local infoFile="${CHAIN_MULTI_INFO}"
     local index=1
 
     if [[ -f "${infoFile}" ]]; then
@@ -11766,7 +11727,7 @@ generateNextChainName() {
 # 检查链路名称是否已存在
 isChainNameExists() {
     local name=$1
-    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+    local infoFile="${CHAIN_MULTI_INFO}"
 
     if [[ ! -f "${infoFile}" ]]; then
         return 1
@@ -11787,8 +11748,8 @@ setupMultiChainEntry() {
     echoContent yellow "$(t CHAIN_MULTI_EXAMPLE)\n"
 
     # 检查是否已存在单链路配置
-    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json" ]] && \
-       [[ ! -f "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" ]]; then
+    if [[ -f "${CHAIN_ENTRY_INFO}" ]] && \
+       [[ ! -f "${CHAIN_MULTI_INFO}" ]]; then
         echoContent yellow "$(t CHAIN_SINGLE_EXISTS)"
         echoContent yellow "$(t CHAIN_SINGLE_UNINSTALL_HINT)"
         echoContent yellow "$(t CHAIN_MENU_PATH)"
@@ -11796,7 +11757,7 @@ setupMultiChainEntry() {
     fi
 
     # 检查是否已存在多链路配置
-    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" ]]; then
+    if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
         echoContent yellow "$(t CHAIN_MULTI_EXISTS)"
         echoContent yellow "1.$(t CHAIN_CONTINUE_ADD_NEW)"
         echoContent yellow "2.$(t CHAIN_RECONFIGURE)"
@@ -11815,11 +11776,11 @@ setupMultiChainEntry() {
                     return 0
                 fi
                 # 清除现有多链路配置
-                rm -f /etc/Proxy-agent/sing-box/conf/chain_multi_info.json
-                rm -f /etc/Proxy-agent/sing-box/conf/config/chain_outbound_*.json
-                rm -f /etc/Proxy-agent/sing-box/conf/config/chain_route.json
-                rm -f /etc/Proxy-agent/sing-box/conf/config/chain_ruleset.json
-                rm -f /etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json
+                rm -f ${CHAIN_MULTI_INFO}
+                rm -f ${SINGBOX_FRAGMENT_DIR}/chain_outbound_*.json
+                rm -f ${SINGBOX_FRAGMENT_DIR}/chain_route.json
+                rm -f ${SINGBOX_FRAGMENT_DIR}/chain_ruleset.json
+                rm -f ${SINGBOX_FRAGMENT_DIR}/chain_bridge_inbound.json
                 ;;
             *)
                 return 0
@@ -11872,7 +11833,7 @@ setupMultiChainInteractive() {
 }
 EOF
 )
-    writeChainInfoAtomic "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" "${__chainMultiInit}" || return 1
+    writeChainInfoAtomic "${CHAIN_MULTI_INFO}" "${__chainMultiInit}" || return 1
 
     while [[ "${continueAdding}" == "y" ]]; do
         ((chainCount++))
@@ -11917,11 +11878,11 @@ EOF
 
     # 检查是否至少添加了一条链路
     local totalChains
-    totalChains=$(jq '.chains | length' /etc/Proxy-agent/sing-box/conf/chain_multi_info.json)
+    totalChains=$(jq '.chains | length' ${CHAIN_MULTI_INFO})
 
     if [[ "${totalChains}" -lt 1 ]]; then
         echoContent red "\n ---> $(t CHAIN_NO_CHAINS_ADDED)"
-        rm -f /etc/Proxy-agent/sing-box/conf/chain_multi_info.json
+        rm -f ${CHAIN_MULTI_INFO}
         return 1
     fi
 
@@ -11951,7 +11912,7 @@ setupMultiChainBatch() {
 }
 EOF
 )
-    writeChainInfoAtomic "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" "${__chainMultiInit}" || return 1
+    writeChainInfoAtomic "${CHAIN_MULTI_INFO}" "${__chainMultiInit}" || return 1
 
     local chainIndex=0
     local line
@@ -11983,7 +11944,7 @@ EOF
 
     if [[ ${chainIndex} -lt 1 ]]; then
         echoContent red "\n ---> $(t CHAIN_IMPORT_NONE)"
-        rm -f /etc/Proxy-agent/sing-box/conf/chain_multi_info.json
+        rm -f ${CHAIN_MULTI_INFO}
         return 1
     fi
 
@@ -12205,7 +12166,7 @@ addExternalChainToConfig() {
     local nodeId=$2
     local isDefault=${3:-false}
 
-    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+    local infoFile="${CHAIN_MULTI_INFO}"
 
     # 获取外部节点信息
     local node
@@ -12263,7 +12224,7 @@ addExternalChainToConfig() {
         return 1
     fi
 
-    local outFile="/etc/Proxy-agent/sing-box/conf/config/chain_outbound_${name}.json"
+    local outFile="${SINGBOX_FRAGMENT_DIR}/chain_outbound_${name}.json"
     local wrapped
     if ! wrapped=$(jq -n --argjson ob "${outboundConfig}" '{outbounds: [$ob]}') || [[ -z "${wrapped}" ]]; then
         echoContent red " ---> $(t EXT_CONFIG_FAILED)"
@@ -12490,7 +12451,7 @@ addChainToConfig() {
     local method=$5
     local isDefault=${6:-false}
 
-    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+    local infoFile="${CHAIN_MULTI_INFO}"
 
     # 添加到 chains 数组
     local tmpFile
@@ -12523,7 +12484,7 @@ addChainToConfig() {
     fi
 
     # 生成链路出站：用 jq -n + --arg/--argjson 而非 heredoc——ip / method / key 可能含 " 或 \。
-    local outFile="/etc/Proxy-agent/sing-box/conf/config/chain_outbound_${name}.json"
+    local outFile="${SINGBOX_FRAGMENT_DIR}/chain_outbound_${name}.json"
     local outboundJson
     if ! outboundJson=$(jq -n \
             --arg name "${name}" \
@@ -12561,7 +12522,7 @@ addRuleToConfig() {
     local ruleValue=$2
     local chainName=$3
 
-    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+    local infoFile="${CHAIN_MULTI_INFO}"
     local tmpFile
     tmpFile=$(mktemp)
     chmod 600 "${tmpFile}"
@@ -12580,7 +12541,7 @@ addRuleToConfig() {
 
 # 配置多链路分流规则
 configureMultiChainRules() {
-    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+    local infoFile="${CHAIN_MULTI_INFO}"
 
     if [[ ! -f "${infoFile}" ]]; then
         echoContent red " ---> $(t CHAIN_NO_CONFIG)"
@@ -12755,7 +12716,7 @@ configureMultiChainRules() {
 
 # 完成多链路配置
 finalizeMultiChainConfig() {
-    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+    local infoFile="${CHAIN_MULTI_INFO}"
 
     echoContent yellow "\n$(t CHAIN_GENERATING)"
 
@@ -12800,7 +12761,7 @@ finalizeMultiChainConfig() {
     local hasXrayProtocols=false
     # 扫描 xray/conf 下所有已注册代理协议(含 WS/XHTTP/HTTPUpgrade 等，见 lib/protocol-registry.sh)；
     # 仅查 02/07/04 会漏掉 XHTTP 等 → hasXrayProtocols=false → 不建桥接/不改路由 → 链路静默失效
-    local _xrayProtos; _xrayProtos=$(scanInstalledProtocols "/etc/Proxy-agent/xray/conf/")
+    local _xrayProtos; _xrayProtos=$(scanInstalledProtocols "${XRAY_CONF_DIR}/")
     if [[ -n "${_xrayProtos//,/}" ]]; then
         hasXrayProtocols=true
         echoContent green " ---> $(t CHAIN_XRAY_DETECTED)"
@@ -12820,7 +12781,7 @@ finalizeMultiChainConfig() {
     # sniff/resolve 在 generateMultiChainRouteConfig 路由配置中以 action 形式注入
     local chainBridgePort=31111
     if [[ "${hasXrayProtocols}" == "true" ]]; then
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/chain_bridge_inbound.json
+        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/chain_bridge_inbound.json
 {
     "inbounds": [
         {
@@ -12849,7 +12810,7 @@ EOF
     sleep 1
     if ! pgrep -x "sing-box" >/dev/null 2>&1; then
         echoContent red " ---> $(t CHAIN_SINGBOX_START_FAILED)"
-        echoContent yellow "$(t CHAIN_SINGBOX_DEBUG) /etc/Proxy-agent/sing-box/sing-box run -c /etc/Proxy-agent/sing-box/conf/config.json"
+        echoContent yellow "$(t CHAIN_SINGBOX_DEBUG) ${SINGBOX_BIN} run -c ${SINGBOX_MERGED_CONFIG}"
         return 1
     fi
     echoContent green " ---> $(t CHAIN_SINGBOX_START_SUCCESS)"
@@ -12870,7 +12831,7 @@ EOF
 
 # 生成多链路路由配置
 generateMultiChainRouteConfig() {
-    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+    local infoFile="${CHAIN_MULTI_INFO}"
 
     # 获取默认链路
     local defaultChain
@@ -12999,8 +12960,8 @@ generateMultiChainRouteConfig() {
     done <<< "${rules}"
 
     # 确保 direct 出站存在（不写 domain_strategy，详见 ensureSingBoxInstalled 注释）
-    if [[ ! -f "/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json" ]]; then
-        cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/01_direct_outbound.json
+    if [[ ! -f "${SINGBOX_FRAGMENT_DIR}/01_direct_outbound.json" ]]; then
+        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/01_direct_outbound.json
 {
     "outbounds": [
         {
@@ -13032,7 +12993,7 @@ EOF
             }
         }')
 
-    echo "${routeConfig}" > /etc/Proxy-agent/sing-box/conf/config/chain_route.json
+    echo "${routeConfig}" > ${SINGBOX_FRAGMENT_DIR}/chain_route.json
 }
 
 # 配置 Xray 链式转发
@@ -13042,7 +13003,7 @@ configureXrayForMultiChain() {
     echoContent yellow "$(t CHAIN_CONFIGURING_XRAY)"
 
     # 创建 Xray SOCKS5 出站 (指向 sing-box 桥接)
-    cat <<EOF >/etc/Proxy-agent/xray/conf/chain_outbound.json
+    cat <<EOF >${XRAY_CONF_DIR}/chain_outbound.json
 {
     "outbounds": [
         {
@@ -13062,12 +13023,12 @@ configureXrayForMultiChain() {
 EOF
 
     # 备份原路由配置
-    if [[ -f "/etc/Proxy-agent/xray/conf/09_routing.json" ]]; then
-        cp /etc/Proxy-agent/xray/conf/09_routing.json /etc/Proxy-agent/xray/conf/09_routing.json.bak.chain
+    if [[ -f "${XRAY_CONF_DIR}/09_routing.json" ]]; then
+        cp ${XRAY_CONF_DIR}/09_routing.json ${XRAY_CONF_DIR}/09_routing.json.bak.chain
     fi
 
     # 创建新的路由配置
-    cat <<EOF >/etc/Proxy-agent/xray/conf/09_routing.json
+    cat <<EOF >${XRAY_CONF_DIR}/09_routing.json
 {
     "routing": {
         "domainStrategy": "AsIs",
@@ -13106,13 +13067,13 @@ EOF
         echoContent green " ---> $(t CHAIN_XRAY_RESTART_SUCCESS)"
     else
         echoContent red " ---> $(t CHAIN_XRAY_RESTART_FAILED)"
-        echoContent yellow "$(t CHAIN_XRAY_CHECK_CONFIG) /etc/Proxy-agent/xray/xray run -confdir /etc/Proxy-agent/xray/conf"
+        echoContent yellow "$(t CHAIN_XRAY_CHECK_CONFIG) ${XRAY_BIN} run -confdir ${XRAY_CONF_DIR}"
     fi
 }
 
 # 显示多链路配置摘要
 showMultiChainSummary() {
-    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+    local infoFile="${CHAIN_MULTI_INFO}"
 
     echoContent green "\n=============================================================="
     echoContent green "$(t CHAIN_CONFIG_COMPLETE)"
@@ -13178,7 +13139,7 @@ showMultiChainSummary() {
 
 # 并行测试多链路连通性
 testMultiChainConnection() {
-    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+    local infoFile="${CHAIN_MULTI_INFO}"
 
     if [[ ! -f "${infoFile}" ]]; then
         # 如果不是多链路模式，使用原有测试函数
@@ -13279,7 +13240,7 @@ testMultiChainConnection() {
 
 # 显示多链路状态
 showMultiChainStatus() {
-    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+    local infoFile="${CHAIN_MULTI_INFO}"
 
     if [[ ! -f "${infoFile}" ]]; then
         return 1
@@ -13378,7 +13339,7 @@ multiChainAdvancedMenu() {
 
 # 删除链路
 removeMultiChainOutbound() {
-    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+    local infoFile="${CHAIN_MULTI_INFO}"
 
     if [[ ! -f "${infoFile}" ]]; then
         echoContent red " ---> 未找到多链路配置"
@@ -13431,7 +13392,7 @@ removeMultiChainOutbound() {
     fi
 
     # 删除链路配置文件
-    rm -f "/etc/Proxy-agent/sing-box/conf/config/chain_outbound_${selectedChain}.json"
+    rm -f "${SINGBOX_FRAGMENT_DIR}/chain_outbound_${selectedChain}.json"
 
     # 从 info 文件中删除
     local tmpFile
@@ -13468,7 +13429,7 @@ removeMultiChainOutbound() {
 
 # 设置默认链路
 setDefaultChain() {
-    local infoFile="/etc/Proxy-agent/sing-box/conf/chain_multi_info.json"
+    local infoFile="${CHAIN_MULTI_INFO}"
 
     if [[ ! -f "${infoFile}" ]]; then
         echoContent red " ---> 未找到多链路配置"
@@ -13535,22 +13496,22 @@ showMultiChainDetailConfig() {
     echoContent skyBlue "\n多链路详细配置"
     echoContent red "=============================================================="
 
-    if [[ -f "/etc/Proxy-agent/sing-box/conf/chain_multi_info.json" ]]; then
+    if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
         echoContent yellow "\n元数据 (chain_multi_info.json):"
-        jq . /etc/Proxy-agent/sing-box/conf/chain_multi_info.json
+        jq . ${CHAIN_MULTI_INFO}
     fi
 
     echoContent yellow "\n链路出站配置:"
-    for f in /etc/Proxy-agent/sing-box/conf/config/chain_outbound_*.json; do
+    for f in ${SINGBOX_FRAGMENT_DIR}/chain_outbound_*.json; do
         if [[ -f "${f}" ]]; then
             echoContent yellow "\n$(basename "${f}"):"
             jq . "${f}"
         fi
     done
 
-    if [[ -f "/etc/Proxy-agent/sing-box/conf/config/chain_route.json" ]]; then
+    if [[ -f "${SINGBOX_FRAGMENT_DIR}/chain_route.json" ]]; then
         echoContent yellow "\n路由配置 (chain_route.json):"
-        jq . /etc/Proxy-agent/sing-box/conf/config/chain_route.json
+        jq . ${SINGBOX_FRAGMENT_DIR}/chain_route.json
     fi
 }
 
@@ -13560,12 +13521,9 @@ showMultiChainDetailConfig() {
 
 # ======================= 外部节点功能开始 =======================
 
-# 外部节点配置文件路径
-EXTERNAL_NODE_FILE="/etc/Proxy-agent/sing-box/conf/external_node_info.json"
-
 # 初始化外部节点配置文件
 initExternalNodeFile() {
-    local confDir="/etc/Proxy-agent/sing-box/conf"
+    local confDir="${SINGBOX_CONF_DIR}"
     mkdir -p "${confDir}"
 
     if [[ ! -f "${EXTERNAL_NODE_FILE}" ]]; then
@@ -14387,7 +14345,7 @@ setupExternalAsSingleExit() {
     fi
 
     # 保存出站配置（jq -n 包装，不做字符串拼接，避免 outboundConfig 内部含特殊字符破坏 JSON）
-    local configDir="/etc/Proxy-agent/sing-box/conf/config"
+    local configDir="${SINGBOX_FRAGMENT_DIR}"
     mkdir -p "${configDir}"
 
     local _wrapped
@@ -14421,7 +14379,7 @@ EOF
 }
 EOF
 )
-    writeChainInfoAtomic "/etc/Proxy-agent/sing-box/conf/chain_entry_info.json" "${__chainEntryInfo}" || return 1
+    writeChainInfoAtomic "${CHAIN_ENTRY_INFO}" "${__chainEntryInfo}" || return 1
 
     # 合并配置
     if ! singBoxMergeConfig; then
@@ -15048,7 +15006,7 @@ customSingBoxInstall() {
         totalProgress=9
         installTools 1
         # 申请tls
-        if echo "${selectCustomInstallType}" | grep -q -E ",0,|,1,|,3,|,4,|,6,|,9,|,10,|,11,|,13,"; then
+        if anyProtocolRequiresTLS "${selectCustomInstallType}"; then
             initTLSNginxConfig 2
             installTLS 3
             handleNginx stop
@@ -15359,8 +15317,8 @@ cronFunction() {
         renewalTLS
         exit 0
     elif [[ "${cronName}" == "UpdateGeo" ]]; then
-        updateGeoSite >>/etc/Proxy-agent/crontab_updateGeoSite.log
-        echoContent green " ---> geo更新日期:$(date "+%F %H:%M:%S")" >>/etc/Proxy-agent/crontab_updateGeoSite.log
+        updateGeoSite >>${PROXY_AGENT_DIR}/crontab_updateGeoSite.log
+        echoContent green " ---> geo更新日期:$(date "+%F %H:%M:%S")" >>${PROXY_AGENT_DIR}/crontab_updateGeoSite.log
         exit 0
     fi
 }
@@ -15439,8 +15397,8 @@ installSubscribe() {
         # 检查是否有可用的TLS证书（实际检查文件是否存在）
         local tlsCertExists=false
         if [[ -n "${subscribeServerName}" ]] && \
-           [[ -f "/etc/Proxy-agent/tls/${subscribeServerName}.crt" ]] && \
-           [[ -f "/etc/Proxy-agent/tls/${subscribeServerName}.key" ]]; then
+           [[ -f "${TLS_DIR}/${subscribeServerName}.crt" ]] && \
+           [[ -f "${TLS_DIR}/${subscribeServerName}.key" ]]; then
             tlsCertExists=true
         fi
 
@@ -15462,7 +15420,7 @@ installSubscribe() {
         else
             SSLType="ssl"
             serverName="server_name ${subscribeServerName};"
-            nginxSubscribeSSL="ssl_certificate /etc/Proxy-agent/tls/${subscribeServerName}.crt;ssl_certificate_key /etc/Proxy-agent/tls/${subscribeServerName}.key;"
+            nginxSubscribeSSL="ssl_certificate ${TLS_DIR}/${subscribeServerName}.crt;ssl_certificate_key ${TLS_DIR}/${subscribeServerName}.key;"
         fi
         if [[ -n "$(curl --connect-timeout 2 -s -6 https://www.cloudflare.com/cdn-cgi/trace | grep "ip" | cut -d "=" -f 2)" ]]; then
             listenIPv6="listen [::]:${result[-1]} ${SSLType};"
@@ -15488,7 +15446,7 @@ server {
     root ${nginxStaticPath};
     location ~ ^/s/(clashMeta|default|clashMetaProfiles|sing-box|sing-box_profiles)/(.*) {
         default_type 'text/plain; charset=utf-8';
-        alias /etc/Proxy-agent/subscribe/\$1/\$2;
+        alias ${SUBSCRIBE_DIR}/\$1/\$2;
     }
     location / {
     }
@@ -15517,18 +15475,18 @@ addSubscribeMenu() {
     if [[ "${addSubscribeStatus}" == "1" ]]; then
         addOtherSubscribe
     elif [[ "${addSubscribeStatus}" == "2" ]]; then
-        if [[ ! -f "/etc/Proxy-agent/subscribe_remote/remoteSubscribeUrl" ]]; then
+        if [[ ! -f "${SUBSCRIBE_REMOTE_DIR}/remoteSubscribeUrl" ]]; then
             echoContent green " ---> 未安装其他订阅"
             exit 0
         fi
-        grep -v '^$' "/etc/Proxy-agent/subscribe_remote/remoteSubscribeUrl" | awk '{print NR""":"$0}'
+        grep -v '^$' "${SUBSCRIBE_REMOTE_DIR}/remoteSubscribeUrl" | awk '{print NR""":"$0}'
         read -r -p "请选择要删除的订阅编号[仅支持单个删除]:" delSubscribeIndex
         if [[ -z "${delSubscribeIndex}" ]]; then
             echoContent green " ---> 不可以为空"
             exit 0
         fi
 
-        sed -i "$((delSubscribeIndex))d" "/etc/Proxy-agent/subscribe_remote/remoteSubscribeUrl" >/dev/null 2>&1
+        sed -i "$((delSubscribeIndex))d" "${SUBSCRIBE_REMOTE_DIR}/remoteSubscribeUrl" >/dev/null 2>&1
 
         echoContent green " ---> 其他机器订阅删除成功"
         subscribe
@@ -15547,7 +15505,7 @@ addOtherSubscribe() {
         echoContent red " ---> 规则不合法"
     else
 
-        if [[ -f "/etc/Proxy-agent/subscribe_remote/remoteSubscribeUrl" ]] && grep -q "${remoteSubscribeUrl}" /etc/Proxy-agent/subscribe_remote/remoteSubscribeUrl; then
+        if [[ -f "${SUBSCRIBE_REMOTE_DIR}/remoteSubscribeUrl" ]] && grep -q "${remoteSubscribeUrl}" ${SUBSCRIBE_REMOTE_DIR}/remoteSubscribeUrl; then
             echoContent red " ---> 此订阅已添加"
             exit 1
         fi
@@ -15556,7 +15514,7 @@ addOtherSubscribe() {
         if [[ "${httpSubscribeStatus}" == "y" ]]; then
             remoteSubscribeUrl="${remoteSubscribeUrl}:http"
         fi
-        echo "${remoteSubscribeUrl}" >>/etc/Proxy-agent/subscribe_remote/remoteSubscribeUrl
+        echo "${remoteSubscribeUrl}" >>${SUBSCRIBE_REMOTE_DIR}/remoteSubscribeUrl
         subscribe
     fi
 }
@@ -15564,7 +15522,7 @@ addOtherSubscribe() {
 clashMetaConfig() {
     local url=$1
     local id=$2
-    cat <<EOF >"/etc/Proxy-agent/subscribe/clashMetaProfiles/${id}"
+    cat <<EOF >"${SUBSCRIBE_DIR}/clashMetaProfiles/${id}"
 log-level: info
 mode: rule
 ipv6: true
@@ -15997,16 +15955,16 @@ subscribe() {
         echoContent red "# 需要手动输入md5加密的salt值，如果不了解使用随机即可"
         echoContent yellow "# 不影响已添加的远程订阅的内容\n"
 
-        if [[ -f "/etc/Proxy-agent/subscribe_local/subscribeSalt" && -n $(cat "/etc/Proxy-agent/subscribe_local/subscribeSalt") ]]; then
+        if [[ -f "${SUBSCRIBE_LOCAL_DIR}/subscribeSalt" && -n $(cat "${SUBSCRIBE_LOCAL_DIR}/subscribeSalt") ]]; then
             if [[ -z "${renewSalt}" ]]; then
                 read -r -p "读取到上次安装设置的Salt，是否使用上次生成的Salt ？[y/n]:" historySaltStatus
                 if [[ "${historySaltStatus}" == "y" ]]; then
-                    subscribeSalt=$(cat /etc/Proxy-agent/subscribe_local/subscribeSalt)
+                    subscribeSalt=$(cat ${SUBSCRIBE_LOCAL_DIR}/subscribeSalt)
                 else
                     readSubscribeSalt
                 fi
             else
-                subscribeSalt=$(cat /etc/Proxy-agent/subscribe_local/subscribeSalt)
+                subscribeSalt=$(cat ${SUBSCRIBE_LOCAL_DIR}/subscribeSalt)
             fi
         else
             readSubscribeSalt
@@ -16014,16 +15972,16 @@ subscribe() {
         fi
         echoContent yellow "\n ---> Salt: ${subscribeSalt}"
 
-        echo "${subscribeSalt}" >/etc/Proxy-agent/subscribe_local/subscribeSalt
+        echo "${subscribeSalt}" >${SUBSCRIBE_LOCAL_DIR}/subscribeSalt
 
-        rm -rf /etc/Proxy-agent/subscribe/default/*
-        rm -rf /etc/Proxy-agent/subscribe/clashMeta/*
-        rm -rf /etc/Proxy-agent/subscribe_local/default/*
-        rm -rf /etc/Proxy-agent/subscribe_local/clashMeta/*
-        rm -rf /etc/Proxy-agent/subscribe_local/sing-box/*
+        rm -rf ${SUBSCRIBE_DIR}/default/*
+        rm -rf ${SUBSCRIBE_DIR}/clashMeta/*
+        rm -rf ${SUBSCRIBE_LOCAL_DIR}/default/*
+        rm -rf ${SUBSCRIBE_LOCAL_DIR}/clashMeta/*
+        rm -rf ${SUBSCRIBE_LOCAL_DIR}/sing-box/*
         showAccounts >/dev/null
-        if [[ -n $(ls /etc/Proxy-agent/subscribe_local/default/) ]]; then
-            if [[ -f "/etc/Proxy-agent/subscribe_remote/remoteSubscribeUrl" && -n $(cat "/etc/Proxy-agent/subscribe_remote/remoteSubscribeUrl") ]]; then
+        if [[ -n $(ls ${SUBSCRIBE_LOCAL_DIR}/default/) ]]; then
+            if [[ -f "${SUBSCRIBE_REMOTE_DIR}/remoteSubscribeUrl" && -n $(cat "${SUBSCRIBE_REMOTE_DIR}/remoteSubscribeUrl") ]]; then
                 if [[ -z "${renewSalt}" ]]; then
                     read -r -p "读取到其他订阅，是否更新？[y/n]" updateOtherSubscribeStatus
                 else
@@ -16031,19 +15989,19 @@ subscribe() {
                 fi
             fi
             local subscribePortLocal="${subscribePort}"
-            find /etc/Proxy-agent/subscribe_local/default/* | while read -r email; do
+            find ${SUBSCRIBE_LOCAL_DIR}/default/* | while read -r email; do
                 email=$(echo "${email}" | awk -F "[d][e][f][a][u][l][t][/]" '{print $2}')
 
                 local emailMd5=
                 emailMd5=$(echo -n "${email}${subscribeSalt}"$'\n' | md5sum | awk '{print $1}')
 
-                cat "/etc/Proxy-agent/subscribe_local/default/${email}" >>"/etc/Proxy-agent/subscribe/default/${emailMd5}"
+                cat "${SUBSCRIBE_LOCAL_DIR}/default/${email}" >>"${SUBSCRIBE_DIR}/default/${emailMd5}"
                 if [[ "${updateOtherSubscribeStatus}" == "y" ]]; then
                     updateRemoteSubscribe "${emailMd5}" "${email}"
                 fi
                 local base64Result
-                base64Result=$(base64 < "/etc/Proxy-agent/subscribe/default/${emailMd5}" | tr -d '\n')
-                echo "${base64Result}" >"/etc/Proxy-agent/subscribe/default/${emailMd5}"
+                base64Result=$(base64 < "${SUBSCRIBE_DIR}/default/${emailMd5}" | tr -d '\n')
+                echo "${base64Result}" >"${SUBSCRIBE_DIR}/default/${emailMd5}"
                 echoContent yellow "--------------------------------------------------------------"
                 local currentDomain=${currentHost}
 
@@ -16067,11 +16025,11 @@ subscribe() {
                     fi
 
                     # clashMeta
-                    if [[ -f "/etc/Proxy-agent/subscribe_local/clashMeta/${email}" ]]; then
+                    if [[ -f "${SUBSCRIBE_LOCAL_DIR}/clashMeta/${email}" ]]; then
 
-                        cat "/etc/Proxy-agent/subscribe_local/clashMeta/${email}" >>"/etc/Proxy-agent/subscribe/clashMeta/${emailMd5}"
+                        cat "${SUBSCRIBE_LOCAL_DIR}/clashMeta/${email}" >>"${SUBSCRIBE_DIR}/clashMeta/${emailMd5}"
 
-                        sed -i '1i\proxies:' "/etc/Proxy-agent/subscribe/clashMeta/${emailMd5}"
+                        sed -i '1i\proxies:' "${SUBSCRIBE_DIR}/clashMeta/${emailMd5}"
 
                         local clashProxyUrl="${subscribeType}://${currentDomain}/s/clashMeta/${emailMd5}"
                         clashMetaConfig "${clashProxyUrl}" "${emailMd5}"
@@ -16084,12 +16042,12 @@ subscribe() {
 
                     fi
                     # sing-box
-                    if [[ -f "/etc/Proxy-agent/subscribe_local/sing-box/${email}" ]]; then
-                        cp "/etc/Proxy-agent/subscribe_local/sing-box/${email}" "/etc/Proxy-agent/subscribe/sing-box_profiles/${emailMd5}"
+                    if [[ -f "${SUBSCRIBE_LOCAL_DIR}/sing-box/${email}" ]]; then
+                        cp "${SUBSCRIBE_LOCAL_DIR}/sing-box/${email}" "${SUBSCRIBE_DIR}/sing-box_profiles/${emailMd5}"
 
                         echoContent skyBlue " ---> 下载 sing-box 通用配置文件"
                         # 模板从本仓库 docs/sing-box.json 拉取，便于跟脚本同步演进。
-                        local _singboxTplFile="/etc/Proxy-agent/subscribe/sing-box/${emailMd5}"
+                        local _singboxTplFile="${SUBSCRIBE_DIR}/sing-box/${emailMd5}"
                         local _singboxTplUrl="https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/docs/sing-box.json"
                         local _singboxTplExit=0
                         if [[ "${release}" == "alpine" ]]; then
@@ -16105,8 +16063,8 @@ subscribe() {
                             echoContent red " ---> sing-box 订阅模板下载或解析失败，跳过本次 sing-box 订阅 (URL: ${_singboxTplUrl})"
                             rm -f "${_singboxTplFile}"
                         else
-                            jq ".outbounds=$(jq ".outbounds|map(if has(\"outbounds\") then .outbounds += $(jq ".|map(.tag)" "/etc/Proxy-agent/subscribe_local/sing-box/${email}") else . end)" "${_singboxTplFile}")" "${_singboxTplFile}" >"${_singboxTplFile}_tmp" && mv "${_singboxTplFile}_tmp" "${_singboxTplFile}"
-                            jq ".outbounds += $(jq '.' "/etc/Proxy-agent/subscribe_local/sing-box/${email}")" "${_singboxTplFile}" >"${_singboxTplFile}_tmp" && mv "${_singboxTplFile}_tmp" "${_singboxTplFile}"
+                            jq ".outbounds=$(jq ".outbounds|map(if has(\"outbounds\") then .outbounds += $(jq ".|map(.tag)" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${email}") else . end)" "${_singboxTplFile}")" "${_singboxTplFile}" >"${_singboxTplFile}_tmp" && mv "${_singboxTplFile}_tmp" "${_singboxTplFile}"
+                            jq ".outbounds += $(jq '.' "${SUBSCRIBE_LOCAL_DIR}/sing-box/${email}")" "${_singboxTplFile}" >"${_singboxTplFile}_tmp" && mv "${_singboxTplFile}_tmp" "${_singboxTplFile}"
 
                             echoContent skyBlue "\n----------sing-box订阅----------\n"
                             echoContent yellow "url:${subscribeType}://${currentDomain}/s/sing-box/${emailMd5}\n"
@@ -16155,7 +16113,7 @@ updateRemoteSubscribe() {
         clashMetaProxies=$(curl -s "${subscribeType}://${remoteUrl}/s/clashMeta/${emailMD5}" | sed '/proxies:/d' | sed "s/\"${email}/\"${email}_${serverAlias}/g")
 
         if ! echo "${clashMetaProxies}" | grep -q "nginx" && [[ -n "${clashMetaProxies}" ]]; then
-            echo "${clashMetaProxies}" >>"/etc/Proxy-agent/subscribe/clashMeta/${emailMD5}"
+            echo "${clashMetaProxies}" >>"${SUBSCRIBE_DIR}/clashMeta/${emailMD5}"
             echoContent green " ---> clashMeta订阅 ${remoteUrl}:${email} 更新成功"
         else
             echoContent red " ---> clashMeta订阅 ${remoteUrl}:${email}不存在"
@@ -16166,7 +16124,7 @@ updateRemoteSubscribe() {
 
         if ! echo "${default}" | grep -q "nginx" && [[ -n "${default}" ]]; then
             default=$(echo "${default}" | base64 -d | sed "s/#${email}/#${email}_${serverAlias}/g")
-            echo "${default}" >>"/etc/Proxy-agent/subscribe/default/${emailMD5}"
+            echo "${default}" >>"${SUBSCRIBE_DIR}/default/${emailMD5}"
 
             echoContent green " ---> 通用订阅 ${remoteUrl}:${email} 更新成功"
         else
@@ -16180,15 +16138,15 @@ updateRemoteSubscribe() {
         # --argjson 传入（jq 自动 escape），避免把远程响应直接拼进 jq 过滤器。
         singBoxSubscribe=${singBoxSubscribe//tag\": \"${email}/tag\": \"${email}_${serverAlias}}
         if ! echo "${singBoxSubscribe}" | grep -q "nginx" && [[ -n "${singBoxSubscribe}" ]] && echo "${singBoxSubscribe}" | jq -e . >/dev/null 2>&1; then
-            singBoxSubscribe=$(jq --argjson remote "${singBoxSubscribe}" '. += $remote' "/etc/Proxy-agent/subscribe_local/sing-box/${email}")
-            echo "${singBoxSubscribe}" | jq . >"/etc/Proxy-agent/subscribe_local/sing-box/${email}"
+            singBoxSubscribe=$(jq --argjson remote "${singBoxSubscribe}" '. += $remote' "${SUBSCRIBE_LOCAL_DIR}/sing-box/${email}")
+            echo "${singBoxSubscribe}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${email}"
 
             echoContent green " ---> 通用订阅 ${remoteUrl}:${email} 更新成功"
         else
             echoContent red " ---> 通用订阅 ${remoteUrl}:${email} 不存在"
         fi
 
-    done < <(grep -v '^$' <"/etc/Proxy-agent/subscribe_remote/remoteSubscribeUrl")
+    done < <(grep -v '^$' <"${SUBSCRIBE_REMOTE_DIR}/remoteSubscribeUrl")
 }
 
 # 切换alpn
@@ -16250,27 +16208,27 @@ initRealityKey() {
     if [[ -z "${realityPrivateKey}" ]]; then
         if [[ "${selectCoreType}" == "2" || "${coreKind}" == "2" ]]; then
             # 二进制预检：缺失会导致 reality-keypair 输出为空 → 后续 JSON 拼接出无效配置
-            if [[ ! -f "/etc/Proxy-agent/sing-box/sing-box" ]]; then
+            if [[ ! -f "${SINGBOX_BIN}" ]]; then
                 echoContent red "\n ---> sing-box 二进制不存在，无法生成 Reality 密钥"
-                echoContent yellow "     预期路径: /etc/Proxy-agent/sing-box/sing-box"
+                echoContent yellow "     预期路径: ${SINGBOX_BIN}"
                 exit 1
             fi
-            realityX25519Key=$(/etc/Proxy-agent/sing-box/sing-box generate reality-keypair)
+            realityX25519Key=$(${SINGBOX_BIN} generate reality-keypair)
             realityPrivateKey=$(echo "${realityX25519Key}" | head -1 | awk '{print $2}')
             realityPublicKey=$(echo "${realityX25519Key}" | tail -n 1 | awk '{print $2}')
-            echo "publicKey:${realityPublicKey}" >/etc/Proxy-agent/sing-box/conf/config/reality_key
+            echo "publicKey:${realityPublicKey}" >${SINGBOX_FRAGMENT_DIR}/reality_key
         else
             # 二进制预检：缺失会让下方 x25519 输出为空，私钥为空又会触发本函数自递归 → 死循环
-            if [[ ! -f "/etc/Proxy-agent/xray/xray" ]]; then
+            if [[ ! -f "${XRAY_BIN}" ]]; then
                 echoContent red "\n ---> Xray-core 二进制不存在，无法生成 Reality 密钥"
-                echoContent yellow "     预期路径: /etc/Proxy-agent/xray/xray"
+                echoContent yellow "     预期路径: ${XRAY_BIN}"
                 exit 1
             fi
             read -r -p "请输入Private Key[回车自动生成]:" historyPrivateKey
             if [[ -n "${historyPrivateKey}" ]]; then
-                realityX25519Key=$(/etc/Proxy-agent/xray/xray x25519 -i "${historyPrivateKey}")
+                realityX25519Key=$(${XRAY_BIN} x25519 -i "${historyPrivateKey}")
             else
-                realityX25519Key=$(/etc/Proxy-agent/xray/xray x25519)
+                realityX25519Key=$(${XRAY_BIN} x25519)
             fi
             # 兼容新旧版本 Xray x25519 输出格式
             # 旧版: "Private key: xxx" / "Public key: xxx"
@@ -16300,13 +16258,13 @@ initRealityShortIds() {
 initRealityMldsa65() {
     echoContent skyBlue "\n生成Reality mldsa65\n"
     # 二进制预检：缺失会让 tls ping 报 No such file，下面的 -gt 比较还会因 length 为空报数值错误
-    if [[ ! -f "/etc/Proxy-agent/xray/xray" ]]; then
+    if [[ ! -f "${XRAY_BIN}" ]]; then
         echoContent red "\n ---> Xray-core 二进制不存在，无法检测目标域名能力，跳过 ML-DSA-65"
-        echoContent yellow "     预期路径: /etc/Proxy-agent/xray/xray"
+        echoContent yellow "     预期路径: ${XRAY_BIN}"
         exit 1
     fi
-    if /etc/Proxy-agent/xray/xray tls ping "${realityServerName}:${realityDomainPort}" 2>/dev/null | grep -q "X25519MLKEM768"; then
-        length=$(/etc/Proxy-agent/xray/xray tls ping "${realityServerName}:${realityDomainPort}" | grep "Certificate chain's total length:" | awk '{print $5}' | head -1)
+    if ${XRAY_BIN} tls ping "${realityServerName}:${realityDomainPort}" 2>/dev/null | grep -q "X25519MLKEM768"; then
+        length=$(${XRAY_BIN} tls ping "${realityServerName}:${realityDomainPort}" | grep "Certificate chain's total length:" | awk '{print $5}' | head -1)
 
         if [ "$length" -gt 3500 ]; then
             if [[ -n "${currentRealityMldsa65Seed}" && -z "${lastInstallationConfig}" ]]; then
@@ -16320,7 +16278,7 @@ initRealityMldsa65() {
                 realityMldsa65Verify=${currentRealityMldsa65Verify}
             fi
             if [[ -z "${realityMldsa65Seed}" ]]; then
-                realityMldsa65=$(/etc/Proxy-agent/xray/xray mldsa65)
+                realityMldsa65=$(${XRAY_BIN} mldsa65)
                 realityMldsa65Seed=$(echo "${realityMldsa65}" | head -1 | awk '{print $2}')
                 realityMldsa65Verify=$(echo "${realityMldsa65}" | tail -n 1 | awk '{print $2}')
             fi
@@ -16519,10 +16477,10 @@ manageReality() {
 
 # 安装reality scanner
 installRealityScanner() {
-    if [[ ! -f "/etc/Proxy-agent/xray/reality_scan/RealiTLScanner-linux-64" ]]; then
+    if [[ ! -f "${XRAY_DIR}/reality_scan/RealiTLScanner-linux-64" ]]; then
         version=$(curl -s https://api.github.com/repos/XTLS/RealiTLScanner/releases?per_page=1 | jq -r '.[]|.tag_name')
-        wget -c -q -P /etc/Proxy-agent/xray/reality_scan/ "https://github.com/XTLS/RealiTLScanner/releases/download/${version}/RealiTLScanner-linux-64"
-        chmod 655 /etc/Proxy-agent/xray/reality_scan/RealiTLScanner-linux-64
+        wget -c -q -P ${XRAY_DIR}/reality_scan/ "https://github.com/XTLS/RealiTLScanner/releases/download/${version}/RealiTLScanner-linux-64"
+        chmod 655 ${XRAY_DIR}/reality_scan/RealiTLScanner-linux-64
     fi
 }
 # reality scanner
@@ -16558,8 +16516,8 @@ realityScanner() {
 
     read -r -p "IP是否正确？[y/n]:" ipStatus
     if [[ "${ipStatus}" == "y" ]]; then
-        echoContent yellow "结果存储在 /etc/Proxy-agent/xray/reality_scan/result.log 文件中\n"
-        /etc/Proxy-agent/xray/reality_scan/RealiTLScanner-linux-64 -addr "${publicIP}" | tee /etc/Proxy-agent/xray/reality_scan/result.log
+        echoContent yellow "结果存储在 ${XRAY_DIR}/reality_scan/result.log 文件中\n"
+        ${XRAY_DIR}/reality_scan/RealiTLScanner-linux-64 -addr "${publicIP}" | tee ${XRAY_DIR}/reality_scan/result.log
     else
         echoContent red " ---> 无法读取正确IP"
     fi
@@ -16569,7 +16527,7 @@ manageHysteria() {
     echoContent skyBlue "\n进度  1/1 : Hysteria2 管理"
     echoContent red "\n=============================================================="
     local hysteria2Status=
-    if [[ -n "${singBoxConfigPath}" ]] && [[ -f "/etc/Proxy-agent/sing-box/conf/config/06_hysteria2_inbounds.json" ]]; then
+    if [[ -n "${singBoxConfigPath}" ]] && [[ -f "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" ]]; then
         echoContent yellow "依赖第三方sing-box\n"
         echoContent yellow "1.重新安装"
         echoContent yellow "2.卸载"
@@ -16596,7 +16554,7 @@ manageTuic() {
     echoContent skyBlue "\n进度  1/1 : Tuic管理"
     echoContent red "\n=============================================================="
     local tuicStatus=
-    if [[ -n "${singBoxConfigPath}" ]] && [[ -f "/etc/Proxy-agent/sing-box/conf/config/09_tuic_inbounds.json" ]]; then
+    if [[ -n "${singBoxConfigPath}" ]] && [[ -f "${SINGBOX_FRAGMENT_DIR}/09_tuic_inbounds.json" ]]; then
         echoContent yellow "依赖sing-box内核\n"
         echoContent yellow "1.重新安装"
         echoContent yellow "2.卸载"
@@ -16619,12 +16577,12 @@ manageTuic() {
 }
 # sing-box log日志
 singBoxLog() {
-    cat <<EOF >/etc/Proxy-agent/sing-box/conf/config/log.json
+    cat <<EOF >${SINGBOX_FRAGMENT_DIR}/log.json
 {
   "log": {
     "disabled": $1,
     "level": "warn",
-    "output": "/etc/Proxy-agent/sing-box/conf/box.log",
+    "output": "${SINGBOX_CONF_DIR}/box.log",
     "timestamp": true
   }
 }
@@ -16689,9 +16647,9 @@ singBoxVersionManageMenu() {
 # 切换语言 / Switch Language
 # ============================================================================
 switchLanguage() {
-    local langFile="/etc/Proxy-agent/lang_pref"
+    local langFile="${PROXY_AGENT_DIR}/lang_pref"
     local currentLang="${CURRENT_LANG:-zh_CN}"
-    local scriptPath="/etc/Proxy-agent/install.sh"
+    local scriptPath="${PROXY_AGENT_DIR}/install.sh"
 
     # 如果安装目录的脚本不存在，使用当前脚本路径
     if [[ ! -f "${scriptPath}" ]]; then
@@ -16825,15 +16783,15 @@ _doctorCheckSystem() {
 _doctorCheckInstall() {
     _doctorSection "$(t DOCTOR_SECTION_INSTALL)"
 
-    if [[ -d /etc/Proxy-agent ]]; then
-        _doctorRow "$(t DOCTOR_CHECK_INSTALLED)" pass "/etc/Proxy-agent"
+    if [[ -d ${PROXY_AGENT_DIR} ]]; then
+        _doctorRow "$(t DOCTOR_CHECK_INSTALLED)" pass "${PROXY_AGENT_DIR}"
     else
-        _doctorRow "$(t DOCTOR_CHECK_INSTALLED)" fail "missing /etc/Proxy-agent"
+        _doctorRow "$(t DOCTOR_CHECK_INSTALLED)" fail "missing ${PROXY_AGENT_DIR}"
     fi
 
-    if [[ -r /etc/Proxy-agent/VERSION ]]; then
+    if [[ -r ${PROXY_AGENT_DIR}/VERSION ]]; then
         local ver
-        ver=$(tr -d '[:space:]' </etc/Proxy-agent/VERSION 2>/dev/null)
+        ver=$(tr -d '[:space:]' <${PROXY_AGENT_DIR}/VERSION 2>/dev/null)
         _doctorRow "$(t DOCTOR_CHECK_VERSION)" pass "${ver:-?}"
     elif [[ -n "${SCRIPT_VERSION:-}" ]]; then
         _doctorRow "$(t DOCTOR_CHECK_VERSION)" pass "${SCRIPT_VERSION} (from running script)"
@@ -16842,7 +16800,7 @@ _doctorCheckInstall() {
     fi
 
     local libDir mod libMissing=""
-    libDir="${_LIB_DIR:-/etc/Proxy-agent/lib}"
+    libDir="${_LIB_DIR:-${PROXY_AGENT_DIR}/lib}"
     for mod in i18n constants utils json-utils system-detect protocol-registry; do
         [[ -f "${libDir}/${mod}.sh" ]] || libMissing="${libMissing}${libMissing:+, }${mod}.sh"
     done
@@ -16856,7 +16814,7 @@ _doctorCheckInstall() {
     if [[ -d "${_SCRIPT_DIR}/shell/lang" ]]; then
         langDir="${_SCRIPT_DIR}/shell/lang"
     else
-        langDir="${_LANG_FALLBACK_DIR:-/etc/Proxy-agent/shell/lang}"
+        langDir="${_LANG_FALLBACK_DIR:-${PROXY_AGENT_DIR}/shell/lang}"
     fi
     for f in zh_CN.sh en_US.sh; do
         [[ -f "${langDir}/${f}" ]] || langMissing="${langMissing}${langMissing:+, }${f}"
@@ -16881,13 +16839,13 @@ _doctorCheckCore() {
     local coreName binaryPath serviceName pgrepFlag pgrepArg
     if [[ "${coreKind}" == "1" ]]; then
         coreName="Xray-core"
-        binaryPath="/etc/Proxy-agent/xray/xray"
+        binaryPath="${XRAY_BIN}"
         serviceName="xray"
         pgrepFlag="-f"
         pgrepArg="xray/xray"
     else
         coreName="sing-box"
-        binaryPath="/etc/Proxy-agent/sing-box/sing-box"
+        binaryPath="${SINGBOX_BIN}"
         serviceName="sing-box"
         pgrepFlag="-x"
         pgrepArg="sing-box"
@@ -16945,7 +16903,7 @@ _doctorCheckConfig() {
     fi
 
     if [[ "${coreKind}" == "1" ]]; then
-        local confDir="/etc/Proxy-agent/xray/conf"
+        local confDir="${XRAY_CONF_DIR}"
         local f base total=0 bad=0 badList=""
         if [[ -d "${confDir}" ]]; then
             shopt -s nullglob
@@ -16967,8 +16925,8 @@ _doctorCheckConfig() {
             _doctorRow "$(t DOCTOR_CHECK_CONFIG)" fail "${bad}/${total} invalid: ${badList}"
         fi
     else
-        local mergedConfig="/etc/Proxy-agent/sing-box/conf/config.json"
-        local binary="/etc/Proxy-agent/sing-box/sing-box"
+        local mergedConfig="${SINGBOX_MERGED_CONFIG}"
+        local binary="${SINGBOX_BIN}"
         if [[ -x "${binary}" && -f "${mergedConfig}" ]]; then
             if "${binary}" check -c "${mergedConfig}" >/dev/null 2>&1; then
                 _doctorRow "$(t DOCTOR_CHECK_CONFIG)" pass "sing-box check OK"
@@ -17012,7 +16970,7 @@ _doctorCheckNetwork() {
 _doctorCheckCert() {
     _doctorSection "$(t DOCTOR_SECTION_CERT)"
 
-    local tlsDir="/etc/Proxy-agent/tls"
+    local tlsDir="${TLS_DIR}"
     if [[ ! -d "${tlsDir}" ]]; then
         _doctorRow "$(t DOCTOR_CHECK_CERT_DIR)" skip "$(t DOCTOR_DETAIL_NO_TLS)"
         return

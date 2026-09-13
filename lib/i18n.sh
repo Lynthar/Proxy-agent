@@ -16,7 +16,7 @@ fi
 # 不看 $LANG / $LANGUAGE —— install.sh 顶部 export LANG=en_US.UTF-8 会把默认值劫持成英文。
 _detect_language() {
     local lang=""
-    local langFile="/etc/Proxy-agent/lang_pref"
+    local langFile="${PROXY_AGENT_DIR:-/etc/Proxy-agent}/lang_pref"
 
     # 优先级 1: 环境变量 V2RAY_LANG
     if [[ -n "${V2RAY_LANG:-}" ]]; then
