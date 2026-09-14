@@ -1071,7 +1071,6 @@ initVar() {
 
     singBoxVLESSVisionPort=
     singBoxVLESSRealityVisionPort=
-    singBoxVLESSRealityGRPCPort=
     singBoxHysteria2Port=
     singBoxTrojanPort=
     singBoxTuicPort=
@@ -1399,7 +1398,6 @@ readInstallProtocolType() {
     frontingTypeReality=
     singBoxVLESSRealityVisionPort=
     singBoxVLESSRealityVisionServerName=
-    singBoxVLESSRealityGRPCPort=
     singBoxVLESSRealityGRPCServerName=
     singBoxAnyTLSPort=
     singBoxTuicPort=
@@ -1506,7 +1504,6 @@ readInstallProtocolType() {
             currentInstallProtocolType="${currentInstallProtocolType}8,"
             if [[ "${coreKind}" == "2" ]]; then
                 frontingTypeReality=08_VLESS_vision_gRPC_inbounds
-                singBoxVLESSRealityGRPCPort=$(jq -r .inbounds[0].listen_port "${row}.json")
                 singBoxVLESSRealityGRPCServerName=$(jq -r .inbounds[0].tls.server_name "${row}.json")
                 if [[ -f "${configPath}reality_key" ]]; then
                     singBoxVLESSRealityPublicKey=$(grep "publicKey" <"${configPath}reality_key" | awk -F "[:]" '{print $2}')
@@ -7053,7 +7050,7 @@ updateNginxBlog() {
             addNginx302 "${redirectDomain}"
             handleNginx stop
             handleNginx start
-            if [[ -z $(pgrep -f "nginx") ]]; then
+            if [[ -z $(pgrep -x "nginx") ]]; then
                 backupNginxConfig restoreBackup
                 handleNginx start
                 exit 0
@@ -7283,7 +7280,7 @@ unInstall() {
     fi
     echoContent yellow " ---> 脚本不会删除acme相关配置，删除请手动执行 [rm -rf /root/.acme.sh]"
     handleNginx stop
-    if [[ -z $(pgrep -f "nginx") ]]; then
+    if [[ -z $(pgrep -x "nginx") ]]; then
         echoContent green " ---> 停止Nginx成功"
     fi
     if [[ "${release}" == "alpine" ]]; then
@@ -15456,7 +15453,7 @@ EOF
         handleNginx stop
         handleNginx start
     fi
-    if [[ -z $(pgrep -f "nginx") ]]; then
+    if [[ -z $(pgrep -x "nginx") ]]; then
         handleNginx start
     fi
 }
