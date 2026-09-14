@@ -7118,6 +7118,18 @@ updateNginxBlog() {
     fi
 }
 
+# 删掉一个附加端口的全部 dokodemo-door 片段。只删这三个精确文件名：通配 "*${port}*"
+# 会让端口 2 命中 02_VLESS_TCP / 12_VLESS_XHTTP，紧随的 reloadCore 就把协议停了；
+# 默认端口那份带 _default 后缀，漏掉它就是菜单里永远删不掉的那一条。
+removeCorePortFiles() {
+    local port="$1"
+    if [[ -n "${configPath}" && -n "${port}" ]]; then
+        rm -f "${configPath}02_dokodemodoor_inbounds_${port}.json" \
+            "${configPath}02_dokodemodoor_inbounds_${port}_default.json" \
+            "${configPath}02_dokodemodoor_inbounds_hysteria_${port}.json"
+    fi
+}
+
 # 添加新端口
 addCorePort() {
 
@@ -7149,14 +7161,15 @@ addCorePort() {
         read -r -p "请输入默认的端口号，同时会更改订阅端口以及节点端口，[回车]默认443:" defaultPort
 
         # defaultPort 校验：必须 1-65535 整数（空表示用默认 443）。非法直接退出，
-        # 不进 find 删除阶段——避免 "*default*" 内插非法字符干扰文件匹配。
+        # 不进 find 删除阶段——避免内插非法字符干扰文件匹配。
         if [[ -n "${defaultPort}" ]] && { ! [[ "${defaultPort}" =~ ^[1-9][0-9]{0,4}$ ]] || (( defaultPort > 65535 )); }; then
             echoContent red " ---> 默认端口非法: ${defaultPort}（必须 1-65535 整数）"
             exit 1
         fi
 
+        # 只有一个端口能带 _default 后缀；只认 dokodemo-door 片段，别的文件名里的 default 不归这里管
         if [[ -n "${defaultPort}" && -n "${configPath}" ]]; then
-            find "${configPath}" -maxdepth 1 -type f -name "*default*" -exec rm -f {} \;
+            find "${configPath}" -maxdepth 1 -type f -name "02_dokodemodoor_inbounds_*_default.json" -exec rm -f {} \;
         fi
 
         if [[ -n "${newPort}" ]]; then
@@ -7168,13 +7181,7 @@ addCorePort() {
                     echoContent yellow " ---> 跳过非法端口: ${port}"
                     continue
                 fi
-                if [[ -n "${configPath}" && -n "${port}" ]]; then
-                    # 只删这三个精确文件名。通配 "*${port}*" 会让端口 2 命中
-                    # 02_VLESS_TCP / 12_VLESS_XHTTP，紧随的 reloadCore 就把协议停了。
-                    rm -f "${configPath}02_dokodemodoor_inbounds_${port}.json" \
-                        "${configPath}02_dokodemodoor_inbounds_${port}_default.json" \
-                        "${configPath}02_dokodemodoor_inbounds_hysteria_${port}.json"
-                fi
+                removeCorePortFiles "${port}"
 
                 local fileName=
                 local hysteriaFileName=
@@ -7255,14 +7262,7 @@ EOF
         # 拼出带换行的文件名，rm 报错而端口其实没删掉。
         dokoConfig=$(find ${configPath} -name "*dokodemodoor*" | grep -v "hysteria" | awk -F "[c][o][n][f][/]" '{print $2}' | awk -F "[_]" '{print $4}' | awk -F "[.]" '{print ""NR""":"$1}' | awk -F ':' -v idx="${portIndex}" '$1 == idx')
         if [[ -n "${dokoConfig}" ]]; then
-            rm "${configPath}02_dokodemodoor_inbounds_$(echo "${dokoConfig}" | awk -F "[:]" '{print $2}').json"
-            local hysteriaDokodemodoorFilePath=
-
-            hysteriaDokodemodoorFilePath="${configPath}02_dokodemodoor_inbounds_hysteria_$(echo "${dokoConfig}" | awk -F "[:]" '{print $2}').json"
-            if [[ -f "${hysteriaDokodemodoorFilePath}" ]]; then
-                rm "${hysteriaDokodemodoorFilePath}"
-            fi
-
+            removeCorePortFiles "${dokoConfig#*:}"
             reloadCore
             addCorePort
         else
