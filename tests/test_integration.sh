@@ -816,6 +816,10 @@ assert_equals "" "${UNREGISTERED_NAMES}" "install.sh 里出现的每个 *_inboun
 HARDCODED_ROOT=$(grep -n '/etc/Proxy-agent' install.sh lib/*.sh | grep -v 'PROXY_AGENT_DIR:-/etc/Proxy-agent')
 assert_equals "" "${HARDCODED_ROOT}" "install.sh 与 lib/ 不再写死 /etc/Proxy-agent（只剩默认值惯用法）"
 
+# nginx 在不在跑只能按进程名精确判：-f 会把 "vim nginx.conf" 当成 nginx
+NGINX_PGREP_SUBSTR=$(grep -nE '^[^#]*pgrep -f "nginx"' install.sh)
+assert_equals "" "${NGINX_PGREP_SUBSTR}" "install.sh 判 nginx 进程一律 pgrep -x，没有 -f 子串匹配"
+
 OVERRIDE_LAYOUT=$(env PROXY_AGENT_DIR=/tmp/pa-override bash -c \
     'source lib/constants.sh; echo "${XRAY_BIN} ${SINGBOX_FRAGMENT_DIR} ${TLS_DIR} ${CHAIN_MULTI_INFO}"')
 assert_equals "/tmp/pa-override/xray/xray /tmp/pa-override/sing-box/conf/config /tmp/pa-override/tls /tmp/pa-override/sing-box/conf/chain_multi_info.json" \
