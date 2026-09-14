@@ -631,14 +631,10 @@ echo ""
 
 echo -e "${BLUE}[addCorePort] 端口文件删除与编号选择${NC}"
 
-# 抽出 addCorePort 里「删同端口旧配置」的整块，连同注释一起
-ADD_PORT_DELETE_BLOCK=$(awk -v marker='-n "${configPath}" && -n "${port}"' '
-    /^addCorePort/ { inFn = 1 }
-    inFn && index($0, marker) { grab = 1 }
-    grab { print }
-    grab && $0 ~ /^[[:space:]]*fi[[:space:]]*$/ { exit }
-' install.sh)
-assert_not_empty "${ADD_PORT_DELETE_BLOCK}" "addCorePort：抽到端口文件删除块"
+# 「删同端口旧配置」收在 removeCorePortFiles 一处，加端口与删除菜单都调它
+REMOVE_PORT_FILES_FN=$(sed -n '/^removeCorePortFiles() {/,/^}/p' install.sh)
+assert_not_empty "${REMOVE_PORT_FILES_FN}" "addCorePort：抽到 removeCorePortFiles"
+eval "${REMOVE_PORT_FILES_FN}"
 
 # 端口 80 不得波及 8080，端口 2 不得波及 02_/12_ 核心 inbound 片段
 run_add_port_delete() {
@@ -649,8 +645,8 @@ run_add_port_delete() {
     : >"${dir}/02_dokodemodoor_inbounds_80.json"
     : >"${dir}/02_dokodemodoor_inbounds_hysteria_80.json"
     : >"${dir}/02_dokodemodoor_inbounds_8080.json"
-    local configPath="${dir}/" port="${targetPort}"
-    eval "${ADD_PORT_DELETE_BLOCK}"
+    local configPath="${dir}/"
+    removeCorePortFiles "${targetPort}"
 }
 
 ADD_PORT_DIR="${MOCK_ROOT}/addcoreport/conf"
@@ -668,6 +664,21 @@ assert_equals "present" "$([[ -f "${ADD_PORT_DIR}/02_VLESS_TCP_inbounds.json" ]]
     "addCorePort(2)：02_VLESS_TCP_inbounds.json 不被删"
 assert_equals "present" "$([[ -f "${ADD_PORT_DIR}/12_VLESS_XHTTP_inbounds.json" ]] && echo present || echo absent)" \
     "addCorePort(2)：12_VLESS_XHTTP_inbounds.json 不被删"
+
+# 换默认端口时清旧 _default 片段：只认 dokodemo-door 那份，别的带 default 的文件名不动
+ADD_PORT_CLEAR_DEFAULT_LINE=$(grep -F -m1 'find "${configPath}" -maxdepth 1 -type f -name' install.sh)
+assert_not_empty "${ADD_PORT_CLEAR_DEFAULT_LINE}" "addCorePort：抽到清旧默认端口片段的语句"
+rm -rf "${ADD_PORT_DIR}" && mkdir -p "${ADD_PORT_DIR}"
+: >"${ADD_PORT_DIR}/02_dokodemodoor_inbounds_443_default.json"
+: >"${ADD_PORT_DIR}/02_dokodemodoor_inbounds_2053.json"
+: >"${ADD_PORT_DIR}/default_settings.json"
+( configPath="${ADD_PORT_DIR}/"; eval "${ADD_PORT_CLEAR_DEFAULT_LINE}" )
+assert_equals "absent" "$([[ -f "${ADD_PORT_DIR}/02_dokodemodoor_inbounds_443_default.json" ]] && echo present || echo absent)" \
+    "addCorePort：旧默认端口片段被清掉"
+assert_equals "present" "$([[ -f "${ADD_PORT_DIR}/02_dokodemodoor_inbounds_2053.json" ]] && echo present || echo absent)" \
+    "addCorePort：非默认端口片段不动"
+assert_equals "present" "$([[ -f "${ADD_PORT_DIR}/default_settings.json" ]] && echo present || echo absent)" \
+    "addCorePort：文件名含 default 的其他文件不被通配误删"
 
 # 删除菜单的编号选择：整列比较，编号 1 不得同时命中 11
 ADD_PORT_SELECT_LINE=$(grep -F 'dokoConfig=$(find' install.sh)
@@ -690,6 +701,35 @@ assert_equals "1" "$(select_add_port 11 | grep -c '^11:')" \
     "addCorePort：编号 11 选中的正是第 11 行"
 assert_equals "0" "$(select_add_port 99 | grep -c .)" \
     "addCorePort：越界编号选不中任何行"
+
+# 删除菜单选中「默认端口」那条：真实文件带 _default 后缀，删完清单不得再含它
+ADD_PORT_LIST_LINE=$(grep -F -m1 'find ${configPath} -name "*dokodemodoor*"' install.sh)
+assert_not_empty "${ADD_PORT_LIST_LINE}" "addCorePort：抽到端口清单语句"
+ADD_PORT_REMOVE_BLOCK=$(awk -v marker='-n "${dokoConfig}"' '
+    /^addCorePort/ { inFn = 1 }
+    inFn && index($0, marker) { grab = 1; next }
+    grab && /reloadCore/ { exit }
+    grab { print }
+' install.sh)
+assert_not_empty "${ADD_PORT_REMOVE_BLOCK}" "addCorePort：抽到删除菜单的删文件块"
+
+rm -rf "${ADD_PORT_DIR}" && mkdir -p "${ADD_PORT_DIR}"
+: >"${ADD_PORT_DIR}/02_dokodemodoor_inbounds_443_default.json"
+: >"${ADD_PORT_DIR}/02_dokodemodoor_inbounds_2053.json"
+list_add_ports() {
+    local configPath="${ADD_PORT_DIR}/"
+    eval "${ADD_PORT_LIST_LINE}"
+}
+delete_add_port() {
+    local configPath="${ADD_PORT_DIR}/" portIndex="$1" dokoConfig
+    eval "${ADD_PORT_SELECT_LINE}"
+    eval "${ADD_PORT_REMOVE_BLOCK}"
+}
+delete_add_port "$(list_add_ports | awk -F ':' '$2 == 443 { print $1 }')"
+assert_equals "0" "$(list_add_ports | grep -c ':443$')" \
+    "addCorePort：删掉默认端口那条后清单不再含它"
+assert_equals "1" "$(list_add_ports | grep -c ':2053$')" \
+    "addCorePort：删默认端口不波及其他端口"
 
 rm -rf "${MOCK_ROOT}/addcoreport"
 
