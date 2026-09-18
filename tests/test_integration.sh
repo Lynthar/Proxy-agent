@@ -838,6 +838,33 @@ for _root in / /opt /etc/.. "/a b/c" relative/x '/opt/pa*' /etc/Proxy-agent/..; 
     assert_equals "reject" "$(root_verdict "${_root}")" "安装根 ${_root} 被拒绝（unInstall 会 rm -rf 它）"
 done
 
+# readInstallProtocolType 自带一份「文件名 stem → ID」表（grep -q 分支），registry 的 parseProtocolIdFromFileName 是另一份：逐名对拍
+SCAN_FN=$(sed -n '/^readInstallProtocolType() {/,/^}/p' install.sh)
+assert_not_empty "${SCAN_FN}" "readInstallProtocolType：抽到函数原文"
+SCAN_STEM_LINES=$(grep -cE 'grep -q [A-Za-z0-9_]+_inbounds' <<< "${SCAN_FN}")
+SCAN_PAIRS=$(awk '
+    match($0, /grep -q [A-Za-z0-9_]+_inbounds/) { stem = substr($0, RSTART + 8, RLENGTH - 8); next }
+    stem != "" && match($0, /currentInstallProtocolType="[$][{]currentInstallProtocolType[}][0-9]+,"/) {
+        id = $0; sub(/.*currentInstallProtocolType[}]/, "", id); sub(/,".*/, "", id)
+        print stem "|" id; stem = ""
+    }
+' <<< "${SCAN_FN}")
+assert_equals "${SCAN_STEM_LINES}" "$(grep -c . <<< "${SCAN_PAIRS}")" "readInstallProtocolType：每个 grep -q <stem> 分支都配到一行 ID 追加"
+SCAN_MISMATCH=$(while IFS='|' read -r _stem _id; do
+    [[ -z "${_stem}" ]] && continue
+    _reg=$(parseProtocolIdFromFileName "${_stem}.json") || _reg="unknown"
+    [[ "${_reg}" == "${_id}" ]] || echo "${_stem}: install.sh=${_id} registry=${_reg}"
+done <<< "${SCAN_PAIRS}")
+assert_equals "" "${SCAN_MISMATCH}" "readInstallProtocolType 的 stem → ID 与 parseProtocolIdFromFileName 逐名一致"
+
+# registry 自己的两张表（ID → 文件名、文件名 → ID）必须互为逆映射：错一格，账户操作就静默写错文件
+REGISTRY_ROUNDTRIP=$(for _pid in $(sed -n '/^getProtocolConfigFileName() {/,/^}/p' lib/protocol-registry.sh |
+    sed -n -E 's/^ *([0-9]+)\) *echo "[^"]+".*/\1/p'); do
+    _back=$(parseProtocolIdFromFileName "$(getProtocolConfigFileName "${_pid}")") || _back="unknown"
+    [[ "${_back}" == "${_pid}" ]] || echo "${_pid} -> $(getProtocolConfigFileName "${_pid}") -> ${_back}"
+done)
+assert_equals "" "${REGISTRY_ROUNDTRIP}" "registry：getProtocolConfigFileName 与 parseProtocolIdFromFileName 互为逆映射"
+
 echo ""
 
 # ============================================================================
