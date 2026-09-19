@@ -2387,7 +2387,7 @@ checkDNSIP() {
         echoContent yellow " ---> 请检查域名解析是否生效以及正确"
         echoContent green " ---> 当前VPS IP：${publicIP}"
         echoContent green " ---> DNS解析 IP：${dnsIP}"
-        exit 0
+        exit 1
     else
         echoContent green " ---> 域名IP校验通过"
     fi
@@ -2720,8 +2720,8 @@ initDNSAPIConfig() {
         else
             echo
             if ! echo "${dnsTLSDomain}" | grep -q "\." || [[ -z $(echo "${dnsTLSDomain}" | awk -F "[.]" '{print $1}') ]]; then
-                echoContent green " ---> 不支持此域名申请通配符证书，建议使用此格式[xx.xx.xx]"
-                exit 0
+                echoContent red " ---> 不支持此域名申请通配符证书，建议使用此格式[xx.xx.xx]"
+                exit 1
             fi
             read -r -p "是否使用*.${dnsTLSDomain}进行API申请通配符证书？[y/n]:" dnsAPIStatus
         fi
@@ -2734,8 +2734,8 @@ initDNSAPIConfig() {
         else
             echo
             if ! echo "${dnsTLSDomain}" | grep -q "\." || [[ -z $(echo "${dnsTLSDomain}" | awk -F "[.]" '{print $1}') ]]; then
-                echoContent green " ---> 不支持此域名申请通配符证书，建议使用此格式[xx.xx.xx]"
-                exit 0
+                echoContent red " ---> 不支持此域名申请通配符证书，建议使用此格式[xx.xx.xx]"
+                exit 1
             fi
             read -r -p "是否使用*.${dnsTLSDomain}进行API申请通配符证书？[y/n]:" dnsAPIStatus
         fi
@@ -3175,7 +3175,7 @@ updateSELinuxHTTPPortT() {
         handleNginx start
 
     else
-        exit 0
+        exit 1
     fi
 }
 
@@ -6949,15 +6949,12 @@ checkNginx302() {
     local domain302Status=
     domain302Status=$(curl -s "https://${currentHost}:${currentPort}")
     if echo "${domain302Status}" | grep -q "302"; then
-        #        local domain302Result=
-        #        domain302Result=$(curl -L -s "https://${currentHost}:${currentPort}")
-        #        if [[ -n "${domain302Result}" ]]; then
         echoContent green " ---> 302重定向设置完毕"
-        exit 0
-        #        fi
+        return 0
     fi
     echoContent red " ---> 302重定向设置失败，请仔细检查是否和示例相同"
     backupNginxConfig restoreBackup
+    return 1
 }
 
 # 备份恢复nginx文件
@@ -7067,10 +7064,11 @@ updateNginxBlog() {
             if [[ -z $(pgrep -x "nginx") ]]; then
                 backupNginxConfig restoreBackup
                 handleNginx start
-                exit 0
+                echoContent red " ---> $(t NGINX_302_ROLLED_BACK)"
+                exit 1
             fi
             checkNginx302
-            exit 0
+            exit $?
         fi
         if [[ "${redirectStatus}" == "2" ]]; then
             removeNginx302
@@ -9094,6 +9092,7 @@ warpRoutingReg() {
         address="${addressWarpReg}/128"
     else
         echoContent red " ---> IP获取失败，退出安装"
+        exit 1
     fi
 
     if [[ "${warpStatus}" == "1" ]]; then
@@ -15326,11 +15325,14 @@ coreVersionManageMenu() {
 cronFunction() {
     if [[ "${cronName}" == "RenewTLS" ]]; then
         renewalTLS
-        exit 0
+        exit $?
     elif [[ "${cronName}" == "UpdateGeo" ]]; then
-        updateGeoSite >>${PROXY_AGENT_DIR}/crontab_updateGeoSite.log
-        echoContent green " ---> geo更新日期:$(date "+%F %H:%M:%S")" >>${PROXY_AGENT_DIR}/crontab_updateGeoSite.log
-        exit 0
+        local geoLog="${PROXY_AGENT_DIR}/crontab_updateGeoSite.log"
+        if updateGeoSite >>"${geoLog}"; then
+            echoContent green " ---> geo更新日期:$(date "+%F %H:%M:%S")" >>"${geoLog}"
+            exit 0
+        fi
+        exit 1
     fi
 }
 # 账号管理
@@ -15493,8 +15495,8 @@ addSubscribeMenu() {
         grep -v '^$' "${SUBSCRIBE_REMOTE_DIR}/remoteSubscribeUrl" | awk '{print NR""":"$0}'
         read -r -p "请选择要删除的订阅编号[仅支持单个删除]:" delSubscribeIndex
         if [[ -z "${delSubscribeIndex}" ]]; then
-            echoContent green " ---> 不可以为空"
-            exit 0
+            echoContent red " ---> 不可以为空"
+            exit 1
         fi
 
         sed -i "$((delSubscribeIndex))d" "${SUBSCRIBE_REMOTE_DIR}/remoteSubscribeUrl" >/dev/null 2>&1
