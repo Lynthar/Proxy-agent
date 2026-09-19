@@ -900,6 +900,55 @@ for _core in 1 2; do
     done
 done
 
+# ============================================================================
+# 测试：updateGeoSite 的失败语义——下载失败要返回 1，旧 geo 文件不能先被删掉
+# ============================================================================
+
+echo -e "${YELLOW}=== 测试 updateGeoSite 失败语义 ===${NC}"
+
+GEO_FN=$(sed -n '/^updateGeoSite() {/,/^}/p' install.sh)
+assert_not_empty "${GEO_FN}" "updateGeoSite：抽到函数原文"
+GEO_DIR="${MOCK_ROOT}/geo/xray/"
+mkdir -p "${GEO_DIR}conf"
+
+# 子 shell 里跑：桩掉 GitHub API、wget 与内核重载；wget 按第一个参数成功（写 -O 目标）或失败
+run_update_geo() (
+    configPath="${GEO_DIR}conf/"
+    release="debian"; wgetShowProgressStatus=""
+    GEO_WGET_MODE="$1"; GEO_API_JSON="$2"
+    curl() { printf '%s' "${GEO_API_JSON}"; }
+    wget() {
+        local out=""
+        while [[ $# -gt 0 ]]; do [[ "$1" == "-O" ]] && out="$2"; shift; done
+        [[ "${GEO_WGET_MODE}" == "ok" && -n "${out}" ]] || return 8
+        printf 'new' >"${out}"
+    }
+    reloadCore() { :; }
+    echoContent() { printf '%s\n' "$2"; }
+    t() { printf '%s' "$1"; }
+    eval "${GEO_FN}"
+    updateGeoSite >/dev/null 2>&1
+)
+geo_files() { printf '%s %s' "$(cat "${GEO_DIR}geosite.dat" 2>/dev/null)" "$(cat "${GEO_DIR}geoip.dat" 2>/dev/null)"; }
+geo_staging_left() { find "${GEO_DIR}" -maxdepth 1 -name 'geo-update.*' | wc -l | tr -d ' '; }
+
+printf 'old' >"${GEO_DIR}geosite.dat"; printf 'old' >"${GEO_DIR}geoip.dat"
+run_update_geo fail '[{"tag_name":"v2099"}]'
+assert_equals "1" "$?" "updateGeoSite：下载失败返回 1"
+assert_equals "old old" "$(geo_files)" "updateGeoSite：下载失败时旧 geo 文件原样保留"
+assert_equals "0" "$(geo_staging_left)" "updateGeoSite：下载失败不留暂存目录"
+
+run_update_geo ok ''
+assert_equals "1" "$?" "updateGeoSite：取不到版本号返回 1"
+assert_equals "old old" "$(geo_files)" "updateGeoSite：取不到版本号时旧文件原样保留"
+
+run_update_geo ok '[{"tag_name":"v2099"}]'
+assert_equals "0" "$?" "updateGeoSite：两个文件都下到后返回 0"
+assert_equals "new new" "$(geo_files)" "updateGeoSite：成功后两个 geo 文件都换成新版"
+assert_equals "0" "$(geo_staging_left)" "updateGeoSite：成功后不留暂存目录"
+
+echo ""
+
 echo ""
 
 # ============================================================================

@@ -489,3 +489,6 @@ MSG_ACCOUNT_TX_BEGIN_FAILED="Failed to create the account-change transaction sna
 MSG_ACCOUNT_TX_FILE_MISSING="Protocol config file missing; the whole account change was rolled back"
 MSG_ACCOUNT_TX_WRITE_FAILED="Failed to write protocol config; the whole account change was rolled back"
 MSG_ACCOUNT_TX_VALIDATE_FAILED="Core config validation failed; the whole account change was rolled back"
+MSG_GEO_NO_CORE="No core installed; there are no geo files to update"
+MSG_GEO_VERSION_FETCH_FAILED="Failed to fetch the latest geo data version; existing geo files untouched"
+MSG_GEO_DOWNLOAD_FAILED="Failed to download %s; existing geo files untouched"
