@@ -3700,23 +3700,37 @@ xrayVersionManageMenu() {
 # 更新 geosite
 updateGeoSite() {
     echoContent yellow "\n来源 https://github.com/Loyalsoldier/v2ray-rules-dat"
+    if [[ -z "${configPath}" ]]; then
+        echoContent red " ---> $(t GEO_NO_CORE)"
+        return 1
+    fi
 
     version=$(curl -s https://api.github.com/repos/Loyalsoldier/v2ray-rules-dat/releases?per_page=1 | jq -r '.[]|.tag_name')
     echoContent skyBlue "------------------------Version-------------------------------"
     echo "version:${version}"
-    rm ${configPath}../geo* >/dev/null
-
-    if [[ "${release}" == "alpine" ]]; then
-        wget -c -q -P ${configPath}../ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geosite.dat"
-        wget -c -q -P ${configPath}../ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geoip.dat"
-    else
-        wget -c -q ${wgetShowProgressStatus} -P ${configPath}../ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geosite.dat"
-        wget -c -q ${wgetShowProgressStatus} -P ${configPath}../ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geoip.dat"
+    if [[ -z "${version}" || "${version}" == "null" ]]; then
+        echoContent red " ---> $(t GEO_VERSION_FETCH_FAILED)"
+        return 1
     fi
+
+    # 先下到同目录的暂存目录，两个文件都到齐才换掉旧文件——中途失败时内核手里仍是旧 geo，
+    # 不能像以前那样先 rm 再下载。
+    local geoDir="${configPath}../"
+    local stagingDir
+    stagingDir=$(mktemp -d "${geoDir}geo-update.XXXXXX") || return 1
+    local file
+    for file in geosite.dat geoip.dat; do
+        if ! wget -q ${wgetShowProgressStatus} -O "${stagingDir}/${file}" "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/${file}"; then
+            rm -rf "${stagingDir}"
+            echoContent red " ---> $(t GEO_DOWNLOAD_FAILED "${file}")"
+            return 1
+        fi
+    done
+    mv -f "${stagingDir}/geosite.dat" "${stagingDir}/geoip.dat" "${geoDir}"
+    rm -rf "${stagingDir}"
 
     reloadCore
     echoContent green " ---> 更新完毕"
-
 }
 
 # 更新Xray

@@ -489,3 +489,6 @@ MSG_ACCOUNT_TX_BEGIN_FAILED="无法创建账户变更事务快照，操作已取
 MSG_ACCOUNT_TX_FILE_MISSING="协议配置文件缺失，本次账户变更已整体回滚"
 MSG_ACCOUNT_TX_WRITE_FAILED="写入协议配置失败，本次账户变更已整体回滚"
 MSG_ACCOUNT_TX_VALIDATE_FAILED="内核配置校验未通过，本次账户变更已整体回滚"
+MSG_GEO_NO_CORE="未安装内核，没有 geo 文件可更新"
+MSG_GEO_VERSION_FETCH_FAILED="获取 geo 数据最新版本失败，现有 geo 文件未改动"
+MSG_GEO_DOWNLOAD_FAILED="%s 下载失败，现有 geo 文件未改动"
