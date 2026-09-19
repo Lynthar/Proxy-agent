@@ -29,10 +29,38 @@ checkCentosSELinux() {
 # checkSystem → release / installType / removeType / upgrade / centosVersion / nginxConfigPath
 # ============================================================================
 
+# detectRelease [OS_RELEASE]：按 os-release 的 ID / ID_LIKE 归入 ubuntu / debian / alpine / centos，
+# 认不出返回 1。只读这个文件，不看 /proc/version——那是内核构建串，容器与 WSL 里写的是宿主内核的。
+detectRelease() {
+    local file="${1:-/etc/os-release}" ids
+    [[ -f "${file}" ]] || return 1
+    ids=" $(sed -n 's/^ID=//p;s/^ID_LIKE=//p' "${file}" | tr -d '"' | tr '\n' ' ') "
+    case "${ids}" in
+    *" ubuntu "*) echo ubuntu ;;
+    *" alpine "*) echo alpine ;;
+    *" debian "*) echo debian ;;
+    *" centos "* | *" rhel "* | *" fedora "*) echo centos ;;
+    *) return 1 ;;
+    esac
+}
+
 checkSystem() {
-    # CentOS / RHEL
-    if [[ -n $(find /etc -name "redhat-release" 2>/dev/null) ]] || \
-       grep </proc/version -q -i "centos" 2>/dev/null; then
+    release=$(detectRelease) || release=
+    # 没有 os-release 的老系统退回发行版自己的标识文件
+    if [[ -z "${release}" ]]; then
+        if [[ -n $(find /etc -name "redhat-release" 2>/dev/null) ]]; then
+            release="centos"
+        elif [[ -f "/etc/issue" ]] && grep -qi "Alpine" /etc/issue; then
+            release="alpine"
+        elif [[ -f "/etc/issue" ]] && grep -qi "debian" /etc/issue; then
+            release="debian"
+        elif [[ -f "/etc/issue" ]] && grep -qi "ubuntu" /etc/issue; then
+            release="ubuntu"
+        fi
+    fi
+
+    case "${release}" in
+    centos)
         mkdir -p /etc/yum.repos.d
 
         if [[ -f "/etc/centos-release" ]]; then
@@ -43,45 +71,29 @@ checkSystem() {
             fi
         fi
 
-        release="centos"
         installType='yum -y install'
         removeType='yum -y remove'
         upgrade="yum update -y --skip-broken"
         checkCentosSELinux
-
-    # Alpine Linux
-    elif { [[ -f "/etc/issue" ]] && grep -qi "Alpine" /etc/issue; } || \
-         { [[ -f "/proc/version" ]] && grep -qi "Alpine" /proc/version; }; then
-        release="alpine"
+        ;;
+    alpine)
         installType='apk add'
         upgrade="apk update"
         removeType='apk del'
         nginxConfigPath=/etc/nginx/http.d/
-
-    # Debian
-    elif { [[ -f "/etc/issue" ]] && grep -qi "debian" /etc/issue; } || \
-         { [[ -f "/proc/version" ]] && grep -qi "debian" /proc/version; } || \
-         { [[ -f "/etc/os-release" ]] && grep -qi "ID=debian" /etc/os-release; }; then
-        release="debian"
-        installType='apt -y install'
-        upgrade="apt update"
-        updateReleaseInfoChange='apt-get --allow-releaseinfo-change update'
-        removeType='apt -y autoremove'
-
-    # Ubuntu
-    elif { [[ -f "/etc/issue" ]] && grep -qi "ubuntu" /etc/issue; } || \
-         { [[ -f "/proc/version" ]] && grep -qi "ubuntu" /proc/version; }; then
-        release="ubuntu"
+        ;;
+    debian | ubuntu)
         installType='apt -y install'
         upgrade="apt update"
         updateReleaseInfoChange='apt-get --allow-releaseinfo-change update'
         removeType='apt -y autoremove'
 
         # Ubuntu 16.x 不支持
-        if grep </etc/issue -q -i "16." 2>/dev/null; then
+        if [[ "${release}" == "ubuntu" ]] && grep -qs '^VERSION_ID="16\.' /etc/os-release; then
             release=
         fi
-    fi
+        ;;
+    esac
 
     # 检查是否支持
     if [[ -z "${release}" ]]; then
