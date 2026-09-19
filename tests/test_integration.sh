@@ -949,6 +949,108 @@ assert_equals "0" "$(geo_staging_left)" "updateGeoSite：成功后不留暂存�
 
 echo ""
 
+# ============================================================================
+# 测试：出错路径的退出码——报错与失败要绑在一起（这些函数自己 exit，全部在子 shell 里跑）
+# ============================================================================
+
+echo -e "${YELLOW}=== 测试出错路径的退出码 ===${NC}"
+
+CRON_FN=$(sed -n '/^cronFunction() {/,/^}/p' install.sh)
+assert_not_empty "${CRON_FN}" "cronFunction：抽到函数原文"
+CRON_ROOT="${MOCK_ROOT}/cron"; mkdir -p "${CRON_ROOT}"
+# PROXY_AGENT_DIR 是 readonly，改根只能另起 bash。$1 cron 任务名，$2 桩函数的返回码；
+# cronFunction 必须 exit，落到 fell-through 就是没退出
+run_cron() {
+    rm -f "${CRON_ROOT}/crontab_updateGeoSite.log"
+    env PROXY_AGENT_DIR="${CRON_ROOT}" CRON_FN="${CRON_FN}" bash -c '
+        cronName="$1"; stubRc="$2"
+        renewalTLS() { return "${stubRc}"; }
+        updateGeoSite() { return "${stubRc}"; }
+        echoContent() { printf "%s\n" "$2"; }
+        eval "${CRON_FN}"
+        cronFunction
+        echo fell-through' _ "$1" "$2"
+}
+run_cron RenewTLS 1 >/dev/null; assert_equals "1" "$?" "cronFunction RenewTLS：续期失败时退出码 1"
+run_cron RenewTLS 0 >/dev/null; assert_equals "0" "$?" "cronFunction RenewTLS：续期成功时退出码 0"
+run_cron UpdateGeo 1 >/dev/null; assert_equals "1" "$?" "cronFunction UpdateGeo：更新失败时退出码 1"
+assert_equals "0" "$(grep -c 'geo更新日期' "${CRON_ROOT}/crontab_updateGeoSite.log")" \
+    "cronFunction UpdateGeo：更新失败时日志里不写「更新日期」"
+run_cron UpdateGeo 0 >/dev/null; assert_equals "0" "$?" "cronFunction UpdateGeo：更新成功时退出码 0"
+assert_equals "1" "$(grep -c 'geo更新日期' "${CRON_ROOT}/crontab_updateGeoSite.log")" \
+    "cronFunction UpdateGeo：更新成功时日志里写一行「更新日期」"
+assert_equals "0" "$(run_cron RenewTLS 0 | grep -c fell-through)" "cronFunction：认出 cron 任务名后进程一定退出"
+
+DNS_FN=$(sed -n '/^checkDNSIP() {/,/^}/p' install.sh)
+assert_not_empty "${DNS_FN}" "checkDNSIP：抽到函数原文"
+# $1 是本机公网 IP 桩值；dig 固定解析到 203.0.113.10
+run_check_dns() (
+    publicIpStub="$1"
+    dig() { echo "203.0.113.10"; }
+    getPublicIP() { echo "${publicIpStub}"; }
+    echoContent() { :; }
+    eval "${DNS_FN}"
+    checkDNSIP example.com
+)
+run_check_dns 203.0.113.10; assert_equals "0" "$?" "checkDNSIP：解析 IP 与本机一致时返回 0"
+run_check_dns 203.0.113.20; assert_equals "1" "$?" "checkDNSIP：解析 IP 与本机不一致时退出码 1"
+
+DNSAPI_FN=$(sed -n '/^initDNSAPIConfig() {/,/^}/p' install.sh)
+assert_not_empty "${DNSAPI_FN}" "initDNSAPIConfig：抽到函数原文"
+# 域名没有点就申请不了通配符证书；凭据从 stdin 喂
+run_dns_api() (
+    dnsTLSDomain="localhost"
+    echoContent() { :; }
+    eval "${DNSAPI_FN}"
+    initDNSAPIConfig "$1"
+)
+run_dns_api cloudflare <<<'token' >/dev/null; assert_equals "1" "$?" "initDNSAPIConfig cloudflare：域名不支持通配符时退出码 1"
+run_dns_api aliyun <<<$'key\nsecret' >/dev/null; assert_equals "1" "$?" "initDNSAPIConfig aliyun：域名不支持通配符时退出码 1"
+
+SUB_MENU_FN=$(sed -n '/^addSubscribeMenu() {/,/^}/p' install.sh)
+assert_not_empty "${SUB_MENU_FN}" "addSubscribeMenu：抽到函数原文"
+# 订阅清单路径从 PROXY_AGENT_DIR 派生，同样另起 bash 指到 mock 根；选「2.移除」后编号留空
+run_sub_menu() {
+    env PROXY_AGENT_DIR="${CRON_ROOT}" SUB_MENU_FN="${SUB_MENU_FN}" bash -c '
+        source lib/constants.sh
+        mkdir -p "${SUBSCRIBE_REMOTE_DIR}"
+        echo "https://example.com/sub:alice" >"${SUBSCRIBE_REMOTE_DIR}/remoteSubscribeUrl"
+        echoContent() { :; }
+        subscribe() { :; }
+        eval "${SUB_MENU_FN}"
+        (addSubscribeMenu >/dev/null); rc=$?
+        echo "rc=${rc} lines=$(grep -c . "${SUBSCRIBE_REMOTE_DIR}/remoteSubscribeUrl")"' <<<$'2\n'
+}
+assert_equals "rc=1 lines=1" "$(run_sub_menu)" "addSubscribeMenu：删除时编号为空退出码 1，订阅清单没被动"
+
+SELINUX_FN=$(sed -n '/^updateSELinuxHTTPPortT() {/,/^}/p' install.sh)
+assert_not_empty "${SELINUX_FN}" "updateSELinuxHTTPPortT：抽到函数原文"
+# 只在 handleNginx 起不来时被调；机器上没有 semanage 就是「起不来且修不了」
+run_selinux() {
+    env PROXY_AGENT_DIR="${CRON_ROOT}" SELINUX_FN="${SELINUX_FN}" bash -c '
+        find() { :; }
+        echoContent() { :; }
+        eval "${SELINUX_FN}"
+        updateSELinuxHTTPPortT 2>/dev/null'
+}
+run_selinux; assert_equals "1" "$?" "updateSELinuxHTTPPortT：不是 SELinux 端口问题时退出码 1"
+
+NGINX302_FN=$(sed -n '/^checkNginx302() {/,/^}/p' install.sh)
+assert_not_empty "${NGINX302_FN}" "checkNginx302：抽到函数原文"
+# $1 是 curl 回包桩值
+run_check_302() (
+    currentHost="example.com"; currentPort="443"; responseStub="$1"
+    curl() { printf '%s' "${responseStub}"; }
+    backupNginxConfig() { :; }
+    echoContent() { :; }
+    eval "${NGINX302_FN}"
+    checkNginx302
+)
+run_check_302 "HTTP/1.1 302 Found"; assert_equals "0" "$?" "checkNginx302：看到 302 返回 0"
+run_check_302 "HTTP/1.1 200 OK"; assert_equals "1" "$?" "checkNginx302：没看到 302 返回 1"
+
+echo ""
+
 echo ""
 
 # ============================================================================
