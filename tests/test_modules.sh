@@ -329,6 +329,27 @@ rm -rf "${_txDir}"
 echo ""
 
 # ============================================================================
+# 测试 detectRelease（checkSystem 的发行版判定，只看 os-release 的 ID / ID_LIKE）
+# ============================================================================
+echo -e "${YELLOW}[system-detect.sh] detectRelease 测试${NC}"
+_osrDir=$(mktemp -d)
+_osr() { printf '%s\n' "$2" >"${_osrDir}/$1"; printf '%s' "${_osrDir}/$1"; }
+assert_equals "ubuntu" "$(detectRelease "$(_osr ubuntu $'NAME="Ubuntu"\nVERSION_ID="22.04"\nID=ubuntu\nID_LIKE=debian')")" "detectRelease: Ubuntu 是 ubuntu，不因 ID_LIKE=debian 归成 debian"
+assert_equals "debian" "$(detectRelease "$(_osr debian $'PRETTY_NAME="Debian GNU/Linux 12"\nID=debian\nVERSION_ID="12"')")" "detectRelease: Debian 是 debian"
+assert_equals "debian" "$(detectRelease "$(_osr kali $'ID=kali\nID_LIKE=debian')")" "detectRelease: Debian 衍生版按 ID_LIKE 归 debian"
+assert_equals "ubuntu" "$(detectRelease "$(_osr mint $'ID=linuxmint\nID_LIKE="ubuntu debian"')")" "detectRelease: Ubuntu 衍生版按 ID_LIKE 归 ubuntu"
+assert_equals "alpine" "$(detectRelease "$(_osr alpine $'ID=alpine\nVERSION_ID=3.20.10')")" "detectRelease: Alpine 是 alpine"
+assert_equals "centos" "$(detectRelease "$(_osr centos $'ID="centos"\nID_LIKE="rhel fedora"\nVERSION_ID="7"')")" "detectRelease: CentOS 是 centos"
+assert_equals "centos" "$(detectRelease "$(_osr rocky $'ID="rocky"\nID_LIKE="rhel centos fedora"')")" "detectRelease: Rocky 按 ID_LIKE 归 centos"
+assert_equals "centos" "$(detectRelease "$(_osr fedora $'ID=fedora')")" "detectRelease: Fedora 归 centos"
+assert_true "! detectRelease $(_osr arch $'ID=arch')" "detectRelease: 认不出的发行版返回 1"
+assert_equals "" "$(detectRelease "${_osrDir}/arch")" "detectRelease: 认不出时不输出"
+assert_true "! detectRelease ${_osrDir}/missing" "detectRelease: 文件不存在返回 1"
+rm -rf "${_osrDir}"
+
+echo ""
+
+# ============================================================================
 # 测试 isPlausiblePublicIP（getPublicIP 的输出闸门）
 # ============================================================================
 echo -e "${YELLOW}[system-detect.sh] isPlausiblePublicIP 测试${NC}"
