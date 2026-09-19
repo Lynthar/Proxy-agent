@@ -2099,7 +2099,7 @@ installTools() {
     fi
 
     if ! command -v netfilter-persistent >/dev/null 2>&1; then
-        if [[ "${release}" != "centos" ]]; then
+        if [[ "${release}" == "debian" || "${release}" == "ubuntu" ]]; then
             echoContent green " ---> $(t INSTALL_TOOL "iptables")"
             echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | sudo debconf-set-selections
             echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | sudo debconf-set-selections
@@ -2214,7 +2214,7 @@ installTools() {
     # 如果 SELinux 导致问题，updateSELinuxHTTPPortT() 函数会在 Nginx 启动失败时尝试修复
     # 用户也可以手动关闭 SELinux，参考: docs/selinux.md
 
-    if [[ "${selectCustomInstallType}" == "7" ]]; then
+    if [[ "${selectCustomInstallType}" == ",7," ]]; then
         echoContent green " ---> 检测到无需依赖证书的服务，跳过安装"
     else
         if [[ ! -d "$HOME/.acme.sh" ]] || [[ -d "$HOME/.acme.sh" && -z $(find "$HOME/.acme.sh/acme.sh") ]]; then
