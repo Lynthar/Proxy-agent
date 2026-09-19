@@ -28,7 +28,7 @@ jobs:
         run: |
           shellcheck --version
           shellcheck --severity=error --shell=bash \
-            lib/*.sh tests/*.sh
+            lib/*.sh tests/*.sh tests/e2e/*.sh
 
       - name: shellcheck install.sh
         # The legacy error backlog is cleared (0 errors since 2026-08); keep it
@@ -128,6 +128,22 @@ jobs:
         run: |
           set -e
           bash -n install.sh
-          for f in lib/*.sh shell/lang/*.sh tests/*.sh; do
+          for f in lib/*.sh shell/lang/*.sh tests/*.sh tests/e2e/*.sh; do
             bash -n "$f"
           done
+
+  install-e2e:
+    name: real install in a ${{ matrix.os }} container
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [alpine, debian]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: run the Reality quick install end to end
+        # Root in a throwaway container: real downloads and service manager, then
+        # xray run -test, a real Reality handshake through the emitted share link,
+        # pasly re-entry, doctor and uninstall. tests/e2e/run.sh is the same command locally.
+        run: bash tests/e2e/run.sh ${{ matrix.os }}
