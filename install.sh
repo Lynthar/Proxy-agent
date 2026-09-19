@@ -8024,7 +8024,7 @@ scriptVersionMenu() {
     4)
         local backupDir="${PROXY_AGENT_DIR}/backup"
         echoContent skyBlue "\n$(t SCRIPT_VERSION_LIST)"
-        echoContent red "=============================================================="
+        echoContent skyBlue "=============================================================="
         if [[ -d "${backupDir}" ]]; then
             ls -1td "${backupDir}"/v* 2>/dev/null | while read -r backup; do
                 local backupName
@@ -8040,7 +8040,7 @@ scriptVersionMenu() {
         else
             echoContent yellow "  ($(t SCRIPT_NO_BACKUPS))"
         fi
-        echoContent red "=============================================================="
+        echoContent skyBlue "=============================================================="
         ;;
     esac
 }
@@ -9673,7 +9673,7 @@ EOF
     echoContent green "  密钥: ${chainKey}"
     echoContent green "  加密方式: ${chainMethod}"
 
-    echoContent red "\n请妥善保管配置码，切勿泄露！"
+    echoContent yellow "\n请妥善保管配置码，切勿泄露！"
 }
 
 # 显示现有配置码
@@ -10269,7 +10269,7 @@ EOF
     echoContent yellow "\n配置码 (供上游入口或中继节点使用):\n"
     echoContent skyBlue "${newChainCode}"
 
-    echoContent red "\n请妥善保管配置码，切勿泄露！"
+    echoContent yellow "\n请妥善保管配置码，切勿泄露！"
 }
 
 # 配置入口节点 - 多跳模式
@@ -11161,7 +11161,7 @@ updateChainKey() {
         fi
         chainCode="chain://ss2022@${hostInCode}:${port}?key=$(echo -n "${newKey}" | base64 | tr -d '\n')&method=${method}"
         echoContent skyBlue "${chainCode}"
-        echoContent red "\n请更新入口节点配置！"
+        echoContent yellow "\n请更新入口节点配置！"
 
     elif [[ -f "${CHAIN_ENTRY_INFO}" ]]; then
         echoContent red " ---> 入口节点请从出口节点获取新配置码后重新配置"
@@ -11239,7 +11239,7 @@ updateChainPort() {
     else
         showRelayChainCode
     fi
-    echoContent red "\n请更新上游节点配置！"
+    echoContent yellow "\n请更新上游节点配置！"
 }
 
 # 显示详细配置

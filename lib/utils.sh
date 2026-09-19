@@ -11,9 +11,9 @@ readonly _UTILS_LOADED=1
 # 颜色输出函数
 # ============================================================================
 
-# 彩色输出
-# 用法: echoContent red "错误信息"
-#       echoContent green "成功信息"
+# 彩色输出。red 是错误通道：打印后返回 1，让「打了错误」等于「失败」，调用方可以
+# `echoContent red …` 收尾或 `fn || …` 直接把失败传上去；其余颜色返回 0。
+# 用法: echoContent red "错误信息" / echoContent green "成功信息"
 echoContent() {
     local color="$1"
     local content="$2"
@@ -21,6 +21,7 @@ echoContent() {
     case "${color}" in
         red)
             echo -e "\033[31m${content}\033[0m"
+            return 1
             ;;
         green)
             echo -e "\033[32m${content}\033[0m"
