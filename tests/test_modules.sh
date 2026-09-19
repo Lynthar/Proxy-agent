@@ -157,6 +157,13 @@ plan_output=$(stripAnsi "$(planAction 'install reality')")
 assert_equals "[plan] install reality" "${plan_output}" "planAction() 输出包含 [plan] 前缀和原 message"
 unset DRY_RUN
 
+# 测试 echoContent：红色是错误通道，返回 1，让「打了错误」等于「失败」；其余颜色返回 0
+assert_equals 1 "$(echoContent red 'boom' >/dev/null; echo $?)" "echoContent red 返回 1"
+assert_equals "boom" "$(stripAnsi "$(echoContent red 'boom')")" "echoContent red 仍把文本打到 stdout"
+for _color in green yellow blue purple skyBlue white plain; do
+    assert_equals 0 "$(echoContent "${_color}" 'ok' >/dev/null; echo $?)" "echoContent ${_color} 返回 0"
+done
+
 echo ""
 
 # ============================================================================
