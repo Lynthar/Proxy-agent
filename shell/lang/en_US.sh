@@ -492,4 +492,5 @@ MSG_ACCOUNT_TX_VALIDATE_FAILED="Core config validation failed; the whole account
 MSG_GEO_NO_CORE="No core installed; there are no geo files to update"
 MSG_GEO_VERSION_FETCH_FAILED="Failed to fetch the latest geo data version; existing geo files untouched"
 MSG_GEO_DOWNLOAD_FAILED="Failed to download %s; existing geo files untouched"
+MSG_GEO_PUBLISH_FAILED="Failed to move the new geo files into %s; some may already be replaced, core not reloaded"
 MSG_NGINX_302_ROLLED_BACK="Nginx failed to start; the configuration from before the 302 redirect was restored"
