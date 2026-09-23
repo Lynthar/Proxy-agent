@@ -888,6 +888,8 @@ SCAN_MISMATCH=$(for _pid in $(seq 0 30); do
 done)
 assert_equals "" "${SCAN_MISMATCH}" "readInstallProtocolType：每个 registry 协议文件单独安装时，扫出且只扫出它自己的 ID"
 rm -rf "${MOCK_ROOT}/pa.tuic_inbounds"
+EMPTY_SCAN_ERR=$( (coreKind=; configPath=; singBoxConfigPath=; eval "${SCAN_FN}"; readInstallProtocolType) 2>&1 >/dev/null )
+assert_equals "" "${EMPTY_SCAN_ERR}" "readInstallProtocolType：未安装（configPath 为空）时不报错"
 
 # 含点的安装根走完整链路：探测内核 → 扫协议 → 账户事务，新用户要真的写进去
 DOTTED_ROOT="${MOCK_ROOT}/dotted.root"

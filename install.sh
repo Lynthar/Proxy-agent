@@ -1551,7 +1551,7 @@ readInstallProtocolType() {
             fi
         fi
 
-    done < <(find "${configPath}" -name "*inbounds.json" | sort | sed 's/\.json$//')
+    done < <([[ -n "${configPath}" ]] && find "${configPath}" -name "*inbounds.json" | sort | sed 's/\.json$//')
 
     if [[ "${coreKind}" == "1" && -n "${singBoxConfigPath}" ]]; then
         if [[ -f "${singBoxConfigPath}06_hysteria2_inbounds.json" ]]; then
