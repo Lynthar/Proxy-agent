@@ -1404,22 +1404,23 @@ readInstallProtocolType() {
     singBoxNaivePort=
     singBoxVMessWSPort=
 
+    # row 是去掉 .json 的完整路径；分支只看文件名——安装根允许含点和下划线
     while read -r row; do
-        if echo "${row}" | grep -q VLESS_TCP_inbounds; then
+        if echo "${row##*/}" | grep -q VLESS_TCP_inbounds; then
             currentInstallProtocolType="${currentInstallProtocolType}0,"
             frontingType=02_VLESS_TCP_inbounds
             if [[ "${coreKind}" == "2" ]]; then
                 singBoxVLESSVisionPort=$(jq .inbounds[0].listen_port "${row}.json")
             fi
         fi
-        if echo "${row}" | grep -q VLESS_WS_inbounds; then
+        if echo "${row##*/}" | grep -q VLESS_WS_inbounds; then
             currentInstallProtocolType="${currentInstallProtocolType}1,"
             if [[ "${coreKind}" == "2" ]]; then
                 frontingType=03_VLESS_WS_inbounds
                 singBoxVLESSWSPort=$(jq .inbounds[0].listen_port "${row}.json")
             fi
         fi
-        if echo "${row}" | grep -q VLESS_XHTTP_inbounds; then
+        if echo "${row##*/}" | grep -q VLESS_XHTTP_inbounds; then
             currentInstallProtocolType="${currentInstallProtocolType}12,"
             xrayVLESSRealityXHTTPort=$(jq -r .inbounds[0].port "${row}.json")
 
@@ -1437,34 +1438,34 @@ readInstallProtocolType() {
 
         fi
 
-        if echo "${row}" | grep -q trojan_gRPC_inbounds; then
+        if echo "${row##*/}" | grep -q trojan_gRPC_inbounds; then
             currentInstallProtocolType="${currentInstallProtocolType}2,"
         fi
-        if echo "${row}" | grep -q VMess_WS_inbounds; then
+        if echo "${row##*/}" | grep -q VMess_WS_inbounds; then
             currentInstallProtocolType="${currentInstallProtocolType}3,"
             if [[ "${coreKind}" == "2" ]]; then
                 frontingType=05_VMess_WS_inbounds
                 singBoxVMessWSPort=$(jq .inbounds[0].listen_port "${row}.json")
             fi
         fi
-        if echo "${row}" | grep -q trojan_TCP_inbounds; then
+        if echo "${row##*/}" | grep -q trojan_TCP_inbounds; then
             currentInstallProtocolType="${currentInstallProtocolType}4,"
             if [[ "${coreKind}" == "2" ]]; then
                 frontingType=04_trojan_TCP_inbounds
                 singBoxTrojanPort=$(jq .inbounds[0].listen_port "${row}.json")
             fi
         fi
-        if echo "${row}" | grep -q VLESS_gRPC_inbounds; then
+        if echo "${row##*/}" | grep -q VLESS_gRPC_inbounds; then
             currentInstallProtocolType="${currentInstallProtocolType}5,"
         fi
-        if echo "${row}" | grep -q hysteria2_inbounds; then
+        if echo "${row##*/}" | grep -q hysteria2_inbounds; then
             currentInstallProtocolType="${currentInstallProtocolType}6,"
             if [[ "${coreKind}" == "2" ]]; then
                 frontingType=06_hysteria2_inbounds
                 singBoxHysteria2Port=$(jq .inbounds[0].listen_port "${row}.json")
             fi
         fi
-        if echo "${row}" | grep -q VLESS_vision_reality_inbounds; then
+        if echo "${row##*/}" | grep -q VLESS_vision_reality_inbounds; then
             currentInstallProtocolType="${currentInstallProtocolType}7,"
             if [[ "${coreKind}" == "1" ]]; then
                 xrayVLESSRealityServerName=$(jq -r .inbounds[1].streamSettings.realitySettings.serverNames[0] "${row}.json")
@@ -1500,7 +1501,7 @@ readInstallProtocolType() {
                 fi
             fi
         fi
-        if echo "${row}" | grep -q VLESS_vision_gRPC_inbounds; then
+        if echo "${row##*/}" | grep -q VLESS_vision_gRPC_inbounds; then
             currentInstallProtocolType="${currentInstallProtocolType}8,"
             if [[ "${coreKind}" == "2" ]]; then
                 frontingTypeReality=08_VLESS_vision_gRPC_inbounds
@@ -1510,28 +1511,28 @@ readInstallProtocolType() {
                 fi
             fi
         fi
-        if echo "${row}" | grep -q tuic_inbounds; then
+        if echo "${row##*/}" | grep -q tuic_inbounds; then
             currentInstallProtocolType="${currentInstallProtocolType}9,"
             if [[ "${coreKind}" == "2" ]]; then
                 frontingType=09_tuic_inbounds
                 singBoxTuicPort=$(jq .inbounds[0].listen_port "${row}.json")
             fi
         fi
-        if echo "${row}" | grep -q naive_inbounds; then
+        if echo "${row##*/}" | grep -q naive_inbounds; then
             currentInstallProtocolType="${currentInstallProtocolType}10,"
             if [[ "${coreKind}" == "2" ]]; then
                 frontingType=10_naive_inbounds
                 singBoxNaivePort=$(jq .inbounds[0].listen_port "${row}.json")
             fi
         fi
-        if echo "${row}" | grep -q anytls_inbounds; then
+        if echo "${row##*/}" | grep -q anytls_inbounds; then
             currentInstallProtocolType="${currentInstallProtocolType}13,"
             if [[ "${coreKind}" == "2" ]]; then
                 frontingType=13_anytls_inbounds
                 singBoxAnyTLSPort=$(jq .inbounds[0].listen_port "${row}.json")
             fi
         fi
-        if echo "${row}" | grep -q ss2022_inbounds; then
+        if echo "${row##*/}" | grep -q ss2022_inbounds; then
             currentInstallProtocolType="${currentInstallProtocolType}14,"
             if [[ "${coreKind}" == "2" ]]; then
                 # ss2022 的 users[].password 是派生 uPSK、逆推不出 UUID——14_ 排序恒最后，
@@ -1542,7 +1543,7 @@ readInstallProtocolType() {
                 ss2022Port=$(jq .inbounds[0].listen_port "${row}.json")
             fi
         fi
-        if echo "${row}" | grep -q VMess_HTTPUpgrade_inbounds; then
+        if echo "${row##*/}" | grep -q VMess_HTTPUpgrade_inbounds; then
             currentInstallProtocolType="${currentInstallProtocolType}11,"
             if [[ "${coreKind}" == "2" ]]; then
                 frontingType=11_VMess_HTTPUpgrade_inbounds
@@ -1550,7 +1551,7 @@ readInstallProtocolType() {
             fi
         fi
 
-    done < <(find ${configPath} -name "*inbounds.json" | sort | awk -F "[.]" '{print $1}')
+    done < <(find "${configPath}" -name "*inbounds.json" | sort | sed 's/\.json$//')
 
     if [[ "${coreKind}" == "1" && -n "${singBoxConfigPath}" ]]; then
         if [[ -f "${singBoxConfigPath}06_hysteria2_inbounds.json" ]]; then
@@ -3726,10 +3727,14 @@ updateGeoSite() {
             return 1
         fi
     done
-    mv -f "${stagingDir}/geosite.dat" "${stagingDir}/geoip.dat" "${geoDir}"
+    if ! mv -f "${stagingDir}/geosite.dat" "${stagingDir}/geoip.dat" "${geoDir}"; then
+        rm -rf "${stagingDir}"
+        echoContent red " ---> $(t GEO_PUBLISH_FAILED "${geoDir}")"
+        return 1
+    fi
     rm -rf "${stagingDir}"
 
-    reloadCore
+    reloadCore || return 1
     echoContent green " ---> 更新完毕"
 }
 

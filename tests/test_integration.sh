@@ -741,18 +741,32 @@ echo ""
 
 echo -e "${BLUE}[initSingBoxConfig] 模板 tag / 证书引用与 registry 交叉钉${NC}"
 
-# 只抽 initSingBoxConfig 内 cat <<EOF >…/NN_xxx_inbounds.json 到 EOF 的块，一块一行：文件名|tag|有无证书
+# 抽 initSingBoxConfig 里写 NN_xxx_inbounds.json 的 heredoc，一块一行：文件名|tag|有无证书。
+# 任何 heredoc（不论重定向写在 << 前后、定界符带不带引号）都跳过到定界符为止，函数只在 heredoc 外的顶格 } 结束
 SINGBOX_TEMPLATE_ROWS=$(awk '
-    /^initSingBoxConfig\(\)/ { inFn = 1 }
-    inFn && !inBlk && /^}/ { inFn = 0 }
-    inFn && /cat <<EOF >/ && match($0, /[0-9][0-9]_[A-Za-z0-9_]+_inbounds\.json/) {
-        name = substr($0, RSTART, RLENGTH); tag = ""; cert = "no"; inBlk = 1; next
+    /^initSingBoxConfig\(\)/ { inFn = 1; next }
+    !inFn { next }
+    delim != "" {
+        line = $0; if (dash) sub(/^\t+/, "", line)
+        if (line == delim) { if (name != "") print name "|" tag "|" cert; delim = ""; next }
+        if (/"tag"/) { t = $0; sub(/.*"tag"[ ]*:[ ]*"/, "", t); sub(/".*/, "", t); tag = t }
+        if (/certificate_path/) cert = "yes"
+        next
     }
-    inBlk && /^EOF$/ { print name "|" tag "|" cert; inBlk = 0 }
-    inBlk && /"tag"/ { t = $0; sub(/.*"tag"[ ]*:[ ]*"/, "", t); sub(/".*/, "", t); tag = t }
-    inBlk && /certificate_path/ { cert = "yes" }
+    /^}/ { exit }
+    match($0, /<<-?[ ]*["\047]?[A-Za-z_][A-Za-z0-9_]*/) && substr($0, RSTART + 2, 1) != "<" {
+        delim = substr($0, RSTART + 2, RLENGTH - 2); dash = sub(/^-/, "", delim)
+        sub(/^[ ]*/, "", delim); gsub(/["\047]/, "", delim)
+        name = ""; tag = ""; cert = "no"
+        if (match($0, /[0-9][0-9]_[A-Za-z0-9_]+_inbounds\.json/)) name = substr($0, RSTART, RLENGTH)
+    }
 ' install.sh)
 assert_not_empty "${SINGBOX_TEMPLATE_ROWS}" "initSingBoxConfig：抽到 inbound 模板块"
+
+# 应有的模板全集独立写死（加协议时同步）：抽漏一块就对不上，不能靠「至少抽到一块」放行
+SINGBOX_TEMPLATE_WANT=$(for _pid in 0 1 3 4 6 7 9 10 11 13 14; do getProtocolConfigFileName "${_pid}"; done | sort)
+assert_equals "${SINGBOX_TEMPLATE_WANT}" "$(cut -d'|' -f1 <<< "${SINGBOX_TEMPLATE_ROWS}" | sort)" \
+    "initSingBoxConfig：抽到的 inbound 模板恰好是每个 sing-box 协议各一块"
 
 while IFS='|' read -r _tplName _tplTag _tplCert; do
     [[ -z "${_tplName}" ]] && continue
@@ -816,9 +830,23 @@ assert_equals "" "${UNREGISTERED_NAMES}" "install.sh 里出现的每个 *_inboun
 HARDCODED_ROOT=$(grep -n '/etc/Proxy-agent' install.sh lib/*.sh | grep -v 'PROXY_AGENT_DIR:-/etc/Proxy-agent')
 assert_equals "" "${HARDCODED_ROOT}" "install.sh 与 lib/ 不再写死 /etc/Proxy-agent（只剩默认值惯用法）"
 
-# nginx 在不在跑只能按进程名精确判：-f 会把 "vim nginx.conf" 当成 nginx
-NGINX_PGREP_SUBSTR=$(grep -nE '^[^#]*pgrep -f "nginx"' install.sh)
-assert_equals "" "${NGINX_PGREP_SUBSTR}" "install.sh 判 nginx 进程一律 pgrep -x，没有 -f 子串匹配"
+# nginx 在不在跑只能按进程名精确判：-f 会把 "vim nginx.conf" 当成 nginx。
+# 先去掉引号与反斜杠再比，任何拼法的 pgrep … nginx 都必须正好是 pgrep -x nginx
+NGINX_PGREP_CALLS=$(awk '
+    /^[[:space:]]*#/ { next }
+    {
+        line = $0; gsub(/["\047\\]/, "", line)
+        while (match(line, /pgrep[[:space:]][^|;&)`]*/)) {
+            call = substr(line, RSTART, RLENGTH); line = substr(line, RSTART + RLENGTH)
+            if (call !~ /nginx/) continue
+            gsub(/[[:space:]]+/, " ", call); sub(/ $/, "", call)
+            print FILENAME ":" FNR ": " call
+        }
+    }
+' install.sh lib/*.sh)
+assert_not_empty "${NGINX_PGREP_CALLS}" "抽到判 nginx 进程的 pgrep 调用"
+assert_equals "" "$(grep -v ': pgrep -x nginx$' <<< "${NGINX_PGREP_CALLS}")" \
+    "install.sh 与 lib/ 判 nginx 进程一律 pgrep -x，没有 -f 子串匹配"
 
 OVERRIDE_LAYOUT=$(env PROXY_AGENT_DIR=/tmp/pa-override bash -c \
     'source lib/constants.sh; echo "${XRAY_BIN} ${SINGBOX_FRAGMENT_DIR} ${TLS_DIR} ${CHAIN_MULTI_INFO}"')
@@ -838,24 +866,44 @@ for _root in / /opt /etc/.. "/a b/c" relative/x '/opt/pa*' /etc/Proxy-agent/..; 
     assert_equals "reject" "$(root_verdict "${_root}")" "安装根 ${_root} 被拒绝（unInstall 会 rm -rf 它）"
 done
 
-# readInstallProtocolType 自带一份「文件名 stem → ID」表（grep -q 分支），registry 的 parseProtocolIdFromFileName 是另一份：逐名对拍
+# readInstallProtocolType 自带一份「文件名 → ID」表，registry 是另一份：跑原文逐个对拍。
+# 安装根名含点、也含协议 stem（根校验都收），扫描只能认文件名
 SCAN_FN=$(sed -n '/^readInstallProtocolType() {/,/^}/p' install.sh)
 assert_not_empty "${SCAN_FN}" "readInstallProtocolType：抽到函数原文"
-SCAN_STEM_LINES=$(grep -cE 'grep -q [A-Za-z0-9_]+_inbounds' <<< "${SCAN_FN}")
-SCAN_PAIRS=$(awk '
-    match($0, /grep -q [A-Za-z0-9_]+_inbounds/) { stem = substr($0, RSTART + 8, RLENGTH - 8); next }
-    stem != "" && match($0, /currentInstallProtocolType="[$][{]currentInstallProtocolType[}][0-9]+,"/) {
-        id = $0; sub(/.*currentInstallProtocolType[}]/, "", id); sub(/,".*/, "", id)
-        print stem "|" id; stem = ""
-    }
-' <<< "${SCAN_FN}")
-assert_equals "${SCAN_STEM_LINES}" "$(grep -c . <<< "${SCAN_PAIRS}")" "readInstallProtocolType：每个 grep -q <stem> 分支都配到一行 ID 追加"
-SCAN_MISMATCH=$(while IFS='|' read -r _stem _id; do
-    [[ -z "${_stem}" ]] && continue
-    _reg=$(parseProtocolIdFromFileName "${_stem}.json") || _reg="unknown"
-    [[ "${_reg}" == "${_id}" ]] || echo "${_stem}: install.sh=${_id} registry=${_reg}"
-done <<< "${SCAN_PAIRS}")
-assert_equals "" "${SCAN_MISMATCH}" "readInstallProtocolType 的 stem → ID 与 parseProtocolIdFromFileName 逐名一致"
+SCAN_DIR="${MOCK_ROOT}/pa.tuic_inbounds/xray/conf"
+scan_protocols() (
+    coreKind=1; configPath="${SCAN_DIR}/"; singBoxConfigPath=
+    eval "${SCAN_FN}"
+    readInstallProtocolType 2>/dev/null
+    printf '%s' "${currentInstallProtocolType}"
+)
+SCAN_MISMATCH=$(for _pid in $(seq 0 30); do
+    _file=$(getProtocolConfigFileName "${_pid}") || continue
+    _want=",${_pid},"
+    [[ "${_pid}" == "20" ]] && _want=","   # 20（socks5）全仓没有生产者，扫描也不认
+    rm -rf "${SCAN_DIR}" && mkdir -p "${SCAN_DIR}"
+    printf '{"inbounds":[]}\n' >"${SCAN_DIR}/${_file}"
+    _got=$(scan_protocols)
+    [[ "${_got}" == "${_want}" ]] || echo "${_file}: 扫出 ${_got}，应为 ${_want}"
+done)
+assert_equals "" "${SCAN_MISMATCH}" "readInstallProtocolType：每个 registry 协议文件单独安装时，扫出且只扫出它自己的 ID"
+rm -rf "${MOCK_ROOT}/pa.tuic_inbounds"
+
+# 含点的安装根走完整链路：探测内核 → 扫协议 → 账户事务，新用户要真的写进去
+DOTTED_ROOT="${MOCK_ROOT}/dotted.root"
+mkdir -p "${DOTTED_ROOT}/xray/conf" && : >"${DOTTED_ROOT}/xray/xray"
+printf '%s\n' '{"inbounds":[{"port":443,"settings":{"clients":[{"id":"a1","email":"alice"}]}}]}' \
+    >"${DOTTED_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
+DOTTED_FNS=$(sed -n '/^readInstallType() {/,/^}/p;/^readInstallProtocolType() {/,/^}/p;/^initXrayClients() {/,/^}/p;/^applyAccountChangeAllProtocols() {/,/^}/p' install.sh)
+env PROXY_AGENT_DIR="${DOTTED_ROOT}" DOTTED_FNS="${DOTTED_FNS}" bash -c '
+    source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh
+    eval "${DOTTED_FNS}"
+    readInstallType; readInstallProtocolType
+    currentClients="[{\"uuid\":\"a1\",\"name\":\"alice\"}]"
+    applyAccountChangeAllProtocols add b2 bob' >/dev/null 2>&1
+assert_equals '["a1","b2"]' "$(jq -c '[.inbounds[0].settings.clients[].id]' "${DOTTED_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json")" \
+    "安装根含点：添加用户真的写进已装协议"
+rm -rf "${DOTTED_ROOT}"
 
 # registry 自己的两张表（ID → 文件名、文件名 → ID）必须互为逆映射：错一格，账户操作就静默写错文件
 REGISTRY_ROUNDTRIP=$(for _pid in $(sed -n '/^getProtocolConfigFileName() {/,/^}/p' lib/protocol-registry.sh |
@@ -882,22 +930,25 @@ render_clients() (
     if [[ "$1" == "1" ]]; then initXrayClients "$2"; else initSingBoxClients "$2"; fi
 )
 
-REGISTRY_IDS=$(for _n in $(grep -oE '[0-9]{2}_[A-Za-z0-9_]+_inbounds\.json' lib/protocol-registry.sh | sort -u); do
-    parseProtocolIdFromFileName "${_n}"; done | sort -nu)
+# 每个内核上该产出用户的协议独立写死（加协议时同步）：删掉一个活分支，产出集合就对不上
+CLIENTS_LIVE_1="0 1 3 4 6 7 9 12"
+CLIENTS_LIVE_2="0 1 3 4 6 7 9 10 11 13 14 20"
+REGISTRY_IDS=$(for _pid in $(seq 0 30); do getProtocolConfigFileName "${_pid}" >/dev/null && echo "${_pid}"; done)
 for _core in 1 2; do
+    _produced=""
     for _pid in ${REGISTRY_IDS}; do
-        _idField=$(getProtocolIdField "${_core}" "${_pid}") || continue
-        _nameField=$(getProtocolNameField "${_core}" "${_pid}")
         _keys=$(render_clients "${_core}" "${_pid}" 2>/dev/null | jq -r '.[0] // empty | keys[]' 2>/dev/null | tr '\n' ' ')
-        if [[ -z "${_keys}" ]]; then
-            echo "  - core ${_core} id ${_pid}: 生成器没有这个分支，跳过"
-            continue
-        fi
+        [[ -z "${_keys}" ]] && continue
+        _produced="${_produced} ${_pid}"
+        _idField=$(getProtocolIdField "${_core}" "${_pid}") || _idField="(registry 无身份列)"
+        _nameField=$(getProtocolNameField "${_core}" "${_pid}")
         assert_contains " ${_keys}" " ${_idField} " "core ${_core} id ${_pid}: 写侧带 registry 身份字段 ${_idField}"
         if [[ -n "${_nameField}" ]]; then
             assert_contains " ${_keys}" " ${_nameField} " "core ${_core} id ${_pid}: 写侧带 registry 显示名字段 ${_nameField}"
         fi
     done
+    _live="CLIENTS_LIVE_${_core}"
+    assert_equals "${!_live}" "${_produced# }" "core ${_core}：生成器产出用户的协议恰好是活组合"
 done
 
 # ============================================================================
@@ -916,6 +967,7 @@ run_update_geo() (
     configPath="${GEO_DIR}conf/"
     release="debian"; wgetShowProgressStatus=""
     GEO_WGET_MODE="$1"; GEO_API_JSON="$2"
+    [[ "${3:-}" == "mv-fail" ]] && mv() { return 1; }
     curl() { printf '%s' "${GEO_API_JSON}"; }
     wget() {
         local out=""
@@ -923,7 +975,7 @@ run_update_geo() (
         [[ "${GEO_WGET_MODE}" == "ok" && -n "${out}" ]] || return 8
         printf 'new' >"${out}"
     }
-    reloadCore() { :; }
+    reloadCore() { : >"${GEO_DIR}reloaded"; }
     echoContent() { printf '%s\n' "$2"; }
     t() { printf '%s' "$1"; }
     eval "${GEO_FN}"
@@ -942,8 +994,21 @@ run_update_geo ok ''
 assert_equals "1" "$?" "updateGeoSite：取不到版本号返回 1"
 assert_equals "old old" "$(geo_files)" "updateGeoSite：取不到版本号时旧文件原样保留"
 
+# 发布失败：mv 整体失败（一个都没换），以及 geoip.dat 被同名目录占着（只换掉 geosite）
+rm -f "${GEO_DIR}reloaded"
+run_update_geo ok '[{"tag_name":"v2099"}]' mv-fail
+assert_equals "1" "$?" "updateGeoSite：新文件挪不进去时返回 1"
+assert_equals "old old" "$(geo_files)" "updateGeoSite：挪不进去时旧 geo 文件原样保留"
+assert_equals "0" "$(geo_staging_left)" "updateGeoSite：挪不进去也不留暂存目录"
+rm -f "${GEO_DIR}geoip.dat" && mkdir "${GEO_DIR}geoip.dat"
+run_update_geo ok '[{"tag_name":"v2099"}]'
+assert_equals "1" "$?" "updateGeoSite：只发布了一部分也返回 1"
+assert_equals "no" "$([[ -e "${GEO_DIR}reloaded" ]] && echo yes || echo no)" "updateGeoSite：发布失败不重载内核"
+rmdir "${GEO_DIR}geoip.dat"
+
 run_update_geo ok '[{"tag_name":"v2099"}]'
 assert_equals "0" "$?" "updateGeoSite：两个文件都下到后返回 0"
+assert_equals "yes" "$([[ -e "${GEO_DIR}reloaded" ]] && echo yes || echo no)" "updateGeoSite：发布成功后重载内核"
 assert_equals "new new" "$(geo_files)" "updateGeoSite：成功后两个 geo 文件都换成新版"
 assert_equals "0" "$(geo_staging_left)" "updateGeoSite：成功后不留暂存目录"
 
