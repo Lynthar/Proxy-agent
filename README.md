@@ -112,6 +112,12 @@ sing-box 的 shadowsocks 出站，还开了 sing-box 特有的 h2mux 多路复�
 | `PROXY_AGENT_BOOTSTRAP_REF` / `_MODE` | 自举拉取的 ref 与模式 |
 | `PROXY_AGENT_SELINUX_NONFATAL` | SELinux enforcing 下不退出 |
 
+安装器也可在独立 Bash 子进程中被 `source`，供测试调用原配置生成函数。
+须使用完整的本地 `install.sh`、`lib/` 和语言文件，并在加载前设置 `PROXY_AGENT_DIR`。
+加载只提供函数和布局常量，不探测系统、不读取已装节点、不检查更新或进入菜单；
+缺失或损坏的库直接返回失败，不自动下载修复。调用方需显式 `initVar` 并设置生成参数。
+生成函数本身仍有端口、防火墙和目标探测等副作用，应在隔离环境中调用。
+
 ## 能力边界
 
 - **它不是面板。** 纯 TTY 菜单，没有 Web UI、没有 API，也不统计流量、到期或多用户配额。

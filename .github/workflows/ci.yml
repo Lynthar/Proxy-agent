@@ -51,6 +51,9 @@ jobs:
       - name: integration tests (mocked VPS tree)
         run: bash tests/test_integration.sh
 
+      - name: library loading without host actions
+        run: bash tests/test_library.sh
+
   lang-parity:
     name: bilingual MSG_ key parity
     runs-on: ubuntu-latest
