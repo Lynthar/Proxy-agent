@@ -106,6 +106,7 @@ checkSystem() {
 
 # ============================================================================
 # checkCPUVendor → cpuVendor 与 xray/singBox/warpReg 三个 CoreCPUVendor 后缀
+# sing-box 的后缀随 release 变，须在 checkSystem 之后调用
 # ============================================================================
 
 checkCPUVendor() {
@@ -135,6 +136,10 @@ checkCPUVendor() {
                 exit 1
                 ;;
             esac
+            # sing-box 无后缀包的二进制动态链接 glibc，Alpine（musl）上 exec 即 not found，要用静态的 -musl 包
+            if [[ "${release:-}" == "alpine" ]]; then
+                singBoxCoreCPUVendor+="-musl"
+            fi
         fi
     else
         echoContent yellow "  $(t SYS_CPU_DEFAULT_AMD64)"

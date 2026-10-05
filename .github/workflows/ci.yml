@@ -133,17 +133,18 @@ jobs:
           done
 
   install-e2e:
-    name: real install in a ${{ matrix.os }} container
+    name: real ${{ matrix.core }} install in a ${{ matrix.os }} container
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         os: [alpine, debian]
+        core: [xray, singbox]
     steps:
       - uses: actions/checkout@v4
 
       - name: run the Reality quick install end to end
-        # Root in a throwaway container: real downloads and service manager, then
-        # xray run -test, a real Reality handshake through the emitted share link,
+        # Root in a throwaway container: real downloads and service manager, then the
+        # core's own config check, a real Reality handshake through the emitted share link,
         # pasly re-entry, doctor and uninstall. tests/e2e/run.sh is the same command locally.
-        run: bash tests/e2e/run.sh ${{ matrix.os }}
+        run: bash tests/e2e/run.sh ${{ matrix.os }} ${{ matrix.core }}

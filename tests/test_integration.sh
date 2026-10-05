@@ -891,6 +891,23 @@ rm -rf "${MOCK_ROOT}/pa.tuic_inbounds"
 EMPTY_SCAN_ERR=$( (coreKind=; configPath=; singBoxConfigPath=; eval "${SCAN_FN}"; readInstallProtocolType) 2>&1 >/dev/null )
 assert_equals "" "${EMPTY_SCAN_ERR}" "readInstallProtocolType：未安装（configPath 为空）时不报错"
 
+# 分享链接与订阅里的 sid 取自 currentRealityShortId；读漏了，服务端的 shortId 白名单不认空串、连不上
+REALITY_SCAN_DIR="${MOCK_ROOT}/reality-scan/"
+mkdir -p "${REALITY_SCAN_DIR}"
+read_reality_sid() (
+    coreKind="$1"; configPath="${REALITY_SCAN_DIR}"; singBoxConfigPath=
+    eval "${SCAN_FN}"
+    readInstallProtocolType 2>/dev/null
+    printf '%s' "${currentRealityShortId}"
+)
+printf '%s\n' '{"inbounds":[{"port":443},{"streamSettings":{"realitySettings":{"shortIds":["aaaa000011112222","bbbb"]}}}]}' \
+    >"${REALITY_SCAN_DIR}07_VLESS_vision_reality_inbounds.json"
+assert_equals "aaaa000011112222" "$(read_reality_sid 1)" "readInstallProtocolType：Xray Reality 读出第一个 shortId"
+printf '%s\n' '{"inbounds":[{"listen_port":443,"tls":{"server_name":"a.example","reality":{"handshake":{"server_port":443},"short_id":["cccc333344445555","dddd"]}}}]}' \
+    >"${REALITY_SCAN_DIR}07_VLESS_vision_reality_inbounds.json"
+assert_equals "cccc333344445555" "$(read_reality_sid 2)" "readInstallProtocolType：sing-box Reality 读出第一个 short_id"
+rm -rf "${REALITY_SCAN_DIR}"
+
 # 含点的安装根走完整链路：探测内核 → 扫协议 → 账户事务，新用户要真的写进去
 DOTTED_ROOT="${MOCK_ROOT}/dotted.root"
 mkdir -p "${DOTTED_ROOT}/xray/conf" && : >"${DOTTED_ROOT}/xray/xray"
@@ -905,6 +922,17 @@ env PROXY_AGENT_DIR="${DOTTED_ROOT}" DOTTED_FNS="${DOTTED_FNS}" bash -c '
     applyAccountChangeAllProtocols add b2 bob' >/dev/null 2>&1
 assert_equals '["a1","b2"]' "$(jq -c '[.inbounds[0].settings.clients[].id]' "${DOTTED_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json")" \
     "安装根含点：添加用户真的写进已装协议"
+
+# 生成器回归成空数组时，事务必须拒绝提交，而不是把该协议的用户清空再报成功
+env PROXY_AGENT_DIR="${DOTTED_ROOT}" DOTTED_FNS="${DOTTED_FNS}" bash -c '
+    source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh
+    eval "${DOTTED_FNS}"
+    initXrayClients() { echo "[]"; }
+    readInstallType; readInstallProtocolType
+    applyAccountChangeAllProtocols add c3 carol' >/dev/null 2>&1
+assert_equals "1" "$?" "账户事务：生成器给出空用户列表时返回 1"
+assert_equals '["a1","b2"]' "$(jq -c '[.inbounds[0].settings.clients[].id]' "${DOTTED_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json")" \
+    "账户事务：生成器给出空用户列表时原有用户原样保留"
 rm -rf "${DOTTED_ROOT}"
 
 # registry 自己的两张表（ID → 文件名、文件名 → ID）必须互为逆映射：错一格，账户操作就静默写错文件
@@ -1013,6 +1041,129 @@ assert_equals "0" "$?" "updateGeoSite：两个文件都下到后返回 0"
 assert_equals "yes" "$([[ -e "${GEO_DIR}reloaded" ]] && echo yes || echo no)" "updateGeoSite：发布成功后重载内核"
 assert_equals "new new" "$(geo_files)" "updateGeoSite：成功后两个 geo 文件都换成新版"
 assert_equals "0" "$(geo_staging_left)" "updateGeoSite：成功后不留暂存目录"
+
+echo ""
+
+# ============================================================================
+# 测试：releaseAssetSHA256——sing-box 不发校验和文件，安装只靠 releases 响应里资产的 digest
+# ============================================================================
+
+echo -e "${YELLOW}=== 测试 readValidPort ===${NC}"
+
+PORT_FN=$(sed -n '/^readValidPort() {/,/^}/p' install.sh)
+assert_not_empty "${PORT_FN}" "readValidPort：抽到函数原文"
+# 子 shell 里跑：$1 是喂给 read 的输入，其余原样传给 readValidPort；成功打印端口，失败打印 rc=1
+run_read_port() (
+    echoContent() { :; }
+    t() { :; }
+    randomNum() { echo "rand:$1-$2"; }
+    eval "${PORT_FN}"
+    local input="$1" got=
+    shift
+    if readValidPort "" got "$@" <<<"${input}"; then echo "${got}"; else echo "rc=1"; fi
+)
+assert_equals "443" "$(run_read_port 443 RANDOM 10000 60000)" "readValidPort：随机区间外的合法端口照收（sing-box Reality 要能选 443）"
+assert_equals "rand:10000-60000" "$(run_read_port '' RANDOM 10000 60000)" "readValidPort：回车在给定区间里随机"
+assert_equals "443" "$(run_read_port '' 443)" "readValidPort：回车取默认值"
+assert_equals "65535" "$(run_read_port 65535 RANDOM 10000 30000)" "readValidPort：65535 合法"
+assert_equals "rc=1" "$(run_read_port 65536 RANDOM 10000 30000)" "readValidPort：超过 65535 拒绝"
+assert_equals "rc=1" "$(run_read_port 18446744073709551616 RANDOM 10000 30000)" "readValidPort：超长数字不靠算术溢出混过去"
+assert_equals "rc=1" "$(run_read_port 0443 443)" "readValidPort：前导 0 拒绝"
+assert_equals "rc=1" "$(run_read_port 44a 443)" "readValidPort：非数字拒绝"
+assert_equals "rc=1" "$(run_read_port '')" "readValidPort：空输入且无默认值拒绝"
+
+echo ""
+
+echo -e "${YELLOW}=== 测试 customPortFunction ===${NC}"
+
+CUSTOM_PORT_FN=$(sed -n '/^customPortFunction() {/,/^}/p;/^isYesInput() {/,/^}/p' install.sh lib/utils.sh)
+assert_not_empty "${CUSTOM_PORT_FN}" "customPortFunction：抽到函数原文"
+# 子 shell 里跑：$1 currentPort，$2 lastInstallationConfig，$3 喂给 read 的输入；打印最终的 port
+run_custom_port() (
+    echoContent() { :; }
+    allowPort() { :; }
+    checkDNSIP() { :; }
+    removeNginxDefaultConf() { :; }
+    checkPortOpen() { :; }
+    handleXray() { :; }
+    eval "${PORT_FN}"
+    eval "${CUSTOM_PORT_FN}"
+    currentPort="$1" lastInstallationConfig="$2" customPort= btDomain= port=
+    customPortFunction <<<"$3" >/dev/null
+    echo "${port}"
+)
+assert_equals "8443" "$(run_custom_port 8443 '' y)" "customPortFunction：答 y 沿用上次端口"
+assert_equals "8443" "$(run_custom_port 8443 '' Y)" "customPortFunction：答 Y 也算沿用"
+assert_equals "443" "$(run_custom_port 8443 '' $'\n')" "customPortFunction：直接回车不沿用，接着问端口（回车取 443），port 不会留空"
+assert_equals "2053" "$(run_custom_port 8443 '' $'n\n2053')" "customPortFunction：答 n 后输入新端口"
+assert_equals "8443" "$(run_custom_port 8443 true '')" "customPortFunction：沿用上次配置时不问、直接用上次端口"
+assert_equals "443" "$(run_custom_port '' '' $'\n')" "customPortFunction：首装直接问端口"
+
+echo ""
+
+echo -e "${YELLOW}=== 测试 addSingBoxDNSConfig predefined ===${NC}"
+
+# 函数体里的 heredoc 有顶格 }，按 sed 范围抽会提前截断；抽到下一个函数定义为止
+DNS_FN=$(awk 'f && /^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{/ {exit} /^addSingBoxDNSConfig\(\) \{/ {f=1} f' install.sh)
+assert_not_empty "${DNS_FN}" "addSingBoxDNSConfig：抽到函数原文"
+DNS_DIR="${MOCK_ROOT}/sbdns/"
+mkdir -p "${DNS_DIR}"
+# 子 shell 里跑：桩掉规则生成，只看 predefined 怎么拼
+run_dns_predefined() (
+    initSingBoxRules() { echo '{"domainRules":[],"ruleSet":[]}'; }
+    singBoxConfigPath="${DNS_DIR}"
+    eval "${DNS_FN}"
+    addSingBoxDNSConfig "$1" "$2" predefined >/dev/null 2>&1
+    jq -c '.dns.servers[] | select(.tag == "hosts") | .predefined' "${DNS_DIR}dns.json" 2>/dev/null || echo invalid
+)
+assert_equals '{"a.example":"1.2.3.4","b.example":"1.2.3.4"}' "$(run_dns_predefined 1.2.3.4 'a.example,b.example')" "addSingBoxDNSConfig：predefined 按域名映射到 IP"
+assert_equals '{"x\"y":"1.2.3.4"}' "$(run_dns_predefined 1.2.3.4 'x"y')" "addSingBoxDNSConfig：域名只当数据进 jq，带引号也不会改写过滤器"
+rm -rf "${DNS_DIR}"
+
+echo ""
+
+echo -e "${YELLOW}=== 测试 ensureAlpineProcps ===${NC}"
+
+PROCPS_FN=$(sed -n '/^ensureAlpineProcps() {/,/^}/p' install.sh)
+assert_not_empty "${PROCPS_FN}" "ensureAlpineProcps：抽到函数原文"
+# 子 shell 里跑：$1 release，$2 pgrep -V 的输出；调两次，打印实际调了几次包管理器
+run_procps() (
+    echoContent() { :; }
+    pgrep() { echo "$PGREP_OUT"; }
+    PGREP_OUT="$2"
+    release="$1"
+    installType="record_install"
+    record_install() { echo "install $*" >>"${MOCK_ROOT}/procps.calls"; }
+    rm -f "${MOCK_ROOT}/procps.calls"
+    eval "${PROCPS_FN}"
+    ensureAlpineProcps
+    ensureAlpineProcps
+    grep -c . "${MOCK_ROOT}/procps.calls" 2>/dev/null || echo 0
+)
+assert_equals "1" "$(run_procps alpine 'pgrep: unrecognized option')" "ensureAlpineProcps：Alpine 上是 BusyBox pgrep 时装 procps，同一次运行只装一次"
+assert_equals "0" "$(run_procps alpine 'pgrep from procps-ng 4.0.4')" "ensureAlpineProcps：已有 procps 时不装"
+assert_equals "0" "$(run_procps debian 'pgrep: unrecognized option')" "ensureAlpineProcps：非 Alpine 不装"
+
+echo ""
+
+echo -e "${YELLOW}=== 测试 releaseAssetSHA256 ===${NC}"
+
+ASSET_FN=$(sed -n '/^releaseAssetSHA256() {/,/^}/p' install.sh)
+assert_not_empty "${ASSET_FN}" "releaseAssetSHA256：抽到函数原文"
+eval "${ASSET_FN}"
+ASSET_JSON='[
+ {"tag_name":"v1.15.0-alpha.1","assets":[{"name":"sing-box-1.15.0-alpha.1-linux-arm64.tar.gz","digest":"sha256:aaaa"}]},
+ {"tag_name":"v1.14.2","assets":[
+   {"name":"sing-box-1.14.2-linux-arm64.tar.gz","digest":"sha256:b43a"},
+   {"name":"sing-box-1.14.2-linux-arm64-musl.tar.gz","digest":"sha256:6752"},
+   {"name":"sing-box-1.14.2-linux-amd64.tar.gz","digest":null},
+   {"name":"sing-box-1.14.2-linux-armv7.tar.gz","digest":"sha512:ffff"}]}]'
+assert_equals "6752" "$(releaseAssetSHA256 "${ASSET_JSON}" v1.14.2 sing-box-1.14.2-linux-arm64-musl.tar.gz)" "releaseAssetSHA256：按 tag 与资产名取到去掉前缀的摘要"
+assert_equals "b43a" "$(releaseAssetSHA256 "${ASSET_JSON}" v1.14.2 sing-box-1.14.2-linux-arm64.tar.gz)" "releaseAssetSHA256：-musl 与无后缀是两个资产，不串"
+assert_equals "" "$(releaseAssetSHA256 "${ASSET_JSON}" v1.14.2 sing-box-1.14.2-linux-amd64.tar.gz)" "releaseAssetSHA256：digest 为 null 时为空"
+assert_equals "" "$(releaseAssetSHA256 "${ASSET_JSON}" v1.14.2 sing-box-1.14.2-linux-armv7.tar.gz)" "releaseAssetSHA256：非 sha256 摘要视为没有"
+assert_equals "" "$(releaseAssetSHA256 "${ASSET_JSON}" v1.14.1 sing-box-1.14.2-linux-arm64.tar.gz)" "releaseAssetSHA256：tag 不符时为空"
+assert_equals "" "$(releaseAssetSHA256 '' v1.14.2 sing-box-1.14.2-linux-arm64.tar.gz)" "releaseAssetSHA256：响应为空时为空"
 
 echo ""
 

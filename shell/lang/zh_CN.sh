@@ -494,3 +494,7 @@ MSG_GEO_VERSION_FETCH_FAILED="获取 geo 数据最新版本失败，现有 geo �
 MSG_GEO_DOWNLOAD_FAILED="%s 下载失败，现有 geo 文件未改动"
 MSG_GEO_PUBLISH_FAILED="新 geo 文件写入 %s 失败，可能只替换了一部分，内核未重载"
 MSG_NGINX_302_ROLLED_BACK="Nginx 启动失败，已恢复添加 302 重定向之前的配置"
+MSG_SINGBOX_DIGEST_MISSING="GitHub 没有给出 %s 的 SHA256 摘要，未校验的二进制不予安装"
+MSG_SINGBOX_UNPACK_FAILED="%s 解压失败"
+MSG_SINGBOX_NOT_RUNNABLE="%s 里的 sing-box 在本机无法运行（架构或 libc 不匹配），已删除"
+MSG_ACCOUNT_TX_EMPTY_CLIENTS="生成的用户列表为空，整次账户变更已回滚"
