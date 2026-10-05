@@ -54,13 +54,18 @@ fi
 # 先全下到 mktemp、校验通过才原子 mv，失败时目标位置零污染。
 # 旁路：PROXY_AGENT_NO_BOOTSTRAP / PROXY_AGENT_BOOTSTRAP_REF / PROXY_AGENT_BOOTSTRAP_MODE。
 _lib_health_ok=1
-if [[ -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
+if [[ -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" || "${BASH_SOURCE[0]}" != "$0" ]]; then
     for _f in i18n constants utils json-utils system-detect protocol-registry; do
         if [[ ! -f "${_LIB_DIR}/${_f}.sh" ]] || ! bash -n "${_LIB_DIR}/${_f}.sh" 2>/dev/null; then
             _lib_health_ok=
             break
         fi
     done
+fi
+# source 只加载完整的本地库；自动修复会下载或删除文件，必须留给直接执行。
+if [[ "${BASH_SOURCE[0]}" != "$0" && -z "${_lib_health_ok}" ]]; then
+    printf '[Proxy-agent] source requires a complete local lib/ directory.\n' >&2
+    return 1
 fi
 if [[ -z "${_lib_health_ok}" && -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
     # 删除可能残留的损坏文件，确保 bootstrap 后是干净状态（避免半新半旧混合）
@@ -385,7 +390,6 @@ _load_version() {
     fi
     export SCRIPT_VERSION
 }
-_load_version
 
 # ============================================================================
 # 从 GitHub API 取最新 Release 版本号
@@ -1959,19 +1963,6 @@ cleanUp() {
         rm -rf ${SINGBOX_FRAGMENT_DIR}/* >/dev/null 2>&1
     fi
 }
-initVar "${1:-}"
-# doctor 是只读诊断入口：SELinux Enforcing 正是它要报告的问题，不能在初始化期就退出
-if [[ "${1:-}" == "doctor" ]]; then
-    PROXY_AGENT_SELINUX_NONFATAL=1
-fi
-checkSystem
-checkCPUVendor
-
-readInstallType
-readInstallProtocolType
-readConfigHostPathUUID
-readCustomPort
-readSingBoxConfig
 # -------------------------------------------------------------
 
 # 初始化安装目录
@@ -17235,6 +17226,24 @@ menu() {
         ;;
     esac
 }
+
+# source 提供函数和布局常量；调用方在独立 Bash 子进程里显式 initVar 并设置生成参数。
+[[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
+
+_load_version
+initVar "${1:-}"
+# doctor 是只读诊断入口：SELinux Enforcing 正是它要报告的问题，不能在初始化期就退出
+if [[ "${1:-}" == "doctor" ]]; then
+    PROXY_AGENT_SELINUX_NONFATAL=1
+fi
+checkSystem
+checkCPUVendor
+
+readInstallType
+readInstallProtocolType
+readConfigHostPathUUID
+readCustomPort
+readSingBoxConfig
 
 # ============================================================================
 # 顶层入口分发（doctor / --dry-run / 菜单）：必须在所有函数定义之后、menu 调用之前

@@ -122,6 +122,13 @@ Seven environment variables:
 | `PROXY_AGENT_BOOTSTRAP_REF` / `_MODE` | Which ref and mode the bootstrap pulls |
 | `PROXY_AGENT_SELINUX_NONFATAL` | Don't exit under SELinux enforcing |
 
+Tests can source the installer in a separate Bash process and call its original configuration
+generators. Use a complete local copy of `install.sh`, `lib/`, and the language files, and set
+`PROXY_AGENT_DIR` before loading. Sourcing provides functions and layout constants without
+system detection, installed-node discovery, update checks, or menu dispatch. Missing or damaged
+libraries fail without downloading replacements. Call `initVar` and set generator inputs explicitly.
+The generators still perform port, firewall, and destination checks; invoke them in isolation.
+
 ## Limitations
 
 - **It isn't a panel.** A TTY menu, no web UI, no API, and no accounting of
