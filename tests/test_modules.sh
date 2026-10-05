@@ -350,6 +350,26 @@ rm -rf "${_osrDir}"
 echo ""
 
 # ============================================================================
+# 测试 checkCPUVendor 的 sing-box 包名后缀（uname 用函数顶替，Linux 以外也能跑）
+# ============================================================================
+echo -e "${YELLOW}[system-detect.sh] checkCPUVendor 测试${NC}"
+_cpuVendorFor() {
+    (
+        _ARCH="$1"
+        uname() { if [[ "${1:-}" == "-m" ]]; then echo "${_ARCH}"; else echo Linux; fi; }
+        release="$2"
+        checkCPUVendor
+        echo "${singBoxCoreCPUVendor} ${xrayCoreCPUVendor}"
+    )
+}
+assert_equals "-linux-arm64-musl Xray-linux-arm64-v8a" "$(_cpuVendorFor aarch64 alpine)" "checkCPUVendor: Alpine arm64 取 sing-box 的 -musl 包，Xray 包名不变"
+assert_equals "-linux-amd64-musl Xray-linux-64" "$(_cpuVendorFor x86_64 alpine)" "checkCPUVendor: Alpine amd64 取 sing-box 的 -musl 包"
+assert_equals "-linux-arm64 Xray-linux-arm64-v8a" "$(_cpuVendorFor aarch64 debian)" "checkCPUVendor: glibc 系 arm64 仍取无后缀包"
+assert_equals "-linux-amd64 Xray-linux-64" "$(_cpuVendorFor x86_64 centos)" "checkCPUVendor: glibc 系 amd64 仍取无后缀包"
+
+echo ""
+
+# ============================================================================
 # 测试 isPlausiblePublicIP（getPublicIP 的输出闸门）
 # ============================================================================
 echo -e "${YELLOW}[system-detect.sh] isPlausiblePublicIP 测试${NC}"

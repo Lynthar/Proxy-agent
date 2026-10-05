@@ -80,13 +80,17 @@ V2RAY_LANG=en pasly
 
 ## 协议
 
-13 个在用协议：
+12 个可装协议：
 
 | 类别 | 协议 |
 |---|---|
-| VLESS | TCP/Vision · WS · Reality Vision · XHTTP |
+| VLESS | TCP/Vision · WS · Reality Vision · Reality XHTTP |
 | VMess | WS · HTTPUpgrade |
-| 其它 | Trojan TCP · Hysteria2 · TUIC · NaiveProxy · AnyTLS · Shadowsocks 2022 · SOCKS5 |
+| 其它 | Trojan TCP · Hysteria2 · TUIC · NaiveProxy · AnyTLS · Shadowsocks 2022 |
+
+不需要域名的只有 Reality Vision 和 Shadowsocks 2022，其余都要域名和证书（Reality XHTTP 要与
+VLESS TCP/Vision 同装，所以也要）。Reality 不能挂在 CDN 后面，走 CDN 只能用 WS / HTTPUpgrade。
+SOCKS5 只用作链式代理里第三方节点的出口，不作为入站安装。
 
 链式代理里，Xray 与 sing-box 可以混合出站，第三方节点也能接进来当出口。链式的每一跳是
 sing-box 的 shadowsocks 出站，还开了 sing-box 特有的 h2mux 多路复用；所以入站走 Xray 时，
@@ -144,7 +148,8 @@ archive 取的 zip，没有校验——它是纯静态文件、不进执行链�
 
 **SELinux enforcing 下脚本会直接退出**并指向 `docs/selinux.md`，这是有意的。
 
-目前没有私密的漏洞报告渠道，敏感问题请不要发公开 issue。
+发现安全问题请走 GitHub 的私密漏洞报告：仓库 Security 页的 Report a vulnerability，或直接打开
+<https://github.com/Lynthar/Proxy-agent/security/advisories/new>。敏感问题请不要发公开 issue。
 
 ## 许可证
 

@@ -30,11 +30,13 @@
 
 ### 支持的系统
 
-- Ubuntu 16.04+
-- Debian 9+
-- CentOS 7+
-- Alpine 3+（请先执行 `apk add bash wget`，脚本依赖 bash）
-- 其他主流 Linux 发行版
+硬性要求是 **bash ≥ 4.3**（低于它脚本直接拒绝运行），服务由 systemd 或 OpenRC 管理。在此之上，脚本按发行版家族识别：
+
+- Debian / Ubuntu 及其衍生版（Ubuntu 16.x 会被拒绝）
+- CentOS / RHEL 系，含 Rocky、Alma、Fedora（CentOS 7 的 bash 是 4.2，会被拒绝；SELinux 处于 enforcing 时脚本会退出，见 [SELinux 说明](selinux.md)）
+- Alpine（请先执行 `apk add bash wget`，脚本依赖 bash）
+
+不在这几个家族里的发行版会被拒绝。能通过检查不等于推荐使用：已过官方支持期的系统版本拿不到安全更新，软件源与内核也可能过旧，请尽量选用仍在支持期内的版本。
 
 ### 系统架构
 
@@ -772,7 +774,7 @@ pasly  # → 16 → 重启
 - 出站的 `domain_strategy` 会在每次启动合并配置时自动改写成等价的 `domain_resolver`，看到「已把旧版 outbound domain_strategy 迁移为 domain_resolver」是正常的，只打印一次
 - rule_set 的 `download_detour` 同样在每次启动合并时自动改成 1.14 的 `http_client` + 顶层 `http_clients`（1.14 弃用、1.15 起拒绝启动）；内核还在 1.14 以下时反向剥离，升级内核后自动恢复。看到「已把 rule_set 的 download_detour 迁移为 http_client」或「已剥离 rule_set 的 http_client 字段」都是正常的
 - Reality 入站现在显式写 `minClientVer: 1.8.0`（老配置在 Xray 启动前自动补上，看到「已为 Reality 入站补上 minClientVer」是正常的）：Xray-core 26.7 起不写就默认 26.3.27，会拒绝 sing-box / mihomo 这类客户端，而脚本自己发的订阅就包含它们。只用新版 Xray 客户端、想跟随 Xray 收紧策略的，可以手动改成 `26.3.27`
-- 如果 FAIL：菜单 9 重装一次受影响的协议、或菜单 22 → 4 找一个旧版本备份回滚
+- 如果 FAIL：菜单 1 重新安装受影响的协议、或菜单 22 → 4 找一个旧版本备份回滚
 
 ### 新增的可用工具
 
@@ -791,20 +793,21 @@ dry-run 模式覆盖菜单 1 / 2 / 3 / 19 / 20 这五个入口；其余菜单（
 
 ### Q: 可以同时安装多个协议吗？
 
-**A**: 可以。使用 **2. 自定义组合安装** 可以选择安装多个协议。安装后，所有协议共享同一用户列表。
+**A**: 可以。使用 **2. 任意组合安装** 可以选择安装多个协议。安装后，所有协议共享同一用户列表。
 
 ### Q: 如何更换端口？
 
-**A**: 进入 **12. 添加新端口**，可以为现有协议添加新的监听端口。
+**A**: 重新安装（菜单 1 或 2）时在端口提示处填新端口即可。只用 Xray 内核的话，也可以用 **12. 添加新端口** 额外开几个端口，原端口不变；sing-box 内核不支持这个菜单。
 
 ### Q: 域名必须要用吗？
 
 **A**: 不一定。以下协议不需要域名：
-- VLESS + Reality
-- Hysteria2（可以使用自签证书）
-- TUIC（可以使用自签证书）
+- VLESS + Reality + Vision（菜单 19 一键安装，或任意组合安装里只选 7）
+- Shadowsocks 2022（sing-box 内核）
 
-但使用 TLS 的协议（VLESS WS、VMess WS、Trojan 等）需要域名。
+其余协议都需要域名和证书，包括 Hysteria2 与 TUIC（脚本只用 ACME 签发的证书，不生成自签证书）。VLESS + Reality + XHTTP 本身不用证书，但会与 VLESS TCP/Vision 一起装，所以也需要域名。
+
+另外，Reality 不能挂在 CDN 后面；要走 CDN 只能选 WS 或 HTTPUpgrade，端口也要选 CDN 会转发的（Cloudflare 的 HTTPS 只转发 443、2053、2083、2087、2096、8443）。
 
 ### Q: 支持使用宝塔面板吗？
 

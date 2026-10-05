@@ -494,3 +494,7 @@ MSG_GEO_VERSION_FETCH_FAILED="Failed to fetch the latest geo data version; exist
 MSG_GEO_DOWNLOAD_FAILED="Failed to download %s; existing geo files untouched"
 MSG_GEO_PUBLISH_FAILED="Failed to move the new geo files into %s; some may already be replaced, core not reloaded"
 MSG_NGINX_302_ROLLED_BACK="Nginx failed to start; the configuration from before the 302 redirect was restored"
+MSG_SINGBOX_DIGEST_MISSING="GitHub reports no SHA256 digest for %s; refusing to install an unverified binary"
+MSG_SINGBOX_UNPACK_FAILED="Failed to unpack %s"
+MSG_SINGBOX_NOT_RUNNABLE="The sing-box binary from %s cannot run on this machine (architecture or libc mismatch); removed"
+MSG_ACCOUNT_TX_EMPTY_CLIENTS="The generated user list is empty; the whole account change was rolled back"

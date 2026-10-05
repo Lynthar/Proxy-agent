@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test_install_e2e.sh - 真装机端到端：以 root 在一次性 Linux 容器里跑 install.sh 的「一键 Reality」安装
-# （菜单 19 → Xray），装完用 xray run -test、真实 Reality 握手、pasly 重入与 doctor 验收，再卸载。
-# 跑法: bash tests/e2e/run.sh alpine|debian（本机与 CI 同一条命令）
+# （菜单 19 → E2E_CORE 选的内核），装完用内核自检、真实 Reality 握手、pasly 重入与 doctor 验收，再卸载。
+# 跑法: bash tests/e2e/run.sh alpine|debian [xray|singbox]（本机与 CI 同一条命令）
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -64,7 +64,23 @@ PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
 INSTALL_ROOT="${PROXY_AGENT_DIR:-/etc/Proxy-agent}"
 XRAY_BIN="${INSTALL_ROOT}/xray/xray"
 XRAY_CONF_DIR="${INSTALL_ROOT}/xray/conf"
+SINGBOX_BIN="${INSTALL_ROOT}/sing-box/sing-box"
+SINGBOX_FRAGMENT_DIR="${INSTALL_ROOT}/sing-box/conf/config"
 E2E_LOG="/tmp/proxy-agent-e2e-install.log"
+E2E_CORE="${E2E_CORE:-xray}"
+
+case "${E2E_CORE}" in
+xray)
+    CORE_BIN="${XRAY_BIN}" CORE_SERVICE=xray CORE_LABEL="Xray-core" MENU_CORE_CHOICE=1
+    ;;
+singbox)
+    CORE_BIN="${SINGBOX_BIN}" CORE_SERVICE=sing-box CORE_LABEL="sing-box" MENU_CORE_CHOICE=2
+    ;;
+*)
+    echo -e "${RED}E2E_CORE 只能是 xray 或 singbox，收到 ${E2E_CORE}${NC}"
+    exit 2
+    ;;
+esac
 
 if [[ "$(id -u)" != "0" || "$(uname -s)" != "Linux" ]]; then
     echo -e "${RED}必须在 Linux 上以 root 运行${NC}"
@@ -91,7 +107,7 @@ if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; then
 elif command -v rc-service >/dev/null 2>&1; then
     SERVICE_MANAGER=openrc
 else
-    echo -e "${RED}容器里既没有 systemd 也没有 OpenRC，脚本没法把 Xray 拉成服务${NC}"
+    echo -e "${RED}容器里既没有 systemd 也没有 OpenRC，脚本没法把内核拉成服务${NC}"
     exit 2
 fi
 
@@ -102,7 +118,7 @@ E2E_SNI="dl.google.com"
 
 echo "=============================================="
 echo -e "${YELLOW}Proxy-agent 真装机端到端测试${NC}"
-echo -e "${YELLOW}$(. /etc/os-release && echo "${PRETTY_NAME}") · $(uname -m) · ${SERVICE_MANAGER}${NC}"
+echo -e "${YELLOW}$(. /etc/os-release && echo "${PRETTY_NAME}") · $(uname -m) · ${SERVICE_MANAGER} · ${CORE_LABEL}${NC}"
 echo "=============================================="
 echo ""
 
@@ -115,9 +131,14 @@ cp -r "${PROJECT_ROOT}/lib" "${HOME}/lib"
 mkdir -p "${HOME}/shell"
 cp -r "${PROJECT_ROOT}/shell/lang" "${HOME}/shell/lang"
 
-echo -e "${YELLOW}=== 菜单 19 → 1：一键 Reality（Xray-core），答案按提示顺序喂 stdin ===${NC}"
-printf '19\n1\n%s\n%s\n%s\n%s:443\n\n' "${E2E_UUID}" "${E2E_USER}" "${E2E_PORT}" "${E2E_SNI}" \
-    | V2RAY_LANG=en bash "${HOME}/install.sh" >"${E2E_LOG}" 2>&1
+# 答案按提示顺序喂 stdin。Xray：UUID、用户名、端口、目标域名、私钥（回车生成）；
+# sing-box 先问目标域名再问端口，密钥由 sing-box 自己生成、不问
+echo -e "${YELLOW}=== 菜单 19 → ${MENU_CORE_CHOICE}：一键 Reality（${CORE_LABEL}）===${NC}"
+if [[ "${E2E_CORE}" == "xray" ]]; then
+    printf '19\n1\n%s\n%s\n%s\n%s:443\n\n' "${E2E_UUID}" "${E2E_USER}" "${E2E_PORT}" "${E2E_SNI}"
+else
+    printf '19\n2\n%s\n%s\n%s:443\n%s\n' "${E2E_UUID}" "${E2E_USER}" "${E2E_SNI}" "${E2E_PORT}"
+fi | V2RAY_LANG=en bash "${HOME}/install.sh" >"${E2E_LOG}" 2>&1
 installRc=$?
 if [[ ${installRc} -ne 0 ]]; then
     echo -e "${RED}安装退出码 ${installRc}，输出末尾：${NC}"
@@ -139,8 +160,13 @@ assert_equals "" "${noisyLines}" "安装输出里没有 command not found / No s
 echo ""
 echo -e "${YELLOW}=== 安装产物 ===${NC}"
 
-assert_equals "yes" "$([[ -x "${XRAY_BIN}" ]] && echo yes || echo no)" "Xray 二进制就位且可执行"
-assert_equals "yes" "$([[ -s "${INSTALL_ROOT}/xray/geosite.dat" && -s "${INSTALL_ROOT}/xray/geoip.dat" ]] && echo yes || echo no)" "geosite.dat / geoip.dat 已下载"
+assert_equals "yes" "$([[ -x "${CORE_BIN}" ]] && echo yes || echo no)" "${CORE_LABEL} 二进制就位且可执行"
+assert_equals "0" "$("${CORE_BIN}" version >/dev/null 2>&1; echo $?)" "${CORE_LABEL} 二进制能在本机运行（架构与 libc 都对）"
+if [[ "${E2E_CORE}" == "xray" ]]; then
+    assert_equals "yes" "$([[ -s "${INSTALL_ROOT}/xray/geosite.dat" && -s "${INSTALL_ROOT}/xray/geoip.dat" ]] && echo yes || echo no)" "geosite.dat / geoip.dat 已下载"
+else
+    assert_equals "no" "$([[ -e "${XRAY_BIN}" ]] && echo yes || echo no)" "sing-box 一键 Reality 不装 Xray"
+fi
 assert_equals "${INSTALL_ROOT}/install.sh" "$(readlink -f /usr/bin/pasly 2>/dev/null)" "/usr/bin/pasly 软链指向安装根里的 install.sh"
 assert_equals "yes" "$([[ ! -e "${HOME}/install.sh" ]] && echo yes || echo no)" "/root/install.sh 已搬进安装根"
 assert_equals "$(cat "${PROJECT_ROOT}/VERSION")" "$(cat "${INSTALL_ROOT}/VERSION" 2>/dev/null)" "VERSION 随行拷入"
@@ -154,20 +180,25 @@ assert_equals "" "$(crontab -l 2>/dev/null | grep -F 'acme.sh' || true)" "cronta
 # ============================================================================
 
 echo ""
-echo -e "${YELLOW}=== Xray 配置 ===${NC}"
+echo -e "${YELLOW}=== ${CORE_LABEL} 配置 ===${NC}"
 
-realityConf="${XRAY_CONF_DIR}/07_VLESS_vision_reality_inbounds.json"
-assert_equals "yes" "$([[ -f "${realityConf}" ]] && echo yes || echo no)" "07_VLESS_vision_reality_inbounds.json 已生成"
-
-runTestOut=$("${XRAY_BIN}" run -test -confdir "${XRAY_CONF_DIR}" 2>&1)
-runTestRc=$?
-if [[ ${runTestRc} -ne 0 ]]; then
-    echo "${runTestOut}" | tail -n 10
+if [[ "${E2E_CORE}" == "xray" ]]; then
+    realityConf="${XRAY_CONF_DIR}/07_VLESS_vision_reality_inbounds.json"
+    coreTestOut=$("${XRAY_BIN}" run -test -confdir "${XRAY_CONF_DIR}" 2>&1)
+    coreTestRc=$?
+else
+    realityConf="${SINGBOX_FRAGMENT_DIR}/07_VLESS_vision_reality_inbounds.json"
+    coreTestOut=$("${SINGBOX_BIN}" check -c "${INSTALL_ROOT}/sing-box/conf/config.json" 2>&1)
+    coreTestRc=$?
 fi
-assert_equals "0" "${runTestRc}" "xray run -test -confdir 通过"
-assert_contains "${runTestOut}" "Configuration OK" "xray run -test 报 Configuration OK"
+assert_equals "yes" "$([[ -f "${realityConf}" ]] && echo yes || echo no)" "07_VLESS_vision_reality_inbounds.json 已生成"
+if [[ ${coreTestRc} -ne 0 ]]; then
+    echo "${coreTestOut}" | tail -n 10
+fi
+assert_equals "0" "${coreTestRc}" "${CORE_LABEL} 自检合并后的配置通过"
 
-if [[ -f "${realityConf}" ]]; then
+if [[ -f "${realityConf}" && "${E2E_CORE}" == "xray" ]]; then
+    assert_contains "${coreTestOut}" "Configuration OK" "xray run -test 报 Configuration OK"
     assert_equals "${E2E_PORT}" "$(jq -r '.inbounds[0].port' "${realityConf}")" "对外端口是喂进去的 ${E2E_PORT}"
     assert_equals "${E2E_UUID}" "$(jq -r '.inbounds[1].settings.clients[0].id' "${realityConf}")" "客户端 UUID 是喂进去的值"
     assert_equals "${E2E_USER}-vless_reality_vision" "$(jq -r '.inbounds[1].settings.clients[0].email' "${realityConf}")" "客户端 email 带协议后缀"
@@ -175,15 +206,28 @@ if [[ -f "${realityConf}" ]]; then
     assert_equals "${E2E_SNI}" "$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0]' "${realityConf}")" "serverNames 是喂进去的目标域名"
     assert_equals "${E2E_SNI}:443" "$(jq -r '.inbounds[1].streamSettings.realitySettings.target' "${realityConf}")" "target 是域名:443"
     assert_equals "1.8.0" "$(jq -r '.inbounds[1].streamSettings.realitySettings.minClientVer' "${realityConf}")" "minClientVer 钉在 1.8.0"
-    assert_equals "2" "$(jq -r '.inbounds[1].streamSettings.realitySettings.shortIds | length' "${realityConf}")" "两个 shortId"
-    assert_equals "" "$(jq -r '.inbounds[1].streamSettings.realitySettings.shortIds[] | select(test("^[0-9a-f]{16}$") | not)' "${realityConf}")" "shortId 都是 16 位十六进制"
+    shortIds=$(jq -r '.inbounds[1].streamSettings.realitySettings.shortIds[]' "${realityConf}")
 
     privateKey=$(jq -r '.inbounds[1].streamSettings.realitySettings.privateKey' "${realityConf}")
     publicKey=$(jq -r '.inbounds[1].streamSettings.realitySettings.publicKey' "${realityConf}")
     derivedPublic=$("${XRAY_BIN}" x25519 -i "${privateKey}" 2>/dev/null | grep -E 'Public|Password' | awk '{print $NF}')
     assert_not_empty "${privateKey}" "privateKey 非空"
     assert_equals "${publicKey}" "${derivedPublic}" "publicKey 与 privateKey 派生值一致"
+elif [[ -f "${realityConf}" ]]; then
+    assert_equals "${E2E_PORT}" "$(jq -r '.inbounds[0].listen_port' "${realityConf}")" "对外端口是喂进去的 ${E2E_PORT}"
+    assert_equals "${E2E_UUID}" "$(jq -r '.inbounds[0].users[0].uuid' "${realityConf}")" "客户端 UUID 是喂进去的值"
+    assert_equals "${E2E_USER}-VLESS_Reality_Vision" "$(jq -r '.inbounds[0].users[0].name' "${realityConf}")" "客户端名带协议后缀"
+    assert_equals "xtls-rprx-vision" "$(jq -r '.inbounds[0].users[0].flow' "${realityConf}")" "flow 是 xtls-rprx-vision"
+    assert_equals "${E2E_SNI}" "$(jq -r '.inbounds[0].tls.server_name' "${realityConf}")" "server_name 是喂进去的目标域名"
+    assert_equals "${E2E_SNI}:443" "$(jq -r '.inbounds[0].tls.reality.handshake | "\(.server):\(.server_port)"' "${realityConf}")" "handshake 是域名:443"
+    shortIds=$(jq -r '.inbounds[0].tls.reality.short_id[]' "${realityConf}")
+    assert_not_empty "$(jq -r '.inbounds[0].tls.reality.private_key // empty' "${realityConf}")" "private_key 非空"
+    # sing-box 不能由私钥反推公钥；公钥配不上私钥时下面的真实握手会失败
+    publicKey=$(sed -n 's/^publicKey://p' "${SINGBOX_FRAGMENT_DIR}/reality_key" 2>/dev/null)
+    assert_not_empty "${publicKey}" "reality_key 里记了公钥"
 fi
+assert_equals "2" "$(grep -c . <<<"${shortIds:-}")" "两个 shortId"
+assert_equals "" "$(grep -vE '^[0-9a-f]{16}$' <<<"${shortIds:-}")" "shortId 都是 16 位十六进制"
 
 # ============================================================================
 # 服务：真的起来了、开机自启登记了、端口在听
@@ -192,18 +236,18 @@ fi
 echo ""
 echo -e "${YELLOW}=== 服务 ===${NC}"
 
-assert_not_empty "$(pgrep -f "xray/xray" || true)" "xray 进程在跑"
+assert_not_empty "$(pgrep -f "${CORE_BIN}" || true)" "${CORE_SERVICE} 进程在跑"
 if [[ "${SERVICE_MANAGER}" == "systemd" ]]; then
-    assert_equals "active" "$(systemctl is-active xray 2>/dev/null)" "systemd: xray.service active"
-    assert_equals "enabled" "$(systemctl is-enabled xray 2>/dev/null)" "systemd: xray.service enabled"
+    assert_equals "active" "$(systemctl is-active "${CORE_SERVICE}" 2>/dev/null)" "systemd: ${CORE_SERVICE}.service active"
+    assert_equals "enabled" "$(systemctl is-enabled "${CORE_SERVICE}" 2>/dev/null)" "systemd: ${CORE_SERVICE}.service enabled"
 else
-    assert_contains "$(rc-service xray status 2>&1)" "started" "OpenRC: xray started"
-    assert_contains "$(rc-update show default 2>/dev/null)" "xray" "OpenRC: xray 在 default 运行级"
+    assert_contains "$(rc-service "${CORE_SERVICE}" status 2>&1)" "started" "OpenRC: ${CORE_SERVICE} started"
+    assert_contains "$(rc-update show default 2>/dev/null)" "${CORE_SERVICE}" "OpenRC: ${CORE_SERVICE} 在 default 运行级"
 fi
 assert_equals "yes" "$(timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/${E2E_PORT}" 2>/dev/null && echo yes || echo no)" "127.0.0.1:${E2E_PORT} 接受 TCP 连接"
 
 # ============================================================================
-# 订阅链接可用：拿脚本发给用户的 vless:// 链接起一个 Xray 客户端，穿过服务端访问外网
+# 订阅链接可用：拿脚本发给用户的 vless:// 链接，用同一个内核起客户端，穿过服务端访问外网
 # ============================================================================
 
 echo ""
@@ -236,25 +280,40 @@ assert_equals "tcp" "$(linkParam type)" "链接 type=tcp"
 assert_equals "reality" "$(linkParam security)" "链接 security=reality"
 assert_equals "${E2E_SNI}" "$(linkParam sni)" "链接 sni 是目标域名"
 assert_equals "${publicKey}" "$(linkParam pbk)" "链接 pbk 是配置里的 publicKey"
-assert_equals "$(jq -r '.inbounds[1].streamSettings.realitySettings.shortIds[0]' "${realityConf}")" "$(linkParam sid)" "链接 sid 是配置里的第一个 shortId"
+assert_equals "$(head -n 1 <<<"${shortIds:-}")" "$(linkParam sid)" "链接 sid 是配置里的第一个 shortId"
 assert_equals "xtls-rprx-vision" "$(linkParam flow)" "链接 flow=xtls-rprx-vision"
 
 clientConf=/tmp/proxy-agent-e2e-client.json
 # 客户端的每个字段都取自链接，端口与传输也不例外：链接写错什么，握手就在什么上失败
-jq -n --arg id "${linkUUID}" --arg port "${linkPort}" --arg net "$(linkParam type)" --arg sni "$(linkParam sni)" \
-    --arg pbk "$(linkParam pbk)" --arg sid "$(linkParam sid)" --arg fp "$(linkParam fp)" --arg pqv "$(linkParam pqv)" '{
-    log: {loglevel: "warning"},
-    inbounds: [{listen: "127.0.0.1", port: 10808, protocol: "socks", settings: {udp: false}}],
-    outbounds: [{
-        protocol: "vless",
-        settings: {vnext: [{address: "127.0.0.1", port: ($port | tonumber),
-            users: [{id: $id, encryption: "none", flow: "xtls-rprx-vision"}]}]},
-        streamSettings: {network: $net, security: "reality",
-            realitySettings: ({serverName: $sni, fingerprint: $fp, publicKey: $pbk, shortId: $sid}
-                + (if $pqv == "" then {} else {mldsa65Verify: $pqv} end))}
-    }]
-}' >"${clientConf}"
-"${XRAY_BIN}" run -c "${clientConf}" >/tmp/proxy-agent-e2e-client.log 2>&1 &
+if [[ "${E2E_CORE}" == "xray" ]]; then
+    jq -n --arg id "${linkUUID}" --arg port "${linkPort}" --arg net "$(linkParam type)" --arg sni "$(linkParam sni)" \
+        --arg pbk "$(linkParam pbk)" --arg sid "$(linkParam sid)" --arg fp "$(linkParam fp)" --arg pqv "$(linkParam pqv)" '{
+        log: {loglevel: "warning"},
+        inbounds: [{listen: "127.0.0.1", port: 10808, protocol: "socks", settings: {udp: false}}],
+        outbounds: [{
+            protocol: "vless",
+            settings: {vnext: [{address: "127.0.0.1", port: ($port | tonumber),
+                users: [{id: $id, encryption: "none", flow: "xtls-rprx-vision"}]}]},
+            streamSettings: {network: $net, security: "reality",
+                realitySettings: ({serverName: $sni, fingerprint: $fp, publicKey: $pbk, shortId: $sid}
+                    + (if $pqv == "" then {} else {mldsa65Verify: $pqv} end))}
+        }]
+    }' >"${clientConf}"
+    clientCmd=("${XRAY_BIN}" run -c "${clientConf}")
+else
+    jq -n --arg id "${linkUUID}" --arg port "${linkPort}" --arg flow "$(linkParam flow)" --arg sni "$(linkParam sni)" \
+        --arg pbk "$(linkParam pbk)" --arg sid "$(linkParam sid)" --arg fp "$(linkParam fp)" '{
+        log: {level: "warn"},
+        inbounds: [{type: "socks", listen: "127.0.0.1", listen_port: 10808}],
+        outbounds: [{
+            type: "vless", server: "127.0.0.1", server_port: ($port | tonumber), uuid: $id, flow: $flow,
+            tls: {enabled: true, server_name: $sni, utls: {enabled: true, fingerprint: $fp},
+                reality: {enabled: true, public_key: $pbk, short_id: $sid}}
+        }]
+    }' >"${clientConf}"
+    clientCmd=("${SINGBOX_BIN}" run -c "${clientConf}")
+fi
+"${clientCmd[@]}" >/tmp/proxy-agent-e2e-client.log 2>&1 &
 clientPid=$!
 sleep 2
 httpCode=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 --proxy socks5h://127.0.0.1:10808 \
@@ -277,7 +336,7 @@ menuOut=$(V2RAY_LANG=en pasly </dev/null 2>&1)
 menuRc=$?
 menuOut=$(sed 's/\x1b\[[0-9;]*m//g' <<<"${menuOut}")
 assert_equals "0" "${menuRc}" "pasly 打开菜单后无输入退出码 0"
-assert_contains "${menuOut}" "Core: Xray-core [Running]" "菜单头显示 Xray-core 运行中"
+assert_contains "${menuOut}" "Core: ${CORE_LABEL} [Running]" "菜单头显示 ${CORE_LABEL} 运行中"
 assert_contains "${menuOut}" "Installed protocols: VLESS+Reality+Vision" "菜单头列出 VLESS+Reality+Vision"
 assert_contains "${menuOut}" "1.Reinstall" "菜单第 1 项变成 Reinstall"
 
@@ -309,12 +368,12 @@ assert_equals "0" "${uninstallRc}" "卸载退出码 0"
 assert_equals "no" "$([[ -e "${INSTALL_ROOT}" ]] && echo yes || echo no)" "安装根已删除"
 assert_equals "no" "$([[ -e /usr/bin/pasly ]] && echo yes || echo no)" "/usr/bin/pasly 已删除"
 if [[ "${SERVICE_MANAGER}" == "systemd" ]]; then
-    assert_equals "no" "$([[ -e /etc/systemd/system/xray.service ]] && echo yes || echo no)" "xray.service 单元文件已删除"
+    assert_equals "no" "$([[ -e "/etc/systemd/system/${CORE_SERVICE}.service" ]] && echo yes || echo no)" "${CORE_SERVICE}.service 单元文件已删除"
 else
-    assert_equals "no" "$([[ -e /etc/init.d/xray ]] && echo yes || echo no)" "/etc/init.d/xray 已删除"
-    assert_equals "" "$(rc-update show default 2>/dev/null | grep xray || true)" "xray 已从 default 运行级移除"
+    assert_equals "no" "$([[ -e "/etc/init.d/${CORE_SERVICE}" ]] && echo yes || echo no)" "/etc/init.d/${CORE_SERVICE} 已删除"
+    assert_equals "" "$(rc-update show default 2>/dev/null | grep -F "${CORE_SERVICE}" || true)" "${CORE_SERVICE} 已从 default 运行级移除"
 fi
-assert_equals "" "$(pgrep -f "xray/xray" || true)" "xray 进程已退出"
+assert_equals "" "$(pgrep -f "${CORE_BIN}" || true)" "${CORE_SERVICE} 进程已退出"
 assert_equals "no" "$(timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/${E2E_PORT}" 2>/dev/null && echo yes || echo no)" "127.0.0.1:${E2E_PORT} 不再监听"
 
 # ============================================================================

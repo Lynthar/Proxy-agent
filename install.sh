@@ -17,28 +17,6 @@ if [[ -z "${BASH_VERSINFO:-}" ]] || (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0]
     exit 1
 fi
 
-# 错误处理函数
-_error_handler() {
-    local exit_code=$?
-    local line_number=$1
-    local command="$2"
-    if [[ ${exit_code} -ne 0 ]]; then
-        echo -e "\033[31m[错误] 脚本在第 ${line_number} 行发生错误\033[0m" >&2
-        echo -e "\033[31m[错误] 命令: ${command}\033[0m" >&2
-        echo -e "\033[31m[错误] 退出码: ${exit_code}\033[0m" >&2
-    fi
-}
-
-# 捕获 ERR 信号（仅用于调试，不会终止脚本）
-# trap '_error_handler ${LINENO} "${BASH_COMMAND}"' ERR
-
-# 清理函数 - 脚本退出时清理临时文件
-_cleanup() {
-    # 清理可能遗留的临时文件
-    rm -f /tmp/Proxy-agent-*.tmp 2>/dev/null
-}
-trap '_cleanup' EXIT
-
 # ============================================================================
 # 模块加载：lib/ 存在则加载模块化组件
 # ============================================================================
@@ -664,7 +642,6 @@ if ! type t &>/dev/null; then
     MSG_CHAIN_DEFAULT_OUTBOUND="默认出站"
     MSG_CHAIN_DEFAULT_OUTBOUND_DIRECT="默认出站: 直连 (未匹配规则的流量直连访问)"
     MSG_CHAIN_TEST_MULTI_TITLE="测试多链路连通性"
-    MSG_CHAIN_RULE_CUSTOM_DOMAIN="自定义域名"
     MSG_CHAIN_TEST_LATENCY="延迟"
     MSG_CHAIN_TEST_CONN_FAIL="连接失败"
     MSG_CHAIN_TEST_COMPLETE="测试完成: %s 通过, %s 失败"
@@ -743,19 +720,19 @@ isValidDomain() {
 }
 
 # readValidPort PROMPT OUT_VAR [DEFAULT|"RANDOM"] [MIN] [MAX] → 0=成功，值写入 OUT_VAR
-# DEFAULT="RANDOM" 时回车生成随机端口；空且无 default、或越界返回 1。
-# 统一入口，杜绝"先动手再校验"。
+# DEFAULT="RANDOM" 时回车在 [MIN, MAX] 里取随机端口；手输的只要是 1-65535 就收。
+# 空且无 default、或不是合法端口返回 1——统一入口，杜绝"先动手再校验"。
 readValidPort() {
     local prompt="$1"
     local -n __rvp_out="$2"
     local default="${3:-}"
-    local min="${4:-1}"
-    local max="${5:-65535}"
+    local randomMin="${4:-1}"
+    local randomMax="${5:-65535}"
     local __rvp_input
     read -r -p "${prompt}" __rvp_input
     if [[ -z "${__rvp_input}" ]]; then
         if [[ "${default}" == "RANDOM" ]]; then
-            __rvp_out=$(randomNum "${min}" "${max}")
+            __rvp_out=$(randomNum "${randomMin}" "${randomMax}")
             return 0
         elif [[ -n "${default}" ]]; then
             __rvp_out="${default}"
@@ -764,9 +741,9 @@ readValidPort() {
         echoContent red " ---> $(t ERR_PORT_EMPTY)"
         return 1
     fi
-    # 拒绝前导 0 / 0 本身 / 非数字；再做范围检查
-    if [[ ! "${__rvp_input}" =~ ^[1-9][0-9]*$ ]] || (( __rvp_input < min || __rvp_input > max )); then
-        echoContent red " ---> $(t ERR_PORT_RANGE "${min}" "${max}")"
+    # 拒绝前导 0 / 0 本身 / 非数字；位数先卡住，免得超长数字在算术比较里溢出
+    if [[ ! "${__rvp_input}" =~ ^[1-9][0-9]{0,4}$ ]] || (( __rvp_input > 65535 )); then
+        echoContent red " ---> $(t ERR_PORT_RANGE 1 65535)"
         return 1
     fi
     __rvp_out="${__rvp_input}"
@@ -853,14 +830,12 @@ extractXrayHash() {
     fi
 }
 
-# 从sing-box校验文件中提取SHA256值
-# 用法: extractSingBoxHash <校验文件路径> <目标文件名>
-extractSingBoxHash() {
-    local checksumFile="$1"
-    local targetFile="$2"
-    if [[ -f "${checksumFile}" ]]; then
-        grep "${targetFile}" "${checksumFile}" | awk '{print $1}' | head -1
-    fi
+# 从 GitHub releases API 响应里取某个资产的 SHA256（资产的 digest 字段）
+# 用法: releaseAssetSHA256 <releases JSON> <tag> <资产文件名>；没有 sha256 摘要时输出为空
+releaseAssetSHA256() {
+    jq -r --arg tag "$2" --arg name "$3" '.[] | select(.tag_name == $tag) | .assets[]?
+        | select(.name == $name) | .digest // "" | select(startswith("sha256:")) | ltrimstr("sha256:")' \
+        <<<"$1" 2>/dev/null | head -1
 }
 
 # verifyInstallSHA256 FILE TAG → 0=通过或软降级跳过，1=校验失败
@@ -1491,6 +1466,7 @@ readInstallProtocolType() {
                 singBoxVLESSRealityVisionPort=$(jq -r .inbounds[0].listen_port "${row}.json")
                 singBoxVLESSRealityVisionServerName=$(jq -r .inbounds[0].tls.server_name "${row}.json")
                 realityDomainPort=$(jq -r .inbounds[0].tls.reality.handshake.server_port "${row}.json")
+                currentRealityShortId=$(jq -r '.inbounds[0].tls.reality.short_id[0] // empty' "${row}.json")
 
                 realityServerName=${singBoxVLESSRealityVisionServerName}
                 if [[ -f "${configPath}reality_key" ]]; then
@@ -2176,6 +2152,8 @@ installTools() {
         ${installType} lsof >/dev/null 2>&1
     fi
 
+    ensureAlpineProcps
+
     if ! dig -h >/dev/null 2>&1; then
         echoContent green " ---> 安装dig"
         if echo "${installType}" | grep -qw "apt"; then
@@ -2198,7 +2176,7 @@ installTools() {
             nginxVersion=$(nginx -v 2>&1)
             nginxVersion=$(echo "${nginxVersion}" | awk -F "[n][g][i][n][x][/]" '{print $2}' | awk -F "[.]" '{print $2}')
             if [[ ${nginxVersion} -lt 14 ]]; then
-                read -r -p "读取到当前的Nginx版本不支持gRPC，会导致安装失败，是否卸载Nginx后重新安装 ？[y/n]:" unInstallNginxStatus
+                read -r -p "读取到当前的Nginx版本过旧（低于1.14），是否卸载后重新安装 ？[y/n]:" unInstallNginxStatus
                 if [[ "${unInstallNginxStatus}" == "y" ]]; then
                     ${removeType} nginx >/dev/null 2>&1
                     echoContent yellow " ---> nginx卸载完成"
@@ -2748,7 +2726,6 @@ switchSSLType() {
         echoContent red "\n=============================================================="
         echoContent yellow "1.letsencrypt[默认]"
         echoContent yellow "2.zerossl"
-        echoContent yellow "3.buypass[不支持DNS申请]"
         echoContent red "=============================================================="
         read -r -p "请选择[回车]使用默认:" selectSSLType
         case ${selectSSLType} in
@@ -2758,17 +2735,10 @@ switchSSLType() {
         2)
             sslType="zerossl"
             ;;
-        3)
-            sslType="buypass"
-            ;;
         *)
             sslType="letsencrypt"
             ;;
         esac
-        if [[ -n "${dnsAPIType}" && "${sslType}" == "buypass" ]]; then
-            echoContent red " ---> buypass不支持API申请证书"
-            exit 1
-        fi
         echo "${sslType}" >${TLS_DIR}/ssl_type
     fi
 }
@@ -2824,20 +2794,23 @@ ACME_ENV_EOF
 }
 # 自定义端口
 customPortFunction() {
-    local historyCustomPortStatus=
+    local historyCustomPortStatus= reuseLastPort=
     if [[ -n "${customPort}" || -n "${currentPort}" ]]; then
         echo
         if [[ -z "${lastInstallationConfig}" ]]; then
             read -r -p "读取到上次安装时的端口，是否使用上次安装时的端口？[y/n]:" historyCustomPortStatus
-            if [[ "${historyCustomPortStatus}" == "y" ]]; then
+            if isYesInput "${historyCustomPortStatus}"; then
                 port=${currentPort}
+                reuseLastPort=true
                 echoContent yellow "\n ---> 端口: ${port}"
             fi
         elif [[ -n "${lastInstallationConfig}" ]]; then
             port=${currentPort}
+            reuseLastPort=true
         fi
     fi
-    if [[ -z "${currentPort}" ]] || [[ "${historyCustomPortStatus}" == "n" ]]; then
+    # 没明确沿用就重新问：回车之类的回答若两头都不进，port 为空，写出的入站配置不是合法 JSON
+    if [[ -z "${currentPort}" || -z "${reuseLastPort}" ]]; then
         echo
 
         if [[ -n "${btDomain}" ]]; then
@@ -3180,8 +3153,24 @@ updateSELinuxHTTPPortT() {
     fi
 }
 
+# BusyBox 的 pgrep -x 比对的是 argv[0] 而非进程名，认不出 nginx 与 sing-box，服务启停判定全靠它。
+# 自更新不跑 installTools，所以服务控制函数也调一次，旧版装的 Alpine 机器更新后同样补上
+ensureAlpineProcps() {
+    # 一次运行只试一次：离线时 apk 装不上，不该让每次启停服务都再连一遍软件源
+    if [[ "${release}" != "alpine" || -n "${alpineProcpsTried:-}" ]]; then
+        return 0
+    fi
+    alpineProcpsTried=true
+    if ! pgrep -V 2>&1 | grep -q procps; then
+        echoContent green " ---> 安装procps"
+        ${installType} procps >/dev/null 2>&1
+        hash -r
+    fi
+}
+
 # 操作Nginx
 handleNginx() {
+    ensureAlpineProcps
 
     if ! echo "${selectCustomInstallType}" | grep -qwE ",7,|,8,|,7,8," && [[ -z $(pgrep -x "nginx") ]] && [[ "$1" == "start" ]]; then
         if [[ "${release}" == "alpine" ]]; then
@@ -3410,17 +3399,14 @@ installSingBox() {
             exit 1
         fi
 
-        local singBoxTarFile="${SINGBOX_DIR}/sing-box-${version/v/}${singBoxCoreCPUVendor}.tar.gz"
-        local singBoxChecksumFile="${SINGBOX_DIR}/sing-box_${version/v/}_checksums.txt"
-        local singBoxTarFileName="sing-box-${version/v/}${singBoxCoreCPUVendor}.tar.gz"
+        local singBoxPackage="sing-box-${version/v/}${singBoxCoreCPUVendor}"
+        local singBoxTarFileName="${singBoxPackage}.tar.gz"
+        local singBoxTarFile="${SINGBOX_DIR}/${singBoxTarFileName}"
 
-        # 下载sing-box核心文件和校验和文件
         if [[ "${release}" == "alpine" ]]; then
             wget -c -q -P ${SINGBOX_DIR}/ "https://github.com/SagerNet/sing-box/releases/download/${version}/${singBoxTarFileName}"
-            wget -c -q -P ${SINGBOX_DIR}/ "https://github.com/SagerNet/sing-box/releases/download/${version}/sing-box_${version/v/}_checksums.txt"
         else
             wget -c -q ${wgetShowProgressStatus} -P ${SINGBOX_DIR}/ "https://github.com/SagerNet/sing-box/releases/download/${version}/${singBoxTarFileName}"
-            wget -c -q ${wgetShowProgressStatus} -P ${SINGBOX_DIR}/ "https://github.com/SagerNet/sing-box/releases/download/${version}/sing-box_${version/v/}_checksums.txt"
         fi
 
         if [[ ! -f "${singBoxTarFile}" ]]; then
@@ -3431,31 +3417,42 @@ installSingBox() {
             fi
             return 1
         else
-            # 校验SHA256
+            # 上游不发校验和文件；摘要取自同一份 releases 响应里 GitHub 给每个资产记的 digest
             local expectedHash
-            expectedHash=$(extractSingBoxHash "${singBoxChecksumFile}" "${singBoxTarFileName}")
-            if [[ -n "${expectedHash}" ]]; then
-                echoContent green " ---> 验证文件完整性..."
-                if ! verifySHA256 "${singBoxTarFile}" "${expectedHash}"; then
-                    echoContent red " ---> 文件校验失败，可能已被篡改，请重新下载"
-                    rm -f "${singBoxTarFile}" "${singBoxChecksumFile}"
-                    read -r -p "是否重新尝试？[y/n]" retryStatus
-                    if isYesInput "${retryStatus}"; then
-                        installSingBox "$1"
-                        return $?
-                    fi
-                    return 1
-                fi
-                echoContent green " ---> 文件校验通过"
-            else
-                echoContent yellow " ---> 警告: 未能获取校验信息，跳过完整性验证"
+            expectedHash=$(releaseAssetSHA256 "${releasesJson}" "${version}" "${singBoxTarFileName}")
+            if [[ -z "${expectedHash}" ]]; then
+                rm -f "${singBoxTarFile}"
+                echoContent red " ---> $(t SINGBOX_DIGEST_MISSING "${singBoxTarFileName}")"
+                return 1
             fi
+            echoContent green " ---> 验证文件完整性..."
+            if ! verifySHA256 "${singBoxTarFile}" "${expectedHash}"; then
+                echoContent red " ---> 文件校验失败，可能已被篡改，请重新下载"
+                rm -f "${singBoxTarFile}"
+                read -r -p "是否重新尝试？[y/n]" retryStatus
+                if isYesInput "${retryStatus}"; then
+                    installSingBox "$1"
+                    return $?
+                fi
+                return 1
+            fi
+            echoContent green " ---> 文件校验通过"
 
-            tar zxvf "${singBoxTarFile}" -C "${SINGBOX_DIR}/" >/dev/null 2>&1
-
-            mv "${SINGBOX_DIR}/sing-box-${version/v/}${singBoxCoreCPUVendor}/sing-box" ${SINGBOX_BIN}
+            if ! tar -xzf "${singBoxTarFile}" -C "${SINGBOX_DIR}/" ||
+                ! mv "${SINGBOX_DIR}/${singBoxPackage}/sing-box" ${SINGBOX_BIN}; then
+                rm -rf ${SINGBOX_DIR}/sing-box-*
+                echoContent red " ---> $(t SINGBOX_UNPACK_FAILED "${singBoxTarFileName}")"
+                return 1
+            fi
             rm -rf ${SINGBOX_DIR}/sing-box-*
             chmod 655 ${SINGBOX_BIN}
+
+            # 包与本机的架构或 libc 不配时文件在、exec 却报 not found，配置与服务都会建在它上面
+            if ! ${SINGBOX_BIN} version >/dev/null 2>&1; then
+                rm -f ${SINGBOX_BIN}
+                echoContent red " ---> $(t SINGBOX_NOT_RUNNABLE "${singBoxTarFileName}")"
+                return 1
+            fi
 
             # 版本守门（兜底）：配置用 1.11+ 的路由级 sniff/resolve action，1.11 以下不识别会启动失败。
             # 下载前已按 tag 检查过一次，这里用实际二进制版本再验一次。
@@ -3958,6 +3955,7 @@ EOF
 
 # 操作sing-box
 handleSingBox() {
+    ensureAlpineProcps
     local startResult=0
     local mergeResult=0
 
@@ -5205,7 +5203,8 @@ singBoxMergeConfig() {
 
     normalizeSingBoxRuleSetHttpClient "${fragmentDir}"
 
-    if ! tmpFile=$(mktemp /tmp/Proxy-agent-singbox-merge-XXXXXX.json); then
+    # BusyBox（Alpine）的 mktemp 要求模板以 XXXXXX 结尾，带扩展名即失败
+    if ! tmpFile=$(mktemp /tmp/Proxy-agent-singbox-merge-XXXXXX); then
         echoContent red " ---> sing-box 配置合并失败：无法创建临时文件"
         return 1
     fi
@@ -5263,8 +5262,8 @@ initSingBoxPort() {
         echo "${port}"
     fi
     if [[ -z "${port}" ]]; then
-        # 回车随机 10000-60000；输入需合法
-        readValidPort '请输入自定义端口[需合法]，端口不可重复，[回车]随机端口:' port "RANDOM" 10000 60000 || exit 1
+        # 本函数跑在 <(...) 里，exit 只退子 shell、调用方会把报错当端口写进配置；输错就重问
+        until readValidPort '请输入自定义端口[需合法]，端口不可重复，[回车]随机端口:' port "RANDOM" 10000 60000 >&2; do :; done
         allowPort "${port}"
         allowPort "${port}" "udp"
         echo "${port}"
@@ -6883,7 +6882,7 @@ showAccounts() {
     fi
     # VLESS Reality XHTTP
     if echo ${currentInstallProtocolType} | grep -q ",12,"; then
-        echoContent skyBlue "\n================================ VLESS Reality XHTTP TLS [仅CDN推荐] ================================\n"
+        echoContent skyBlue "\n================================ VLESS Reality XHTTP ================================\n"
 
         jq .inbounds[0].settings.clients//.inbounds[0].users ${configPath}12_VLESS_XHTTP_inbounds.json | jq -c '.[]' | while read -r user; do
             local email=
@@ -7466,6 +7465,12 @@ applyAccountChangeAllProtocols() {
                 clients=$(initXrayClients "${protocolId}" "${arg1}" "${arg2}")
             else
                 clients=$(initSingBoxClients "${protocolId}" "${arg1}" "${arg2}")
+            fi
+            # 生成器若给出空数组，写进去就是把这个协议的用户整个清空还报成功
+            if [[ "$(jq 'length' <<<"${clients}" 2>/dev/null)" -lt 1 ]]; then
+                echoContent red " ---> $(t ACCOUNT_TX_EMPTY_CLIENTS) [$(getProtocolDisplayName "${protocolId}")]"
+                jsonTxRollback
+                return 1
             fi
             newContent=$(jq --argjson newClients "${clients}" "${usersPath} = \$newClients" "${targetFile}" 2>/dev/null)
         else
@@ -14674,7 +14679,7 @@ sniRouting() {
     echoContent red "\n=============================================================="
     echoContent yellow "# 注意事项"
     echoContent yellow "# 使用提示：请参考 docs 目录中的分流与策略说明 \n"
-    echoContent yellow "# sing-box不支持规则集，仅支持指定域名。\n"
+    echoContent yellow "# sing-box 侧只能填具体域名，不支持规则集。\n"
 
     echoContent yellow "1.添加"
     echoContent yellow "2.卸载"
@@ -14725,13 +14730,21 @@ EOF
         if [[ -n "${singBoxConfigPath}" ]]; then
             echoContent yellow "录入示例:www.netflix.com,www.google.com"
             read -r -p "请按照上面示例录入域名:" singboxDomainList
+            local singboxDomain singboxDomains
+            IFS=',' read -r -a singboxDomains <<<"${singboxDomainList}"
+            for singboxDomain in "${singboxDomains[@]}"; do
+                if [[ -n "${singboxDomain}" ]] && ! isValidDomain "${singboxDomain}"; then
+                    echoContent red " ---> $(t ERR_DOMAIN_INVALID): ${singboxDomain}"
+                    exit 1
+                fi
+            done
             addSingBoxDNSConfig "${setSNIP}" "${singboxDomainList}" "predefined"
         fi
         echoContent yellow " ---> SNI反向代理分流成功"
         reloadCore
-    else
-        echoContent red " ---> SNI IP不可为空"
+        exit 0
     fi
+    echoContent red " ---> SNI IP不可为空"
     exit 1
 }
 
@@ -14791,8 +14804,8 @@ addSingBoxDNSConfig() {
         if [[ "${actionType}" == "predefined" ]]; then
             local predefined={}
             while read -r line; do
-                predefined=$(echo "${predefined}" | jq ".\"${line}\"=\"${ip}\"")
-            done < <(echo "${domainList}" | tr ',' '\n' | grep -v '^$' | sort -n | uniq | paste -sd ',' | tr ',' '\n')
+                predefined=$(echo "${predefined}" | jq --arg d "${line}" --arg ip "${ip}" '.[$d] = $ip')
+            done < <(echo "${domainList}" | tr ',' '\n' | grep -v '^$' | sort -u)
 
             cat <<EOF >"${singBoxConfigPath}dns.json"
 {
@@ -14890,7 +14903,7 @@ removeUnlockDNS() {
 EOF
     fi
 
-    if [[ "${coreKind}" == "2" && -f "${singBoxConfigPath}dns.json" ]]; then
+    if [[ -n "${singBoxConfigPath}" && -f "${singBoxConfigPath}dns.json" ]]; then
         cat <<EOF >${singBoxConfigPath}dns.json
 {
     "dns": {
@@ -14925,7 +14938,7 @@ removeUnlockSNI() {
 EOF
     fi
 
-    if [[ "${coreKind}" == "2" && -f "${singBoxConfigPath}dns.json" ]]; then
+    if [[ -n "${singBoxConfigPath}" && -f "${singBoxConfigPath}dns.json" ]]; then
         cat <<EOF >${singBoxConfigPath}dns.json
 {
     "dns": {
@@ -14978,17 +14991,16 @@ validateCustomInstallTokens() {
 # sing-box 个性化安装
 customSingBoxInstall() {
     echoContent skyBlue "\n========================个性化安装============================"
-    echoContent yellow "0.VLESS+Vision+TCP"
+    echoContent yellow "0.VLESS+TLS_Vision+TCP"
     echoContent yellow "1.VLESS+TLS+WS[仅CDN推荐]"
     echoContent yellow "3.VMess+TLS+WS[仅CDN推荐]"
     echoContent yellow "4.Trojan+TLS[不推荐]"
     echoContent yellow "6.Hysteria2"
     echoContent yellow "7.VLESS+Reality+Vision"
-    # echoContent yellow "8.VLESS+Reality+gRPC"  # gRPC已移除，推荐使用XHTTP
     echoContent yellow "9.Tuic"
     echoContent yellow "10.Naive"
     echoContent yellow "11.VMess+TLS+HTTPUpgrade"
-    echoContent yellow "13.anytls"
+    echoContent yellow "13.AnyTLS"
     echoContent yellow "14.Shadowsocks 2022[无需TLS证书]"
 
     read -r -p "请选择[多选]，[例如:1,2,3]:" selectCustomInstallType
@@ -15009,11 +15021,10 @@ customSingBoxInstall() {
     fi
 
     if validateCustomInstallTokens "${selectCustomInstallType}" 0 1 3 4 6 7 9 10 11 13 14; then
-        # WebSocket 协议迁移提示
-        if echo "${selectCustomInstallType}" | grep -q -E ",1,|,3,"; then
-            echoContent yellow "\n ---> 提示: WebSocket传输已逐渐被XHTTP(SplitHTTP)取代"
-            echoContent yellow " ---> XHTTP具有更好的抗检测能力和CDN兼容性，建议在Xray中使用VLESS+Reality+XHTTP"
-            echoContent yellow " ---> 参考: https://xtls.github.io/en/config/transports/splithttp.html\n"
+        # 走 CDN 的协议提示：sing-box 下每个协议单独监听，随机端口 CDN 不转发
+        if echo "${selectCustomInstallType}" | grep -q -E ",1,|,3,|,11,"; then
+            echoContent yellow "\n ---> 提示: WS / HTTPUpgrade 只在走 CDN 时才值得用；不走 CDN 选 7（Reality）抗检测更好，但 Reality 不能挂在 CDN 后面"
+            echoContent yellow " ---> 走 CDN 时端口要选 CDN 会转发的，Cloudflare 的 HTTPS 只转发 443、2053、2083、2087、2096、8443\n"
         fi
 
         readLastInstallationConfig
@@ -15050,13 +15061,10 @@ customXrayInstall() {
     echoContent yellow "VLESS前置，默认安装0，无域名安装Reality只选择7即可"
     echoContent yellow "0.VLESS+TLS_Vision+TCP[推荐]"
     echoContent yellow "1.VLESS+TLS+WS[仅CDN推荐]"
-    #    echoContent yellow "2.Trojan+TLS+gRPC[仅CDN推荐]"
     echoContent yellow "3.VMess+TLS+WS[仅CDN推荐]"
     echoContent yellow "4.Trojan+TLS[不推荐]"
-    # echoContent yellow "5.VLESS+TLS+gRPC[仅CDN推荐]"  # gRPC已移除，推荐使用XHTTP
     echoContent yellow "7.VLESS+Reality+uTLS+Vision[推荐]"
-    # echoContent yellow "8.VLESS+Reality+gRPC"
-    echoContent yellow "12.VLESS+Reality+XHTTP+TLS[CDN可用]"
+    echoContent yellow "12.VLESS+Reality+XHTTP"
     read -r -p "请选择[多选]，[例如:1,2,3]:" selectCustomInstallType
     echoContent skyBlue "--------------------------------------------------------------"
     if echo "${selectCustomInstallType}" | grep -q "，"; then
@@ -15082,11 +15090,10 @@ customXrayInstall() {
         selectCustomInstallType=",${selectCustomInstallType},"
     fi
     if validateCustomInstallTokens "${selectCustomInstallType}" 0 1 3 4 7 12; then
-        # WebSocket 协议迁移提示
+        # 走 CDN 的协议提示：Reality 的 TLS 必须直连本机，挂在 CDN 后面连不上
         if echo "${selectCustomInstallType}" | grep -q -E ",1,|,3,"; then
-            echoContent yellow "\n ---> 提示: WebSocket传输已逐渐被XHTTP(SplitHTTP)取代"
-            echoContent yellow " ---> XHTTP具有更好的抗检测能力和CDN兼容性，建议选择12.VLESS+Reality+XHTTP+TLS"
-            echoContent yellow " ---> 参考: https://xtls.github.io/en/config/transports/splithttp.html\n"
+            echoContent yellow "\n ---> 提示: WS 只在走 CDN 时才值得用；不走 CDN 选 7 或 12（Reality）抗检测更好，但 Reality 不能挂在 CDN 后面"
+            echoContent yellow " ---> 走 CDN 时端口要选 CDN 会转发的，Cloudflare 的 HTTPS 只转发 443、2053、2083、2087、2096、8443\n"
         fi
 
         readLastInstallationConfig
@@ -15177,6 +15184,7 @@ selectCoreInstall() {
 
 # 一键无域名 Reality 安装：仅安装 VLESS+Reality+Vision (协议 7)，跳过域名/TLS 申请
 installXrayRealityOnly() {
+    selectCoreType=1
     selectCustomInstallType=",7,"
     readLastInstallationConfig
     unInstallSubscribe
@@ -15194,6 +15202,7 @@ installXrayRealityOnly() {
 }
 
 installSingBoxRealityOnly() {
+    selectCoreType=2
     selectCustomInstallType=",7,"
     readLastInstallationConfig
     unInstallSubscribe
@@ -16546,7 +16555,7 @@ manageHysteria() {
     echoContent red "\n=============================================================="
     local hysteria2Status=
     if [[ -n "${singBoxConfigPath}" ]] && [[ -f "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" ]]; then
-        echoContent yellow "依赖第三方sing-box\n"
+        echoContent yellow "依赖sing-box内核\n"
         echoContent yellow "1.重新安装"
         echoContent yellow "2.卸载"
         echoContent yellow "3.端口跳跃管理"
