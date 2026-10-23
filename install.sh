@@ -1148,9 +1148,6 @@ initVar() {
     # ssl邮箱
     sslEmail=
 
-    # 检查天数
-    sslRenewalDays=90
-
     # dns ssl状态
     #    dnsSSLStatus=
 
@@ -3235,55 +3232,38 @@ renewalTLS() {
     if [[ -n $1 ]]; then
         echoContent skyBlue "\n进度  $1/1 : 更新证书"
     fi
-    readAcmeTLS
     local domain=${currentHost}
     if [[ -z "${currentHost}" && -n "${tlsDomain}" ]]; then
         domain=${tlsDomain}
     fi
 
-    if [[ -f "${TLS_DIR}/ssl_type" ]]; then
-        if grep -q "buypass" <"${TLS_DIR}/ssl_type"; then
-            sslRenewalDays=180
-        fi
+    # acme.sh 续期与安装都按证书名寻址：通配符证书名是字面的 *.<父域>，拿主机名去装会被拒。
+    # 不调 readAcmeTLS：它按全局 domain 改写 installTLS 随后要用的通配符状态，换域名重装时两边不是同一个域名
+    local acmeCertName=
+    local wildcardCertName="*.${domain#*.}"
+    if [[ -d "$HOME/.acme.sh/${domain}_ecc" && -f "$HOME/.acme.sh/${domain}_ecc/${domain}.key" && -f "$HOME/.acme.sh/${domain}_ecc/${domain}.cer" ]]; then
+        acmeCertName=${domain}
+    elif [[ -f "$HOME/.acme.sh/${wildcardCertName}_ecc/${wildcardCertName}.key" && -f "$HOME/.acme.sh/${wildcardCertName}_ecc/${wildcardCertName}.cer" ]]; then
+        acmeCertName=${wildcardCertName}
     fi
-    if [[ -d "$HOME/.acme.sh/${domain}_ecc" && -f "$HOME/.acme.sh/${domain}_ecc/${domain}.key" && -f "$HOME/.acme.sh/${domain}_ecc/${domain}.cer" ]] || [[ "${installedDNSAPIStatus}" == "true" ]]; then
-        modifyTime=
 
-        if [[ "${installedDNSAPIStatus}" == "true" ]]; then
-            # 使用 find 获取通配符证书文件路径，避免 glob 在引号中不展开的问题
-            local wildcardCertFile
-            wildcardCertFile=$(find "$HOME/.acme.sh" -path '*/\*.'"${dnsTLSDomain}_ecc"'/\*.'"${dnsTLSDomain}.cer" -type f 2>/dev/null | head -1)
-            if [[ -n "${wildcardCertFile}" ]]; then
-                modifyTime=$(stat -c %Y "${wildcardCertFile}")
-            else
-                echoContent red " ---> 未找到通配符证书文件"
-                return 1
-            fi
-        else
-            modifyTime=$(stat -c %Y "$HOME/.acme.sh/${domain}_ecc/${domain}.cer")
-        fi
+    if [[ -n "${acmeCertName}" ]]; then
+        # 按证书真实到期时间判窗口：CA 在缩短有效期（LE 2027 起 64 天、2028 起 45 天），按固定天数推算会过期了才续。
+        # 用 -checkend 不用 date -d：BusyBox 的 date 解析不了 openssl 的日期格式
+        local renewWindowDays=15
+        local renewWindow=$((renewWindowDays * 86400))
+        local renewCertFile="${TLS_DIR}/${domain}.crt"
+        local renewKeyFile="${TLS_DIR}/${domain}.key"
+        local acmeCertFile="$HOME/.acme.sh/${acmeCertName}_ecc/${acmeCertName}.cer"
+        # tls/ 下还没装（重装途中）就判 acme.sh 那份：装进来归 installTLS，这里不在安装中途启停服务
+        local checkCertFile=${renewCertFile}
+        [[ -s "${checkCertFile}" ]] || checkCertFile=${acmeCertFile}
 
-        # stat -c %Y 直接给出 epoch 秒(mtime)，GNU/BusyBox(Alpine) 通用，省去 date -d 解析
-        currentTime=$(date +%s)
-        ((stampDiff = currentTime - modifyTime))
-        ((days = stampDiff / 86400))
-        ((remainingDays = sslRenewalDays - days))
-
-        tlsStatus=${remainingDays}
-        if [[ ${remainingDays} -le 0 ]]; then
-            tlsStatus="已过期"
-        fi
-
-        # BusyBox 的 date -d @epoch 支持随版本而异——GNU 写法失败时退 BusyBox 的 -D %s，再退裸 epoch
-        local certGenDate
-        certGenDate=$(date -d "@${modifyTime}" +"%F %H:%M:%S" 2>/dev/null || date -u -D %s -d "${modifyTime}" +"%F %H:%M:%S" 2>/dev/null || echo "${modifyTime}")
         echoContent skyBlue " ---> 证书检查日期:$(date "+%F %H:%M:%S")"
-        echoContent skyBlue " ---> 证书生成日期:${certGenDate}"
-        echoContent skyBlue " ---> 证书生成天数:${days}"
-        echoContent skyBlue " ---> 证书剩余天数:"${tlsStatus}
-        echoContent skyBlue " ---> 证书过期前最后一天自动更新，如更新失败请手动更新"
+        echoContent skyBlue " ---> $(t TLS_RENEW_EXPIRY "$(openssl x509 -in "${checkCertFile}" -noout -enddate 2>/dev/null | cut -d= -f2)")"
+        echoContent skyBlue " ---> $(t TLS_RENEW_POLICY "${renewWindowDays}")"
 
-        if [[ ${remainingDays} -le 1 ]]; then
+        if ! openssl x509 -in "${checkCertFile}" -noout -checkend "${renewWindow}" >/dev/null 2>&1; then
             echoContent yellow " ---> 重新生成证书"
             handleNginx stop
 
@@ -3295,20 +3275,24 @@ renewalTLS() {
 
             # 这是唯一的续期入口（acme.sh 自身的 cron 已被 installCronTLS 删除），
             # 写半截/错配直接 reload 会断线到下次人工介入——先备份，验证不过就还原旧证书再拉起服务
-            local renewCertFile="${TLS_DIR}/${domain}.crt"
-            local renewKeyFile="${TLS_DIR}/${domain}.key"
             cp -fp "${renewCertFile}" "${renewCertFile}.renew-bak" 2>/dev/null
             cp -fp "${renewKeyFile}" "${renewKeyFile}.renew-bak" 2>/dev/null
 
+            # acme.sh 那张已在窗口外（它续过、只是没装进来）就只重装。必须 --force：
+            # acme.sh ≤3.1.2 按签发后第 60 天排期且不看到期，遇上 45 天证书 --cron 永远轮不到
             local renewFailed=
-            if ! sudo "$HOME/.acme.sh/acme.sh" --cron --home "$HOME/.acme.sh"; then
+            if ! openssl x509 -in "${acmeCertFile}" -noout -checkend "${renewWindow}" >/dev/null 2>&1 &&
+                ! sudo "$HOME/.acme.sh/acme.sh" --renew -d "${acmeCertName}" --ecc --force --home "$HOME/.acme.sh"; then
                 echoContent red " ---> $(t TLS_RENEW_ACME_FAILED)"
                 renewFailed=true
-            elif ! sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${domain}" --fullchainpath "${renewCertFile}" --keypath "${renewKeyFile}" --ecc; then
+            elif ! sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${acmeCertName}" --fullchainpath "${renewCertFile}" --keypath "${renewKeyFile}" --ecc; then
                 echoContent red " ---> $(t TLS_RENEW_INSTALL_FAILED)"
                 renewFailed=true
             elif ! verifyCertKeyMatch "${renewCertFile}" "${renewKeyFile}"; then
                 echoContent red " ---> $(t TLS_RENEW_VERIFY_FAILED)"
+                renewFailed=true
+            elif ! openssl x509 -in "${renewCertFile}" -noout -checkend "${renewWindow}" >/dev/null 2>&1; then
+                echoContent red " ---> $(t TLS_RENEW_NOT_EXTENDED "${renewWindowDays}")"
                 renewFailed=true
             fi
 

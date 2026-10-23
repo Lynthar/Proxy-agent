@@ -1269,6 +1269,116 @@ run_check_302 "HTTP/1.1 200 OK"; assert_equals "1" "$?" "checkNginx302：没看�
 
 echo ""
 
+# ============================================================================
+# 测试：证书续期——按真实到期时间判窗口，按 acme.sh 证书名续与装
+# ============================================================================
+
+echo -e "${YELLOW}=== 测试 renewalTLS ===${NC}"
+
+RENEW_FN=$(sed -n '/^renewalTLS() {/,/^}/p; /^verifyCertKeyMatch() {/,/^}/p' install.sh)
+assert_not_empty "${RENEW_FN}" "renewalTLS：抽到函数原文"
+RENEW_ROOT="${MOCK_ROOT}/renew"
+RENEW_HOME="${RENEW_ROOT}/home"
+RENEW_LOG="${RENEW_HOME}/acme-calls.log"
+RENEW_CRT="${RENEW_ROOT}/tls/www.example.test.crt"
+RENEW_WINDOW=$((15 * 86400))
+mkdir -p "${RENEW_HOME}/.acme.sh"
+
+# $1 目录，$2 文件名（不含扩展名），$3 有效天数：写一对 .cer / .key
+renew_cert() {
+    mkdir -p "$1"
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days "$3" \
+        -subj "/CN=renew-test" -keyout "$1/$2.key" -out "$1/$2.cer" >/dev/null 2>&1
+}
+
+# acme.sh 桩：记下参数。--renew 按 FAKE_RENEW 重签 90 天（noop 不动、fail 失败），
+# --installcert 像真 acme.sh 一样只认证书名，找不到 <名>_ecc 目录就报错
+cat >"${RENEW_HOME}/.acme.sh/acme.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >>"${HOME}/acme-calls.log"
+action="" name="" full="" key=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --renew) action=renew ;;
+        --installcert) action=install ;;
+        -d) name=$2; shift ;;
+        --fullchainpath) full=$2; shift ;;
+        --keypath) key=$2; shift ;;
+    esac
+    shift
+done
+dir="${HOME}/.acme.sh/${name}_ecc"
+if [[ "${action}" == "renew" ]]; then
+    [[ "${FAKE_RENEW}" == "fail" ]] && exit 1
+    [[ "${FAKE_RENEW}" == "noop" ]] && exit 0
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 90 \
+        -subj "/CN=renew-test" -keyout "${dir}/${name}.key" -out "${dir}/${name}.cer" >/dev/null 2>&1
+elif [[ "${action}" == "install" ]]; then
+    [[ -d "${dir}" ]] || { echo "'${name}' is not a cert name" >&2; exit 1; }
+    cp "${dir}/${name}.cer" "${full}" && cp "${dir}/${name}.key" "${key}"
+fi
+EOF
+chmod +x "${RENEW_HOME}/.acme.sh/acme.sh"
+
+# $1 acme.sh 里的证书名，$2 它的有效天数，$3 已装进 tls/ 那张的有效天数
+renew_setup() {
+    rm -rf "${RENEW_HOME}/.acme.sh/"*_ecc "${RENEW_ROOT}/tls" "${RENEW_LOG}"
+    renew_cert "${RENEW_HOME}/.acme.sh/$1_ecc" "$1" "$2"
+    renew_cert "${RENEW_ROOT}/tls" www.example.test "$3"
+    mv "${RENEW_ROOT}/tls/www.example.test.cer" "${RENEW_CRT}"
+}
+# TLS_DIR 在本进程是 readonly，另起 bash；$1 是 FAKE_RENEW。服务启停全桩掉，t 只回显键名
+run_renew() {
+    env HOME="${RENEW_HOME}" TLS_DIR="${RENEW_ROOT}/tls" FAKE_RENEW="${1:-}" RENEW_FN="${RENEW_FN}" bash -c '
+        currentHost=www.example.test; coreKind=1
+        echoContent() { printf "%s\n" "$2"; }
+        t() { printf "%s\n" "$1"; }
+        sudo() { "$@"; }
+        handleNginx() { :; }; handleXray() { :; }; reloadCore() { :; }
+        eval "${RENEW_FN}"
+        renewalTLS'
+}
+renew_calls() { cat "${RENEW_LOG}" 2>/dev/null; }
+renew_fresh() { openssl x509 -in "${RENEW_CRT}" -noout -checkend "${RENEW_WINDOW}" >/dev/null 2>&1; }
+
+renew_setup www.example.test 90 90
+run_renew >/dev/null; assert_equals "0" "$?" "renewalTLS：离到期还远时返回 0"
+assert_equals "" "$(renew_calls)" "renewalTLS：离到期还远时不调 acme.sh"
+
+# 重装途中 tls/ 下还没有证书：按 acme.sh 那份判，装证书留给 installTLS
+renew_setup www.example.test 90 90; rm -f "${RENEW_CRT}"
+run_renew >/dev/null; assert_equals "0" "$?" "renewalTLS：tls/ 下没装、acme.sh 那份离到期还远时返回 0"
+assert_equals "" "$(renew_calls)" "renewalTLS：tls/ 下没装时不在安装中途续期或重装"
+
+# 刚签的短证书：按文件修改时间加 90 天推算会以为还剩 90 天，要按真实到期时间判
+renew_setup www.example.test 3 3
+run_renew >/dev/null; assert_equals "0" "$?" "renewalTLS：3 天后到期的证书进窗口、续期成功"
+assert_contains "$(renew_calls)" "--renew -d www.example.test --ecc --force" "renewalTLS：单域名证书按证书名强制续期"
+renew_fresh; assert_equals "0" "$?" "renewalTLS：续完 tls/ 下是新证书"
+
+renew_setup '*.example.test' 3 3
+run_renew >/dev/null; assert_equals "0" "$?" "renewalTLS：通配符证书续期成功"
+assert_contains "$(renew_calls)" "--renew -d *.example.test" "renewalTLS：通配符证书按 *.父域 续期"
+assert_contains "$(renew_calls)" "--installcert -d *.example.test" "renewalTLS：通配符证书按 *.父域 安装，拿主机名装会被 acme.sh 拒"
+
+renew_setup www.example.test 90 3
+run_renew >/dev/null; assert_equals "0" "$?" "renewalTLS：acme.sh 里已是新证书时只重装"
+assert_equals "0" "$(renew_calls | grep -c -- '--renew')" "renewalTLS：acme.sh 里已是新证书时不再续期"
+renew_fresh; assert_equals "0" "$?" "renewalTLS：重装后 tls/ 下是新证书"
+
+renew_setup www.example.test 3 3
+RENEW_BEFORE=$(cksum <"${RENEW_CRT}")
+RENEW_OUT=$(run_renew noop); assert_equals "1" "$?" "renewalTLS：acme.sh 没换出新证书时返回 1"
+assert_contains "${RENEW_OUT}" "TLS_RENEW_NOT_EXTENDED" "renewalTLS：没换出新证书时报「续期后仍在窗口内」"
+assert_equals "${RENEW_BEFORE}" "$(cksum <"${RENEW_CRT}")" "renewalTLS：续期失败后 tls/ 下还是原来那张"
+assert_equals "0" "$(find "${RENEW_ROOT}/tls" -name '*.renew-bak' | wc -l | tr -d ' ')" "renewalTLS：失败后不留 .renew-bak"
+
+renew_setup www.example.test 3 3
+RENEW_OUT=$(run_renew fail); assert_equals "1" "$?" "renewalTLS：acme.sh 续期失败返回 1"
+assert_contains "${RENEW_OUT}" "TLS_RENEW_ACME_FAILED" "renewalTLS：acme.sh 续期失败时报续期失败"
+
+echo ""
+
 echo ""
 
 # ============================================================================
