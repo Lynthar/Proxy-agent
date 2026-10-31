@@ -216,6 +216,43 @@ getProtocolNameField() {
     fi
 }
 
+# getProtocolEmailSuffix COREKIND ID → 写进 email/name 的协议后缀（账户名形如 "<名>-<后缀>"）
+# 后缀里不含连字符，这样 ${name%-*} 才能无歧义地剥回账户名；改任何 cell 前先对照 initXrayClients / initSingBoxClients
+getProtocolEmailSuffix() {
+    local core="$1" protocolId="$2"
+
+    if [[ "${core}" == "1" ]]; then
+        case "${protocolId}" in
+            0)  echo "VLESS_TCP/TLS_Vision" ;;
+            1)  echo "VLESS_WS" ;;
+            3)  echo "VMess_WS" ;;
+            4)  echo "trojan_tcp" ;;
+            6)  echo "singbox_hysteria2" ;;
+            7)  echo "vless_reality_vision" ;;
+            9)  echo "singbox_tuic" ;;
+            12) echo "VLESS_Reality_XHTTP" ;;
+            *) return 1 ;;
+        esac
+    elif [[ "${core}" == "2" ]]; then
+        case "${protocolId}" in
+            0)  echo "VLESS_TCP/TLS_Vision" ;;
+            1)  echo "VLESS_WS" ;;
+            3)  echo "VMess_WS" ;;
+            4)  echo "Trojan_TCP" ;;
+            6)  echo "singbox_hysteria2" ;;
+            7)  echo "VLESS_Reality_Vision" ;;
+            9)  echo "singbox_tuic" ;;
+            10) echo "singbox_naive" ;;
+            11) echo "VMess_HTTPUpgrade" ;;
+            13) echo "anytls" ;;
+            14) echo "SS2022" ;;
+            *) return 1 ;;
+        esac
+    else
+        return 1
+    fi
+}
+
 # ============================================================================
 # 协议检测与路径
 # ============================================================================

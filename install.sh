@@ -55,7 +55,7 @@ fi
 # 旁路：PROXY_AGENT_NO_BOOTSTRAP / PROXY_AGENT_BOOTSTRAP_REF / PROXY_AGENT_BOOTSTRAP_MODE。
 _lib_health_ok=1
 if [[ -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" || "${BASH_SOURCE[0]}" != "$0" ]]; then
-    for _f in i18n constants utils json-utils system-detect protocol-registry; do
+    for _f in i18n constants utils json-utils system-detect protocol-registry carpool; do
         if [[ ! -f "${_LIB_DIR}/${_f}.sh" ]] || ! bash -n "${_LIB_DIR}/${_f}.sh" 2>/dev/null; then
             _lib_health_ok=
             break
@@ -70,7 +70,7 @@ fi
 if [[ -z "${_lib_health_ok}" && -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
     # 删除可能残留的损坏文件，确保 bootstrap 后是干净状态（避免半新半旧混合）
     if [[ -d "${_LIB_DIR}" ]]; then
-        for _f in i18n constants utils json-utils system-detect protocol-registry; do
+        for _f in i18n constants utils json-utils system-detect protocol-registry carpool; do
             if [[ -f "${_LIB_DIR}/${_f}.sh" ]] && ! bash -n "${_LIB_DIR}/${_f}.sh" 2>/dev/null; then
                 printf '\033[33m[bootstrap] 检测到损坏的 %s/%s.sh，将重新下载\033[0m\n' "${_LIB_DIR}" "${_f}" >&2
                 rm -f "${_LIB_DIR}/${_f}.sh"
@@ -84,7 +84,7 @@ if [[ -z "${_lib_health_ok}" && -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
         local apiUrl="https://api.github.com/repos/Lynthar/Proxy-agent/releases/latest"
         local libDst="${_LIB_FALLBACK_DIR}"
         local langDst="${_LANG_FALLBACK_DIR}"
-        local libFiles=(i18n.sh constants.sh utils.sh json-utils.sh system-detect.sh protocol-registry.sh)
+        local libFiles=(i18n.sh constants.sh utils.sh json-utils.sh system-detect.sh protocol-registry.sh carpool.sh)
         local langFiles=(zh_CN.sh en_US.sh)
         local fetcher tmpDir
 
@@ -319,8 +319,8 @@ fi
 
 # 加载模块（如果存在）
 if [[ -d "${_LIB_DIR}" ]]; then
-    # 加载顺序不可换：i18n → constants → utils → system-detect → json-utils → protocol-registry
-    for _module in i18n constants utils json-utils system-detect protocol-registry; do
+    # 加载顺序不可换：i18n → constants → utils → json-utils → system-detect → protocol-registry → carpool
+    for _module in i18n constants utils json-utils system-detect protocol-registry carpool; do
         if [[ -f "${_LIB_DIR}/${_module}.sh" ]]; then
             # shellcheck source=/dev/null
             source "${_LIB_DIR}/${_module}.sh"
@@ -338,6 +338,7 @@ _required_lib_fns=(
     getProtocolDisplayName
     getProtocolInboundTag
     anyProtocolRequiresTLS
+    carpoolJudge
 )
 _missing_lib_fns=()
 for _fn in "${_required_lib_fns[@]}"; do
@@ -4087,6 +4088,9 @@ handleXray() {
     if [[ "$1" == "start" ]]; then
         removeLegacyAllowInsecure
         ensureRealityMinClientVer
+        ensureCarpoolXray
+    elif [[ "$1" == "stop" ]]; then
+        carpoolCollectBeforeStop
     fi
 
     if [[ -n $(find /bin /usr/bin -name "systemctl") ]] && [[ -n $(find /etc/systemd/system/ -name "xray.service") ]]; then
@@ -5121,6 +5125,7 @@ EOF
 
 # sing-box Tuic安装
 singBoxTuicInstall() {
+    carpoolRefuseIfEnabled
     if ! anyProtocolRequiresTLS "${currentInstallProtocolType}"; then
         echoContent red "\n ---> 由于需要依赖证书，如安装Tuic，请先安装带有TLS标识协议"
         exit 1
@@ -5137,6 +5142,7 @@ singBoxTuicInstall() {
 
 # sing-box hy2安装
 singBoxHysteria2Install() {
+    carpoolRefuseIfEnabled
     if ! anyProtocolRequiresTLS "${currentInstallProtocolType}"; then
         echoContent red "\n ---> 由于需要依赖证书，如安装Hysteria2，请先安装带有TLS标识协议"
         exit 1
@@ -7427,16 +7433,20 @@ customUserEmail() {
     fi
 }
 
-# 把一次账户变更（add UUID EMAIL / delName KEY）按协议注册表应用到全部已装协议；KEY 是去掉协议后缀的
-# 账户名，按名删是因为各协议文件的用户顺序不保证一致。全程 jsonTx 事务：任一文件写失败即整体回滚；
-# 落盘后、reload 前先过内核级校验，校验不过同样回滚——磁盘与在跑服务保持变更前状态。
+# 把一次账户变更（add UUID EMAIL / delName KEY / set FILE）按协议注册表应用到全部已装协议；KEY 是去掉协议后缀的
+# 账户名，按名删是因为各协议文件的用户顺序不保证一致；set 的 FILE 是 {"<协议ID>": [clients…]}，只写里面有的协议，
+# 空数组合法（能否启动由内核校验兜底）。全程 jsonTx 事务：任一文件写失败即整体回滚；落盘后、reload 前过内核级校验。
 applyAccountChangeAllProtocols() {
     local action=$1
     local arg1=$2
     local arg2=$3
 
-    if [[ "${action}" != "add" && "${action}" != "delName" ]]; then
+    if [[ "${action}" != "add" && "${action}" != "delName" && "${action}" != "set" ]]; then
         echoContent red " ---> $(t ACCOUNT_TX_BAD_ACTION "${action}")"
+        return 1
+    fi
+    if [[ "${action}" == "set" ]] && ! jq -e 'type == "object"' "${arg1}" >/dev/null 2>&1; then
+        echoContent red " ---> $(t ACCOUNT_TX_BAD_SET_FILE)"
         return 1
     fi
 
@@ -7465,6 +7475,11 @@ applyAccountChangeAllProtocols() {
         fi
         targetFile=$(getProtocolConfigPath "${protocolId}" "${targetDir}")
         usersPath=$(getProtocolUsersPath "${coreKind}" "${protocolId}")
+        # set 只碰 FILE 里列出的协议，不在里面的连快照都不做
+        if [[ "${action}" == "set" ]]; then
+            clients=$(jq -c --arg k "${protocolId}" '.[$k] // empty' "${arg1}" 2>/dev/null)
+            [[ -z "${clients}" ]] && continue
+        fi
         if [[ -z "${targetFile}" || -z "${usersPath}" || ! -f "${targetFile}" ]]; then
             echoContent red " ---> $(t ACCOUNT_TX_FILE_MISSING) [$(getProtocolDisplayName "${protocolId}")]"
             jsonTxRollback
@@ -7489,6 +7504,8 @@ applyAccountChangeAllProtocols() {
                 jsonTxRollback
                 return 1
             fi
+            newContent=$(jq --argjson newClients "${clients}" "${usersPath} = \$newClients" "${targetFile}" 2>/dev/null)
+        elif [[ "${action}" == "set" ]]; then
             newContent=$(jq --argjson newClients "${clients}" "${usersPath} = \$newClients" "${targetFile}" 2>/dev/null)
         else
             nameField=$(getProtocolNameField "${coreKind}" "${protocolId}")
@@ -7536,6 +7553,7 @@ applyAccountChangeAllProtocols() {
 
 # 添加用户
 addUser() {
+    if carpoolGuardAccountMenu; then return; fi
     read -r -p "请输入要添加的用户数量:" userNum
     echo
     if [[ -z ${userNum} || ${userNum} -le 0 ]]; then
@@ -7567,6 +7585,7 @@ addUser() {
 }
 # 移除用户
 removeUser() {
+    if carpoolGuardAccountMenu; then return; fi
     local userConfigType= delUserKey=
     if [[ -n "${frontingType}" ]]; then
         userConfigType="${frontingType}"
@@ -7618,6 +7637,942 @@ removeUser() {
     manageAccount 1
 }
 
+# ======================= 拼车 =======================
+
+# carpoolLock → 0=拿到 state 读-改-写锁（fd 9，最多等 10 秒）；flock 缺失或超时返回 1。锁只包 state 的读写，不包 reload
+# BusyBox 的 flock 没有 -w，等待用 -n 轮询
+carpoolLock() {
+    local i
+    if ! command -v flock >/dev/null 2>&1; then
+        echoContent red " ---> $(t CARPOOL_FLOCK_MISSING)"
+        return 1
+    fi
+    mkdir -p "${CARPOOL_DIR}"
+    exec 9>>"${CARPOOL_LOCK_FILE}" || return 1
+    for i in $(seq 1 20); do
+        flock -n 9 && return 0
+        sleep 0.5
+    done
+    exec 9>&-
+    return 1
+}
+
+carpoolUnlock() {
+    flock -u 9 2>/dev/null
+    exec 9>&-
+}
+
+# carpoolEnabled → 0=state.json 存在且 enabled
+carpoolEnabled() {
+    local state
+    state=$(carpoolReadState) || return 1
+    [[ "$(jq -r '.enabled' <<<"${state}")" == "true" ]]
+}
+
+# carpoolCurrentClientsMap → {"<ID>": [clients…]}，每个已装拼车协议文件当前的用户数组（按目录扫，不信全局变量）
+carpoolCurrentClientsMap() {
+    local id file usersPath current map="{}"
+    for id in $(carpoolInstalledProtocolsJson "$(scanInstalledProtocols "${XRAY_CONF_DIR}")" | jq -r '.[]'); do
+        file=$(getProtocolConfigPath "${id}" "${XRAY_CONF_DIR}/")
+        usersPath=$(getProtocolUsersPath 1 "${id}")
+        [[ -f "${file}" && -n "${usersPath}" ]] || continue
+        current=$(jq -c "${usersPath} // []" "${file}" 2>/dev/null) || return 1
+        map=$(jq -c --arg k "${id}" --argjson v "${current}" '.[$k] = $v' <<<"${map}") || return 1
+    done
+    printf '%s\n' "${map}"
+}
+
+# ensureCarpoolCron → crontab 里确保有一条 CarpoolTick；按 "install.sh CarpoolTick" 子串判重，车主改过间隔的行不会被再加一条
+ensureCarpoolCron() {
+    local current
+    current=$(crontab -l 2>/dev/null)
+    grep -q -F "${PROXY_AGENT_DIR}/install.sh CarpoolTick" <<<"${current}" && return 0
+    {
+        if [[ -n "${current}" ]]; then printf '%s\n' "${current}"; fi
+        echo "*/5 * * * * PROXY_AGENT_DIR=${PROXY_AGENT_DIR} /bin/bash ${PROXY_AGENT_DIR}/install.sh CarpoolTick >> ${CARPOOL_LOG_FILE} 2>&1"
+    } | crontab - || echoContent yellow " ---> $(t CARPOOL_CRON_FAILED)"
+}
+
+# ensureCarpoolXray → 拼车开着：补齐 policy 统计字段与 12_stats_api.json、确保 cron 行、对账 clients；关着：撤掉前两样。
+# 挂在 handleXray start，绝不 exit：对账失败只打一行，事务已回滚，下个 tick 重试
+ensureCarpoolXray() {
+    local statsFile="${XRAY_CONF_DIR}/12_stats_api.json" policyFile="${XRAY_CONF_DIR}/12_policy.json"
+    local state want
+    if ! state=$(carpoolReadState) || [[ "$(jq -r '.enabled' <<<"${state}")" != "true" ]]; then
+        [[ -f "${statsFile}" ]] && rm -f "${statsFile}"
+        if [[ -f "${policyFile}" ]] && jq -e '.policy.levels."0" | has("statsUserUplink") or has("statsUserDownlink")' "${policyFile}" >/dev/null 2>&1; then
+            jsonModifyFile "${policyFile}" 'del(.policy.levels."0".statsUserUplink, .policy.levels."0".statsUserDownlink)' false
+        fi
+        return 0
+    fi
+    if [[ ! -f "${policyFile}" ]]; then
+        echoContent red " ---> $(t CARPOOL_POLICY_MISSING "${policyFile}")"
+        return 1
+    fi
+    if ! jq -e '.policy.levels."0".statsUserUplink == true and .policy.levels."0".statsUserDownlink == true' "${policyFile}" >/dev/null 2>&1; then
+        if ! jsonModifyFile "${policyFile}" '.policy.levels."0".statsUserUplink = true | .policy.levels."0".statsUserDownlink = true' false; then
+            echoContent red " ---> $(t CARPOOL_ENSURE_WRITE_FAILED "${policyFile}")"
+            return 1
+        fi
+    fi
+    want=$(jq -cn --arg listen "127.0.0.1:$(jq -r '.apiPort' <<<"${state}")" '{stats: {}, api: {tag: "api", listen: $listen, services: ["StatsService"]}}')
+    if [[ "$(jq -Sc . "${statsFile}" 2>/dev/null)" != "$(jq -Sc . <<<"${want}")" ]]; then
+        if ! jsonWriteFile "${statsFile}" "${want}" false; then
+            echoContent red " ---> $(t CARPOOL_ENSURE_WRITE_FAILED "${statsFile}")"
+            return 1
+        fi
+    fi
+    ensureCarpoolCron
+    carpoolReconcile "${state}" >/dev/null || echoContent yellow " ---> $(t CARPOOL_RECONCILE_FAILED)"
+}
+
+# carpoolReconcile STATE → 各协议文件的 clients 对齐到期望值：有差异走账户事务 set；输出 changed / unchanged
+carpoolReconcile() {
+    local map payload tmp
+    map=$(carpoolCurrentClientsMap) || return 1
+    payload=$(carpoolReconcilePayload "$1" "${map}") || return 1
+    if [[ -z "${payload}" ]]; then
+        echo unchanged
+        return 0
+    fi
+    tmp=$(mktemp "${CARPOOL_DIR}/.set.XXXXXX") || return 1
+    printf '%s\n' "${payload}" >"${tmp}"
+    readInstallProtocolType
+    if ! applyAccountChangeAllProtocols set "${tmp}"; then
+        rm -f "${tmp}"
+        return 1
+    fi
+    rm -f "${tmp}"
+    echo changed
+}
+
+# carpoolCollect STATE → 向 StatsService 取一次增量（-reset）累加进 state 并输出；Xray 没在跑原样输出；查询失败返回 1
+carpoolCollect() {
+    local apiPort raw sums
+    if [[ -z $(pgrep -f "xray/xray") ]]; then
+        printf '%s\n' "$1"
+        return 0
+    fi
+    apiPort=$(jq -r '.apiPort' <<<"$1")
+    if ! raw=$(${XRAY_BIN} api statsquery -s "127.0.0.1:${apiPort}" -t 3 -pattern 'user>>>' -reset 2>/dev/null); then
+        return 1
+    fi
+    sums=$(carpoolSumStats "${raw}") || return 1
+    carpoolAddUsage "$1" "${sums}"
+}
+
+# carpoolCollectBeforeStop → handleXray stop 的钩子：拼车开着且 Xray 在跑就先把内存里的计数收进 state（否则随进程丢）
+carpoolCollectBeforeStop() {
+    local state newState
+    state=$(carpoolReadState) || return 0
+    [[ "$(jq -r '.enabled' <<<"${state}")" == "true" ]] || return 0
+    [[ -n $(pgrep -f "xray/xray") ]] || return 0
+    carpoolLock || return 0
+    state=$(carpoolReadState)
+    if newState=$(carpoolCollect "${state}"); then
+        carpoolWriteState "${newState}"
+    fi
+    carpoolUnlock
+}
+
+# carpoolSubscribeMd5 NAME → 该成员订阅文件（与成员页）的文件名 = md5(订阅键 + salt)，与 subscribe 同一算法；无 salt 返回 1
+carpoolSubscribeMd5() {
+    local salt md5
+    [[ -s "${SUBSCRIBE_LOCAL_DIR}/subscribeSalt" ]] || return 1
+    salt=$(cat "${SUBSCRIBE_LOCAL_DIR}/subscribeSalt")
+    md5=$(echo -n "$(carpoolSubscribeKey "$1")${salt}"$'\n' | md5sum | awk '{print $1}')
+    [[ "${md5}" =~ ^[0-9a-f]{32}$ ]] || return 1
+    printf '%s\n' "${md5}"
+}
+
+# carpoolWritePlaceholders STATE → 给每个 disabled 且已不在 inbound 里的成员覆盖写四个占位订阅文件；没有 salt 或订阅目录就跳过
+carpoolWritePlaceholders() {
+    local name reason label md5 present
+    [[ -s "${SUBSCRIBE_LOCAL_DIR}/subscribeSalt" && -d "${SUBSCRIBE_DIR}/default" ]] || return 0
+    present=$(carpoolCurrentClientsMap | jq -c '[.[] | .[]? | (.email // "") | sub("-[^-]*$"; "")]')
+    while IFS=$'\t' read -r name reason; do
+        [[ -z "${name}" ]] && continue
+        jq -e --arg n "${name}" 'index($n) != null' <<<"${present}" >/dev/null 2>&1 && continue
+        md5=$(carpoolSubscribeMd5 "${name}") || continue
+        label=$(carpoolReasonText "${reason}")
+        carpoolPlaceholderDefault "${label}" >"${SUBSCRIBE_DIR}/default/${md5}"
+        carpoolPlaceholderClash "${label}" >"${SUBSCRIBE_DIR}/clashMeta/${md5}"
+        carpoolPlaceholderSingBoxProfile "${label}" >"${SUBSCRIBE_DIR}/sing-box_profiles/${md5}"
+        carpoolPlaceholderSingBoxConfig "${label}" >"${SUBSCRIBE_DIR}/sing-box/${md5}"
+    done < <(jq -r '.members | to_entries[] | select(.value.status == "disabled") | "\(.key)\t\(.value.reason)"' <<<"$1")
+}
+
+# carpoolRefreshSubscribe → 有人恢复后重建订阅文件；只在订阅已装且 salt 已存在时调，否则 subscribe 在 cron 下会交互
+carpoolRefreshSubscribe() {
+    readNginxSubscribe
+    [[ -n "${subscribePort}" && -s "${SUBSCRIBE_LOCAL_DIR}/subscribeSalt" ]] || return 0
+    subscribe false true >/dev/null 2>&1 || true
+}
+
+# carpoolJudgeAndWrite STATE TODAY NOW [EXTRA_EVENTS] → 判定、记事件（EXTRA 在前）、写 state，输出 events；调用方持锁
+carpoolJudgeAndWrite() {
+    local state=$1 verdict events period
+    period=$(carpoolPeriodStart "$2" "$(jq -r '.resetDay' <<<"${state}")")
+    verdict=$(carpoolJudge "${state}" "$(jq -c '.notify' <<<"${state}")" "$2" "${period}")
+    events=$(jq -c --argjson extra "${4:-[]}" '$extra + .events' <<<"${verdict}")
+    state=$(carpoolAppendEvents "$(jq -c --arg now "$3" '.state | .lastTick = $now' <<<"${verdict}")" "${events}" "$3")
+    carpoolWriteState "${state}" || return 1
+    printf '%s\n' "${events}"
+}
+
+# carpoolSettle EVENTS [FORCE_REFRESH] → 放锁之后：对账 clients → 占位 → 有变更就重载 → 有恢复（或 FORCE）就重建订阅。
+# state 从磁盘重读，不用调用方的副本：reload 里的 stop 钩子还会再写一笔
+carpoolSettle() {
+    local events=$1 state result now ev
+    now=$(date '+%F %H:%M')
+    state=$(carpoolReadState) || return 1
+    while read -r ev; do
+        [[ -n "${ev}" ]] && echoContent yellow " ---> ${now} $(carpoolEventText "${ev}")"
+    done < <(jq -c '.[]' <<<"${events}")
+    if ! result=$(carpoolReconcile "${state}"); then
+        echoContent red " ---> ${now} $(t CARPOOL_RECONCILE_FAILED)"
+        carpoolNotifyEvents "$(jq -c '. + [{type: "txFailed"}]' <<<"${events}")"
+        return 1
+    fi
+    carpoolWritePlaceholders "${state}"
+    if [[ "${result}" == "changed" ]]; then
+        reloadCore
+    fi
+    if [[ -n "${2:-}" ]] || jq -e 'any(.type == "restored")' <<<"${events}" >/dev/null 2>&1; then
+        carpoolRefreshSubscribe
+    fi
+    carpoolRenderPages
+    carpoolNotifyEvents "${events}"
+    return 0
+}
+
+# carpoolTelegramSend TEXT → 有合法的 telegram.conf 就发一条纯文本（curl 带超时，正文截到 4000 字符：Bot API 上限 4096）；
+# 没配置静默返回 0，发失败打一行返回 1。失败文案里不放 curl 的原话：它可能带上含 token 的 URL
+carpoolTelegramSend() {
+    local conf token chat resp
+    conf=$(carpoolReadTelegramConf "${CARPOOL_TELEGRAM_FILE}") || return 0
+    token=$(sed -n 1p <<<"${conf}")
+    chat=$(sed -n 2p <<<"${conf}")
+    if ! resp=$(curl -s --connect-timeout 5 -m 15 -X POST "https://api.telegram.org/bot${token}/sendMessage" \
+        --data-urlencode "chat_id=${chat}" --data-urlencode "text=${1:0:4000}" 2>/dev/null); then
+        echoContent yellow " ---> $(t CARPOOL_TG_SEND_FAILED "curl")"
+        return 1
+    fi
+    if ! jq -e '.ok == true' <<<"${resp}" >/dev/null 2>&1; then
+        echoContent yellow " ---> $(t CARPOOL_TG_SEND_FAILED "$(jq -r '.description // "bad response"' <<<"${resp}" 2>/dev/null | head -c 120)")"
+        return 1
+    fi
+    return 0
+}
+
+# carpoolNotifyEvents EVENTS → 事件合成一条消息发出去，每日摘要另发一条；没有 telegram.conf 就什么都不做，失败不影响退出码
+carpoolNotifyEvents() {
+    local state label text today
+    [[ -f "${CARPOOL_TELEGRAM_FILE}" ]] || return 0
+    state=$(carpoolReadState) || return 0
+    label=$(jq -r '.notify.label' <<<"${state}")
+    text=$(carpoolNotifyText "${label}" "$(jq -c 'map(select(.type != "digest"))' <<<"$1")")
+    [[ -n "${text}" ]] && carpoolTelegramSend "${text}"
+    if jq -e 'any(.type == "digest")' <<<"$1" >/dev/null 2>&1; then
+        today=$(jq -r 'map(select(.type == "digest"))[0].date' <<<"$1")
+        carpoolTelegramSend "[${label}]"$'\n'"$(carpoolDigestText "${state}" "${today}")"
+    fi
+    return 0
+}
+
+# carpoolTickExitTrap RC → cron 入口的 EXIT 陷阱：tick 没走完就退出（多半是内核重载失败 exit 1）时发一条
+carpoolTickExitTrap() {
+    [[ "$1" -ne 0 && -z "${_carpoolTickFinished:-}" ]] || return 0
+    local label
+    label=$(carpoolReadState 2>/dev/null | jq -r '.notify.label // "carpool"' 2>/dev/null)
+    carpoolTelegramSend "[${label:-carpool}]"$'\n'"$(t CARPOOL_EVENT_TICK_ABORTED "$1")" || true
+}
+
+# carpoolTick → cron 入口 CarpoolTick（手动跑也行）：采集 → 同步 members.json 即时字段 → 判定写 state（持锁恰好一次）→ settle
+carpoolTick() {
+    local state newState today now installed errors normalized events
+    state=$(carpoolReadState) || return 0
+    [[ "$(jq -r '.enabled' <<<"${state}")" == "true" ]] || return 0
+    today=$(date +%F)
+    now=$(date '+%F %H:%M')
+    if [[ "${coreKind}" != "1" ]]; then
+        echoContent yellow " ---> ${now} $(t CARPOOL_TICK_NOT_XRAY)"
+        carpoolLock || return 0
+        state=$(carpoolReadState)
+        local firstTime=
+        if [[ "$(jq -r '.notified["inactive:core"] // false' <<<"${state}")" != "true" ]]; then
+            carpoolWriteState "$(jq -c '.notified["inactive:core"] = true' <<<"${state}")" && firstTime=1
+        fi
+        carpoolUnlock
+        [[ -n "${firstTime}" ]] && carpoolNotifyEvents '[{"type": "inactive"}]'
+        return 0
+    fi
+    if ! carpoolLock; then
+        echoContent red " ---> ${now} $(t CARPOOL_TICK_LOCK_FAILED)"
+        return 1
+    fi
+    state=$(carpoolReadState)
+    if newState=$(carpoolCollect "${state}"); then
+        state=$(jq -c '.collectFailures = 0' <<<"${newState}")
+    else
+        state=$(jq -c '.collectFailures += 1' <<<"${state}")
+        echoContent yellow " ---> ${now} $(t CARPOOL_TICK_COLLECT_FAILED "$(jq -r '.collectFailures' <<<"${state}")")"
+    fi
+    local membersOk=true fileId notices extra
+    installed=$(scanInstalledProtocols "${XRAY_CONF_DIR}")
+    if errors=$(carpoolValidateMembers "${CARPOOL_MEMBERS_FILE}" "${installed}" "$(carpoolForeignAccounts "${state}" "$(carpoolCurrentClientsMap)")"); then
+        normalized=$(carpoolNormalizeMembers "${CARPOOL_MEMBERS_FILE}" "${installed}")
+        state=$(carpoolSyncLimits "${state}" "${normalized}")
+    else
+        membersOk=false
+        echoContent yellow " ---> ${now} $(t CARPOOL_TICK_MEMBERS_INVALID "${CARPOOL_MEMBERS_FILE}")"
+        echo "${errors}"
+    fi
+    # 文件无效按内容摘要只提醒一次；采集失败满 3 次 / 恢复各一次；每日摘要到点一次
+    fileId=$(md5sum "${CARPOOL_MEMBERS_FILE}" 2>/dev/null | awk '{print $1}')
+    notices=$(carpoolTickNotices "${state}" "${today}" "$((10#$(date +%H)))" "${membersOk}" "${fileId:-missing}")
+    state=$(jq -c '.state' <<<"${notices}")
+    extra=$(jq -c --arg r "$(tr '\n' ';' <<<"${errors}")" '.events | map(if .type == "invalid" then .reasons = $r else . end)' <<<"${notices}")
+    if ! events=$(carpoolJudgeAndWrite "${state}" "${today}" "${now}" "${extra}"); then
+        carpoolUnlock
+        echoContent red " ---> ${now} $(t CARPOOL_TICK_STATE_WRITE_FAILED)"
+        return 1
+    fi
+    carpoolUnlock
+    carpoolSettle "${events}"
+}
+
+# carpoolRefuseIfEnabled → 拼车开着时拒绝切内核与装 6 / 9（它们让计量失真），红字并退出
+carpoolRefuseIfEnabled() {
+    carpoolEnabled || return 0
+    echoContent red " ---> $(t CARPOOL_REFUSE_ENABLED)"
+    exit 1
+}
+
+# carpoolGuardAccountMenu → 拼车开着时 addUser / removeUser 交给配置文件；拦住了返回 0
+carpoolGuardAccountMenu() {
+    carpoolEnabled || return 1
+    echoContent yellow " ---> $(t CARPOOL_ACCOUNTS_MANAGED "${CARPOOL_MEMBERS_FILE}")"
+    manageAccount 1
+}
+
+# carpoolCheckPrerequisites → 开启前的五项检查，逐条打印不满足的原因，任一不满足返回 1
+carpoolCheckPrerequisites() {
+    local ok=1 ver
+    if [[ "${coreKind}" != "1" ]]; then
+        echoContent red " ---> $(t CARPOOL_REQ_XRAY)"
+        ok=
+    else
+        ver=$(${XRAY_BIN} version 2>/dev/null | head -1 | awk '{print $2}')
+        if [[ -z "${ver}" ]] || ! versionGreaterOrEqual "${ver}" "${CARPOOL_XRAY_MIN_VERSION}"; then
+            echoContent red " ---> $(t CARPOOL_REQ_XRAY_VERSION "${ver:-?}" "${CARPOOL_XRAY_MIN_VERSION}")"
+            ok=
+        fi
+    fi
+    if [[ "${currentInstallProtocolType}" == *",6,"* || "${currentInstallProtocolType}" == *",9,"* ]]; then
+        echoContent red " ---> $(t CARPOOL_REQ_NO_SIDECAR)"
+        ok=
+    fi
+    if ! command -v flock >/dev/null 2>&1; then
+        echoContent red " ---> $(t CARPOOL_FLOCK_MISSING)"
+        ok=
+    fi
+    if ! ensureCronService >/dev/null 2>&1; then
+        echoContent red " ---> $(t CARPOOL_REQ_CROND)"
+        ok=
+    fi
+    [[ -n "${ok}" ]]
+}
+
+# carpoolPortFree PORT → 0=本机没有进程在监听该 TCP 端口（没有 lsof 就当空闲）
+carpoolPortFree() {
+    command -v lsof >/dev/null 2>&1 || return 0
+    ! lsof -i "tcp:$1" 2>/dev/null | grep -q LISTEN
+}
+
+# carpoolPickApiPort → 10000–30000 里随机取一个没被监听的端口给统计 API
+carpoolPickApiPort() {
+    local port i
+    for i in $(seq 1 20); do
+        port=$(randomPort)
+        if carpoolPortFree "${port}"; then
+            printf '%s\n' "${port}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# carpoolAllAccounts CURRENT_MAP → {name: uuid}，inbound 里全部账号
+carpoolAllAccounts() {
+    carpoolForeignAccounts '{"members": {}}' "$1"
+}
+
+# carpoolFillUuids STATE → uuid 为空的成员各生成一个（xray uuid）
+carpoolFillUuids() {
+    local state=$1 name u
+    for name in $(jq -r '.members | to_entries[] | select(.value.uuid == "") | .key' <<<"${state}"); do
+        u=$(${XRAY_BIN} uuid 2>/dev/null)
+        if ! carpoolIsValidUUID "${u}"; then
+            echoContent red " ---> $(t CARPOOL_UUID_GEN_FAILED)"
+            return 1
+        fi
+        state=$(jq -c --arg n "${name}" --arg u "${u}" '.members[$n].uuid = $u' <<<"${state}")
+    done
+    printf '%s\n' "${state}"
+}
+
+# carpoolRemoveCron → 删掉 CarpoolTick 的 cron 行
+carpoolRemoveCron() {
+    local current
+    current=$(crontab -l 2>/dev/null) || return 0
+    grep -v -F "${PROXY_AGENT_DIR}/install.sh CarpoolTick" <<<"${current}" | crontab - || echoContent yellow " ---> $(t CRON_REMOVE_FAILED)"
+}
+
+# carpoolRemoveSubscriptionFiles NAME → 删掉该成员的五个订阅文件（含占位）与成员页
+carpoolRemoveSubscriptionFiles() {
+    local md5 dir
+    md5=$(carpoolSubscribeMd5 "$1") || return 0
+    for dir in default clashMeta clashMetaProfiles sing-box sing-box_profiles carpool; do
+        rm -f "${SUBSCRIBE_DIR}/${dir}/${md5}"
+    done
+}
+
+# carpoolEnable → 检查 → 没有 members.json 就按现有账号播种 → 写 state → reloadCore（start 钩子写片段、cron 行、对账）→ 第一次 tick
+carpoolEnable() {
+    local installed map accounts seed fileMembers errors normalized state today apiPort
+    if carpoolEnabled; then
+        echoContent yellow " ---> $(t CARPOOL_ALREADY_ENABLED)"
+        return 0
+    fi
+    carpoolCheckPrerequisites || return 1
+    mkdir -p "${CARPOOL_DIR}" && chmod 700 "${CARPOOL_DIR}"
+    installed=$(scanInstalledProtocols "${XRAY_CONF_DIR}")
+    map=$(carpoolCurrentClientsMap) || return 1
+    accounts=$(carpoolAllAccounts "${map}")
+    if [[ ! -f "${CARPOOL_MEMBERS_FILE}" ]]; then
+        seed=$(carpoolSeedMembers "$(jq -c 'to_entries | map({name: .key, uuid: .value})' <<<"${accounts}")")
+        if ! jsonWriteFile "${CARPOOL_MEMBERS_FILE}" "${seed}" false; then
+            echoContent red " ---> $(t CARPOOL_ENSURE_WRITE_FAILED "${CARPOOL_MEMBERS_FILE}")"
+            return 1
+        fi
+        echoContent green " ---> $(t CARPOOL_SEEDED "${CARPOOL_MEMBERS_FILE}" "$(jq 'length' <<<"${accounts}")")"
+    fi
+    fileMembers=$(jq -c '{members: (.members // {})}' "${CARPOOL_MEMBERS_FILE}" 2>/dev/null) || fileMembers='{"members": {}}'
+    if ! errors=$(carpoolValidateMembers "${CARPOOL_MEMBERS_FILE}" "${installed}" "$(carpoolForeignAccounts "${fileMembers}" "${map}")"); then
+        echoContent red " ---> $(t CARPOOL_MEMBERS_INVALID "${CARPOOL_MEMBERS_FILE}")"
+        echo "${errors}"
+        return 1
+    fi
+    normalized=$(carpoolNormalizeMembers "${CARPOOL_MEMBERS_FILE}" "${installed}")
+    today=$(date +%F)
+    if state=$(carpoolReadState); then
+        # 之前关过：沿用计数；旧的 apiPort 被别人占了就换一个
+        state=$(jq -c '.enabled = true' <<<"${state}")
+        if ! carpoolPortFree "$(jq -r '.apiPort' <<<"${state}")"; then
+            apiPort=$(carpoolPickApiPort) || { echoContent red " ---> $(t CARPOOL_API_PORT_FAILED)"; return 1; }
+            state=$(jq -c --argjson p "${apiPort}" '.apiPort = $p' <<<"${state}")
+        fi
+    else
+        apiPort=$(carpoolPickApiPort) || { echoContent red " ---> $(t CARPOOL_API_PORT_FAILED)"; return 1; }
+        state=$(carpoolInitialState "${apiPort}" "$(carpoolPeriodStart "${today}" "$(jq -r '.resetDay' <<<"${normalized}")")")
+    fi
+    carpoolLock || return 1
+    state=$(carpoolMergeState "${state}" "${normalized}" "${accounts}")
+    if ! state=$(carpoolFillUuids "${state}"); then
+        carpoolUnlock
+        return 1
+    fi
+    if ! carpoolWriteState "${state}"; then
+        carpoolUnlock
+        echoContent red " ---> $(t CARPOOL_TICK_STATE_WRITE_FAILED)"
+        return 1
+    fi
+    carpoolUnlock
+    reloadCore
+    carpoolTick
+    echoContent green " ---> $(t CARPOOL_ENABLED)"
+    echoContent yellow " ---> $(t CARPOOL_ENABLED_HINT "${CARPOOL_MEMBERS_FILE}")"
+}
+
+# carpoolDisable → 关闭 = 不再计量：Xray 在跑就先采一次，超额停用者恢复、到期与手动停用者保持（可选一并恢复）；
+# 确认之后从重读 state 到翻 enabled=false 整段持锁（对账事务不 reload），事务失败整体不关闭
+carpoolDisable() {
+    local state groups today answer restoreAll=false kept
+    if ! carpoolEnabled; then
+        echoContent yellow " ---> $(t CARPOOL_NOT_ENABLED)"
+        return 0
+    fi
+    carpoolCollectBeforeStop
+    state=$(carpoolReadState) || return 1
+    today=$(date +%F)
+    groups=$(carpoolCloseGroups "${state}" "${today}")
+    kept=$(jq -r '(.expiredNow + .keepExpired + .keepManual) | join(", ")' <<<"${groups}")
+    echoContent skyBlue "\n$(t CARPOOL_CLOSE_TITLE)"
+    echoContent yellow " ---> $(t CARPOOL_CLOSE_WILL_RESTORE): $(jq -r '.restore | join(", ") | if . == "" then "-" else . end' <<<"${groups}")"
+    echoContent yellow " ---> $(t CARPOOL_CLOSE_KEEP_DISABLED): ${kept:--}"
+    echoContent yellow " ---> $(t CARPOOL_CLOSE_UNTOUCHED): $(jq -r '[.members | to_entries[] | select(.value.status == "active") | .key] | join(", ") | if . == "" then "-" else . end' <<<"${state}")"
+    read -r -p "$(t CARPOOL_CLOSE_CONFIRM)" answer
+    if ! isYesInput "${answer}"; then
+        echoContent yellow " ---> $(t CARPOOL_CANCELLED)"
+        return 0
+    fi
+    if [[ -n "${kept}" ]]; then
+        read -r -p "$(t CARPOOL_CLOSE_RESTORE_ALL)" answer
+        isYesInput "${answer}" && restoreAll=true
+    fi
+    carpoolLock || return 1
+    state=$(carpoolReadState)
+    groups=$(carpoolCloseGroups "${state}" "${today}")
+    state=$(carpoolApplyClose "${state}" "${groups}" "${restoreAll}")
+    if ! carpoolWriteState "${state}" || ! carpoolReconcile "${state}" >/dev/null; then
+        carpoolUnlock
+        echoContent red " ---> $(t CARPOOL_CLOSE_TX_FAILED)"
+        return 1
+    fi
+    state=$(jq -c '.enabled = false | .pageEnabled = false | .pageToken = ""' <<<"${state}")
+    if ! carpoolWriteState "${state}"; then
+        carpoolUnlock
+        echoContent red " ---> $(t CARPOOL_TICK_STATE_WRITE_FAILED)"
+        return 1
+    fi
+    carpoolUnlock
+    carpoolRemoveCron
+    carpoolRemovePages
+    carpoolEnsureNginxLocation off
+    reloadCore
+    carpoolRefreshSubscribe
+    carpoolWritePlaceholders "$(carpoolReadState)"
+    local restoredList keptList
+    restoredList=$(jq -r --argjson all "${restoreAll}" '(.restore + (if $all then .keepExpired + .keepManual else [] end)) | join(", ") | if . == "" then "-" else . end' <<<"${groups}")
+    keptList=$(jq -r --argjson all "${restoreAll}" '(.expiredNow + (if $all then [] else .keepExpired + .keepManual end)) | join(", ") | if . == "" then "-" else . end' <<<"${groups}")
+    echoContent green " ---> $(t CARPOOL_DISABLED)"
+    echoContent yellow " ---> $(t CARPOOL_CLOSE_WILL_RESTORE): ${restoredList}"
+    echoContent yellow " ---> $(t CARPOOL_CLOSE_KEEP_DISABLED): ${keptList}"
+    echoContent yellow " ---> $(t CARPOOL_DISABLED_HINT)"
+    carpoolNotifyEvents "$(jq -cn --arg r "${restoredList}" --arg k "${keptList}" '[{type: "closed", restored: $r, kept: $k}]')"
+}
+
+# carpoolApply → 应用 members.json：校验 → 显示差异 → 删除 / 换 UUID 逐项确认（非 tty 拒绝）→ 持锁重建成员表并判定 → settle
+carpoolApply() {
+    local installed map fileMembers errors normalized state accounts diff answer events name force=
+    if ! carpoolEnabled; then
+        echoContent yellow " ---> $(t CARPOOL_NOT_ENABLED)"
+        return 1
+    fi
+    installed=$(scanInstalledProtocols "${XRAY_CONF_DIR}")
+    map=$(carpoolCurrentClientsMap) || return 1
+    fileMembers=$(jq -c '{members: (.members // {})}' "${CARPOOL_MEMBERS_FILE}" 2>/dev/null) || fileMembers='{"members": {}}'
+    if ! errors=$(carpoolValidateMembers "${CARPOOL_MEMBERS_FILE}" "${installed}" "$(carpoolForeignAccounts "${fileMembers}" "${map}")"); then
+        echoContent red " ---> $(t CARPOOL_MEMBERS_INVALID "${CARPOOL_MEMBERS_FILE}")"
+        echo "${errors}"
+        return 1
+    fi
+    normalized=$(carpoolNormalizeMembers "${CARPOOL_MEMBERS_FILE}" "${installed}")
+    state=$(carpoolReadState) || return 1
+    accounts=$(carpoolAllAccounts "${map}")
+    diff=$(carpoolDiffMembers "${state}" "${normalized}" "${accounts}")
+    if carpoolDiffIsEmpty "${diff}"; then
+        echoContent green " ---> $(t CARPOOL_APPLY_NO_CHANGES)"
+        return 0
+    fi
+    echoContent skyBlue "\n$(t CARPOOL_APPLY_TITLE)"
+    carpoolDiffText "${diff}"
+    if carpoolDiffNeedsConfirm "${diff}"; then
+        if [[ ! -t 0 ]]; then
+            echoContent red " ---> $(t CARPOOL_APPLY_NEEDS_TTY)"
+            return 1
+        fi
+        for name in $(jq -r '.removed[]' <<<"${diff}"); do
+            read -r -p "$(t CARPOOL_APPLY_CONFIRM_REMOVE "${name}")" answer
+            if ! isYesInput "${answer}"; then
+                echoContent yellow " ---> $(t CARPOOL_CANCELLED)"
+                return 0
+            fi
+        done
+        for name in $(jq -r '.uuid[]' <<<"${diff}"); do
+            read -r -p "$(t CARPOOL_APPLY_CONFIRM_UUID "${name}")" answer
+            if ! isYesInput "${answer}"; then
+                echoContent yellow " ---> $(t CARPOOL_CANCELLED)"
+                return 0
+            fi
+        done
+        force=1
+    fi
+    jq -e '(.added | length) > 0' <<<"${diff}" >/dev/null 2>&1 && force=1
+    carpoolLock || return 1
+    state=$(carpoolMergeState "$(carpoolReadState)" "${normalized}" "${accounts}")
+    if ! state=$(carpoolFillUuids "${state}"); then
+        carpoolUnlock
+        return 1
+    fi
+    local summary applied
+    summary=$(carpoolDiffText "$(jq -c '.unmanaged = []' <<<"${diff}")" | paste -sd ';' - | sed 's/;/ · /g')
+    applied=$(jq -cn --arg s "${summary}" '[{type: "applied", summary: $s}]')
+    if ! events=$(carpoolJudgeAndWrite "${state}" "$(date +%F)" "$(date '+%F %H:%M')" "${applied}"); then
+        carpoolUnlock
+        echoContent red " ---> $(t CARPOOL_TICK_STATE_WRITE_FAILED)"
+        return 1
+    fi
+    carpoolUnlock
+    for name in $(jq -r '.removed[]' <<<"${diff}"); do
+        carpoolRemoveSubscriptionFiles "${name}"
+    done
+    carpoolSettle "${events}" "${force}" || return 1
+    echoContent green " ---> $(t CARPOOL_APPLIED)"
+}
+
+# carpoolResetUsage → 菜单：清零单人或全员，随后判定一次（因超额停用的随之恢复）
+carpoolResetUsage() {
+    local choice name="" state events
+    if ! carpoolEnabled; then
+        echoContent yellow " ---> $(t CARPOOL_NOT_ENABLED)"
+        return 1
+    fi
+    echoContent yellow "1.$(t CARPOOL_RESET_ALL)"
+    echoContent yellow "2.$(t CARPOOL_RESET_ONE)"
+    read -r -p "$(t CARPOOL_MENU_PROMPT)" choice
+    case "${choice}" in
+        1) ;;
+        2)
+            read -r -p "$(t CARPOOL_RESET_NAME_PROMPT)" name
+            if ! carpoolIsValidMemberName "${name}" || ! jq -e --arg n "${name}" '.members[$n]' <<<"$(carpoolReadState)" >/dev/null 2>&1; then
+                echoContent red " ---> $(t CARPOOL_RESET_NOT_MEMBER "${name}")"
+                return 1
+            fi
+            ;;
+        *)
+            echoContent red " ---> $(t CARPOOL_MENU_BAD_CHOICE)"
+            return 1
+            ;;
+    esac
+    carpoolLock || return 1
+    state=$(carpoolResetUsageState "$(carpoolReadState)" "${name}")
+    if ! events=$(carpoolJudgeAndWrite "${state}" "$(date +%F)" "$(date '+%F %H:%M')"); then
+        carpoolUnlock
+        echoContent red " ---> $(t CARPOOL_TICK_STATE_WRITE_FAILED)"
+        return 1
+    fi
+    carpoolUnlock
+    carpoolSettle "${events}" || return 1
+    echoContent green " ---> $(t CARPOOL_RESET_DONE)"
+}
+
+# carpoolShowUsage → 菜单：文本表（与页面同一份数据）
+carpoolShowUsage() {
+    local state n u q e st others
+    if ! state=$(carpoolReadState); then
+        echoContent yellow " ---> $(t CARPOOL_NOT_ENABLED)"
+        return 0
+    fi
+    echoContent skyBlue "\n$(jq -r '.notify.label' <<<"${state}") · $(if [[ "$(jq -r '.enabled' <<<"${state}")" == "true" ]]; then t CARPOOL_USAGE_STATE_ON; else t CARPOOL_USAGE_STATE_OFF; fi)"
+    echoContent yellow " ---> $(t CARPOOL_PAGE_PERIOD) $(jq -r '.period' <<<"${state}") · $(t CARPOOL_PAGE_NEXT_RESET) $(carpoolNextPeriodStart "$(date +%F)" "$(jq -r '.resetDay' <<<"${state}")") · $(t CARPOOL_USAGE_LAST_TICK) $(jq -r '.lastTick | if . == "" then "-" else . end' <<<"${state}")\n"
+    printf '%-24s %-12s %-12s %-12s %s\n' "$(t CARPOOL_PAGE_NAME)" "$(t CARPOOL_PAGE_USED)" "$(t CARPOOL_PAGE_QUOTA)" "$(t CARPOOL_PAGE_EXPIRE)" "$(t CARPOOL_PAGE_STATUS)"
+    while IFS=$'\t' read -r n u q e st; do
+        [[ -n "${n}" ]] && printf '%-24s %-12s %-12s %-12s %s\n' "${n}" "${u}" "${q}" "${e}" "${st}"
+    done < <(carpoolUsageTable "${state}")
+    others=$(carpoolForeignAccounts "${state}" "$(carpoolCurrentClientsMap)" | jq -r 'keys | join(", ")')
+    [[ -n "${others}" ]] && echoContent yellow "\n ---> $(t CARPOOL_PAGE_OTHERS): ${others}"
+    echo
+}
+
+# carpoolWritePage FILE HTML → mktemp + mv 原子落盘，644（nginx 要读）
+carpoolWritePage() {
+    local tmp
+    tmp=$(mktemp "${CARPOOL_PAGE_DIR}/.page.XXXXXX") || return 1
+    if ! printf '%s\n' "$2" >"${tmp}"; then
+        rm -f "${tmp}"
+        return 1
+    fi
+    chmod 644 "${tmp}"
+    mv -f "${tmp}" "$1"
+}
+
+# carpoolRemovePages → 清空页面目录（只放页面，所以整目录清）
+carpoolRemovePages() {
+    [[ -d "${CARPOOL_PAGE_DIR}" ]] || return 0
+    find "${CARPOOL_PAGE_DIR}" -maxdepth 1 -type f -delete
+}
+
+# carpoolReloadNginx → 配置已过 nginx -t 之后让它生效：在跑就 reload，没在跑就 start
+carpoolReloadNginx() {
+    if [[ -n $(pgrep -x "nginx") ]]; then
+        nginx -s reload >/dev/null 2>&1 && return 0
+    fi
+    handleNginx start
+}
+
+# carpoolEnsureNginxLocation on|off → subscribe.conf 里加 / 删页面的 location 块（按标记判重）；
+# 改完过 nginx -t，不过就还原，不动订阅现有 location 的形状。块经临时文件喂给 awk：BSD awk 的 -v 不吃多行串
+carpoolEnsureNginxLocation() {
+    local conf="${nginxConfigPath}subscribe.conf" has= blockFile
+    [[ -f "${conf}" ]] || return 0
+    grep -q '# carpool-page-begin' "${conf}" && has=1
+    if [[ "$1" == "on" && -z "${has}" ]]; then
+        blockFile=$(mktemp "${CARPOOL_DIR}/.nginx.XXXXXX") || return 1
+        carpoolNginxLocationBlock "${CARPOOL_PAGE_DIR}" >"${blockFile}"
+        cp -f "${conf}" "${conf}.carpool.bak"
+        awk -v f="${blockFile}" '/^    location \/ \{/ && !done { while ((getline line < f) > 0) print line; close(f); done = 1 } { print }' "${conf}.carpool.bak" >"${conf}" || { mv -f "${conf}.carpool.bak" "${conf}"; rm -f "${blockFile}"; return 1; }
+        rm -f "${blockFile}"
+    elif [[ "$1" == "off" && -n "${has}" ]]; then
+        cp -f "${conf}" "${conf}.carpool.bak"
+        sed '/# carpool-page-begin/,/# carpool-page-end/d' "${conf}.carpool.bak" >"${conf}" || { mv -f "${conf}.carpool.bak" "${conf}"; return 1; }
+    else
+        return 0
+    fi
+    if nginx -t >/dev/null 2>&1; then
+        rm -f "${conf}.carpool.bak"
+        carpoolReloadNginx
+    else
+        mv -f "${conf}.carpool.bak" "${conf}"
+        echoContent red " ---> $(t CARPOOL_PAGE_NGINX_FAILED)"
+        return 1
+    fi
+}
+
+# carpoolPendingText STATE → 页面顶部的提示：members.json 与 state 有差异就列出来，文件无效就说明；都没有输出空
+carpoolPendingText() {
+    local installed map fileMembers normalized diff
+    installed=$(scanInstalledProtocols "${XRAY_CONF_DIR}")
+    map=$(carpoolCurrentClientsMap) || return 0
+    fileMembers=$(jq -c '{members: (.members // {})}' "${CARPOOL_MEMBERS_FILE}" 2>/dev/null) || fileMembers='{"members": {}}'
+    if ! carpoolValidateMembers "${CARPOOL_MEMBERS_FILE}" "${installed}" "$(carpoolForeignAccounts "${fileMembers}" "${map}")" >/dev/null; then
+        t CARPOOL_PAGE_FILE_INVALID
+        echo
+        return 0
+    fi
+    normalized=$(carpoolNormalizeMembers "${CARPOOL_MEMBERS_FILE}" "${installed}")
+    diff=$(carpoolDiffMembers "$1" "${normalized}" "$(carpoolAllAccounts "${map}")")
+    carpoolDiffIsEmpty "${diff}" && return 0
+    t CARPOOL_PAGE_PENDING "$(carpoolDiffText "$(jq -c '.unmanaged = []' <<<"${diff}")" | paste -sd ';' - | sed 's/;/ · /g')"
+    echo
+}
+
+# carpoolRenderPages → 页面开着就重生成车主页与成员页（期望集合之外的文件删掉），并确保 nginx location 在；关着就清空目录
+carpoolRenderPages() {
+    local state token today now meta others pending name md5 html keep=() file base
+    state=$(carpoolReadState) || return 0
+    if [[ "$(jq -r '.enabled and .pageEnabled' <<<"${state}")" != "true" ]]; then
+        carpoolRemovePages
+        return 0
+    fi
+    token=$(jq -r '.pageToken' <<<"${state}")
+    [[ "${token}" =~ ^[0-9a-f]{32,64}$ ]] || return 1
+    mkdir -p "${CARPOOL_PAGE_DIR}" && chmod 755 "${CARPOOL_PAGE_DIR}"
+    today=$(date +%F)
+    now=$(date '+%F %H:%M')
+    meta=$(jq -c '{resetDay, notify}' <<<"${state}")
+    others=$(carpoolForeignAccounts "${state}" "$(carpoolCurrentClientsMap)" | jq -c 'keys')
+    pending=$(carpoolPendingText "${state}")
+    html=$(carpoolRenderOwnerPage "${state}" "${meta}" "${today}" "${now}" "${others}" "${pending}") || return 1
+    if ! carpoolWritePage "${CARPOOL_PAGE_DIR}/${token}" "${html}"; then
+        echoContent red " ---> $(t CARPOOL_PAGE_WRITE_FAILED "${CARPOOL_PAGE_DIR}/${token}")"
+        return 1
+    fi
+    keep+=("${token}")
+    for name in $(jq -r '.members | keys_unsorted[]' <<<"${state}"); do
+        md5=$(carpoolSubscribeMd5 "${name}") || continue
+        html=$(carpoolRenderMemberPage "${state}" "${meta}" "${name}" "${today}" "${now}") || continue
+        carpoolWritePage "${CARPOOL_PAGE_DIR}/${md5}" "${html}" && keep+=("${md5}")
+    done
+    while IFS= read -r file; do
+        base=${file##*/}
+        [[ " ${keep[*]} " == *" ${base} "* ]] || find "${CARPOOL_PAGE_DIR}" -maxdepth 1 -type f -name "${base}" -delete
+    done < <(find "${CARPOOL_PAGE_DIR}" -maxdepth 1 -type f)
+    carpoolEnsureNginxLocation on
+}
+
+# carpoolPageUrlBase → 页面链接前缀，与订阅同一域名 / 端口 / 协议；订阅没装返回 1
+carpoolPageUrlBase() {
+    local domain
+    readNginxSubscribe
+    [[ -n "${subscribePort}" ]] || return 1
+    if [[ "${subscribeType}" == "http" ]]; then
+        domain="$(getPublicIP):${subscribePort}"
+    else
+        domain="${currentHost}:${subscribePort}"
+    fi
+    printf '%s://%s/s/carpool/\n' "${subscribeType}" "${domain}"
+}
+
+# carpoolShowPageLinks → 打印车主页与各成员页链接
+carpoolShowPageLinks() {
+    local state base name md5
+    state=$(carpoolReadState) || return 1
+    if [[ "$(jq -r '.pageEnabled' <<<"${state}")" != "true" ]]; then
+        echoContent yellow " ---> $(t CARPOOL_PAGE_STATUS_OFF)"
+        return 0
+    fi
+    if ! base=$(carpoolPageUrlBase); then
+        echoContent red " ---> $(t CARPOOL_PAGE_NEEDS_SUBSCRIBE)"
+        return 1
+    fi
+    echoContent green " ---> $(t CARPOOL_PAGE_OWNER_LINK): ${base}$(jq -r '.pageToken' <<<"${state}")"
+    if [[ ! -s "${SUBSCRIBE_LOCAL_DIR}/subscribeSalt" ]]; then
+        echoContent yellow " ---> $(t CARPOOL_PAGE_NO_SALT)"
+        return 0
+    fi
+    for name in $(jq -r '.members | keys_unsorted[]' <<<"${state}"); do
+        md5=$(carpoolSubscribeMd5 "${name}") || continue
+        echoContent yellow " ---> $(t CARPOOL_PAGE_MEMBER_LINK) ${name}: ${base}${md5}"
+    done
+}
+
+# carpoolPageSetToken TOKEN|"" → 持锁改 state 的 pageEnabled / pageToken（空串即关闭）
+carpoolPageSetToken() {
+    local state
+    carpoolLock || return 1
+    state=$(jq -c --arg tk "$1" '.pageToken = $tk | .pageEnabled = ($tk != "")' <<<"$(carpoolReadState)")
+    if ! carpoolWriteState "${state}"; then
+        carpoolUnlock
+        echoContent red " ---> $(t CARPOOL_TICK_STATE_WRITE_FAILED)"
+        return 1
+    fi
+    carpoolUnlock
+}
+
+# carpoolPageEnable → 开启页面：要订阅已装；HTTP 订阅提示一次；生成 32 位十六进制令牌，渲染并发布
+carpoolPageEnable() {
+    local token
+    if ! carpoolEnabled; then
+        echoContent yellow " ---> $(t CARPOOL_NOT_ENABLED)"
+        return 1
+    fi
+    readNginxSubscribe
+    if [[ -z "${subscribePort}" ]]; then
+        echoContent red " ---> $(t CARPOOL_PAGE_NEEDS_SUBSCRIBE)"
+        return 1
+    fi
+    [[ "${subscribeType}" == "http" ]] && echoContent yellow " ---> $(t CARPOOL_PAGE_HTTP_WARNING)"
+    token=$(openssl rand -hex 16 2>/dev/null)
+    [[ "${token}" =~ ^[0-9a-f]{32}$ ]] || return 1
+    carpoolPageSetToken "${token}" || return 1
+    carpoolRenderPages || return 1
+    echoContent green " ---> $(t CARPOOL_PAGE_STATUS_ON)"
+    carpoolShowPageLinks
+}
+
+# carpoolPageDisable → 关闭页面：删文件、撤 location、清 state 里的令牌
+carpoolPageDisable() {
+    carpoolPageSetToken "" || return 1
+    carpoolRemovePages
+    carpoolEnsureNginxLocation off
+    echoContent green " ---> $(t CARPOOL_PAGE_DISABLED)"
+}
+
+# carpoolTelegramMask → 配置状态一行（只露 token 的数字段，不露密钥）
+carpoolTelegramMask() {
+    local conf
+    if conf=$(carpoolReadTelegramConf "${CARPOOL_TELEGRAM_FILE}"); then
+        printf '%s (%s:*** → %s)\n' "$(t CARPOOL_TG_STATUS_ON)" "$(sed -n 1p <<<"${conf}" | cut -d: -f1)" "$(sed -n 2p <<<"${conf}")"
+    else
+        t CARPOOL_TG_STATUS_OFF
+        echo
+    fi
+}
+
+# carpoolTelegramConfigure → 读 token（不回显）与 chat id，格式校验后写 telegram.conf（0600），再发一条测试消息
+carpoolTelegramConfigure() {
+    local token chat
+    read -r -s -p "$(t CARPOOL_TG_TOKEN_PROMPT)" token
+    echo
+    if ! [[ "${token}" =~ ^[0-9]{6,12}:[A-Za-z0-9_-]{30,}$ ]]; then
+        echoContent red " ---> $(t CARPOOL_TG_BAD_TOKEN)"
+        return 1
+    fi
+    read -r -p "$(t CARPOOL_TG_CHAT_PROMPT)" chat
+    if ! [[ "${chat}" =~ ^-?[0-9]{1,20}$ ]]; then
+        echoContent red " ---> $(t CARPOOL_TG_BAD_CHAT)"
+        return 1
+    fi
+    mkdir -p "${CARPOOL_DIR}" && chmod 700 "${CARPOOL_DIR}"
+    (umask 077 && printf 'TG_BOT_TOKEN=%s\nTG_CHAT_ID=%s\n' "${token}" "${chat}" >"${CARPOOL_TELEGRAM_FILE}") || return 1
+    chmod 600 "${CARPOOL_TELEGRAM_FILE}"
+    echoContent green " ---> $(t CARPOOL_TG_SAVED "${CARPOOL_TELEGRAM_FILE}")"
+    carpoolTelegramTest
+}
+
+# carpoolTelegramTest → 发一条测试消息
+carpoolTelegramTest() {
+    local label
+    if ! carpoolReadTelegramConf "${CARPOOL_TELEGRAM_FILE}" >/dev/null; then
+        echoContent yellow " ---> $(t CARPOOL_TG_STATUS_OFF)"
+        return 1
+    fi
+    label=$(carpoolReadState 2>/dev/null | jq -r '.notify.label // empty' 2>/dev/null)
+    if carpoolTelegramSend "[${label:-$(t CARPOOL_DEFAULT_LABEL)}]"$'\n'"$(t CARPOOL_TG_TEST_TEXT)"; then
+        echoContent green " ---> $(t CARPOOL_TG_SENT)"
+    fi
+}
+
+# carpoolTelegramDisable → 删掉 telegram.conf
+carpoolTelegramDisable() {
+    rm -f "${CARPOOL_TELEGRAM_FILE}"
+    echoContent green " ---> $(t CARPOOL_TG_DISABLED "${CARPOOL_TELEGRAM_FILE}")"
+}
+
+# carpoolPageMenu → 拼车管理 → 页面与通知
+carpoolPageMenu() {
+    local choice pageOn=
+    [[ "$(carpoolReadState 2>/dev/null | jq -r '.pageEnabled' 2>/dev/null)" == "true" ]] && pageOn=1
+    echoContent skyBlue "\n$(t CARPOOL_PAGE_TITLE)"
+    echoContent yellow " ---> $(if [[ -n "${pageOn}" ]]; then t CARPOOL_PAGE_STATUS_ON; else t CARPOOL_PAGE_STATUS_OFF; fi) · $(carpoolTelegramMask)"
+    echoContent skyBlue "=============================================================="
+    if [[ -n "${pageOn}" ]]; then
+        echoContent yellow "1.$(t CARPOOL_PAGE_OFF)"
+    else
+        echoContent yellow "1.$(t CARPOOL_PAGE_ON)"
+    fi
+    echoContent yellow "2.$(t CARPOOL_PAGE_LINKS)"
+    echoContent yellow "3.$(t CARPOOL_PAGE_REGEN)"
+    echoContent yellow "4.$(t CARPOOL_TG_CONFIGURE)"
+    echoContent yellow "5.$(t CARPOOL_TG_TEST)"
+    echoContent yellow "6.$(t CARPOOL_TG_DISABLE)"
+    echoContent skyBlue "=============================================================="
+    read -r -p "$(t CARPOOL_MENU_PROMPT)" choice
+    case "${choice}" in
+        1) if [[ -n "${pageOn}" ]]; then carpoolPageDisable; else carpoolPageEnable; fi ;;
+        2) carpoolShowPageLinks ;;
+        3)
+            if [[ -z "${pageOn}" ]]; then
+                echoContent yellow " ---> $(t CARPOOL_PAGE_STATUS_OFF)"
+            elif carpoolPageEnable; then
+                echoContent yellow " ---> $(t CARPOOL_PAGE_TOKEN_REGENERATED)"
+            fi
+            ;;
+        4) carpoolTelegramConfigure ;;
+        5) carpoolTelegramTest ;;
+        6) carpoolTelegramDisable ;;
+        *) echoContent red " ---> $(t CARPOOL_MENU_BAD_CHOICE)" ;;
+    esac
+}
+
+# carpoolMenu → 账号管理 → 拼车管理
+carpoolMenu() {
+    local choice
+    echoContent skyBlue "\n$(t CARPOOL_MENU_TITLE)"
+    echoContent skyBlue "=============================================================="
+    echoContent yellow "1.$(t CARPOOL_MENU_USAGE)"
+    echoContent yellow "2.$(t CARPOOL_MENU_APPLY)"
+    echoContent yellow "3.$(t CARPOOL_MENU_RESET)"
+    if carpoolEnabled; then
+        echoContent yellow "4.$(t CARPOOL_MENU_DISABLE)"
+    else
+        echoContent yellow "4.$(t CARPOOL_MENU_ENABLE)"
+    fi
+    echoContent yellow "5.$(t CARPOOL_MENU_PAGE)"
+    echoContent skyBlue "=============================================================="
+    read -r -p "$(t CARPOOL_MENU_PROMPT)" choice
+    case "${choice}" in
+        1) carpoolShowUsage ;;
+        2) carpoolApply ;;
+        3) carpoolResetUsage ;;
+        4) if carpoolEnabled; then carpoolDisable; else carpoolEnable; fi ;;
+        5) carpoolPageMenu ;;
+        *) echoContent red " ---> $(t CARPOOL_MENU_BAD_CHOICE)" ;;
+    esac
+}
+
 # ======================= 脚本版本管理 =======================
 
 # snapshotConfig DEST_DIR → 0=至少快照了一项，1=全部源缺失或目标不可写
@@ -7647,6 +8602,10 @@ backupConfigSnapshot() {
     if [[ -f "${installDir}/lang_pref" ]]; then
         cp -f "${installDir}/lang_pref" "${destDir}/" 2>/dev/null && copied=1
     fi
+    # 拼车成员文件与状态
+    if [[ -d "${installDir}/carpool" ]]; then
+        cp -rf "${installDir}/carpool" "${destDir}/" 2>/dev/null && copied=1
+    fi
 
     [[ ${copied} -eq 1 ]]
 }
@@ -7675,6 +8634,11 @@ restoreConfigSnapshot() {
     fi
     if [[ -f "${sourceDir}/lang_pref" ]]; then
         cp -f "${sourceDir}/lang_pref" "${installDir}/" 2>/dev/null && restored=1
+    fi
+    # 快照里有 carpool/ 才覆盖：回滚到开拼车之前的快照不能把车主手写的 members.json 删掉
+    if [[ -d "${sourceDir}/carpool" ]]; then
+        rm -rf "${installDir}/carpool"
+        cp -rf "${sourceDir}/carpool" "${installDir}/" 2>/dev/null && restored=1
     fi
 
     [[ ${restored} -eq 1 ]]
@@ -7979,7 +8943,7 @@ rollbackScript() {
         local failedModules=()
         if [[ -n "${stagedOk}" ]]; then
             echoContent yellow " ---> 下载模块文件..."
-            for module in i18n constants utils json-utils system-detect protocol-registry; do
+            for module in i18n constants utils json-utils system-detect protocol-registry carpool; do
                 if ! wget -q -O "${stagingDir}/lib/${module}.sh" "${rawBase}/${version}/lib/${module}.sh" ||
                     [[ ! -s "${stagingDir}/lib/${module}.sh" ]] ||
                     ! bash -n "${stagingDir}/lib/${module}.sh" 2>/dev/null; then
@@ -8018,7 +8982,7 @@ rollbackScript() {
         cp -f "${stagingDir}/install.sh" "${installDir}/install.sh.new" && mv -f "${installDir}/install.sh.new" "${installDir}/install.sh"
         chmod 700 "${installDir}/install.sh"
         mkdir -p "${installDir}/lib" "${installDir}/shell/lang"
-        for module in i18n constants utils json-utils system-detect protocol-registry; do
+        for module in i18n constants utils json-utils system-detect protocol-registry carpool; do
             cp -f "${stagingDir}/lib/${module}.sh" "${installDir}/lib/${module}.sh.new" && mv -f "${installDir}/lib/${module}.sh.new" "${installDir}/lib/${module}.sh"
         done
         for langFile in zh_CN en_US; do
@@ -8230,7 +9194,7 @@ updateV2RayAgent() {
     local failedLangs=()
     local _dst _tmp module langFile
 
-    for module in i18n constants utils json-utils system-detect protocol-registry; do
+    for module in i18n constants utils json-utils system-detect protocol-registry carpool; do
         _dst="${installDir}/lib/${module}.sh"
         _tmp="${_dst}.new"
         if wget -q -O "${_tmp}" "${rawBase}/lib/${module}.sh" && bash -n "${_tmp}" 2>/dev/null; then
@@ -15198,6 +16162,7 @@ selectCoreInstall() {
         fi
         ;;
     2)
+        carpoolRefuseIfEnabled
         if [[ "${selectInstallType}" == "2" ]]; then
             customSingBoxInstall
         else
@@ -15231,6 +16196,7 @@ installXrayRealityOnly() {
 }
 
 installSingBoxRealityOnly() {
+    carpoolRefuseIfEnabled
     selectCoreType=2
     selectCustomInstallType=",7,"
     readLastInstallationConfig
@@ -15366,6 +16332,8 @@ coreVersionManageMenu() {
 }
 # 定时任务检查
 cronFunction() {
+    # Debian / RHEL 系的 cron 交给任务的 PATH 只有 /usr/bin:/bin，nginx、rc-service 在 sbin 里，不补就找不到
+    PATH="/usr/local/sbin:/usr/sbin:/sbin:${PATH}"
     if [[ "${cronName}" == "RenewTLS" ]]; then
         renewalTLS
         exit $?
@@ -15376,6 +16344,15 @@ cronFunction() {
             exit 0
         fi
         exit 1
+    elif [[ "${cronName}" == "CarpoolTick" ]]; then
+        trap 'carpoolTickExitTrap $?' EXIT
+        carpoolTick
+        local tickRc=$?
+        _carpoolTickFinished=1
+        exit "${tickRc}"
+    elif [[ "${cronName}" == "CarpoolApply" ]]; then
+        carpoolApply
+        exit $?
     fi
 }
 # 账号管理
@@ -15394,6 +16371,7 @@ manageAccount() {
     echoContent yellow "3.管理其他订阅"
     echoContent yellow "4.添加用户"
     echoContent yellow "5.删除用户"
+    echoContent yellow "6.$(t CARPOOL_MENU_ENTRY)"
     echoContent red "=============================================================="
     read -r -p "请输入:" manageAccountStatus
     if [[ "${manageAccountStatus}" == "1" ]]; then
@@ -15406,6 +16384,8 @@ manageAccount() {
         addUser
     elif [[ "${manageAccountStatus}" == "5" ]]; then
         removeUser
+    elif [[ "${manageAccountStatus}" == "6" ]]; then
+        carpoolMenu
     else
         echoContent red " ---> 选择错误"
     fi
@@ -16107,9 +17087,9 @@ subscribe() {
                         local _singboxTplUrl="https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/docs/sing-box.json"
                         local _singboxTplExit=0
                         if [[ "${release}" == "alpine" ]]; then
-                            wget -O "${_singboxTplFile}" -q "${_singboxTplUrl}" || _singboxTplExit=$?
+                            wget -O "${_singboxTplFile}" -q --timeout=15 --tries=2 "${_singboxTplUrl}" || _singboxTplExit=$?
                         else
-                            wget -O "${_singboxTplFile}" -q ${wgetShowProgressStatus} "${_singboxTplUrl}" || _singboxTplExit=$?
+                            wget -O "${_singboxTplFile}" -q --timeout=15 --tries=2 ${wgetShowProgressStatus} "${_singboxTplUrl}" || _singboxTplExit=$?
                         fi
 
                         # 失败兜底：wget 非 0 / 文件空 / 不是合法 JSON 任意一种都视为失败。
@@ -16137,6 +17117,10 @@ subscribe() {
                 fi
 
             done
+        fi
+        # 停用的拼车成员不在 inbound 里、上面没给他们生成文件，补上占位（关闭后保持停用的也算）
+        if [[ -f "${CARPOOL_STATE_FILE}" ]]; then
+            carpoolWritePlaceholders "$(carpoolReadState)"
         fi
     else
         echoContent red " ---> 未安装伪装站点，无法使用订阅服务"
@@ -16857,7 +17841,7 @@ _doctorCheckInstall() {
 
     local libDir mod libMissing=""
     libDir="${_LIB_DIR:-${PROXY_AGENT_DIR}/lib}"
-    for mod in i18n constants utils json-utils system-detect protocol-registry; do
+    for mod in i18n constants utils json-utils system-detect protocol-registry carpool; do
         [[ -f "${libDir}/${mod}.sh" ]] || libMissing="${libMissing}${libMissing:+, }${mod}.sh"
     done
     if [[ -z "${libMissing}" ]]; then

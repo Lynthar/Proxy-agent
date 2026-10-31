@@ -32,6 +32,14 @@ readonly SUBSCRIBE_LOCAL_DIR="${PROXY_AGENT_DIR}/subscribe_local"
 readonly SUBSCRIBE_REMOTE_DIR="${PROXY_AGENT_DIR}/subscribe_remote"
 readonly WARP_DIR="${PROXY_AGENT_DIR}/warp"
 readonly GEOSITE_LIST_FILE="${PROXY_AGENT_DIR}/geosite/dlc.dat_plain.yml"
+# 拼车状态住安装根下的 carpool/，不能进 xray/conf：-confdir 会把目录里所有 .json 当配置读
+readonly CARPOOL_DIR="${PROXY_AGENT_DIR}/carpool"
+readonly CARPOOL_MEMBERS_FILE="${CARPOOL_DIR}/members.json"
+readonly CARPOOL_STATE_FILE="${CARPOOL_DIR}/state.json"
+readonly CARPOOL_TELEGRAM_FILE="${CARPOOL_DIR}/telegram.conf"
+readonly CARPOOL_LOCK_FILE="${CARPOOL_DIR}/.lock"
+readonly CARPOOL_LOG_FILE="${PROXY_AGENT_DIR}/crontab_carpool.log"
+readonly CARPOOL_PAGE_DIR="${SUBSCRIBE_DIR}/carpool"
 
 # ============================================================================
 # 版本下限
@@ -51,6 +59,9 @@ readonly REALITY_MIN_CLIENT_VER="1.8.0"
 # ClientHello 带 X25519MLKEM768 份额，sing-box 会剥掉它（SagerNet/sing-box#4520），脚本自己发的
 # sing-box 订阅在 7/12 上报 reality verification failed。升级菜单可显式装最新版；sing-box 修好前别动
 readonly XRAY_PINNED_VERSION="v26.3.27"
+
+# 拼车要的 api.listen 自 Xray 1.8.12 起才有；只拦手动回钉旧核的机器
+readonly CARPOOL_XRAY_MIN_VERSION="1.8.12"
 
 # ============================================================================
 # 脚本版本（SCRIPT_VERSION 由 install.sh 从 VERSION 文件加载，此处仅默认值）

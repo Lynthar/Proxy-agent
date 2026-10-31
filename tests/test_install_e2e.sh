@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# test_install_e2e.sh - 真装机端到端：以 root 在一次性 Linux 容器里跑 install.sh 的「一键 Reality」安装
-# （菜单 19 → E2E_CORE 选的内核），装完用内核自检、真实 Reality 握手（客户端由 E2E_CLIENT 选，默认同内核）、
-# pasly 重入与 doctor 验收，再卸载。跑法: bash tests/e2e/run.sh alpine|debian [xray|singbox] [xray|singbox]
+# test_install_e2e.sh - 真装机端到端：以 root 在一次性容器里跑「一键 Reality」（菜单 19 → E2E_CORE 选的内核），
+# 用内核自检、真实 Reality 握手（客户端由 E2E_CLIENT 选，默认同内核）、pasly 重入与 doctor 验收；Xray 内核再开拼车、
+# 走一遍真实计量、到期停用与关闭恢复，最后卸载。跑法: bash tests/e2e/run.sh alpine|debian [xray|singbox] [xray|singbox]
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -345,17 +345,22 @@ else
     }' >"${clientConf}"
     clientCmd=("${CLIENT_BIN}" run -c "${clientConf}")
 fi
-"${clientCmd[@]}" >/tmp/proxy-agent-e2e-client.log 2>&1 &
-clientPid=$!
-sleep 2
-httpCode=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 --proxy socks5h://127.0.0.1:10808 \
-    https://www.google.com/generate_204 2>/tmp/proxy-agent-e2e-curl.log)
-kill "${clientPid}" 2>/dev/null
-wait "${clientPid}" 2>/dev/null
-if [[ "${httpCode}" != "204" ]]; then
-    cat /tmp/proxy-agent-e2e-curl.log /tmp/proxy-agent-e2e-client.log
-fi
-assert_equals "204" "${httpCode}" "按链接配置的客户端经服务端访问外网返回 204"
+# realityProbe → 起一次客户端、经服务端访问外网、关掉客户端，打印 HTTP 状态码（连不上是 000）
+realityProbe() {
+    local pid code
+    "${clientCmd[@]}" >/tmp/proxy-agent-e2e-client.log 2>&1 &
+    pid=$!
+    sleep 2
+    code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 --proxy socks5h://127.0.0.1:10808 \
+        https://www.google.com/generate_204 2>/tmp/proxy-agent-e2e-curl.log)
+    kill "${pid}" 2>/dev/null
+    wait "${pid}" 2>/dev/null
+    if [[ "${code}" != "204" ]]; then
+        cat /tmp/proxy-agent-e2e-curl.log /tmp/proxy-agent-e2e-client.log >&2
+    fi
+    printf '%s\n' "${code}"
+}
+assert_equals "204" "$(realityProbe)" "按链接配置的客户端经服务端访问外网返回 204"
 
 # ============================================================================
 # 重入：pasly 认得出已装状态，doctor 全绿
@@ -395,6 +400,133 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
     assert_equals "0" "${geoCronRc}" "添加 geo 定时更新退出码 0"
     assert_equals "35 1 * * * PROXY_AGENT_DIR=${INSTALL_ROOT} /bin/bash ${INSTALL_ROOT}/install.sh UpdateGeo >> ${INSTALL_ROOT}/crontab_tls.log 2>&1" \
         "$(crontab -l 2>/dev/null | grep -F 'install.sh UpdateGeo')" "crontab 里的 UpdateGeo 行带安装根前缀"
+fi
+
+# ============================================================================
+# 拼车（只有 Xray 内核能开）：菜单 7 → 6 → 4 开启，真实流量要被 cron 那条 tick 记进成员名下；再到期停用、关闭时恢复
+# ============================================================================
+
+# listenAddrs PORT → 该 TCP 端口上 LISTEN 的本地地址（/proc/net/tcp{,6} 的十六进制形式），每行一个
+listenAddrs() {
+    awk -v p=":$(printf '%04X' "$1")" '$4 == "0A" && substr($2, length($2) - 4) == p { split($2, a, ":"); print a[1] }' \
+        /proc/net/tcp /proc/net/tcp6 2>/dev/null
+}
+
+# runCarpoolTick CRON_LINE → 把 crontab 那一行原样执行一次，打印它这次追加进日志的内容，返回它的退出码。
+# 环境照 Debian cron 交给任务的给（实测 PATH=/usr/bin:/bin）；Alpine 的 crond 继承 OpenRC，比这宽
+runCarpoolTick() {
+    local log="${INSTALL_ROOT}/crontab_carpool.log" before=0 rc
+    [[ -f "${log}" ]] && before=$(wc -l <"${log}")
+    env -i HOME=/root PATH=/usr/bin:/bin SHELL=/bin/sh /bin/sh -c "$(cut -d' ' -f6- <<<"$1")"
+    rc=$?
+    tail -n +"$((before + 1))" "${log}" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g'
+    return "${rc}"
+}
+
+# statsValue JSON NAME → statsquery 输出里该计数器的值（Xray 对 0 省掉 value 字段）；没有这个计数器打印 missing
+statsValue() {
+    jq -r --arg n "$2" '[.stat[]? | select(.name == $n) | (.value // 0 | tonumber)] | first // "missing"' <<<"$1" 2>/dev/null
+}
+
+if [[ "${E2E_CORE}" == "xray" ]]; then
+    echo ""
+    echo -e "${YELLOW}=== 菜单 7 → 6 → 4：开启拼车 ===${NC}"
+    carpoolDir="${INSTALL_ROOT}/carpool"
+    carpoolOut=$(printf '7\n6\n4\n' | V2RAY_LANG=en pasly 2>&1)
+    carpoolRc=$?
+    carpoolOut=$(sed 's/\x1b\[[0-9;]*m//g' <<<"${carpoolOut}")
+    carpoolState=$(cat "${carpoolDir}/state.json" 2>/dev/null)
+    if [[ ${carpoolRc} -ne 0 || "$(jq -r '.enabled' <<<"${carpoolState}" 2>/dev/null)" != "true" ]]; then
+        tail -n 30 <<<"${carpoolOut}"
+    fi
+    assert_equals "0" "${carpoolRc}" "开启拼车退出码 0"
+    apiPort=$(jq -r '.apiPort' <<<"${carpoolState}" 2>/dev/null)
+    assert_equals "true" "$(jq -r '.enabled' <<<"${carpoolState}" 2>/dev/null)" "state.json 记为已开启"
+    assert_equals "${E2E_UUID}" "$(jq -r --arg u "${E2E_USER}" '.members[$u].uuid' <<<"${carpoolState}" 2>/dev/null)" \
+        "现有账号播种成成员，UUID 沿用 inbound 里的值"
+    assert_equals "700" "$(stat -c %a "${carpoolDir}" 2>/dev/null)" "carpool/ 目录权限 700"
+    assert_equals "127.0.0.1:${apiPort}" "$(jq -r '.api.listen' "${XRAY_CONF_DIR}/12_stats_api.json" 2>/dev/null)" \
+        "12_stats_api.json 的统计 API 只配在 127.0.0.1"
+    assert_equals "true true" "$(jq -r '.policy.levels."0" | "\(.statsUserUplink) \(.statsUserDownlink)"' "${XRAY_CONF_DIR}/12_policy.json" 2>/dev/null)" \
+        "12_policy.json 打开了按用户的上下行统计"
+    # 统计 API 不鉴权，内核实际绑定的地址只能是回环
+    assert_equals "0100007F" "$(listenAddrs "${apiPort}")" "统计 API 端口实际只在 127.0.0.1 上监听"
+    carpoolCron=$(crontab -l 2>/dev/null | grep -F 'install.sh CarpoolTick')
+    assert_equals "*/5 * * * * PROXY_AGENT_DIR=${INSTALL_ROOT} /bin/bash ${INSTALL_ROOT}/install.sh CarpoolTick >> ${INSTALL_ROOT}/crontab_carpool.log 2>&1" \
+        "${carpoolCron}" "crontab 里的 CarpoolTick 行带安装根前缀"
+    assert_not_empty "$(command -v flock || true)" "flock 可用（state 的读改写靠它加锁）"
+    assert_contains "$("${XRAY_BIN}" run -test -confdir "${XRAY_CONF_DIR}" 2>&1)" "Configuration OK" \
+        "Xray 在跑、统计 API 端口被它占着时 run -test 照样通过（每次重载前都要过这一关）"
+
+    echo ""
+    echo -e "${YELLOW}=== 拼车：真实流量 → 按 cron 的环境跑一次 tick ===${NC}"
+    assert_equals "204" "$(realityProbe)" "开启拼车（内核重载过）后客户端照样经服务端访问外网"
+    statName="user>>>${E2E_USER}-vless_reality_vision>>>traffic>>>downlink"
+    statsRaw=$("${XRAY_BIN}" api statsquery -s "127.0.0.1:${apiPort}" -t 3 -pattern 'user>>>' 2>&1)
+    statsDown=$(statsValue "${statsRaw}" "${statName}")
+    assert_equals "yes" "$([[ "${statsDown}" =~ ^[0-9]+$ && "${statsDown}" -gt 0 ]] && echo yes || echo no)" \
+        "statsquery 有 ${statName}，计数 ${statsDown} > 0"
+    tickOut=$(runCarpoolTick "${carpoolCron}")
+    tickRc=$?
+    if [[ ${tickRc} -ne 0 ]]; then
+        echo "${tickOut}"
+    fi
+    assert_equals "0" "${tickRc}" "CarpoolTick 在 cron 的环境下退出码 0"
+    carpoolState=$(cat "${carpoolDir}/state.json" 2>/dev/null)
+    usedBytes=$(jq -r --arg u "${E2E_USER}" '.members[$u] | .upBytes + .downBytes' <<<"${carpoolState}" 2>/dev/null)
+    assert_equals "yes" "$([[ "${usedBytes}" =~ ^[0-9]+$ && "${usedBytes}" -gt 0 ]] && echo yes || echo no)" \
+        "这次流量记进了 ${E2E_USER} 名下（${usedBytes} 字节）"
+    assert_equals "0" "$(jq -r '.collectFailures' <<<"${carpoolState}" 2>/dev/null)" "采集没有失败计数"
+    # 采集带 -reset：取过的计数器要归零，否则每个 tick 都把累计值重加一遍
+    assert_equals "0" "$(statsValue "$("${XRAY_BIN}" api statsquery -s "127.0.0.1:${apiPort}" -t 3 -pattern 'user>>>' 2>&1)" "${statName}")" \
+        "tick 采集之后该计数器归零"
+
+    echo ""
+    echo -e "${YELLOW}=== 拼车：到期日改到过去 → tick 停用 → 原链接连不上 ===${NC}"
+    expiredMembers=$(jq --arg u "${E2E_USER}" '.members[$u].expire = "2020-01-01"' "${carpoolDir}/members.json")
+    printf '%s\n' "${expiredMembers}" >"${carpoolDir}/members.json"
+    expireOut=$(runCarpoolTick "${carpoolCron}")
+    expireRc=$?
+    if [[ ${expireRc} -ne 0 ]]; then
+        echo "${expireOut}"
+    fi
+    assert_equals "0" "${expireRc}" "这次 tick 要重载内核，在 cron 的环境下退出码仍是 0"
+    carpoolState=$(cat "${carpoolDir}/state.json" 2>/dev/null)
+    assert_equals "disabled expired" "$(jq -r --arg u "${E2E_USER}" '.members[$u] | "\(.status) \(.reason)"' <<<"${carpoolState}" 2>/dev/null)" \
+        "tick 读入新的到期日，${E2E_USER} 判为到期停用"
+    assert_equals "0" "$(jq --arg id "${E2E_UUID}" '[.inbounds[1].settings.clients[]? | select(.id == $id)] | length' "${realityConf}" 2>/dev/null)" \
+        "${E2E_USER} 已从 Reality 入站拿掉"
+    assert_not_empty "$(pgrep -f "${XRAY_BIN}" || true)" "入站里一个用户都不剩时 Xray 照样在跑"
+    assert_equals "no" "$([[ "$(realityProbe 2>/dev/null)" == "204" ]] && echo yes || echo no)" "停用后用原链接连不上"
+
+    echo ""
+    echo -e "${YELLOW}=== 菜单 7 → 6 → 4：关闭拼车，到期的也一并恢复 ===${NC}"
+    disableOut=$(printf '7\n6\n4\ny\ny\n' | V2RAY_LANG=en pasly 2>&1)
+    disableRc=$?
+    disableOut=$(sed 's/\x1b\[[0-9;]*m//g' <<<"${disableOut}")
+    carpoolState=$(cat "${carpoolDir}/state.json" 2>/dev/null)
+    if [[ ${disableRc} -ne 0 || "$(jq -r '.enabled' <<<"${carpoolState}" 2>/dev/null)" != "false" ]]; then
+        tail -n 30 <<<"${disableOut}"
+    fi
+    assert_equals "0" "${disableRc}" "关闭拼车退出码 0"
+    assert_equals "false" "$(jq -r '.enabled' <<<"${carpoolState}" 2>/dev/null)" "state.json 记为已关闭"
+    assert_equals "active" "$(jq -r --arg u "${E2E_USER}" '.members[$u].status' <<<"${carpoolState}" 2>/dev/null)" \
+        "第二问答了 y，到期停用的 ${E2E_USER} 也恢复了"
+    assert_equals "1" "$(jq --arg id "${E2E_UUID}" '[.inbounds[1].settings.clients[]? | select(.id == $id)] | length' "${realityConf}" 2>/dev/null)" \
+        "${E2E_USER} 用原 UUID 放回了 Reality 入站"
+    assert_equals "no" "$([[ -e "${XRAY_CONF_DIR}/12_stats_api.json" ]] && echo yes || echo no)" "12_stats_api.json 已撤掉"
+    assert_equals "false false" "$(jq -r '.policy.levels."0" | "\(has("statsUserUplink")) \(has("statsUserDownlink"))"' "${XRAY_CONF_DIR}/12_policy.json" 2>/dev/null)" \
+        "12_policy.json 的两个统计字段已撤掉"
+    assert_equals "" "$(crontab -l 2>/dev/null | grep -F 'install.sh CarpoolTick' || true)" "CarpoolTick 的 cron 行已删"
+    assert_equals "" "$(listenAddrs "${apiPort}")" "统计 API 端口不再监听"
+    assert_equals "yes" "$([[ -s "${carpoolDir}/members.json" ]] && echo yes || echo no)" "members.json 保留"
+    assert_equals "204" "$(realityProbe)" "恢复后原链接重新连得上（客户端配置没动过）"
+
+    noisyLines=$(grep -E 'command not found|No such file or directory' <<<"${carpoolOut}"$'\n'"${tickOut}"$'\n'"${expireOut}"$'\n'"${disableOut}" || true)
+    if [[ -n "${noisyLines}" ]]; then
+        echo "${noisyLines}"
+    fi
+    assert_equals "" "${noisyLines}" "拼车各步的输出里没有 command not found / No such file"
 fi
 
 # ============================================================================
