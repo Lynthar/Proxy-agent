@@ -510,3 +510,6 @@ MSG_SINGBOX_DIGEST_MISSING="GitHub 没有给出 %s 的 SHA256 摘要，未校验
 MSG_SINGBOX_UNPACK_FAILED="%s 解压失败"
 MSG_SINGBOX_NOT_RUNNABLE="%s 里的 sing-box 在本机无法运行（架构或 libc 不匹配），已删除"
 MSG_ACCOUNT_TX_EMPTY_CLIENTS="生成的用户列表为空，整次账户变更已回滚"
+MSG_ACCOUNT_TX_BAD_ACTION="未知的账户操作: %s"
+MSG_ACCOUNT_TX_NAME_FIELD_MISSING="注册表没有该协议的名字字段，无法按名字删除，本次账户变更已整体回滚"
+MSG_REMOVE_USER_NO_NAME="该账号没有名字字段，无法按名字删除"

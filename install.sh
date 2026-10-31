@@ -7427,13 +7427,18 @@ customUserEmail() {
     fi
 }
 
-# 把一次账户变更（add UUID EMAIL / del INDEX）按协议注册表应用到全部已装协议。
-# 全程 jsonTx 事务：任一文件写失败即整体回滚；落盘后、reload 前先过内核级校验，
-# 校验不过同样回滚——磁盘与在跑服务保持变更前状态。
+# 把一次账户变更（add UUID EMAIL / delName KEY）按协议注册表应用到全部已装协议；KEY 是去掉协议后缀的
+# 账户名，按名删是因为各协议文件的用户顺序不保证一致。全程 jsonTx 事务：任一文件写失败即整体回滚；
+# 落盘后、reload 前先过内核级校验，校验不过同样回滚——磁盘与在跑服务保持变更前状态。
 applyAccountChangeAllProtocols() {
     local action=$1
     local arg1=$2
     local arg2=$3
+
+    if [[ "${action}" != "add" && "${action}" != "delName" ]]; then
+        echoContent red " ---> $(t ACCOUNT_TX_BAD_ACTION "${action}")"
+        return 1
+    fi
 
     # 快照建在安装根下（与 xray/ 和 sing-box/ 两个目标目录同文件系统，恢复用 cp 才可靠）
     if ! jsonTxBegin "${PROXY_AGENT_DIR}"; then
@@ -7441,7 +7446,7 @@ applyAccountChangeAllProtocols() {
         return 1
     fi
 
-    local protocolId targetDir targetFile usersPath clients newContent
+    local protocolId targetDir targetFile usersPath nameField delFilter clients newContent
     local touchedXray= touchedSingBox=
     for protocolId in ${currentInstallProtocolType//,/ }; do
         # 覆盖面与旧的手写分支一致：2/5/8 已废弃冻结，20 是内部 inbound，12 仅 Xray
@@ -7486,7 +7491,14 @@ applyAccountChangeAllProtocols() {
             fi
             newContent=$(jq --argjson newClients "${clients}" "${usersPath} = \$newClients" "${targetFile}" 2>/dev/null)
         else
-            newContent=$(jq --argjson idx "${arg1}" "del(${usersPath}[\$idx])" "${targetFile}" 2>/dev/null)
+            nameField=$(getProtocolNameField "${coreKind}" "${protocolId}")
+            if [[ -z "${nameField}" ]]; then
+                echoContent red " ---> $(t ACCOUNT_TX_NAME_FIELD_MISSING) [$(getProtocolDisplayName "${protocolId}")]"
+                jsonTxRollback
+                return 1
+            fi
+            delFilter="${usersPath}"' |= map(select(((.[$f] // "") | sub("-[^-]*$"; "")) != $key))'
+            newContent=$(jq --arg f "${nameField}" --arg key "${arg1}" "${delFilter}" "${targetFile}" 2>/dev/null)
         fi
         if [[ -z "${newContent}" ]] || ! jsonWriteFile "${targetFile}" "${newContent}" false; then
             echoContent red " ---> $(t ACCOUNT_TX_WRITE_FAILED) [$(getProtocolDisplayName "${protocolId}")]"
@@ -7555,7 +7567,7 @@ addUser() {
 }
 # 移除用户
 removeUser() {
-    local userConfigType=
+    local userConfigType= delUserKey=
     if [[ -n "${frontingType}" ]]; then
         userConfigType="${frontingType}"
     elif [[ -n "${frontingTypeReality}" ]]; then
@@ -7583,12 +7595,17 @@ removeUser() {
             echoContent red " ---> 选择错误"
             delUserIndex=
         else
-            delUserIndex=$((delUserIndex - 1))
+            # 编号只用来在前置协议文件里取名字；各协议文件的用户顺序不保证一致，真正删除按去掉协议后缀的名字
+            delUserKey=$(jq -r --argjson idx "$((delUserIndex - 1))" "${listUsersPath}[\$idx].${listNameField} // empty" "${configPath}${userConfigType}.json")
+            delUserKey=${delUserKey%-*}
+            if [[ -z "${delUserKey}" ]]; then
+                echoContent red " ---> $(t REMOVE_USER_NO_NAME)"
+            fi
         fi
     fi
 
-    if [[ -n "${delUserIndex}" ]]; then
-        if ! applyAccountChangeAllProtocols del "${delUserIndex}"; then
+    if [[ -n "${delUserKey}" ]]; then
+        if ! applyAccountChangeAllProtocols delName "${delUserKey}"; then
             manageAccount 1
             return
         fi

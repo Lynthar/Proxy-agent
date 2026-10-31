@@ -551,75 +551,65 @@ rm -f "${MINVER_FILE}"
 echo ""
 
 # ============================================================================
-# 测试 removeUser 删除过滤器语义（镜像 install.sh removeUser 的 jq 过滤器）
-# 回归背景：只写 .settings.clients 的过滤器在 sing-box 形态（.users）上是静默
-# no-op——命令成功退出但用户没删掉，凭据继续有效
+# 测试账户删除过滤器语义（镜像 applyAccountChangeAllProtocols 的 delName 过滤器）
+# 回归背景：按下标删假定所有协议文件的用户顺序一致；按名字删对每个文件独立匹配，
+# 名字是去掉最后一段协议后缀的账户名，三种文件形态（.users / .settings.clients / Reality 07）都要真的删掉
 # ============================================================================
 
-echo -e "${YELLOW}=== 测试 removeUser 删除过滤器语义 ===${NC}"
+echo -e "${YELLOW}=== 测试按名字删除用户的过滤器语义 ===${NC}"
 
-REMOVE_USER_FILTER='del(.inbounds[0].settings.clients[$idx]//.inbounds[0].users[$idx])'
+# 与 install.sh 同一条过滤器：$f 是 registry 给的名字字段，$key 是去掉协议后缀的账户名
+delete_by_name() {
+    jq --arg f "$2" --arg key "$3" "$1"' |= map(select(((.[$f] // "") | sub("-[^-]*$"; "")) != $key))' "${REMOVE_USER_TMP}"
+}
 REMOVE_USER_TMP="${MOCK_ROOT}/remove_user_semantics.json"
 
-# sing-box 形态（.users）——组合过滤器必须真的删掉目标用户
+# sing-box 形态（.users，名字段 name）
 cat > "${REMOVE_USER_TMP}" << 'EOF'
 {"inbounds": [{"type": "vless", "users": [{"uuid": "u-aaa", "name": "alice-VLESS_WS"}, {"uuid": "u-bbb", "name": "bob-VLESS_WS"}]}]}
 EOF
-result=$(jq -r --argjson idx 0 "${REMOVE_USER_FILTER}" "${REMOVE_USER_TMP}" | jq -r '.inbounds[0].users | length')
-assert_equals "1" "${result}" "sing-box .users 形态：删除后剩 1 个用户"
-result=$(jq -r --argjson idx 0 "${REMOVE_USER_FILTER}" "${REMOVE_USER_TMP}" | jq -r '.inbounds[0].users[0].uuid')
-assert_equals "u-bbb" "${result}" "sing-box .users 形态：删除的是选中下标的用户"
+assert_equals "u-bbb" "$(delete_by_name '.inbounds[0].users' name alice | jq -r '[.inbounds[0].users[].uuid] | join(",")')" "sing-box .users 形态：按名字删掉 alice，只剩 bob"
+assert_equals "u-aaa,u-bbb" "$(delete_by_name '.inbounds[0].users' name alic | jq -r '[.inbounds[0].users[].uuid] | join(",")')" "按名字删：名字是整段比较，前缀 alic 删不掉 alice"
 
-# 旧过滤器（仅 settings.clients）在同一文件上是静默 no-op——钉死这个缺陷不再回归
-result=$(jq -r --argjson idx 0 'del(.inbounds[0].settings.clients[$idx])' "${REMOVE_USER_TMP}" | jq -r '.inbounds[0].users | length')
-assert_equals "2" "${result}" "旧的仅 settings.clients 过滤器在 sing-box 形态上确实是 no-op（回归钉）"
-
-# Xray 形态（.settings.clients，含 XHTTP 的 12_ 文件同构）
+# Xray 形态（.settings.clients，名字段 email；后缀里带 / 也只剥最后一个 - 之后）
 cat > "${REMOVE_USER_TMP}" << 'EOF'
 {"inbounds": [{"protocol": "vless", "settings": {"clients": [{"id": "u-ccc", "email": "carol-VLESS_TCP/TLS_Vision"}, {"id": "u-ddd", "email": "dave-VLESS_TCP/TLS_Vision"}]}}]}
 EOF
-result=$(jq -r --argjson idx 1 "${REMOVE_USER_FILTER}" "${REMOVE_USER_TMP}" | jq -r '.inbounds[0].settings.clients | length')
-assert_equals "1" "${result}" "Xray .settings.clients 形态：删除后剩 1 个用户"
-result=$(jq -r --argjson idx 1 "${REMOVE_USER_FILTER}" "${REMOVE_USER_TMP}" | jq -r '.inbounds[0].settings.clients[0].id')
-assert_equals "u-ccc" "${result}" "Xray .settings.clients 形态：保留未选中的用户"
+assert_equals "u-ccc" "$(delete_by_name '.inbounds[0].settings.clients' email dave | jq -r '[.inbounds[0].settings.clients[].id] | join(",")')" "Xray .settings.clients 形态：按名字删掉 dave，保留 carol"
 
-# Xray Reality 07 形态（clients 在 inbounds[1]）——removeUser 协议 7 的三路组合过滤器
-REMOVE_REALITY_FILTER='del(.inbounds[0].settings.clients[$idx]//.inbounds[1].settings.clients[$idx]//.inbounds[0].users[$idx])'
+# Xray Reality 07 形态（clients 在 inbounds[1]），inbounds[0] 的 dokodemo 不动
 cat > "${REMOVE_USER_TMP}" << 'EOF'
 {"inbounds": [{"port": 443, "protocol": "dokodemo-door", "settings": {}}, {"protocol": "vless", "settings": {"clients": [{"id": "u-eee", "email": "erin-vless_reality_vision"}, {"id": "u-fff", "email": "frank-vless_reality_vision"}]}}]}
 EOF
-result=$(jq -r --argjson idx 0 "${REMOVE_REALITY_FILTER}" "${REMOVE_USER_TMP}" | jq -r '.inbounds[1].settings.clients | length')
-assert_equals "1" "${result}" "Reality 07 形态：inbounds[1] 中删除成功"
+assert_equals "u-fff" "$(delete_by_name '.inbounds[1].settings.clients' email erin | jq -r '[.inbounds[1].settings.clients[].id] | join(",")')" "Reality 07 形态：inbounds[1] 里按名字删掉 erin"
+assert_equals "dokodemo-door" "$(delete_by_name '.inbounds[1].settings.clients' email erin | jq -r '.inbounds[0].protocol')" "Reality 07 形态：inbounds[0] 的 dokodemo 分发器不受影响"
+assert_equals "false" "$(delete_by_name '.inbounds[1].settings.clients' email erin | jq -r '.inbounds[0].settings | has("clients")')" "Reality 07 形态：dokodemo 的 settings 不长出 clients"
 
-# 注册表驱动的账户过滤器语义（镜像 applyAccountChangeAllProtocols：路径来自
-# getProtocolUsersPath，add 用 --argjson 整组替换，del 用精确路径不再靠 // 猜测链）
-# (core=1, id=7)：del 精确打 inbounds[1]，与旧三路组合链等价，且 [0] 的 dokodemo 不动
-result=$(jq -r --argjson idx 0 'del(.inbounds[1].settings.clients[$idx])' "${REMOVE_USER_TMP}" | jq -r '.inbounds[1].settings.clients | length')
-assert_equals "1" "${result}" "注册表 del(1,7)：精确 inbounds[1] 删除，与旧组合链等价"
-result=$(jq -r --argjson idx 0 'del(.inbounds[1].settings.clients[$idx])' "${REMOVE_USER_TMP}" | jq -r '.inbounds[0].protocol')
-assert_equals "dokodemo-door" "${result}" "注册表 del(1,7)：inbounds[0] 的 dokodemo 分发器不受影响"
+# 默认名是 UUID：两侧都只剥最后一段，带后缀的名剥掉后缀得完整 UUID，裸 UUID 名剥掉自己的末段——
+# 各自都能匹配自己（removeUser 从前置文件取名时用同一剥法），不带连字符的名字不受波及
+cat > "${REMOVE_USER_TMP}" << 'EOF'
+{"inbounds": [{"protocol": "vless", "settings": {"clients": [{"id": "u-ggg", "email": "3fa85f64-5717-4562-b3fc-2c963f66afa6-VLESS_WS"}, {"id": "u-hhh", "email": "3fa85f64-5717-4562-b3fc-2c963f66afa6"}, {"id": "u-iii", "email": "noone"}]}}]}
+EOF
+assert_equals "u-hhh,u-iii" "$(delete_by_name '.inbounds[0].settings.clients' email 3fa85f64-5717-4562-b3fc-2c963f66afa6 | jq -r '[.inbounds[0].settings.clients[].id] | join(",")')" "按名字删：带后缀的 UUID 名，键是完整 UUID，只删它自己"
+assert_equals "u-ggg,u-iii" "$(delete_by_name '.inbounds[0].settings.clients' email 3fa85f64-5717-4562-b3fc | jq -r '[.inbounds[0].settings.clients[].id] | join(",")')" "按名字删：裸 UUID 名，键是剥掉末段的 UUID，自己仍匹配自己"
 
-# (core=1, id=7)：add 整组替换写 inbounds[1]，[0] 不长出 clients
+# naive fronting 的名字段是 username
+cat > "${REMOVE_USER_TMP}" << 'EOF'
+{"inbounds": [{"type": "naive", "users": [{"username": "ivy-singbox_naive", "password": "u-iii"}, {"username": "jon-singbox_naive", "password": "u-jjj"}]}]}
+EOF
+assert_equals "jon-singbox_naive" "$(delete_by_name '.inbounds[0].users' username ivy | jq -r '.inbounds[0].users[].username')" "注册表列表(2,10)：按 username 删掉 ivy"
+
+# add 侧不变：整组替换落在 registry 给的路径
+cat > "${REMOVE_USER_TMP}" << 'EOF'
+{"inbounds": [{"port": 443, "protocol": "dokodemo-door", "settings": {}}, {"protocol": "vless", "settings": {"clients": [{"id": "u-eee", "email": "erin-vless_reality_vision"}]}}]}
+EOF
 result=$(jq --argjson newClients '[{"id":"u-new","email":"new-vless_reality_vision"}]' '.inbounds[1].settings.clients = $newClients' "${REMOVE_USER_TMP}" | jq -r '.inbounds[1].settings.clients[0].id')
 assert_equals "u-new" "${result}" "注册表 add(1,7)：整组替换落在 inbounds[1]"
-result=$(jq --argjson newClients '[{"id":"u-new","email":"n"}]' '.inbounds[1].settings.clients = $newClients' "${REMOVE_USER_TMP}" | jq -r '.inbounds[0].settings | has("clients")')
-assert_equals "false" "${result}" "注册表 add(1,7)：dokodemo 的 settings 不长出 clients"
-
-# (core=2)：add/del 精确打 .inbounds[0].users（B02 家族的 add/del 两侧一并钉死）
 cat > "${REMOVE_USER_TMP}" << 'EOF'
-{"inbounds": [{"type": "vless", "users": [{"uuid": "u-ggg", "name": "gina-VLESS_WS"}, {"uuid": "u-hhh", "name": "hank-VLESS_WS"}]}]}
+{"inbounds": [{"type": "vless", "users": [{"uuid": "u-ggg", "name": "gina-VLESS_WS"}]}]}
 EOF
 result=$(jq --argjson newClients '[{"uuid":"u-1","name":"a"},{"uuid":"u-2","name":"b"},{"uuid":"u-3","name":"c"}]' '.inbounds[0].users = $newClients' "${REMOVE_USER_TMP}" | jq -r '.inbounds[0].users | length')
 assert_equals "3" "${result}" "注册表 add(2,*)：整组替换落在 .users"
-result=$(jq -r --argjson idx 1 'del(.inbounds[0].users[$idx])' "${REMOVE_USER_TMP}" | jq -r '.inbounds[0].users[0].uuid')
-assert_equals "u-ggg" "${result}" "注册表 del(2,*)：按 index 删 .users 保留其余"
-
-# removeUser 列表端组合：naive fronting 的名字段是 username（旧的 name//username 整流链已废）
-cat > "${REMOVE_USER_TMP}" << 'EOF'
-{"inbounds": [{"type": "naive", "users": [{"username": "ivy-singbox_naive", "password": "u-iii"}]}]}
-EOF
-result=$(jq -r '.inbounds[0].users[].username' "${REMOVE_USER_TMP}")
-assert_equals "ivy-singbox_naive" "${result}" "注册表列表(2,10)：usersPath[].username 取到显示名"
 
 rm -f "${REMOVE_USER_TMP}"
 
@@ -922,6 +912,33 @@ env PROXY_AGENT_DIR="${DOTTED_ROOT}" DOTTED_FNS="${DOTTED_FNS}" bash -c '
     applyAccountChangeAllProtocols add b2 bob' >/dev/null 2>&1
 assert_equals '["a1","b2"]' "$(jq -c '[.inbounds[0].settings.clients[].id]' "${DOTTED_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json")" \
     "安装根含点：添加用户真的写进已装协议"
+
+# 按名字删：两个协议文件里同一批用户顺序相反，按下标删会删错人，按名字删两边都删对
+printf '%s\n' '{"inbounds":[{"port":443,"settings":{"clients":[{"id":"a1","email":"alice-VLESS_TCP/TLS_Vision"},{"id":"b2","email":"bob-VLESS_TCP/TLS_Vision"},{"id":"c3","email":"carol-VLESS_TCP/TLS_Vision"}]}}]}' \
+    >"${DOTTED_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
+printf '%s\n' '{"inbounds":[{"port":31297,"settings":{"clients":[{"id":"c3","email":"carol-VLESS_WS"},{"id":"b2","email":"bob-VLESS_WS"},{"id":"a1","email":"alice-VLESS_WS"}]}}]}' \
+    >"${DOTTED_ROOT}/xray/conf/03_VLESS_WS_inbounds.json"
+env PROXY_AGENT_DIR="${DOTTED_ROOT}" DOTTED_FNS="${DOTTED_FNS}" bash -c '
+    source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh
+    eval "${DOTTED_FNS}"
+    readInstallType; readInstallProtocolType
+    applyAccountChangeAllProtocols delName bob' >/dev/null 2>&1
+assert_equals "0" "$?" "账户事务 delName：返回 0"
+assert_equals '["a1","c3"]' "$(jq -c '[.inbounds[0].settings.clients[].id]' "${DOTTED_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json")" \
+    "账户事务 delName：前置协议文件里 bob 没了、其余顺序不变"
+assert_equals '["c3","a1"]' "$(jq -c '[.inbounds[0].settings.clients[].id]' "${DOTTED_ROOT}/xray/conf/03_VLESS_WS_inbounds.json")" \
+    "账户事务 delName：顺序相反的第二个文件里删的也是 bob"
+env PROXY_AGENT_DIR="${DOTTED_ROOT}" DOTTED_FNS="${DOTTED_FNS}" bash -c '
+    source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh
+    eval "${DOTTED_FNS}"
+    readInstallType; readInstallProtocolType
+    applyAccountChangeAllProtocols del 1' >/dev/null 2>&1
+assert_equals "1" "$?" "账户事务：旧的按下标 del 动作被拒绝"
+assert_equals '["a1","c3"]' "$(jq -c '[.inbounds[0].settings.clients[].id]' "${DOTTED_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json")" \
+    "账户事务：被拒绝的动作不碰文件"
+rm -f "${DOTTED_ROOT}/xray/conf/03_VLESS_WS_inbounds.json"
+printf '%s\n' '{"inbounds":[{"port":443,"settings":{"clients":[{"id":"a1","email":"alice"},{"id":"b2","email":"bob"}]}}]}' \
+    >"${DOTTED_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
 
 # 生成器回归成空数组时，事务必须拒绝提交，而不是把该协议的用户清空再报成功
 env PROXY_AGENT_DIR="${DOTTED_ROOT}" DOTTED_FNS="${DOTTED_FNS}" bash -c '

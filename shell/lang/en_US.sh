@@ -510,3 +510,6 @@ MSG_SINGBOX_DIGEST_MISSING="GitHub reports no SHA256 digest for %s; refusing to 
 MSG_SINGBOX_UNPACK_FAILED="Failed to unpack %s"
 MSG_SINGBOX_NOT_RUNNABLE="The sing-box binary from %s cannot run on this machine (architecture or libc mismatch); removed"
 MSG_ACCOUNT_TX_EMPTY_CLIENTS="The generated user list is empty; the whole account change was rolled back"
+MSG_ACCOUNT_TX_BAD_ACTION="Unknown account action: %s"
+MSG_ACCOUNT_TX_NAME_FIELD_MISSING="The registry has no name field for this protocol, so it cannot be deleted by name; the whole account change was rolled back"
+MSG_REMOVE_USER_NO_NAME="This account has no name field and cannot be deleted by name"
