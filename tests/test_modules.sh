@@ -472,6 +472,23 @@ assert_equals "" "${_sfxWithDash}" "getProtocolEmailSuffix: 后缀都不含连�
 echo ""
 
 # ============================================================================
+# 测试 json-utils.sh 的写前校验
+# ============================================================================
+
+echo -e "${YELLOW}=== 测试 jsonIsSingleValue ===${NC}"
+
+assert_true 'jsonIsSingleValue <<<"{\"a\": 1}"' "jsonIsSingleValue: 一个对象"
+assert_true 'jsonIsSingleValue <<<"0"' "jsonIsSingleValue: 数字 0 也是一个值"
+assert_true '! printf "" | jsonIsSingleValue' "jsonIsSingleValue: 空输入不算（jq -e . 对它返回 0）"
+assert_true '! jsonIsSingleValue <<<"   "' "jsonIsSingleValue: 只有空白不算"
+assert_true '! jsonIsSingleValue <<<"{} {}"' "jsonIsSingleValue: 两个值不算"
+assert_true '! jsonIsSingleValue <<<"null"' "jsonIsSingleValue: null 不算"
+assert_true '! jsonIsSingleValue <<<"false"' "jsonIsSingleValue: false 不算"
+assert_true '! jsonIsSingleValue <<<"{"' "jsonIsSingleValue: 语法错误不算"
+
+echo ""
+
+# ============================================================================
 # 测试 carpool.sh 函数
 # ============================================================================
 

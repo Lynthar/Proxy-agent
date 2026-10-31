@@ -453,6 +453,14 @@ else
     ((TESTS_FAILED++))
 fi
 
+# 上游 jq 出错时内容是空串：写入必须失败、原文件不动，不能落一个 0 字节的配置
+assert_equals "1" "$(jsonWriteFile "${TEST_WRITE_FILE}" "" false; echo $?)" "jsonWriteFile() 拒绝空内容"
+assert_equals "1" "$(jsonWriteFile "${TEST_WRITE_FILE}" '{"a": 1} {"b": 2}' false; echo $?)" "jsonWriteFile() 拒绝两个 JSON 值"
+assert_equals "1" "$(jsonModifyFile "${TEST_WRITE_FILE}" 'empty' false; echo $?)" "jsonModifyFile() 拒绝空结果"
+assert_equals "final" "$(jq -r '.test' "${TEST_WRITE_FILE}")" "被拒的写入没有动原文件"
+: >"${MOCK_ROOT}/test_empty.json"
+assert_equals "1" "$(jsonModifyFile "${MOCK_ROOT}/test_empty.json" '.a = 1' false; echo $?)" "jsonModifyFile() 拒绝 0 字节的源文件"
+
 echo ""
 
 # ============================================================================

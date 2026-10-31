@@ -11,6 +11,12 @@ readonly _JSON_UTILS_LOADED=1
 # 原子文件写入函数
 # ============================================================================
 
+# jsonIsSingleValue → 0=stdin 恰好是一个 JSON 值且不是 null / false。
+# 单靠 jq -e . 不够：它对空输入也返回 0，上游 jq 出错时就会写出 0 字节文件
+jsonIsSingleValue() {
+    jq -e -s 'length == 1 and .[0] != null and .[0] != false' >/dev/null 2>&1
+}
+
 # jsonWriteFile FILE CONTENT [BACKUP=true] → 0=成功 1=失败
 # 验证语法 → 可选备份 → 写 mktemp → 原子 rename；任一步失败原文件不变。
 jsonWriteFile() {
@@ -19,7 +25,7 @@ jsonWriteFile() {
     local backup="${3:-true}"
 
     # 验证 JSON 语法
-    if ! echo "${content}" | jq -e . >/dev/null 2>&1; then
+    if ! echo "${content}" | jsonIsSingleValue; then
         return 1
     fi
 
@@ -57,7 +63,7 @@ jsonModifyFile() {
     fi
 
     # 验证源文件
-    if ! jq -e . "${file}" >/dev/null 2>&1; then
+    if ! jsonIsSingleValue <"${file}"; then
         return 1
     fi
 
@@ -75,7 +81,7 @@ jsonModifyFile() {
     fi
 
     # 验证结果
-    if ! jq -e . "${tmpFile}" >/dev/null 2>&1; then
+    if ! jsonIsSingleValue <"${tmpFile}"; then
         rm -f "${tmpFile}"
         return 1
     fi
