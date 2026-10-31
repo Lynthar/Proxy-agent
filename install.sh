@@ -1301,7 +1301,7 @@ readNginxSubscribe() {
     subscribeType="https"
     if [[ -f "${nginxConfigPath}subscribe.conf" ]]; then
         if grep -q "sing-box" "${nginxConfigPath}subscribe.conf"; then
-            subscribePort=$(grep "listen" "${nginxConfigPath}subscribe.conf" | awk '{print $2}')
+            subscribePort=$(grep -m1 "listen" "${nginxConfigPath}subscribe.conf" | awk '{print $2}')
             subscribeDomain=$(grep "server_name" "${nginxConfigPath}subscribe.conf" | awk '{print $2}')
             subscribeDomain=${subscribeDomain//;/}
             if [[ -n "${currentHost}" && "${subscribeDomain}" != "${currentHost}" ]]; then
@@ -16592,6 +16592,7 @@ installSubscribe() {
             read -r -p "是否安装[y/n]？" installNginxStatus
             if [[ "${installNginxStatus}" == "y" ]]; then
                 installNginxTools
+                nginxVersion=$(nginx -v 2>&1)
             else
                 echoContent red " ---> 放弃安装nginx\n"
                 exit 1
@@ -16645,12 +16646,23 @@ installSubscribe() {
         if [[ -n "$(curl --connect-timeout 2 -s -6 https://www.cloudflare.com/cdn-cgi/trace | grep "ip" | cut -d "=" -f 2)" ]]; then
             listenIPv6="listen [::]:${result[-1]} ${SSLType};"
         fi
+        # 不带 SNI 或 SNI 不对的握手直接拒，按 IP 扫的拿不到域名证书（与 0 的 rejectUnknownSni 一致）；
+        # ssl_reject_handshake 从 nginx 1.19.4 起才有，旧版写进去 nginx -t 不过、整个 nginx 起不来
+        local rejectUnknownSniBlock= rejectListen="listen ${result[-1]} ssl default_server;"
+        if [[ "${SSLType}" == "ssl" ]] && versionGreaterOrEqual "$(sed -n 's|.*nginx/\([0-9][0-9.]*\).*|\1|p' <<<"${nginxVersion}")" 1.19.4; then
+            if [[ -n "${listenIPv6}" ]]; then
+                rejectListen+="listen [::]:${result[-1]} ssl default_server;"
+            fi
+            rejectUnknownSniBlock=$(printf 'server {\n    %s\n    ssl_reject_handshake on;\n}' "${rejectListen}")
+        fi
         if echo "${nginxVersion}" | grep -q "1.25" && [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $3}') -gt 0 ]] || [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $2}') -gt 25 ]]; then
             nginxSubscribeListen="listen ${result[-1]} ${SSLType} so_keepalive=on;http2 on;${listenIPv6}"
         else
             nginxSubscribeListen="listen ${result[-1]} ${SSLType} so_keepalive=on;${listenIPv6}"
         fi
 
+        # 订阅文件名一律是 32 位十六进制 md5，location 只收这种名字：$2 里没有 / 和 .，alias 拼不出目录外的路径。
+        # 正则带花括号，必须加引号，否则 nginx 当成块的开头；readNginxSubscribe 取第一行 listen，主 server 块要排在最前
         cat <<EOF >${nginxConfigPath}subscribe.conf
 server {
     ${nginxSubscribeListen}
@@ -16663,14 +16675,16 @@ server {
     resolver                   1.1.1.1 valid=60s;
     resolver_timeout           2s;
     client_max_body_size 100m;
+    server_tokens off;
     root ${nginxStaticPath};
-    location ~ ^/s/(clashMeta|default|clashMetaProfiles|sing-box|sing-box_profiles)/(.*) {
+    location ~ "^/s/(clashMeta|default|clashMetaProfiles|sing-box|sing-box_profiles)/([0-9a-f]{32})\$" {
         default_type 'text/plain; charset=utf-8';
         alias ${SUBSCRIBE_DIR}/\$1/\$2;
     }
     location / {
     }
 }
+${rejectUnknownSniBlock}
 EOF
         bootStartup nginx
         handleNginx stop

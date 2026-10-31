@@ -1155,8 +1155,9 @@ EOF
 server {
     listen 12345 ssl;
     server_name example.com;
+    server_tokens off;
     root /usr/share/nginx/html;
-    location ~ ^/s/(clashMeta|default|clashMetaProfiles|sing-box|sing-box_profiles)/(.*) {
+    location ~ "^/s/(clashMeta|default|clashMetaProfiles|sing-box|sing-box_profiles)/([0-9a-f]{32})$" {
         default_type 'text/plain; charset=utf-8';
         alias /etc/Proxy-agent/subscribe/$1/$2;
     }
@@ -1594,7 +1595,7 @@ _member=$(cat "${CP_ROOT}/subscribe/carpool/${CP_ALICE_MD5}")
 assert_contains "${_member}" "· alice</h1>" "成员页：本人"
 assert_equals "no" "$([[ "${_member}" == *"bob"* ]] && echo yes || echo no)" "成员页：看不到别人"
 assert_equals "1" "$(grep -c 'location ~ "^/s/carpool/' "${CP_ROOT}/nginx/subscribe.conf")" "页面开启：subscribe.conf 多一个 location"
-assert_equals "1" "$(grep -c '^    location ~ ^/s/(clashMeta' "${CP_ROOT}/nginx/subscribe.conf")" "页面开启：订阅原有 location 原样"
+assert_equals "1" "$(grep -c '^    location ~ "^/s/(clashMeta' "${CP_ROOT}/nginx/subscribe.conf")" "页面开启：订阅原有 location 原样"
 assert_equals "yes" "$(awk '/carpool-page-end/{e=NR} /^    location \/ \{/{l=NR} END{print (e && l && e < l) ? "yes" : "no"}' "${CP_ROOT}/nginx/subscribe.conf")" "页面开启：块插在 location / 之前"
 assert_equals "1|1" "$(grep -c '^nginx -t$' "${CP_CALLS}")|$(grep -c '^nginx -s reload$' "${CP_CALLS}")" "页面开启：nginx -t 过了才 reload"
 assert_contains "${_out}" "车主页: https://example.com:12345/s/carpool/${_token}" "页面开启：车主链接走订阅的域名与端口"
@@ -2442,6 +2443,75 @@ assert_equals "0" "$(find "${RENEW_ROOT}/tls" -name '*.renew-bak' | wc -l | tr -
 renew_setup www.example.test 3 3
 RENEW_OUT=$(run_renew fail); assert_equals "1" "$?" "renewalTLS：acme.sh 续期失败返回 1"
 assert_contains "${RENEW_OUT}" "TLS_RENEW_ACME_FAILED" "renewalTLS：acme.sh 续期失败时报续期失败"
+
+echo ""
+
+echo -e "${YELLOW}=== 测试 installSubscribe ===${NC}"
+
+# installSubscribe 的 heredoc 里有顶格的 }，按下一个函数的开头截取
+SUB_FN=$(awk '/^installSubscribe\(\) \{/{f=1} /^unInstallSubscribe\(\) \{/{f=0} f' install.sh; sed -n '/^readNginxSubscribe() {/,/^}/p' install.sh)
+assert_not_empty "${SUB_FN}" "installSubscribe：抽到函数原文"
+SUB_ROOT="${MOCK_ROOT}/subscribe-conf"
+SUB_CONF="${SUB_ROOT}/nginx/subscribe.conf"
+SUB_HEX=0123456789abcdef0123456789abcdef
+
+# $1 nginx -v 报的版本（none = 还没装，装上后报 1.27.3），$2 cert|nocert，$3 v6|v4；输出读回的「端口|协议」。
+# nocert 按 IP 装（Reality-only），没有 currentHost
+run_sub() {
+    rm -rf "${SUB_ROOT}"; mkdir -p "${SUB_ROOT}/nginx" "${SUB_ROOT}/tls"
+    local host=
+    if [[ "$2" == "cert" ]]; then host=example.com; : >"${SUB_ROOT}/tls/example.com.crt"; : >"${SUB_ROOT}/tls/example.com.key"; fi
+    printf 'y\ny\n' | env SUB_HOST="${host}" SUB_ROOT="${SUB_ROOT}" SUB_FN="${SUB_FN}" SUB_NGINX="$1" SUB_V6="$3" bash -c '
+        source lib/utils.sh
+        TLS_DIR="${SUB_ROOT}/tls"; SUBSCRIBE_DIR="${SUB_ROOT}/subscribe"; nginxConfigPath="${SUB_ROOT}/nginx/"
+        nginxStaticPath=/usr/share/nginx/html; currentHost="${SUB_HOST}"
+        echoContent() { :; }
+        nginx() {
+            [[ "$1" == "-v" ]] || return 0
+            if [[ "${SUB_NGINX}" != none || -f "${SUB_ROOT}/installed" ]]; then
+                echo "nginx version: nginx/${SUB_NGINX/none/1.27.3}" >&2
+            else
+                echo "bash: nginx: command not found" >&2
+            fi
+        }
+        installNginxTools() { : >"${SUB_ROOT}/installed"; }
+        initSingBoxPort() { echo 23456; }
+        nginxBlog() { :; }; bootStartup() { :; }; handleNginx() { :; }; pgrep() { echo 1; }
+        curl() { [[ "${SUB_V6}" == v6 ]] && echo "ip=2001:db8::1"; return 0; }
+        eval "${SUB_FN}"
+        installSubscribe >/dev/null 2>&1
+        readNginxSubscribe
+        printf "%s|%s\n" "${subscribePort}" "${subscribeType}"'
+}
+# 订阅 location 的正则（去掉 nginx 的引号）对 $1 是否命中
+sub_location_matches() {
+    local re
+    re=$(sed -n 's/^    location ~ "\(\^\/s\/.*\$\)" {$/\1/p' "${SUB_CONF}")
+    [[ -n "${re}" ]] && grep -qE "${re}" <<<"$1"
+}
+
+assert_equals "23456|https" "$(run_sub 1.27.3 cert v6)" "installSubscribe：有证书时读回订阅端口与 https（多了拒握手块也只取主块的 listen）"
+assert_equals "1" "$(grep -c 'ssl_reject_handshake on;' "${SUB_CONF}")" "installSubscribe：nginx ≥ 1.19.4 时 SNI 不对的握手直接拒"
+assert_contains "$(cat "${SUB_CONF}")" "listen 23456 ssl default_server;listen [::]:23456 ssl default_server;" "installSubscribe：拒握手块是这个端口 v4 / v6 的默认 server"
+assert_contains "$(grep -m1 listen "${SUB_CONF}")" "so_keepalive=on" "installSubscribe：第一行 listen 属于主 server 块"
+assert_equals "1" "$(grep -c '^    server_tokens off;' "${SUB_CONF}")" "installSubscribe：响应头不带 nginx 版本号"
+sub_location_matches "/s/default/${SUB_HEX}"; assert_equals "0" "$?" "installSubscribe：32 位十六进制的订阅文件名命中"
+sub_location_matches "/s/sing-box_profiles/${SUB_HEX}"; assert_equals "0" "$?" "installSubscribe：sing-box_profiles 命中"
+sub_location_matches "/s/default/../../etc/passwd"; assert_equals "1" "$?" "installSubscribe：带 .. 的路径不命中"
+sub_location_matches "/s/default/${SUB_HEX}/x"; assert_equals "1" "$?" "installSubscribe：文件名后再带路径不命中"
+sub_location_matches "/s/default/${SUB_HEX%?}"; assert_equals "1" "$?" "installSubscribe：31 位不命中"
+sub_location_matches "/s/carpool/${SUB_HEX}"; assert_equals "1" "$?" "installSubscribe：不在白名单的目录不命中"
+
+assert_equals "23456|https" "$(run_sub 1.18.0 cert v4)" "installSubscribe：nginx 1.18 有证书时照常读回"
+assert_equals "0" "$(grep -c 'ssl_reject_handshake\|default_server' "${SUB_CONF}")" "installSubscribe：nginx < 1.19.4 不写拒握手块"
+assert_equals "1" "$(grep -c '^    server_tokens off;' "${SUB_CONF}")" "installSubscribe：nginx 1.18 也不带版本号"
+
+assert_equals "23456|http" "$(run_sub 1.27.3 nocert v4)" "installSubscribe：没证书时走 http"
+assert_equals "0" "$(grep -c 'ssl_reject_handshake' "${SUB_CONF}")" "installSubscribe：http 订阅不写拒握手块"
+
+assert_equals "23456|https" "$(run_sub none cert v4)" "installSubscribe：先装 nginx 再配订阅"
+assert_equals "1" "$(grep -c 'ssl_reject_handshake on;' "${SUB_CONF}")" "installSubscribe：按装完后的 nginx 版本判，不用装之前的 not found"
+assert_contains "$(grep -m1 listen "${SUB_CONF}")" "http2 on;" "installSubscribe：装完后的 nginx ≥ 1.25.1 时开 http2"
 
 echo ""
 
