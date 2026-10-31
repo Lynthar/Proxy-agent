@@ -761,10 +761,16 @@ SINGBOX_TEMPLATE_ROWS=$(awk '
 ' install.sh)
 assert_not_empty "${SINGBOX_TEMPLATE_ROWS}" "initSingBoxConfig：抽到 inbound 模板块"
 
-# 应有的模板全集独立写死（加协议时同步）：抽漏一块就对不上，不能靠「至少抽到一块」放行
-SINGBOX_TEMPLATE_WANT=$(for _pid in 0 1 3 4 6 7 9 10 11 13 14; do getProtocolConfigFileName "${_pid}"; done | sort)
+# 应有的模板全集独立写死（加协议时同步）：抽漏一块就对不上，不能靠「至少抽到一块」放行。
+# 6 不是 heredoc，由 hysteria2InboundJson 生成，下面把它的输出拼成同样一行参加交叉钉
+SINGBOX_TEMPLATE_WANT=$(for _pid in 0 1 3 4 7 9 10 11 13 14; do getProtocolConfigFileName "${_pid}"; done | sort)
 assert_equals "${SINGBOX_TEMPLATE_WANT}" "$(cut -d'|' -f1 <<< "${SINGBOX_TEMPLATE_ROWS}" | sort)" \
-    "initSingBoxConfig：抽到的 inbound 模板恰好是每个 sing-box 协议各一块"
+    "initSingBoxConfig：抽到的 heredoc 模板恰好是除 6 以外每个 sing-box 协议各一块"
+HY2_FN=$(sed -n '/^hysteria2InboundJson() {/,/^}/p' install.sh)
+assert_not_empty "${HY2_FN}" "hysteria2InboundJson：抽到函数原文"
+_hy2Row=$(eval "${HY2_FN}"; hysteria2InboundJson 443 '[]' example.com '' '' '' '' '' |
+    jq -r '.inbounds[0] | "\(.tag)|\(if .tls.certificate_path then "yes" else "no" end)"')
+SINGBOX_TEMPLATE_ROWS+=$'\n'"$(getProtocolConfigFileName 6)|${_hy2Row}"
 
 while IFS='|' read -r _tplName _tplTag _tplCert; do
     [[ -z "${_tplName}" ]] && continue
@@ -776,6 +782,50 @@ while IFS='|' read -r _tplName _tplTag _tplCert; do
             "模板 ${_tplName} 引用 tls/ 证书 ⇒ protocolRequiresTLS(${_tplId})"
     fi
 done <<< "${SINGBOX_TEMPLATE_ROWS}"
+
+echo ""
+
+echo -e "${BLUE}[Hysteria2] 入站片段与读回${NC}"
+
+hy2_json() ( eval "${HY2_FN}"; hysteria2InboundJson "$@" )
+_hy2Bbr=$(hy2_json 443 '[{"name":"a","password":"p"}]' example.com '' '' '' '' /usr/share/nginx/html)
+assert_equals "true" "$(jq '.inbounds[0].ignore_client_bandwidth' <<<"${_hy2Bbr}")" \
+    "Hysteria2：不填带宽即 BBR，ignore_client_bandwidth 让客户端也走 BBR"
+assert_equals "false" "$(jq '.inbounds[0] | has("up_mbps") or has("down_mbps")' <<<"${_hy2Bbr}")" \
+    "Hysteria2：BBR 不写 up_mbps / down_mbps，写了就成了拒绝客户端用 BBR"
+assert_equals '{"type":"file","directory":"/usr/share/nginx/html"}' "$(jq -c '.inbounds[0].masquerade' <<<"${_hy2Bbr}")" \
+    "Hysteria2：masquerade 拿伪装站目录当文件服务器"
+assert_equals "false" "$(jq '.inbounds[0] | has("obfs")' <<<"${_hy2Bbr}")" "Hysteria2：不混淆时不写 obfs"
+assert_equals '[{"name":"a","password":"p"}] 443' "$(jq -r '.inbounds[0] | "\(.users | tojson) \(.listen_port)"' <<<"${_hy2Bbr}")" \
+    "Hysteria2：用户数组原样进片段，端口是数字"
+assert_equals "${TLS_DIR}/example.com.crt ${TLS_DIR}/example.com.key" \
+    "$(jq -r '.inbounds[0].tls | "\(.certificate_path) \(.key_path)"' <<<"${_hy2Bbr}")" "Hysteria2：证书按域名取 tls/ 下那一对"
+_hy2Brutal=$(hy2_json 8443 '[]' example.com 100 50 gecko 'a"b\c' '')
+assert_equals "100 50 false" "$(jq -r '.inbounds[0] | "\(.up_mbps) \(.down_mbps) \(.ignore_client_bandwidth)"' <<<"${_hy2Brutal}")" \
+    "Hysteria2：Brutal 写服务端 up / down，并允许客户端按带宽发"
+assert_equals '{"type":"gecko","password":"a\"b\\c"}' "$(jq -c '.inbounds[0].obfs' <<<"${_hy2Brutal}")" \
+    "Hysteria2：混淆类型与密码只当数据进 jq"
+assert_equals "false" "$(jq '.inbounds[0] | has("masquerade")' <<<"${_hy2Brutal}")" "Hysteria2：没有伪装站目录就不写 masquerade"
+
+READ_SB_FN=$(sed -n '/^readSingBoxConfig() {/,/^}/p' install.sh)
+assert_not_empty "${READ_SB_FN}" "readSingBoxConfig：抽到函数原文"
+HY2_READ_DIR="${MOCK_ROOT}/hy2read/"
+mkdir -p "${HY2_READ_DIR}"
+# 打印「客户端下行|客户端上行|混淆类型|混淆密码」
+hy2_read() (
+    singBoxConfigPath="${HY2_READ_DIR}"
+    eval "${READ_SB_FN}"
+    readSingBoxConfig
+    printf '%s|%s|%s|%s\n' "${hysteria2ClientDownloadSpeed}" "${hysteria2ClientUploadSpeed}" "${hysteria2ObfsType}" "${hysteria2ObfsPassword}"
+)
+printf '%s\n' "${_hy2Bbr}" >"${HY2_READ_DIR}06_hysteria2_inbounds.json"
+assert_equals "|||" "$(hy2_read)" "readSingBoxConfig：BBR 片段读回空带宽而不是 null，订阅就不给客户端带宽"
+printf '%s\n' "${_hy2Brutal}" >"${HY2_READ_DIR}06_hysteria2_inbounds.json"
+assert_equals '100|50|gecko|a"b\c' "$(hy2_read)" "readSingBoxConfig：up_mbps 读作客户端下行、down_mbps 读作上行，混淆类型一并读出"
+printf '%s\n' '{"inbounds":[{"type":"hysteria2","listen_port":443,"up_mbps":200,"down_mbps":20,"ignore_client_bandwidth":false,"obfs":{"type":"salamander","password":"pw"}}]}' \
+    >"${HY2_READ_DIR}06_hysteria2_inbounds.json"
+assert_equals "200|20|salamander|pw" "$(hy2_read)" "readSingBoxConfig：旧版写死 Brutal 的片段照旧读出带宽与混淆"
+rm -rf "${HY2_READ_DIR}"
 
 echo ""
 

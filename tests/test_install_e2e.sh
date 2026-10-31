@@ -207,6 +207,35 @@ if [[ ${coreTestRc} -ne 0 ]]; then
 fi
 assert_equals "0" "${coreTestRc}" "${CORE_LABEL} 自检合并后的配置通过"
 
+# Hysteria2 片段要过真 sing-box 的 check：字段名、gecko、masquerade 对不对，桩测不出来。
+# 证书现签 ECDSA：1.14 起客户端默认模仿 Chrome 握手，不认 Ed25519
+if [[ "${E2E_CORE}" == "singbox" ]]; then
+    HY2_FN=$(sed -n '/^hysteria2InboundJson() {/,/^}/p' "${PROJECT_ROOT}/install.sh")
+    hy2Dir=$(mktemp -d)
+    mkdir -p "${hy2Dir}/site"
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 -subj /CN=e2e.example \
+        -keyout "${hy2Dir}/e2e.example.key" -out "${hy2Dir}/e2e.example.crt" >/dev/null 2>&1
+    singBoxVersion=$("${SINGBOX_BIN}" version 2>/dev/null | awk '/^sing-box version/ {print $3; exit}')
+    hy2Obfs=salamander
+    if [[ "$(printf '%s\n' "${singBoxVersion}" 1.14.0 | sort -V | head -n 1)" == "1.14.0" ]]; then
+        hy2Obfs=gecko
+    fi
+    # hy2Check UP DOWN OBFS SITE → 生成片段并 check，返回 check 的退出码；失败时打出 check 的输出
+    hy2Check() {
+        (TLS_DIR="${hy2Dir}"; eval "${HY2_FN}"
+            hysteria2InboundJson 8443 '[{"name":"e2e","password":"pw"}]' e2e.example "$1" "$2" "$3" pw0 "$4") >"${hy2Dir}/hy2.json" &&
+            "${SINGBOX_BIN}" check -c "${hy2Dir}/hy2.json" >"${hy2Dir}/check.log" 2>&1 || {
+            tail -n 5 "${hy2Dir}/check.log"
+            return 1
+        }
+    }
+    hy2Check '' '' "${hy2Obfs}" "${hy2Dir}/site"
+    assert_equals "0" "$?" "Hysteria2 片段过 sing-box ${singBoxVersion} 的 check：BBR + ${hy2Obfs} + masquerade"
+    hy2Check 100 50 salamander ''
+    assert_equals "0" "$?" "Hysteria2 片段过 sing-box ${singBoxVersion} 的 check：Brutal + salamander"
+    rm -rf "${hy2Dir}"
+fi
+
 if [[ -f "${realityConf}" && "${E2E_CORE}" == "xray" ]]; then
     assert_contains "${coreTestOut}" "Configuration OK" "xray run -test 报 Configuration OK"
     assert_equals "${E2E_PORT}" "$(jq -r '.inbounds[0].port' "${realityConf}")" "对外端口是回车默认的 ${E2E_PORT}"

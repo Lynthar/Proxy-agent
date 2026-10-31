@@ -1177,6 +1177,10 @@ initVar() {
     # hysteria上行速度
     hysteria2ClientUploadSpeed=
 
+    # Hysteria2 混淆类型（salamander / gecko，空 = 不混淆）与密码
+    hysteria2ObfsType=
+    hysteria2ObfsPassword=
+
     # Reality
     realityPrivateKey=
     realityServerName=
@@ -1753,11 +1757,11 @@ readSingBoxConfig() {
         fi
         if [[ -f "${singBoxConfigPath}06_hysteria2_inbounds.json" ]]; then
             hysteriaPort=$(jq -r '.inbounds[0].listen_port' "${singBoxConfigPath}06_hysteria2_inbounds.json")
-            # 落盘约定：up_mbps 存下行速度、down_mbps 存上行速度（Hysteria2 的
-            # "服务端上行=客户端下行" 语义）。读回必须按同一约定还原，
-            # 否则改配置 / 重新生成订阅时会把上下行对调。
-            hysteria2ClientDownloadSpeed=$(jq -r '.inbounds[0].up_mbps' "${singBoxConfigPath}06_hysteria2_inbounds.json")
-            hysteria2ClientUploadSpeed=$(jq -r '.inbounds[0].down_mbps' "${singBoxConfigPath}06_hysteria2_inbounds.json")
+            # 落盘约定：up_mbps 存客户端下行、down_mbps 存客户端上行（服务端上行 = 客户端下行），读回按同一约定，
+            # 否则重新生成订阅时上下行对调。BBR 的配置不写带宽，读回为空，订阅随之不给客户端带宽
+            hysteria2ClientDownloadSpeed=$(jq -r '.inbounds[0].up_mbps // empty' "${singBoxConfigPath}06_hysteria2_inbounds.json")
+            hysteria2ClientUploadSpeed=$(jq -r '.inbounds[0].down_mbps // empty' "${singBoxConfigPath}06_hysteria2_inbounds.json")
+            hysteria2ObfsType=$(jq -r '.inbounds[0].obfs.type // empty' "${singBoxConfigPath}06_hysteria2_inbounds.json")
             hysteria2ObfsPassword=$(jq -r '.inbounds[0].obfs.password // empty' "${singBoxConfigPath}06_hysteria2_inbounds.json")
         fi
     fi
@@ -4454,30 +4458,84 @@ initSingBoxClients() {
     echo "${users}"
 }
 
-# 初始化hysteria网络信息
+# initHysteria2Network → 问拥塞控制与混淆。BBR 时 hysteria2ClientDownloadSpeed / UploadSpeed 为空，
+# 不混淆时 hysteria2ObfsType / hysteria2ObfsPassword 为空；gecko 要 sing-box ≥ 1.14，低于它不给选
 initHysteria2Network() {
+    local choice= gecko=
+    hysteria2ClientDownloadSpeed=
+    hysteria2ClientUploadSpeed=
+    hysteria2ObfsType=
+    hysteria2ObfsPassword=
 
-    echoContent yellow "请输入本地带宽峰值的下行速度（默认：100，单位：Mbps）"
-    read -r -p "下行速度:" hysteria2ClientDownloadSpeed
-    if [[ -z "${hysteria2ClientDownloadSpeed}" ]]; then
-        hysteria2ClientDownloadSpeed=100
-        echoContent green "\n ---> 下行速度: ${hysteria2ClientDownloadSpeed}\n"
-    fi
-
-    echoContent yellow "请输入本地带宽峰值的上行速度（默认：50，单位：Mbps）"
-    read -r -p "上行速度:" hysteria2ClientUploadSpeed
-    if [[ -z "${hysteria2ClientUploadSpeed}" ]]; then
-        hysteria2ClientUploadSpeed=50
-        echoContent green "\n ---> 上行速度: ${hysteria2ClientUploadSpeed}\n"
-    fi
-
-    echoContent yellow "是否启用混淆(obfs)? 留空不启用，输入密码则启用salamander混淆"
-    read -r -p "混淆密码(留空不启用):" hysteria2ObfsPassword
-    if [[ -n "${hysteria2ObfsPassword}" ]]; then
-        echoContent green "\n ---> 混淆已启用\n"
+    echoContent yellow "$(t HY2_CC_MENU)"
+    read -r -p "$(t HY2_SELECT_DEFAULT_1)" choice
+    if [[ "${choice}" == "2" ]]; then
+        readHysteria2Speed "$(t HY2_SPEED_DOWN 100)" hysteria2ClientDownloadSpeed 100
+        readHysteria2Speed "$(t HY2_SPEED_UP 50)" hysteria2ClientUploadSpeed 50
+        echoContent green " ---> $(t HY2_BRUTAL_SET "${hysteria2ClientDownloadSpeed}" "${hysteria2ClientUploadSpeed}")"
     else
-        echoContent green "\n ---> 混淆未启用\n"
+        echoContent green " ---> BBR"
     fi
+
+    if versionGreaterOrEqual "$(singBoxInstalledVersion)" 1.14.0; then
+        gecko=true
+    fi
+    echoContent yellow "$(t HY2_OBFS_MENU)"
+    if [[ -n "${gecko}" ]]; then
+        echoContent yellow "$(t HY2_OBFS_GECKO)"
+    fi
+    read -r -p "$(t HY2_SELECT_DEFAULT_1)" choice
+    case "${choice}" in
+    2) hysteria2ObfsType=salamander ;;
+    3) [[ -n "${gecko}" ]] && hysteria2ObfsType=gecko ;;
+    esac
+    if [[ -z "${hysteria2ObfsType}" ]]; then
+        echoContent green " ---> $(t HY2_OBFS_OFF)"
+        return 0
+    fi
+    # 只收 URL 不保留字符：密码要原样进 hysteria2:// 链接与 clashMeta 的 YAML，别的字符会把两者写坏
+    while true; do
+        read -r -p "$(t HY2_OBFS_PASSWORD)" hysteria2ObfsPassword
+        if [[ -z "${hysteria2ObfsPassword}" ]]; then
+            hysteria2ObfsPassword=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+        fi
+        if [[ "${hysteria2ObfsPassword}" =~ ^[A-Za-z0-9._~-]{1,128}$ ]]; then
+            break
+        fi
+        echoContent red " ---> $(t HY2_OBFS_PASSWORD_INVALID)"
+    done
+    echoContent green " ---> obfs: ${hysteria2ObfsType}"
+}
+
+# readHysteria2Speed PROMPT OUT_VAR DEFAULT → 读 1-999999 的整数（Mbps）写进 OUT_VAR，回车取 DEFAULT，输错重问
+readHysteria2Speed() {
+    local -n __rhs_out="$2"
+    local input
+    while true; do
+        read -r -p "$1" input
+        input=${input:-$3}
+        if [[ "${input}" =~ ^[1-9][0-9]{0,5}$ ]]; then
+            __rhs_out=${input}
+            return 0
+        fi
+        echoContent red " ---> $(t HY2_SPEED_INVALID)"
+    done
+}
+
+# hysteria2InboundJson PORT USERS_JSON SNI UP DOWN OBFS_TYPE OBFS_PASSWORD SITE_DIR → 06 片段的完整 JSON
+# UP / DOWN 是服务端的 up_mbps / down_mbps，留空即 BBR，并用 ignore_client_bandwidth 让客户端也走 BBR；
+# OBFS_TYPE 空 = 不混淆；SITE_DIR 空 = 不配 masquerade，未认证的 HTTP/3 请求得到内核自带的 404
+hysteria2InboundJson() {
+    jq -n --argjson port "$1" --argjson users "$2" --arg sni "$3" --arg up "$4" --arg down "$5" \
+        --arg obfsType "$6" --arg obfsPassword "$7" --arg site "$8" \
+        --arg cert "${TLS_DIR}/$3.crt" --arg keyFile "${TLS_DIR}/$3.key" '
+        {type: "hysteria2", tag: "hysteria2-in", listen: "::", listen_port: $port, users: $users}
+        + (if $up == "" then {ignore_client_bandwidth: true}
+           else {up_mbps: ($up | tonumber), down_mbps: ($down | tonumber), ignore_client_bandwidth: false} end)
+        + (if $obfsType == "" then {} else {obfs: {type: $obfsType, password: $obfsPassword}} end)
+        + (if $site == "" then {} else {masquerade: {type: "file", directory: $site}} end)
+        + {tls: {enabled: true, server_name: $sni, alpn: ["h3"], certificate_path: $cert, key_path: $keyFile}}
+        | {inbounds: [.]}'
 }
 
 # 初始化 Shadowsocks 2022 配置
@@ -6118,42 +6176,27 @@ EOF
         echoContent green "\n ---> Hysteria2端口：${result[-1]}"
         initHysteria2Network
 
-        # 构建obfs配置（如果启用）
-        # 用 jq -Rs 把密码转成合法 JSON string literal（含外层引号），
-        # 避免密码含 " 或 \ 时破坏 JSON。
-        local hysteria2ObfsConfig=""
-        if [[ -n "${hysteria2ObfsPassword}" ]]; then
-            local _obfsPwJson
-            _obfsPwJson=$(printf '%s' "${hysteria2ObfsPassword}" | jq -Rs '.')
-            hysteria2ObfsConfig='"obfs": {"type": "salamander", "password": '"${_obfsPwJson}"'},'
+        # masquerade 用伪装站的静态文件，sing-box 内核没装过就先装一个。宝塔 / 1Panel 的目录是用户自己的站点，
+        # 可能有 PHP 源码，文件服务器会原样吐出去，所以不配
+        local hysteria2SiteDir= hysteria2Json=
+        if [[ -z "${btDomain}" ]]; then
+            if [[ ! -f "${nginxStaticPath}/check" ]]; then
+                nginxBlog
+            fi
+            if [[ -f "${nginxStaticPath}/check" ]]; then
+                hysteria2SiteDir=${nginxStaticPath%/}
+            fi
         fi
-
-        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json
-{
-    "inbounds": [
-        {
-            "type": "hysteria2",
-            "tag": "hysteria2-in",
-            "listen": "::",
-            "listen_port": ${result[-1]},
-            "users": $(initSingBoxClients 6),
-            "up_mbps":${hysteria2ClientDownloadSpeed},
-            "down_mbps":${hysteria2ClientUploadSpeed},
-            "ignore_client_bandwidth": false,
-            ${hysteria2ObfsConfig}
-            "tls": {
-                "enabled": true,
-                "server_name":"${sslDomain}",
-                "alpn": [
-                    "h3"
-                ],
-                "certificate_path": "${TLS_DIR}/${sslDomain}.crt",
-                "key_path": "${TLS_DIR}/${sslDomain}.key"
-            }
-        }
-    ]
-}
-EOF
+        if [[ -z "${hysteria2SiteDir}" ]]; then
+            echoContent yellow " ---> $(t HY2_MASQUERADE_NONE)"
+        fi
+        if ! hysteria2Json=$(hysteria2InboundJson "${result[-1]}" "$(initSingBoxClients 6)" "${sslDomain}" \
+            "${hysteria2ClientDownloadSpeed}" "${hysteria2ClientUploadSpeed}" \
+            "${hysteria2ObfsType}" "${hysteria2ObfsPassword}" "${hysteria2SiteDir}") ||
+            ! jsonWriteFile "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" "${hysteria2Json}" false; then
+            echoContent red " ---> $(t HY2_WRITE_FAILED)"
+            exit 1
+        fi
     elif [[ -z "${3:-}" ]]; then
         rm ${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json >/dev/null 2>&1
     fi
@@ -6586,12 +6629,20 @@ EOF
             # JSON string literal：用于 sing-box 订阅 JSON 片段（与 4925/5760 同款）
             _obfsPwJson=$(printf '%s' "${hysteria2ObfsPassword}" | jq -Rs '.')
 
-            obfsUrlParam="obfs=salamander&obfs-password=${_obfsPwUriEnc}&"
-            # QR 客户端 URL-decode 后拿到 obfs=samalander，不匹配仅支持的 "salamander" → obfs 静默失效。
-            obfsUrlParamEncode="obfs%3Dsalamander%26obfs-password%3D${_obfsPwQrEnc}%26"
-            clashMetaObfs="    obfs: salamander
+            local obfsType=${hysteria2ObfsType:-salamander}
+            obfsUrlParam="obfs=${obfsType}&obfs-password=${_obfsPwUriEnc}&"
+            obfsUrlParamEncode="obfs%3D${obfsType}%26obfs-password%3D${_obfsPwQrEnc}%26"
+            clashMetaObfs="    obfs: ${obfsType}
     obfs-password: ${hysteria2ObfsPassword}"
-            singBoxObfs=',"obfs":{"type":"salamander","password":'"${_obfsPwJson}"'}'
+            singBoxObfs=',"obfs":{"type":"'"${obfsType}"'","password":'"${_obfsPwJson}"'}'
+        fi
+
+        # 只有 Brutal 才把带宽发给客户端；BBR 的配置不写带宽，客户端没有带宽就走 BBR
+        local clashMetaBandwidth= singBoxBandwidth=
+        if [[ -n "${hysteria2ClientDownloadSpeed}" ]]; then
+            clashMetaBandwidth="    up: \"${hysteria2ClientUploadSpeed} Mbps\"
+    down: \"${hysteria2ClientDownloadSpeed} Mbps\""
+            singBoxBandwidth=",\"up_mbps\":${hysteria2ClientUploadSpeed},\"down_mbps\":${hysteria2ClientDownloadSpeed}"
         fi
 
         echoContent green "    hysteria2://${id}@${currentHost}:${singBoxHysteria2Port}?${multiPort}${obfsUrlParam}peer=${currentHost}&insecure=0&sni=${currentHost}&alpn=h3#${email}\n"
@@ -6610,12 +6661,11 @@ EOF
     alpn:
         - h3
     sni: ${currentHost}
-    up: "${hysteria2ClientUploadSpeed} Mbps"
-    down: "${hysteria2ClientDownloadSpeed} Mbps"
+${clashMetaBandwidth}
 ${clashMetaObfs}
 EOF
 
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"hysteria2\",\"server\":\"${currentHost}\",\"server_port\":${singBoxHysteria2Port},\"up_mbps\":${hysteria2ClientUploadSpeed},\"down_mbps\":${hysteria2ClientDownloadSpeed},\"password\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"alpn\":[\"h3\"]}${singBoxObfs}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"hysteria2\",\"server\":\"${currentHost}\",\"server_port\":${singBoxHysteria2Port}${singBoxBandwidth},\"password\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"alpn\":[\"h3\"]}${singBoxObfs}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
         echoContent yellow " ---> 二维码 Hysteria2(TLS)"
