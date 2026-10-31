@@ -1095,6 +1095,21 @@ rm -rf "${CRON_FAKE_ROOT}" "${MOCK_ROOT}/cron.calls"
 echo ""
 
 # ============================================================================
+# updateRemoteSubscribe 的三次远程拉取都要带超时：它被 cron 里的订阅重建调到，无超时的 curl 会把任务挂死
+# ============================================================================
+
+echo -e "${YELLOW}=== 测试 updateRemoteSubscribe 的 curl 超时 ===${NC}"
+
+REMOTE_SUB_FN=$(sed -n '/^updateRemoteSubscribe() {/,/^}/p' install.sh)
+assert_not_empty "${REMOTE_SUB_FN}" "updateRemoteSubscribe：抽到函数原文"
+REMOTE_SUB_CURLS=$(grep -c 'curl ' <<<"${REMOTE_SUB_FN}")
+assert_equals "3" "${REMOTE_SUB_CURLS}" "updateRemoteSubscribe：三种订阅格式各拉一次"
+assert_equals "${REMOTE_SUB_CURLS}" "$(grep 'curl ' <<<"${REMOTE_SUB_FN}" | grep -c -e '--connect-timeout [0-9]' )" "updateRemoteSubscribe：每次 curl 都带 --connect-timeout"
+assert_equals "${REMOTE_SUB_CURLS}" "$(grep 'curl ' <<<"${REMOTE_SUB_FN}" | grep -c -E -e '(-m|--max-time) [0-9]+')" "updateRemoteSubscribe：每次 curl 都带总超时 -m"
+
+echo ""
+
+# ============================================================================
 # 测试：updateGeoSite 的失败语义——下载失败要返回 1，旧 geo 文件不能先被删掉
 # ============================================================================
 

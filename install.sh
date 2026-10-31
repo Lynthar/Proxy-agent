@@ -16149,7 +16149,7 @@ updateRemoteSubscribe() {
         fi
         local clashMetaProxies=
 
-        clashMetaProxies=$(curl -s "${subscribeType}://${remoteUrl}/s/clashMeta/${emailMD5}" | sed '/proxies:/d' | sed "s/\"${email}/\"${email}_${serverAlias}/g")
+        clashMetaProxies=$(curl -s --connect-timeout 5 -m 20 "${subscribeType}://${remoteUrl}/s/clashMeta/${emailMD5}" | sed '/proxies:/d' | sed "s/\"${email}/\"${email}_${serverAlias}/g")
 
         if ! echo "${clashMetaProxies}" | grep -q "nginx" && [[ -n "${clashMetaProxies}" ]]; then
             echo "${clashMetaProxies}" >>"${SUBSCRIBE_DIR}/clashMeta/${emailMD5}"
@@ -16159,7 +16159,7 @@ updateRemoteSubscribe() {
         fi
 
         local default=
-        default=$(curl -s "${subscribeType}://${remoteUrl}/s/default/${emailMD5}")
+        default=$(curl -s --connect-timeout 5 -m 20 "${subscribeType}://${remoteUrl}/s/default/${emailMD5}")
 
         if ! echo "${default}" | grep -q "nginx" && [[ -n "${default}" ]]; then
             default=$(echo "${default}" | base64 -d | sed "s/#${email}/#${email}_${serverAlias}/g")
@@ -16171,7 +16171,7 @@ updateRemoteSubscribe() {
         fi
 
         local singBoxSubscribe=
-        singBoxSubscribe=$(curl -s "${subscribeType}://${remoteUrl}/s/sing-box_profiles/${emailMD5}")
+        singBoxSubscribe=$(curl -s --connect-timeout 5 -m 20 "${subscribeType}://${remoteUrl}/s/sing-box_profiles/${emailMD5}")
 
         # 远程订阅是半可信内容：先做标签重命名，再 jq -e 预校验为合法 JSON，最后用
         # --argjson 传入（jq 自动 escape），避免把远程响应直接拼进 jq 过滤器。
