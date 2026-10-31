@@ -535,6 +535,11 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
     assert_equals "yes" "$([[ "${usedBytes}" =~ ^[0-9]+$ && "${usedBytes}" -gt 0 ]] && echo yes || echo no)" \
         "这次流量记进了 ${E2E_USER} 名下（${usedBytes} 字节）"
     assert_equals "0" "$(jq -r '.collectFailures' <<<"${carpoolState}" 2>/dev/null)" "采集没有失败计数"
+    # 整机读真 /proc：开启时那次 tick 记下基线，这次 tick 的增量里含刚才经代理的流量（网卡还多出协议开销）
+    assert_equals '["eth0"]' "$(jq -c '.machine.ifaces' <<<"${carpoolState}" 2>/dev/null)" "整机按默认路由找到网卡 eth0"
+    machineBytes=$(jq -r '.machine.rx + .machine.tx' <<<"${carpoolState}" 2>/dev/null)
+    assert_equals "yes" "$([[ "${machineBytes}" =~ ^[0-9]+$ && "${usedBytes}" =~ ^[0-9]+$ && "${machineBytes}" -ge "${usedBytes}" ]] && echo yes || echo no)" \
+        "整机本周期收发 ${machineBytes} 字节，不少于成员统计的 ${usedBytes} 字节"
     # 采集带 -reset：取过的计数器要归零，否则每个 tick 都把累计值重加一遍
     assert_equals "0" "$(statsValue "$("${XRAY_BIN}" api statsquery -s "127.0.0.1:${apiPort}" -t 3 -pattern 'user>>>' 2>&1)" "${statName}")" \
         "tick 采集之后该计数器归零"

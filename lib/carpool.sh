@@ -10,7 +10,8 @@ readonly _CARPOOL_LOADED=1
 # 可纳入拼车计量的协议：Xray 自己承载的入站。6/9 在 Xray 内核下跑在 sing-box sidecar，v2ray_api 计不到
 readonly CARPOOL_PROTOCOLS=",0,1,3,4,7,12,"
 
-# 日期算术只有这一份实现（Hinnant days_from_civil），bash 侧与 jq 判定共用；输入 "YYYY-MM-DD"
+# jq 侧共享定义。日期算术只有这一份实现（Hinnant days_from_civil，输入 "YYYY-MM-DD"），bash 侧与判定共用；
+# 用量也只在这里算：成员 = 上下行合计 × 口径系数（both 为 2），整机按网卡收发（out 只计发、max 取大）
 readonly _CARPOOL_JQ_DEFS='
 def carpoolDays:
   (split("-") | map(tonumber)) as [$y0, $m, $d]
@@ -25,6 +26,15 @@ def carpoolFmtBytes:
   elif . >= 1048576 then "\(. / 1048576 * 10 | floor / 10) MiB"
   elif . >= 1024 then "\(. / 1024 | floor) KiB"
   else "\(.) B" end;
+def carpoolFmtDecimal:
+  if . >= 1000000000 then "\(. / 1000000000 * 100 | floor / 100) GB"
+  elif . >= 1000000 then "\(. / 1000000 * 10 | floor / 10) MB"
+  elif . >= 1000 then "\(. / 1000 | floor) kB"
+  else "\(.) B" end;
+def carpoolUsage($billing): (.upBytes + .downBytes) * (if $billing == "both" then 2 else 1 end);
+def carpoolMachineUsage($billing):
+  if $billing == "out" then .tx elif $billing == "max" then ([.rx, .tx] | max) else .rx + .tx end;
+def carpoolHasMachine: ((.machine.ifaces // []) | length) > 0;
 '
 
 # ============================================================================
@@ -133,9 +143,20 @@ carpoolValidateMembers() {
     raw=$(jq -r --argjson installed "${installedJson}" --argjson foreign "${foreign}" \
         --argjson allowed "$(carpoolInstalledProtocolsJson "${CARPOOL_PROTOCOLS}")" '
       if type != "object" then "NOT_OBJECT\t" else
-        ( keys[] | select(. != "resetDay" and . != "notify" and . != "members") | "UNKNOWN_FIELD\t\(.)" ),
+        ( keys[] | select(. != "resetDay" and . != "notify" and . != "billing" and . != "plan" and . != "members") | "UNKNOWN_FIELD\t\(.)" ),
         ( if has("resetDay") and ((.resetDay | type) != "number" or .resetDay != (.resetDay | floor) or .resetDay < 1 or .resetDay > 28)
           then "BAD_RESET_DAY\t\(.resetDay | tojson)" else empty end ),
+        ( if has("billing") and (.billing != "out" and .billing != "both" and .billing != "max")
+          then "BAD_BILLING\t\(.billing | tojson)" else empty end ),
+        ( if has("plan") then
+            if (.plan | type) != "object" then "BAD_PLAN\tplan" else
+              .plan as $p
+              | ( $p | keys[] | select(. != "sizeGB" and . != "warnPercent" and . != "interface") | "UNKNOWN_FIELD\tplan.\(.)" ),
+                ( if $p.sizeGB != null and (($p.sizeGB | type) != "number" or $p.sizeGB != ($p.sizeGB | floor) or $p.sizeGB < 0) then "BAD_PLAN\tsizeGB" else empty end ),
+                ( if $p.warnPercent != null and (($p.warnPercent | type) != "number" or $p.warnPercent != ($p.warnPercent | floor) or $p.warnPercent < 0 or $p.warnPercent > 100) then "BAD_PLAN\twarnPercent" else empty end ),
+                ( if $p.interface != null and (($p.interface | type) != "string" or ($p.interface | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,14}$") | not)) then "BAD_PLAN\tinterface" else empty end )
+            end
+          else empty end ),
         ( if has("notify") then
             if (.notify | type) != "object" then "BAD_NOTIFY\tnotify" else
               .notify as $n
@@ -188,6 +209,8 @@ carpoolValidateMembers() {
             NO_MEMBERS) t CARPOOL_ERR_NO_MEMBERS ;;
             UNKNOWN_FIELD) t CARPOOL_ERR_UNKNOWN_FIELD "${a}" ;;
             BAD_RESET_DAY) t CARPOOL_ERR_BAD_RESET_DAY "${a}" ;;
+            BAD_BILLING) t CARPOOL_ERR_BAD_BILLING "${a}" ;;
+            BAD_PLAN) t CARPOOL_ERR_BAD_PLAN "${a}" ;;
             BAD_NOTIFY) t CARPOOL_ERR_BAD_NOTIFY "${a}" ;;
             BAD_NAME) t CARPOOL_ERR_BAD_NAME "${a}" ;;
             DUP_NAME_CASE) t CARPOOL_ERR_DUP_NAME_CASE "${a}" ;;
@@ -210,12 +233,12 @@ carpoolValidateMembers() {
 }
 
 # carpoolNormalizeMembers FILE INSTALLED → 默认值填好、"all" 展开、配额换成字节的 JSON；先过校验再调
-# digestHour 为 null 表示关闭，保留 null
+# digestHour 为 null 表示关闭，保留 null；口径不写按 both：多算只是成员提前停，少算是整机被服务商限速
 carpoolNormalizeMembers() {
     local installedJson
     installedJson=$(carpoolInstalledProtocolsJson "$2")
     jq -c --argjson installed "${installedJson}" --arg defaultLabel "$(t CARPOOL_DEFAULT_LABEL)" '
-      (.notify // {}) as $n
+      (.notify // {}) as $n | (.plan // {}) as $p
       | {
           resetDay: (.resetDay // 1),
           notify: {
@@ -224,6 +247,8 @@ carpoolNormalizeMembers() {
             digestHour: (if ($n | has("digestHour")) then $n.digestHour else 8 end),
             expireNoticeDays: ($n.expireNoticeDays // 3)
           },
+          billing: (.billing // "both"),
+          plan: {sizeGB: ($p.sizeGB // 0), warnPercent: ($p.warnPercent // 85), interface: ($p.interface // "")},
           members: ((.members // {}) | with_entries(.value |= {
             quotaBytes: ((.quotaGiB // 0) * 1073741824),
             expire: (.expire // ""),
@@ -244,6 +269,8 @@ carpoolSeedMembers() {
     jq --arg defaultLabel "$(t CARPOOL_DEFAULT_LABEL)" '{
         resetDay: 1,
         notify: {label: $defaultLabel, warnPercent: 80, digestHour: 8, expireNoticeDays: 3},
+        billing: "both",
+        plan: {sizeGB: 0, warnPercent: 85},
         members: (map({key: .name, value: {quotaGiB: 0, expire: "", protocols: "all"}}) | from_entries)
       }' <<<"$1"
 }
@@ -274,15 +301,55 @@ carpoolAddUsage() {
 }
 
 # ============================================================================
+# 整机网卡用量（服务商按网卡计费，成员统计不含协议开销与系统流量）
+# ============================================================================
+
+# carpoolDefaultRouteIfaces ROUTE_TEXT IPV6_ROUTE_TEXT → 默认路由所在网卡的 JSON 数组（升序去重）：
+# 两段分别是 /proc/net/route 与 /proc/net/ipv6_route 的内容，v4 / v6 各取 metric 最小的那条；lo 上的 v6 默认路由是内核的 unreachable 占位，跳过
+carpoolDefaultRouteIfaces() {
+    jq -cn --arg v4 "$1" --arg v6 "$2" '
+      def rows($t): $t | split("\n") | map([splits("\\s+")] | map(select(. != ""))) | .[];
+      ( [ rows($v4) | select(length >= 8 and .[1] == "00000000" and .[7] == "00000000") | {dev: .[0], metric: (.[6] | tonumber)} ]
+        | sort_by(.metric) | .[0:1] | map(.dev) )
+      + ( [ rows($v6) | select(length >= 10 and .[0] == "00000000000000000000000000000000" and .[1] == "00" and .[9] != "lo") | {dev: .[9], metric: .[5]} ]
+        | sort_by(.metric) | .[0:1] | map(.dev) )
+      | unique'
+}
+
+# carpoolNetDevCounters NETDEV_TEXT IFACES_JSON → {"<网卡>": {"rx": 字节, "tx": 字节}}，只取列出的网卡；/proc/net/dev 里没有的不出现
+carpoolNetDevCounters() {
+    jq -cn --arg t "$1" --argjson want "$2" '
+      [ $t | split("\n")[] | select(test(":")) | (sub(":"; " ") | [splits("\\s+")] | map(select(. != ""))) as $f
+        | select(($f | length) >= 10 and ($want | index($f[0])) != null)
+        | {key: $f[0], value: {rx: ($f[1] | tonumber), tx: ($f[9] | tonumber)}} ] | from_entries'
+}
+
+# carpoolMachineAdvance MACHINE SAMPLE → 新的 state.machine {bootId, ifaces, last, rx, tx}；SAMPLE 是 {bootId, counters}
+# 换了开机（bootId 都非空且不同）就把本次读数整段算作增量；读数比上次小（网卡重建）同样处理；上次没有这块网卡只记读数不加
+carpoolMachineAdvance() {
+    jq -c --argjson s "$2" '
+      (. // {}) as $m | ($m.last // {}) as $last
+      | (($m.bootId // "") != "" and $s.bootId != "" and $m.bootId != $s.bootId) as $rebooted
+      | [ $s.counters | to_entries[] | .key as $k | .value as $c
+          | if $rebooted then $c
+            elif $last[$k] == null then {rx: 0, tx: 0}
+            else {rx: (if $c.rx >= $last[$k].rx then $c.rx - $last[$k].rx else $c.rx end),
+                  tx: (if $c.tx >= $last[$k].tx then $c.tx - $last[$k].tx else $c.tx end)} end ] as $d
+      | {bootId: $s.bootId, ifaces: ($s.counters | keys), last: $s.counters,
+         rx: (($m.rx // 0) + ([$d[].rx] | add // 0)), tx: (($m.tx // 0) + ([$d[].tx] | add // 0))}' <<<"$1"
+}
+
+# ============================================================================
 # state.json
 # ============================================================================
 
-# carpoolInitialState APIPORT PERIOD → 开启时的 state 内容；成员、resetDay 与 notify 由 carpoolMergeState 填
-# resetDay / notify 是「已应用的副本」：members.json 校验不过的那个 tick 仍要有周期可算
+# carpoolInitialState APIPORT PERIOD → 开启时的 state 内容；成员与四个顶层设置由 carpoolMergeState 填
+# resetDay / notify / billing / plan 是「已应用的副本」：members.json 校验不过的那个 tick 仍要有周期可算、口径可乘
 carpoolInitialState() {
     jq -cn --argjson apiPort "$1" --arg period "$2" --arg defaultLabel "$(t CARPOOL_DEFAULT_LABEL)" '{
         enabled: true, apiPort: $apiPort, period: $period, lastTick: "", resetDay: 1,
         notify: {label: $defaultLabel, warnPercent: 80, digestHour: 8, expireNoticeDays: 3},
+        billing: "both", plan: {sizeGB: 0, warnPercent: 85, interface: ""}, machine: {},
         pageEnabled: false, pageToken: "", collectFailures: 0, notified: {}, events: [], members: {}
       }'
 }
@@ -312,14 +379,15 @@ carpoolMergeState() {
               upBytes: ($o.upBytes // 0), downBytes: ($o.downBytes // 0),
               status: ($o.status // "active"), reason: ($o.reason // "")}})
         | from_entries) as $nm
-      | $old | .members = $nm | .resetDay = $members.resetDay | .notify = $members.notify' <<<"$1"
+      | $old | .members = $nm | .resetDay = $members.resetDay | .notify = $members.notify
+      | .billing = $members.billing | .plan = $members.plan' <<<"$1"
 }
 
-# carpoolSyncLimits STATE NORMALIZED → 文件里的即时类字段同步进 state：resetDay、notify、在册成员的 quotaBytes 与 expire
+# carpoolSyncLimits STATE NORMALIZED → 文件里的即时类字段同步进 state：resetDay、notify、billing、plan、在册成员的 quotaBytes 与 expire
 # protocols 与 uuid 是「需应用」类不动；文件里没有的成员也不动（增删只在应用时做）
 carpoolSyncLimits() {
     jq -c --argjson m "$2" '
-      .resetDay = $m.resetDay | .notify = $m.notify
+      .resetDay = $m.resetDay | .notify = $m.notify | .billing = $m.billing | .plan = $m.plan
       | .members |= with_entries(.key as $k
           | if $m.members[$k] then .value.quotaBytes = $m.members[$k].quotaBytes | .value.expire = $m.members[$k].expire else . end)' <<<"$1"
 }
@@ -356,11 +424,12 @@ carpoolDiffMembers() {
 # ============================================================================
 
 # carpoolJudge STATE NOTIFY TODAY PERIOD_START → {"state": …, "events": […]}，一次过：
-# 换周期清零 → 逐人按到期 / 配额定目标状态（到期优先于超额，manual 永不自动恢复）→ 预警与到期提醒
-# 预警 / 提醒的去重键记在 state.notified，换周期清空；events 元素形如 {type, name, …}
+# 换周期清零（成员与整机）→ 逐人按到期 / 配额定目标状态（到期优先于超额，manual 永不自动恢复）→ 预警与到期提醒 → 整机套餐预警
+# 用量按 state.billing 的口径算；去重键记在 state.notified，换周期清空；events 元素形如 {type, name, …}
 carpoolJudge() {
     jq -c --argjson notify "$2" --arg today "$3" --arg period "$4" "${_CARPOOL_JQ_DEFS}"'
-      def usage: .upBytes + .downBytes;
+      (.billing // "both") as $billing
+      | def usage: carpoolUsage($billing);
       def overQuota: .quotaBytes > 0 and usage >= .quotaBytes;
       def expired: .expire != "" and .expire < $today;
       def target:
@@ -371,8 +440,10 @@ carpoolJudge() {
       def daysLeft: (.expire | carpoolDays) - ($today | carpoolDays);
 
       (if .period != $period then
-         {type: "period", previous: .period, usage: (.members | map_values({up: .upBytes, down: .downBytes}))} as $ev
+         {type: "period", previous: .period, usage: (.members | map_values(usage)),
+          machine: (if carpoolHasMachine then (.machine | carpoolMachineUsage($billing)) else null end)} as $ev
          | .members |= map_values(.upBytes = 0 | .downBytes = 0)
+         | .machine = ((.machine // {}) | .rx = 0 | .tx = 0)
          | .notified = {} | .period = $period | .pendingEvents = [$ev]
        else .pendingEvents = [] end)
       | reduce (.members | to_entries[]) as $e (.;
@@ -395,6 +466,14 @@ carpoolJudge() {
               .notified["expire:" + $n + ":" + $m.expire] = true
               | .pendingEvents += [{type: "expiring", name: $n, date: $m.expire, days: ($m | daysLeft)}]
             else . end)
+      | ((.plan.sizeGB // 0) * 1000000000) as $size
+      | if $size > 0 and (.plan.warnPercent // 0) > 0 and carpoolHasMachine
+           and ((.machine | carpoolMachineUsage($billing)) * 100 / $size | floor) >= .plan.warnPercent
+           and ((.notified["plan:warn"] // false) | not) then
+          (.machine | carpoolMachineUsage($billing)) as $used
+          | .notified["plan:warn"] = true
+          | .pendingEvents += [{type: "planWarn", percent: ($used * 100 / $size | floor), used: $used, size: $size}]
+        else . end
       | {state: del(.pendingEvents), events: .pendingEvents}' <<<"$1"
 }
 
@@ -579,9 +658,13 @@ carpoolEventText() {
         warn) t CARPOOL_EVENT_WARN "${name}" "$(jq -r '.percent' <<<"$1")" \
             "$(carpoolFormatBytes "$(jq -r '.used' <<<"$1")")" "$(carpoolFormatBytes "$(jq -r '.quota' <<<"$1")")" ;;
         expiring) t CARPOOL_EVENT_EXPIRING "${name}" "$(jq -r '.date' <<<"$1")" "$(jq -r '.days' <<<"$1")" ;;
+        planWarn) t CARPOOL_EVENT_PLAN_WARN "$(jq -r '.percent' <<<"$1")" \
+            "$(jq -r "${_CARPOOL_JQ_DEFS}"'.used | carpoolFmtDecimal' <<<"$1")" "$(jq -r "${_CARPOOL_JQ_DEFS}"'.size | carpoolFmtDecimal' <<<"$1")" ;;
         period)
             t CARPOOL_EVENT_PERIOD
-            jq -r "${_CARPOOL_JQ_DEFS}"'.usage // {} | to_entries[] | "  \(.key): \((.value.up + .value.down) | carpoolFmtBytes)"' <<<"$1"
+            jq -r --arg machine "$(t CARPOOL_MACHINE)" "${_CARPOOL_JQ_DEFS}"'
+              (.usage // {} | to_entries[] | "  \(.key): \(.value | carpoolFmtBytes)"),
+              (if .machine != null then "  \($machine): \(.machine | carpoolFmtDecimal)" else empty end)' <<<"$1"
             return 0
             ;;
         applied) t CARPOOL_EVENT_APPLIED "$(jq -r '.summary // ""' <<<"$1")" ;;
@@ -597,11 +680,41 @@ carpoolEventText() {
     echo
 }
 
-# carpoolDigestText STATE TODAY → 每日摘要正文：标题 + 每人一行（名字 已用/配额 状态）
+# carpoolDigestText STATE TODAY → 每日摘要正文：标题 + 每人一行（名字 已用/配额 状态）+ 整机一行
 carpoolDigestText() {
     t CARPOOL_DIGEST_TITLE "$2"
     echo
     carpoolUsageTable "$1" | awk -F'\t' '{ printf "%s: %s / %s · %s\n", $1, $2, $3, $5 }'
+    carpoolMachineSummary "$1"
+}
+
+# carpoolBillingText BILLING → out / both / max 的本地化名字
+carpoolBillingText() {
+    case "$1" in
+        out) t CARPOOL_BILLING_OUT ;;
+        max) t CARPOOL_BILLING_MAX ;;
+        *) t CARPOOL_BILLING_BOTH ;;
+    esac
+}
+
+# carpoolMachineSummary STATE → 一行：整机本周期用量（有套餐时带套餐与百分比）· 成员合计 · 计费口径，十进制单位与套餐一致；
+# 整机还没有读数时整机那段写 -
+carpoolMachineSummary() {
+    local used size pct total billing
+    IFS='|' read -r used size pct total billing < <(jq -r "${_CARPOOL_JQ_DEFS}"'
+      (.billing // "both") as $billing | ((.plan.sizeGB // 0) * 1000000000) as $size
+      | (if carpoolHasMachine then (.machine | carpoolMachineUsage($billing)) else null end) as $used
+      | [ (if $used != null then ($used | carpoolFmtDecimal) else "-" end),
+          (if $size > 0 then ($size | carpoolFmtDecimal) else "" end),
+          (if $size > 0 and $used != null then ($used * 100 / $size | floor | tostring) else "" end),
+          ([.members[] | carpoolUsage($billing)] | add // 0 | carpoolFmtDecimal),
+          $billing ] | join("|")' <<<"$1")
+    if [[ -n "${pct}" ]]; then
+        t CARPOOL_MACHINE_LINE_PLAN "${used}" "${size}" "${pct}" "${total}" "$(carpoolBillingText "${billing}")"
+    else
+        t CARPOOL_MACHINE_LINE "${used}" "${total}" "$(carpoolBillingText "${billing}")"
+    fi
+    echo
 }
 
 # carpoolNotifyText LABEL EVENTS → 一条通知的正文：第一行标签，之后每个事件一行；没有事件输出空
@@ -647,13 +760,14 @@ carpoolTickNotices() {
       | {state: del(.pendingEvents), events: .pendingEvents}' <<<"$1"
 }
 
-# carpoolUsageTable STATE → 文本表（菜单「查看用量」与每日摘要共用）：名字 已用 配额 到期 状态
+# carpoolUsageTable STATE → 文本表（菜单「查看用量」与每日摘要共用）：名字 已用（按口径）配额 到期 状态。列数不能动，摘要按 $1..$5 取
 carpoolUsageTable() {
     jq -r --arg unlimited "$(t CARPOOL_UNLIMITED)" --arg active "$(t CARPOOL_STATUS_ACTIVE)" \
         --arg quota "$(t CARPOOL_REASON_QUOTA)" --arg expired "$(t CARPOOL_REASON_EXPIRED)" --arg manual "$(t CARPOOL_REASON_MANUAL)" \
         "${_CARPOOL_JQ_DEFS}"'
-      .members | to_entries[] | .value as $m
-      | "\(.key)\t\($m.upBytes + $m.downBytes | carpoolFmtBytes)\t\(if $m.quotaBytes > 0 then ($m.quotaBytes | carpoolFmtBytes) else $unlimited end)\t\(if $m.expire == "" then "-" else $m.expire end)\t\(if $m.status == "active" then $active elif $m.reason == "quota" then $quota elif $m.reason == "expired" then $expired else $manual end)"' <<<"$1"
+      (.billing // "both") as $billing
+      | .members | to_entries[] | .value as $m
+      | "\(.key)\t\($m | carpoolUsage($billing) | carpoolFmtBytes)\t\(if $m.quotaBytes > 0 then ($m.quotaBytes | carpoolFmtBytes) else $unlimited end)\t\(if $m.expire == "" then "-" else $m.expire end)\t\(if $m.status == "active" then $active elif $m.reason == "quota" then $quota elif $m.reason == "expired" then $expired else $manual end)"' <<<"$1"
 }
 
 # carpoolNginxLocationBlock PAGE_DIR → 嵌进 subscribe.conf 的 location 块：路径只收 32–64 位十六进制、只读静态文件、
@@ -684,6 +798,7 @@ _carpoolPageStrings() {
         --arg evPeriod "$(t CARPOOL_PAGE_EV_PERIOD)" --arg evApplied "$(t CARPOOL_PAGE_EV_APPLIED)" \
         --arg evInvalid "$(t CARPOOL_PAGE_FILE_INVALID)" --arg evCollectFailed "$(t CARPOOL_EVENT_COLLECT_FAILED '%s')" \
         --arg evCollectRecovered "$(t CARPOOL_EVENT_COLLECT_RECOVERED)" --arg evTxFailed "$(t CARPOOL_EVENT_TX_FAILED)" \
+        --arg evPlanWarn "$(t CARPOOL_PAGE_EV_PLAN_WARN)" --arg billing "$(t CARPOOL_PAGE_BILLING)" \
         --arg lang "${CURRENT_LANG:-zh_CN}" \
         '$ARGS.named'
 }
@@ -699,12 +814,14 @@ carpoolRenderOwnerPage() {
     resetDay=$(jq -r '.resetDay' <<<"${members}")
     nextReset=$(carpoolNextPeriodStart "${today}" "${resetDay}")
     jq -rn --argjson s "${state}" --argjson m "${members}" --argjson L "$(_carpoolPageStrings)" --argjson others "${others}" \
-        --arg now "${now}" --arg nextReset "${nextReset}" --arg pending "${pending}" --arg css "${_CARPOOL_PAGE_CSS}" "${_CARPOOL_JQ_DEFS}"'
-      def esc: tostring | @html;
+        --arg now "${now}" --arg nextReset "${nextReset}" --arg pending "${pending}" --arg css "${_CARPOOL_PAGE_CSS}" \
+        --arg machine "$(carpoolMachineSummary "${state}")" "${_CARPOOL_JQ_DEFS}"'
+      ($s.billing // "both") as $billing
+      | def esc: tostring | @html;
       def statusText($m): if $m.status == "active" then $L.active else "\($L.disabled) · \(if $m.reason == "quota" then $L.rQuota elif $m.reason == "expired" then $L.rExpired else $L.rManual end)" end;
-      def pct($m): if $m.quotaBytes > 0 then (($m.upBytes + $m.downBytes) * 100 / $m.quotaBytes | floor) else null end;
+      def pct($m): if $m.quotaBytes > 0 then (($m | carpoolUsage($billing)) * 100 / $m.quotaBytes | floor) else null end;
       def row: .key as $n | .value as $m | pct($m) as $p
-        | "<tr class=\"\($m.status)\"><td>\($n | esc)</td><td>\(($m.upBytes + $m.downBytes) | carpoolFmtBytes)"
+        | "<tr class=\"\($m.status)\"><td>\($n | esc)</td><td>\($m | carpoolUsage($billing) | carpoolFmtBytes)"
           + (if $p != null then "<div class=\"bar\"><i class=\"\(if $p >= 80 then "hot" else "" end)\" style=\"width:\([$p, 100] | min)%\"></i></div>" else "" end)
           + "</td><td>\(if $m.quotaBytes > 0 then ($m.quotaBytes | carpoolFmtBytes) else $L.unlimited end)</td>"
           + "<td>\(if $p != null then "\($p)%" else "-" end)</td><td>\(if $m.expire == "" then "-" else $m.expire end)</td><td>\(statusText($m) | esc)</td></tr>";
@@ -719,10 +836,12 @@ carpoolRenderOwnerPage() {
            elif $e.type == "collectFailed" then ($L.evCollectFailed | sub("%s"; ($e.count // "" | tostring)))
            elif $e.type == "collectRecovered" then $L.evCollectRecovered
            elif $e.type == "txFailed" then $L.evTxFailed
+           elif $e.type == "planWarn" then $L.evPlanWarn
            else "\($e.type | esc) \($e.name // "" | esc)" end);
       "<!DOCTYPE html><html lang=\"\($L.lang | sub("_"; "-"))\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"robots\" content=\"noindex\"><title>\($m.notify.label | esc)</title><style>\($css)</style></head><body>"
       + "<h1>\($m.notify.label | esc)</h1>"
       + "<p class=\"muted\">\($L.generated | esc) \($now | esc) · \($L.period | esc) \($s.period | esc) · \($L.nextReset | esc) \($nextReset | esc)</p>"
+      + "<p>\($machine | esc)</p>"
       + (if $pending != "" then "<p class=\"warn\">\($pending | esc)</p>" else "" end)
       + (if ($s.members | length) == 0 then "<p>\($L.noMembers | esc)</p>" else
           "<table><thead><tr><th>\($L.name | esc)</th><th>\($L.used | esc)</th><th>\($L.quota | esc)</th><th>%</th><th>\($L.expire | esc)</th><th>\($L.status | esc)</th></tr></thead><tbody>"
@@ -740,17 +859,19 @@ carpoolRenderMemberPage() {
     resetDay=$(jq -r '.resetDay' <<<"${members}")
     nextReset=$(carpoolNextPeriodStart "${today}" "${resetDay}")
     jq -rn --argjson s "${state}" --argjson m "${members}" --argjson L "$(_carpoolPageStrings)" --arg n "${name}" \
-        --arg now "${now}" --arg nextReset "${nextReset}" --arg css "${_CARPOOL_PAGE_CSS}" "${_CARPOOL_JQ_DEFS}"'
+        --arg now "${now}" --arg nextReset "${nextReset}" --arg css "${_CARPOOL_PAGE_CSS}" \
+        --arg billingText "$(carpoolBillingText "$(jq -r '.billing // "both"' <<<"${state}")")" "${_CARPOOL_JQ_DEFS}"'
       def esc: tostring | @html;
-      $s.members[$n] as $u
-      | (if $u.quotaBytes > 0 then (($u.upBytes + $u.downBytes) * 100 / $u.quotaBytes | floor) else null end) as $p
+      $s.members[$n] as $u | ($u | carpoolUsage($s.billing // "both")) as $used
+      | (if $u.quotaBytes > 0 then ($used * 100 / $u.quotaBytes | floor) else null end) as $p
       | "<!DOCTYPE html><html lang=\"\($L.lang | sub("_"; "-"))\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"robots\" content=\"noindex\"><title>\($m.notify.label | esc)</title><style>\($css)</style></head><body>"
       + "<h1>\($m.notify.label | esc) · \($n | esc)</h1>"
       + "<p class=\"muted\">\($L.generated | esc) \($now | esc) · \($L.period | esc) \($s.period | esc) · \($L.nextReset | esc) \($nextReset | esc)</p>"
       + "<table><tbody>"
-      + "<tr><th>\($L.used | esc)</th><td>\(($u.upBytes + $u.downBytes) | carpoolFmtBytes)"
+      + "<tr><th>\($L.used | esc)</th><td>\($used | carpoolFmtBytes)"
       + (if $p != null then " (\($p)%)<div class=\"bar\"><i class=\"\(if $p >= 80 then "hot" else "" end)\" style=\"width:\([$p, 100] | min)%\"></i></div>" else "" end) + "</td></tr>"
       + "<tr><th>\($L.quota | esc)</th><td>\(if $u.quotaBytes > 0 then ($u.quotaBytes | carpoolFmtBytes) else $L.unlimited end)</td></tr>"
+      + "<tr><th>\($L.billing | esc)</th><td>\($billingText | esc)</td></tr>"
       + "<tr><th>\($L.expire | esc)</th><td>\(if $u.expire == "" then "-" else $u.expire end)</td></tr>"
       + "<tr><th>\($L.status | esc)</th><td>\(if $u.status == "active" then $L.active else "\($L.disabled) · \(if $u.reason == "quota" then $L.rQuota elif $u.reason == "expired" then $L.rExpired else $L.rManual end)" end | esc)</td></tr>"
       + "</tbody></table></body></html>"'

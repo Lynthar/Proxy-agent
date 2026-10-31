@@ -650,6 +650,27 @@ _cpOut=$(carpoolValidateMembers "${_cpMembers}" ",0,7," '"not-an-object"')
 assert_equals "1" "$?" "校验: FOREIGN 参数不是对象（调用方错误）也返回 1，不会当成合法"
 cp_assert_contains "${_cpOut}" "INTERNAL" "校验: 调用方错误报成 INTERNAL 并带 jq 原话，不冒充「JSON 不合法」"
 
+# 计费口径与套餐
+for _b in out both max; do
+    assert_equals "0" "$(printf '{"billing": "%s", "members": {}}\n' "${_b}" > "${_cpMembers}"; carpoolValidateMembers "${_cpMembers}" ",0,7,"; echo $?)" "校验: billing ${_b} 合法"
+done
+cp_expect_error '{"billing": "in", "members": {}}' 'billing 必须是 "out"、"both" 或 "max"，现在是 "in"' "校验: billing 拼错"
+cp_expect_error '{"billing": 1, "members": {}}' "billing 必须是" "校验: billing 是数字"
+cp_expect_error '{"billing": ["out"], "members": {}}' "billing 必须是" "校验: billing 是数组"
+assert_equals "0" "$(printf '%s\n' '{"plan": {"sizeGB": 1000, "warnPercent": 0, "interface": "eth0"}, "members": {}}' > "${_cpMembers}"; carpoolValidateMembers "${_cpMembers}" ",0,7,"; echo $?)" "校验: plan 三项合法（warnPercent 0 = 关闭）"
+assert_equals "0" "$(printf '%s\n' '{"plan": {}, "members": {}}' > "${_cpMembers}"; carpoolValidateMembers "${_cpMembers}" ",0,7,"; echo $?)" "校验: plan 空对象合法"
+cp_expect_error '{"plan": 1000, "members": {}}' "plan.plan 的值不合法" "校验: plan 不是对象"
+cp_expect_error '{"plan": {"sizeGB": -1}, "members": {}}' "plan.sizeGB 的值不合法" "校验: sizeGB 负数"
+cp_expect_error '{"plan": {"sizeGB": 1.5}, "members": {}}' "plan.sizeGB 的值不合法" "校验: sizeGB 小数"
+cp_expect_error '{"plan": {"sizeGB": "1000"}, "members": {}}' "plan.sizeGB 的值不合法" "校验: sizeGB 字符串"
+cp_expect_error '{"plan": {"warnPercent": 101}, "members": {}}' "plan.warnPercent 的值不合法" "校验: plan.warnPercent 超 100"
+cp_expect_error '{"plan": {"interface": ""}, "members": {}}' "plan.interface 的值不合法" "校验: interface 空串"
+cp_expect_error '{"plan": {"interface": "a b"}, "members": {}}' "plan.interface 的值不合法" "校验: interface 带空格"
+cp_expect_error '{"plan": {"interface": "abcdefghijklmnop"}, "members": {}}' "plan.interface 的值不合法" "校验: interface 16 个字符（内核上限 15）"
+cp_expect_error '{"plan": {"interface": "-x"}, "members": {}}' "plan.interface 的值不合法" "校验: interface 以 - 开头"
+cp_expect_error '{"plan": {"foo": 1}, "members": {}}' "不认识的字段 plan.foo" "校验: plan 字段拼错"
+assert_equals "0" "$(printf '%s\n' '{"plan": {"interface": "abcdefghijklmno"}, "members": {}}' > "${_cpMembers}"; carpoolValidateMembers "${_cpMembers}" ",0,7,"; echo $?)" "校验: interface 正好 15 个字符合法"
+
 # --- 归一化与播种 ---
 cat > "${_cpMembers}" <<'EOF'
 {"members": {"alice": {}, "bob": {"quotaGiB": 2, "expire": "2026-12-31", "protocols": [7, 0, 7]}}}
@@ -663,12 +684,18 @@ assert_equals "2147483648" "$(jq -r '.members.bob.quotaBytes' <<<"${_cpNorm}")" 
 assert_equals "[0,7]" "$(jq -c '.members.bob.protocols' <<<"${_cpNorm}")" "carpoolNormalizeMembers: 显式 protocols 去重排序"
 printf '%s\n' '{"notify": {"digestHour": null, "label": "L"}, "members": {}}' > "${_cpMembers}"
 assert_equals "null|L" "$(carpoolNormalizeMembers "${_cpMembers}" ",0,7," | jq -r '.notify | "\(.digestHour)|\(.label)"')" "carpoolNormalizeMembers: digestHour null（关闭）保留为 null"
+assert_equals 'both|{"sizeGB":0,"warnPercent":85,"interface":""}' "$(carpoolNormalizeMembers "${_cpMembers}" ",0,7," | jq -r '"\(.billing)|\(.plan | tojson)"')" "carpoolNormalizeMembers: 口径默认 both，套餐默认 0（不提醒）/ 85% / 自动找网卡"
+printf '%s\n' '{"billing": "max", "plan": {"sizeGB": 2000, "warnPercent": 0, "interface": "ens5"}, "members": {}}' > "${_cpMembers}"
+assert_equals 'max|{"sizeGB":2000,"warnPercent":0,"interface":"ens5"}' "$(carpoolNormalizeMembers "${_cpMembers}" ",0,7," | jq -r '"\(.billing)|\(.plan | tojson)"')" "carpoolNormalizeMembers: 显式口径与套餐原样保留，warnPercent 0 不被默认值顶掉"
+printf '%s\n' '{"plan": {"sizeGB": 500}, "members": {}}' > "${_cpMembers}"
+assert_equals '{"sizeGB":500,"warnPercent":85,"interface":""}' "$(carpoolNormalizeMembers "${_cpMembers}" ",0,7," | jq -c '.plan')" "carpoolNormalizeMembers: plan 只写 sizeGB 时其余补默认"
 
 _cpAccounts=$(carpoolAccountsFromClients '[{"id":"u1","email":"alice-VLESS_TCP/TLS_Vision"},{"password":"u2","email":"bob-x-trojan_tcp"},{"id":"u3","email":"3fa85f64-5717-4562-b3fc-2c963f66afa6"}]')
 assert_equals '[{"name":"alice","uuid":"u1"},{"name":"bob-x","uuid":"u2"},{"name":"3fa85f64-5717-4562-b3fc","uuid":"u3"}]' "${_cpAccounts}" "carpoolAccountsFromClients: 名字剥后缀，凭据取 id 或 password"
 _cpSeed=$(carpoolSeedMembers "${_cpAccounts}")
 assert_equals '["alice","bob-x","3fa85f64-5717-4562-b3fc"]' "$(jq -c '.members | keys_unsorted' <<<"${_cpSeed}")" "carpoolSeedMembers: 全部账号入册、顺序不变"
 assert_equals '{"quotaGiB":0,"expire":"","protocols":"all"}' "$(jq -c '.members.alice' <<<"${_cpSeed}")" "carpoolSeedMembers: 不限额不限期全协议、不写 uuid"
+assert_equals 'both|{"sizeGB":0,"warnPercent":85}' "$(jq -r '"\(.billing)|\(.plan | tojson)"' <<<"${_cpSeed}")" "carpoolSeedMembers: 写出口径 both 与套餐两项，车主一眼看得到该填哪里"
 printf '%s\n' "${_cpSeed}" > "${_cpMembers}"
 assert_equals "0" "$(carpoolValidateMembers "${_cpMembers}" ",0,4,"; echo $?)" "carpoolSeedMembers: 播种出来的文件本身通过校验"
 
@@ -698,9 +725,9 @@ cp_member() { # UUID QUOTA EXPIRE PROTOCOLS UP DOWN STATUS REASON
     jq -cn --arg u "$1" --argjson q "$2" --arg e "$3" --argjson p "$4" --argjson up "$5" --argjson dn "$6" --arg s "$7" --arg r "$8" \
         '{uuid: $u, quotaBytes: $q, expire: $e, protocols: $p, upBytes: $up, downBytes: $dn, status: $s, reason: $r}'
 }
-cp_state() { # PERIOD MEMBERS_JSON [NOTIFIED_JSON]
+cp_state() { # PERIOD MEMBERS_JSON [NOTIFIED_JSON]；口径固定 out（系数 1），口径相关的用例自己改 .billing
     jq -cn --arg p "$1" --argjson m "$2" --argjson n "${3:-{\}}" \
-        '{enabled: true, apiPort: 1, period: $p, lastTick: "", pageEnabled: false, pageToken: "", collectFailures: 0, notified: $n, events: [], members: $m}'
+        '{enabled: true, apiPort: 1, period: $p, lastTick: "", billing: "out", pageEnabled: false, pageToken: "", collectFailures: 0, notified: $n, events: [], members: $m}'
 }
 _cpU1="11111111-1111-1111-1111-111111111111"
 _cpU2="22222222-2222-2222-2222-222222222222"
@@ -711,6 +738,7 @@ GiB=1073741824
 _cpInit=$(carpoolInitialState 23456 2026-10-01)
 assert_equals "true|23456|2026-10-01|0" "$(jq -r '"\(.enabled)|\(.apiPort)|\(.period)|\(.members | length)"' <<<"${_cpInit}")" "carpoolInitialState: 开启态、端口、周期、无成员"
 assert_equals "1|拼车|80|8|3" "$(jq -r '"\(.resetDay)|\(.notify.label)|\(.notify.warnPercent)|\(.notify.digestHour)|\(.notify.expireNoticeDays)"' <<<"${_cpInit}")" "carpoolInitialState: resetDay 与 notify 的已应用副本带默认值"
+assert_equals 'both|{"sizeGB":0,"warnPercent":85,"interface":""}|{}' "$(jq -r '"\(.billing)|\(.plan | tojson)|\(.machine | tojson)"' <<<"${_cpInit}")" "carpoolInitialState: 口径 both、套餐默认、整机还没有读数"
 assert_equals "0" "$(carpoolWriteState "${_cpInit}" "${_cpDir}/state.json"; echo $?)" "carpoolWriteState: 写入成功"
 assert_equals "${_cpInit}" "$(carpoolReadState "${_cpDir}/state.json")" "carpoolReadState: 读回一致"
 assert_equals "1" "$(carpoolReadState "${_cpDir}/absent.json" >/dev/null; echo $?)" "carpoolReadState: 缺文件返回 1"
@@ -731,6 +759,9 @@ assert_equals "0|0|active|" "$(jq -r '.members.bob | "\(.upBytes)|\(.downBytes)|
 assert_equals "2026-10-01|23456" "$(jq -r '"\(.period)|\(.apiPort)"' <<<"$(carpoolMergeState "${_cpInit}" "${_cpNorm}" '{}')")" "carpoolMergeState: 顶层字段不动"
 printf '%s\n' '{"resetDay": 20, "notify": {"label": "L", "warnPercent": 50}, "members": {"alice": {}}}' > "${_cpMembers}"
 assert_equals "20|L|50|8" "$(carpoolMergeState "${_cpInit}" "$(carpoolNormalizeMembers "${_cpMembers}" ",0,7,")" '{}' | jq -r '"\(.resetDay)|\(.notify.label)|\(.notify.warnPercent)|\(.notify.digestHour)"')" "carpoolMergeState: resetDay 与 notify 跟文件走"
+printf '%s\n' '{"billing": "out", "plan": {"sizeGB": 1000, "interface": "eth1"}, "members": {"alice": {}}}' > "${_cpMembers}"
+_cpMerged2=$(carpoolMergeState "$(jq -c '.machine = {rx: 5, tx: 6}' <<<"${_cpInit}")" "$(carpoolNormalizeMembers "${_cpMembers}" ",0,7,")" '{}')
+assert_equals 'out|{"sizeGB":1000,"warnPercent":85,"interface":"eth1"}|{"rx":5,"tx":6}' "$(jq -r '"\(.billing)|\(.plan | tojson)|\(.machine | tojson)"' <<<"${_cpMerged2}")" "carpoolMergeState: 口径与套餐跟文件走，整机读数不动"
 
 # 即时类同步：resetDay / notify / 在册成员的 quotaBytes 与 expire；protocols、uuid、文件里没有的成员不动
 printf '%s\n' '{"resetDay": 10, "notify": {"warnPercent": 70}, "members": {"alice": {"quotaGiB": 3, "expire": "2027-01-31", "protocols": [0], "uuid": "22222222-2222-2222-2222-222222222222"}, "newbie": {}}}' > "${_cpMembers}"
@@ -739,6 +770,10 @@ assert_equals "10|70" "$(jq -r '"\(.resetDay)|\(.notify.warnPercent)"' <<<"${_cp
 assert_equals "$((3 * GiB))|2027-01-31|[0]|${_cpU1}" "$(jq -r '.members.alice | "\(.quotaBytes)|\(.expire)|\(.protocols | tojson)|\(.uuid)"' <<<"${_cpSynced}")" "carpoolSyncLimits: 配额与到期同步，protocols 与 uuid 不动"
 assert_equals '["bob","alice","carol","dave"]' "$(jq -c '.members | keys_unsorted' <<<"${_cpSynced}")" "carpoolSyncLimits: 不增不删成员"
 assert_equals "0|" "$(jq -r '.members.bob | "\(.quotaBytes)|\(.expire)"' <<<"${_cpSynced}")" "carpoolSyncLimits: 文件里没有的成员原样"
+assert_equals 'both|{"sizeGB":0,"warnPercent":85,"interface":""}' "$(jq -r '"\(.billing)|\(.plan | tojson)"' <<<"${_cpSynced}")" "carpoolSyncLimits: 文件没写口径与套餐时同步成默认值"
+printf '%s\n' '{"billing": "max", "plan": {"sizeGB": 3000, "warnPercent": 90}, "members": {}}' > "${_cpMembers}"
+_cpSynced2=$(carpoolSyncLimits "$(jq -c '.billing = "out" | .machine = {rx: 1, tx: 2}' <<<"${_cpMerged}")" "$(carpoolNormalizeMembers "${_cpMembers}" ",0,7,")")
+assert_equals 'max|{"sizeGB":3000,"warnPercent":90,"interface":""}|{"rx":1,"tx":2}' "$(jq -r '"\(.billing)|\(.plan | tojson)|\(.machine | tojson)"' <<<"${_cpSynced2}")" "carpoolSyncLimits: 口径与套餐是即时类字段，下一次 tick 就同步；整机读数不动"
 
 _cpMap='{"0":[{"id":"zz","email":"zed-VLESS_TCP/TLS_Vision"},{"id":"'"${_cpU1}"'","email":"alice-VLESS_TCP/TLS_Vision"}],"4":[{"password":"pp","email":"pat-trojan_tcp"}]}'
 assert_equals '{"zed":"zz","pat":"pp"}' "$(carpoolForeignAccounts "${_cpMerged}" "${_cpMap}")" "carpoolForeignAccounts: 不在册的账号 → {名: 凭据}，id 或 password 都认"
@@ -759,6 +794,44 @@ _cpUsed=$(carpoolAddUsage "${_cpMerged}" '{"alice":{"up":100,"down":200},"zed":{
 assert_equals "105|206" "$(jq -r '.members.alice | "\(.upBytes)|\(.downBytes)"' <<<"${_cpUsed}")" "carpoolAddUsage: 增量累加"
 assert_equals "0|0" "$(jq -r '.members.bob | "\(.upBytes)|\(.downBytes)"' <<<"${_cpUsed}")" "carpoolAddUsage: 没有增量的成员不变"
 assert_equals "4" "$(jq -r '.members | length' <<<"${_cpUsed}")" "carpoolAddUsage: 不是成员的键丢弃"
+
+# --- 整机网卡用量：默认路由网卡、/proc/net/dev、跨 tick 累加 ---
+_cpR4=$'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\neth1\t00000000\t0101A8C0\t0003\t0\t0\t200\t00000000\t0\t0\t0\neth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\neth2\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0'
+_cpV6Lo='00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 ffffffff 00000001 00000000 00200200       lo'
+_cpV6Ens='00000000000000000000000000000000 00 00000000000000000000000000000000 00 fe800000000000000000000000000001 00000400 00000001 00000000 00000003     ens5'
+_cpV6Eth1='00000000000000000000000000000000 00 00000000000000000000000000000000 00 fe800000000000000000000000000001 00000100 00000001 00000000 00000003     eth1'
+_cpV6Prefix='20010db8000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000001 00000000 00000001     eth3'
+assert_equals '["eth0"]' "$(carpoolDefaultRouteIfaces "${_cpR4}" "")" "carpoolDefaultRouteIfaces: v4 取 metric 最小的默认路由，非默认路由（eth2）不算"
+assert_equals '["eth0"]' "$(carpoolDefaultRouteIfaces "${_cpR4}" "${_cpV6Lo}")" "carpoolDefaultRouteIfaces: lo 上的 v6 默认路由（内核的 unreachable 占位）跳过"
+assert_equals '["ens5","eth0"]' "$(carpoolDefaultRouteIfaces "${_cpR4}" "${_cpV6Ens}"$'\n'"${_cpV6Lo}")" "carpoolDefaultRouteIfaces: v4 与 v6 走不同网卡就两块都算，升序"
+assert_equals '["eth1"]' "$(carpoolDefaultRouteIfaces "${_cpR4}" "${_cpV6Ens}"$'\n'"${_cpV6Eth1}" | jq -c 'map(select(. != "eth0"))')" "carpoolDefaultRouteIfaces: v6 也取 metric 最小的那条"
+assert_equals '["eth0"]' "$(carpoolDefaultRouteIfaces $'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\neth0\t00000000\t0101A8C0\t0003\t0\t0\t0\t00000000\t0\t0\t0' "${_cpV6Prefix}"$'\n00000000000000000000000000000000 00 00000000000000000000000000000000 00 fe800000000000000000000000000001 00000400 00000001 00000000 00000003     eth0')" "carpoolDefaultRouteIfaces: v4 与 v6 同一块网卡只算一次；带前缀的 v6 路由不算默认"
+assert_equals '[]' "$(carpoolDefaultRouteIfaces "" "")" "carpoolDefaultRouteIfaces: 读不到路由表得空数组"
+
+_cpDev=$'Inter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n    lo: 100 1 0 0 0 0 0 0 100 1 0 0 0 0 0 0\n  eth0: 5000 10 0 0 0 0 0 0 7000 12 0 0 0 0 0 0\n  ens5:123 1 0 0 0 0 0 0 456 2 0 0 0 0 0 0'
+assert_equals '{"eth0":{"rx":5000,"tx":7000}}' "$(carpoolNetDevCounters "${_cpDev}" '["eth0"]')" "carpoolNetDevCounters: 取第 1 列收、第 9 列发，没要的网卡（lo、ens5）不出现"
+assert_equals '{"ens5":{"rx":123,"tx":456}}' "$(carpoolNetDevCounters "${_cpDev}" '["ens5","nope"]')" "carpoolNetDevCounters: 冒号后不带空格也认；要了但不存在的网卡不出现"
+assert_equals '{}' "$(carpoolNetDevCounters "${_cpDev}" '["Inter-","face"]')" "carpoolNetDevCounters: 两行表头不当网卡"
+assert_equals '{}' "$(carpoolNetDevCounters "" '["eth0"]')" "carpoolNetDevCounters: 读不到文件得空对象"
+
+cp_sample() { # BOOTID COUNTERS_JSON
+    jq -cn --arg b "$1" --argjson c "$2" '{bootId: $b, counters: $c}'
+}
+_cpM=$(carpoolMachineAdvance '{}' "$(cp_sample b1 '{"eth0":{"rx":5000,"tx":7000}}')")
+assert_equals '{"bootId":"b1","ifaces":["eth0"],"last":{"eth0":{"rx":5000,"tx":7000}},"rx":0,"tx":0}' "${_cpM}" "carpoolMachineAdvance: 第一次读数只记基线、不加"
+assert_equals "${_cpM}" "$(carpoolMachineAdvance null "$(cp_sample b1 '{"eth0":{"rx":5000,"tx":7000}}')")" "carpoolMachineAdvance: 旧 state 没有 machine（null）同样只记基线"
+_cpM=$(carpoolMachineAdvance "${_cpM}" "$(cp_sample b1 '{"eth0":{"rx":6000,"tx":9000},"ens5":{"rx":50,"tx":60}}')")
+assert_equals '1000|2000|["ens5","eth0"]|{"rx":50,"tx":60}' "$(jq -r '"\(.rx)|\(.tx)|\(.ifaces | tojson)|\(.last.ens5 | tojson)"' <<<"${_cpM}")" "carpoolMachineAdvance: 同一次开机累加差值；新出现的网卡只记基线"
+_cpM=$(carpoolMachineAdvance "${_cpM}" "$(cp_sample b1 '{"eth0":{"rx":6500,"tx":9100},"ens5":{"rx":80,"tx":90}}')")
+assert_equals "1530|2130" "$(jq -r '"\(.rx)|\(.tx)"' <<<"${_cpM}")" "carpoolMachineAdvance: 两块网卡的差值相加"
+_cpM=$(carpoolMachineAdvance "${_cpM}" "$(cp_sample b2 '{"eth0":{"rx":7000,"tx":10}}')")
+assert_equals '8530|2140|b2|["eth0"]' "$(jq -r '"\(.rx)|\(.tx)|\(.bootId)|\(.ifaces | tojson)"' <<<"${_cpM}")" "carpoolMachineAdvance: 换了开机（bootId 变了）本次读数整段算增量，即使比上次大"
+_cpM=$(carpoolMachineAdvance "${_cpM}" "$(cp_sample b2 '{"eth0":{"rx":100,"tx":20}}')")
+assert_equals "8630|2150" "$(jq -r '"\(.rx)|\(.tx)"' <<<"${_cpM}")" "carpoolMachineAdvance: 同一次开机读数变小（网卡重建）也把本次读数整段算增量"
+_cpM2=$(carpoolMachineAdvance "${_cpM}" "$(cp_sample "" '{"eth0":{"rx":150,"tx":30}}')")
+assert_equals "8680|2160" "$(jq -r '"\(.rx)|\(.tx)"' <<<"${_cpM2}")" "carpoolMachineAdvance: 读不到 bootId（空）不当重启，照常算差值"
+_cpM2=$(carpoolMachineAdvance "$(jq -c '.bootId = ""' <<<"${_cpM}")" "$(cp_sample b3 '{"eth0":{"rx":150,"tx":30}}')")
+assert_equals "8680|2160|b3" "$(jq -r '"\(.rx)|\(.tx)|\(.bootId)"' <<<"${_cpM2}")" "carpoolMachineAdvance: 上次没记 bootId 也不当重启"
 
 # --- 判定 ---
 cp_judge() { carpoolJudge "$1" "${2:-${_cpNotify}}" "$3" "$4"; }
@@ -790,6 +863,16 @@ assert_equals "active" "$(jq -r '.state.members.alice.status' <<<"${_cpJ}")" "�
 _cpJ=$(cp_judge "$(cp_one alice "$(cp_member "${_cpU1}" 0 "" '[0]' 0 0 disabled manual)")" "" 2026-10-20 2026-10-01)
 assert_equals "disabled|manual|[]" "$(jq -r '"\(.state.members.alice.status)|\(.state.members.alice.reason)|\(.events | tojson)"' <<<"${_cpJ}")" "判定: manual 永不自动恢复"
 
+# 计费口径：成员用量 = 系数 × 上下行合计，both 为 2，out / max 为 1；原始字节照存
+_cpB=$(cp_one alice "$(cp_member "${_cpU1}" $((10 * GiB)) "" '[0]' $((3 * GiB)) $((2 * GiB)) active "")")
+assert_equals "disabled|quota" "$(cp_judge "$(jq -c '.billing = "both"' <<<"${_cpB}")" "" 2026-10-20 2026-10-01 | jq -r '.state.members.alice | "\(.status)|\(.reason)"')" "口径 both: 3+2 GiB 按 10 GiB 计，正好到 10 GiB 配额即停用"
+assert_equals "active" "$(cp_judge "$(jq -c '.billing = "out"' <<<"${_cpB}")" "" 2026-10-20 2026-10-01 | jq -r '.state.members.alice.status')" "口径 out: 按 5 GiB 计，不停用"
+assert_equals "active" "$(cp_judge "$(jq -c '.billing = "max"' <<<"${_cpB}")" "" 2026-10-20 2026-10-01 | jq -r '.state.members.alice.status')" "口径 max: 按 5 GiB 计，不停用"
+assert_equals "disabled" "$(cp_judge "$(jq -c 'del(.billing)' <<<"${_cpB}")" "" 2026-10-20 2026-10-01 | jq -r '.state.members.alice.status')" "state 没有 billing（升级前的旧 state）按 both 算"
+assert_equals "$((3 * GiB))|$((2 * GiB))" "$(cp_judge "$(jq -c '.billing = "both"' <<<"${_cpB}")" "" 2026-10-20 2026-10-01 | jq -r '.state.members.alice | "\(.upBytes)|\(.downBytes)"')" "口径只在判定时乘，state 里存的还是原始字节"
+_cpJ=$(cp_judge "$(cp_state 2026-10-01 "{\"alice\": $(cp_member "${_cpU1}" $((10 * GiB)) "" '[0]' $((3 * GiB)) $((1 * GiB)) active "")}" | jq -c '.billing = "both"')" "" 2026-10-20 2026-10-01)
+assert_equals "warn|80|$((8 * GiB))|$((10 * GiB))" "$(jq -r '.events[0] | "\(.type)|\(.percent)|\(.used)|\(.quota)"' <<<"${_cpJ}")" "口径 both: 成员预警的百分比与已用都是按口径乘过的值"
+
 # 新周期：清零、quota 停用者恢复、到期者不恢复、notified 清空、周期事件带上期用量
 _cpS=$(cp_state 2026-09-01 "{
   \"alice\": $(cp_member "${_cpU1}" ${GiB} "" '[0]' ${GiB} 5 disabled quota),
@@ -804,8 +887,32 @@ assert_equals "active|" "$(jq -r '.state.members.alice | "\(.status)|\(.reason)"
 assert_equals "disabled|expired" "$(jq -r '.state.members.bob | "\(.status)|\(.reason)"' <<<"${_cpJ}")" "新周期: 超额且已到期的翻成 expired、不恢复"
 assert_equals "disabled|expired" "$(jq -r '.state.members.carol | "\(.status)|\(.reason)"' <<<"${_cpJ}")" "新周期: 到期停用者保持"
 assert_equals "active" "$(jq -r '.state.members.dave.status' <<<"${_cpJ}")" "新周期: 正常成员不动"
-assert_equals "period|2026-09-01|$((GiB + 5))|18" "$(jq -r '.events[0] | "\(.type)|\(.previous)|\(.usage.alice.up + .usage.alice.down)|\(.usage.dave.up + .usage.dave.down)"' <<<"${_cpJ}")" "新周期: 周期事件带上期各人用量"
+assert_equals "period|2026-09-01|$((GiB + 5))|18|null" "$(jq -r '.events[0] | "\(.type)|\(.previous)|\(.usage.alice)|\(.usage.dave)|\(.machine)"' <<<"${_cpJ}")" "新周期: 周期事件带上期各人用量（按口径），没有整机读数时 machine 为 null"
 assert_equals '["period","restored"]' "$(jq -c '[.events[].type]' <<<"${_cpJ}")" "新周期: 只有 alice 的恢复事件，bob 不发恢复"
+_cpMach='{"bootId":"b1","ifaces":["eth0"],"last":{"eth0":{"rx":9000,"tx":8000}},"rx":300,"tx":200}'
+_cpJ=$(cp_judge "$(jq -c --argjson m "${_cpMach}" '.machine = $m | .billing = "both" | .notified["plan:warn"] = true' <<<"${_cpS}")" "" 2026-10-02 2026-10-01)
+assert_equals '0|0|b1|{"eth0":{"rx":9000,"tx":8000}}|["eth0"]' "$(jq -r '.state.machine | "\(.rx)|\(.tx)|\(.bootId)|\(.last | tojson)|\(.ifaces | tojson)"' <<<"${_cpJ}")" "新周期: 整机累计归零，基线与 bootId 保留（下个 tick 照常算差值）"
+assert_equals "{}" "$(jq -c '.state.notified' <<<"${_cpJ}")" "新周期: 整机预警的去重键一起清掉"
+assert_equals "500|$(((GiB + 5) * 2))" "$(jq -r '.events[0] | "\(.machine)|\(.usage.alice)"' <<<"${_cpJ}")" "新周期: 周期事件带上期整机用量（both = 收 + 发）与按口径乘过的成员用量"
+assert_equals "300|200" "$(cp_judge "$(jq -c --argjson m "${_cpMach}" '.machine = $m' <<<"${_cpS}")" "" 2026-09-20 2026-09-01 | jq -r '.state.machine | "\(.rx)|\(.tx)"')" "同一周期内判定不动整机累计"
+
+# 整机套餐预警：sizeGB 按十进制 GB（1 = 10^9 字节），整机用量按口径（out = 发、both = 收 + 发、max = 取大）
+_cpS=$(cp_state 2026-10-01 "{\"alice\": $(cp_member "${_cpU1}" 0 "" '[0]' 1 1 active '')}" | jq -c '
+  .plan = {sizeGB: 1, warnPercent: 85, interface: ""}
+  | .machine = {bootId: "b1", ifaces: ["eth0"], last: {}, rx: 500000000, tx: 400000000}')
+_cpJ=$(cp_judge "$(jq -c '.billing = "both"' <<<"${_cpS}")" "" 2026-10-20 2026-10-01)
+assert_equals '[{"type":"planWarn","percent":90,"used":900000000,"size":1000000000}]' "$(jq -c '.events' <<<"${_cpJ}")" "整机预警: both 下 90% ≥ 85%，发一次，带百分比、用量与套餐"
+assert_equals "true" "$(jq -r '.state.notified["plan:warn"]' <<<"${_cpJ}")" "整机预警: 去重键记进 notified"
+assert_equals "[]" "$(cp_judge "$(jq -c '.state' <<<"${_cpJ}")" "" 2026-10-21 2026-10-01 | jq -c '.events')" "整机预警: 同一周期不再重复"
+assert_equals "[]" "$(cp_judge "$(jq -c '.billing = "out"' <<<"${_cpS}")" "" 2026-10-20 2026-10-01 | jq -c '.events')" "整机预警: out 只计发（40%），不发"
+assert_equals "[]" "$(cp_judge "$(jq -c '.billing = "max"' <<<"${_cpS}")" "" 2026-10-20 2026-10-01 | jq -c '.events')" "整机预警: max 取大（50%），不发"
+assert_equals "planWarn|50" "$(cp_judge "$(jq -c '.billing = "max" | .plan.warnPercent = 50' <<<"${_cpS}")" "" 2026-10-20 2026-10-01 | jq -r '.events[0] | "\(.type)|\(.percent)"')" "整机预警: max 取大正好到阈值就发"
+assert_equals "[]" "$(cp_judge "$(jq -c '.billing = "both" | .plan.warnPercent = 0' <<<"${_cpS}")" "" 2026-10-20 2026-10-01 | jq -c '.events')" "整机预警: warnPercent 0 关闭"
+assert_equals "[]" "$(cp_judge "$(jq -c '.billing = "both" | .plan.sizeGB = 0' <<<"${_cpS}")" "" 2026-10-20 2026-10-01 | jq -c '.events')" "整机预警: 没填套餐（sizeGB 0）不提醒"
+assert_equals "[]" "$(cp_judge "$(jq -c '.billing = "both" | .machine = {}' <<<"${_cpS}")" "" 2026-10-20 2026-10-01 | jq -c '.events')" "整机预警: 还没有整机读数不提醒"
+assert_equals "[]" "$(cp_judge "$(jq -c '.billing = "both" | .machine.ifaces = []' <<<"${_cpS}")" "" 2026-10-20 2026-10-01 | jq -c '.events')" "整机预警: 读数里没有网卡不提醒"
+assert_equals "[]" "$(cp_judge "$(jq -c '.billing = "both" | del(.plan)' <<<"${_cpS}")" "" 2026-10-20 2026-10-01 | jq -c '.events')" "整机预警: state 没有 plan（旧 state）不提醒"
+assert_equals "true|500000000" "$(carpoolResetUsageState "$(jq -c '.state' <<<"${_cpJ}")" | jq -r '"\(.notified["plan:warn"])|\(.machine.rx)"')" "carpoolResetUsageState: 清零成员不动整机读数与整机预警键（整机是服务商视角）"
 
 # 预警与到期提醒：各发一次，去重键进 notified
 _cpS=$(cp_state 2026-10-01 "{\"alice\": $(cp_member "${_cpU1}" $((10 * GiB)) 2026-10-22 '[0]' $((8 * GiB)) 0 active '')}")
@@ -886,13 +993,27 @@ assert_equals "alice 已停用（流量已用尽）" "$(carpoolEventText '{"type
 assert_equals "alice 已恢复" "$(carpoolEventText '{"type":"restored","name":"alice"}')" "carpoolEventText: 恢复"
 assert_equals "alice 已用 85%（4.65 GiB / 5.58 GiB）" "$(carpoolEventText '{"type":"warn","name":"alice","percent":85,"used":5000000000,"quota":6000000000}')" "carpoolEventText: 预警"
 assert_equals "alice 将于 2026-10-22 到期，还有 2 天" "$(carpoolEventText '{"type":"expiring","name":"alice","date":"2026-10-22","days":2}')" "carpoolEventText: 到期提醒"
-assert_equals $'新周期开始，流量已清零；上期用量：\n  alice: 1 KiB\n  bob: 0 B' "$(carpoolEventText '{"type":"period","previous":"2026-09-01","usage":{"alice":{"up":1000,"down":24},"bob":{"up":0,"down":0}}}')" "carpoolEventText: 周期清零附上期用量"
+assert_equals $'新周期开始，流量已清零；上期用量：\n  alice: 1 KiB\n  bob: 0 B' "$(carpoolEventText '{"type":"period","previous":"2026-09-01","usage":{"alice":1024,"bob":0},"machine":null}')" "carpoolEventText: 周期清零附上期用量"
+assert_equals $'新周期开始，流量已清零；上期用量：\n  alice: 1 KiB\n  整机: 812.5 GB' "$(carpoolEventText '{"type":"period","previous":"2026-09-01","usage":{"alice":1024},"machine":812500000000}')" "carpoolEventText: 有整机读数时周期清零多一行整机（十进制单位）"
+assert_equals "整机本周期已用套餐的 90%（900 MB / 1 GB）" "$(carpoolEventText '{"type":"planWarn","percent":90,"used":900000000,"size":1000000000}')" "carpoolEventText: 整机套餐预警，十进制单位"
 
 _cpS=$(cp_state 2026-10-15 "{
   \"alice\": $(cp_member "${_cpU1}" $((100 * GiB)) 2026-12-31 '[0,7]' $((100 * GiB)) 1 disabled quota),
   \"bob-x\": $(cp_member "${_cpU2}" 0 "" '[0,7]' 5 6 active '')}")
 _cpS=$(carpoolAppendEvents "${_cpS}" '[{"type":"disabled","name":"alice","reason":"quota"}]' "2026-10-31 11:55")
 assert_equals $'alice\t100 GiB\t100 GiB\t2026-12-31\t流量已用尽\nbob-x\t11 B\t不限\t-\t正常' "$(carpoolUsageTable "${_cpS}")" "carpoolUsageTable: 名字 已用 配额 到期 状态"
+_cpTable=$(carpoolUsageTable "$(jq -c '.billing = "both"' <<<"${_cpS}")")
+assert_equals $'alice\t200 GiB\t100 GiB\t2026-12-31\t流量已用尽\nbob-x\t22 B\t不限\t-\t正常' "${_cpTable}" "carpoolUsageTable: both 下已用列翻倍，配额列不变"
+assert_equals "5" "$(head -1 <<<"${_cpTable}" | awk -F'\t' '{print NF}')" "carpoolUsageTable: 仍是 5 列（每日摘要按 \$1..\$5 取）"
+
+assert_equals "只计出站|双向（进 + 出）|进出取大|双向（进 + 出）" "$(carpoolBillingText out)|$(carpoolBillingText both)|$(carpoolBillingText max)|$(carpoolBillingText "")" "carpoolBillingText: 三种口径，空按 both"
+_cpSum=$(jq -c '.billing = "both" | .plan = {sizeGB: 1000, warnPercent: 85, interface: ""}
+  | .members = {a: {upBytes: 200000000000, downBytes: 100000000000}, b: {upBytes: 50000000000, downBytes: 0}}
+  | .machine = {bootId: "b", ifaces: ["eth0"], last: {}, rx: 400000000000, tx: 412345678901}' <<<"${_cpS}")
+assert_equals "整机本周期 812.34 GB / 套餐 1000 GB（81%）· 成员合计 700 GB · 计费口径：双向（进 + 出）" "$(carpoolMachineSummary "${_cpSum}")" "carpoolMachineSummary: 有套餐有读数时带套餐与百分比，十进制单位，成员合计按口径"
+assert_equals "整机本周期 412.34 GB · 成员合计 350 GB · 计费口径：只计出站" "$(carpoolMachineSummary "$(jq -c '.billing = "out" | .plan.sizeGB = 0' <<<"${_cpSum}")")" "carpoolMachineSummary: 没填套餐时只有整机与成员合计；out 只计发"
+assert_equals "整机本周期 - · 成员合计 700 GB · 计费口径：双向（进 + 出）" "$(carpoolMachineSummary "$(jq -c '.machine = {}' <<<"${_cpSum}")")" "carpoolMachineSummary: 还没有整机读数时整机写 -，有套餐也不显示百分比"
+assert_equals "整机本周期 412.34 GB · 成员合计 350 GB · 计费口径：进出取大" "$(carpoolMachineSummary "$(jq -c '.billing = "max" | del(.plan)' <<<"${_cpSum}")")" "carpoolMachineSummary: max 取大；旧 state 没有 plan 也能出"
 
 printf '%s\n' '{"resetDay": 15, "notify": {"label": "<b>小车</b>&\"x\""}, "members": {"alice": {"quotaGiB": 100, "expire": "2026-12-31"}, "bob-x": {}}}' > "${_cpMembers}"
 _cpNorm=$(carpoolNormalizeMembers "${_cpMembers}" ",0,7,")
@@ -904,6 +1025,13 @@ cp_assert_contains "${_cpPage}" '本周期自 2026-10-15 · 下次清零 2026-11
 cp_assert_contains "${_cpPage}" '<tr class="disabled"><td>alice</td><td>100 GiB<div class="bar"><i class="hot" style="width:100%"></i></div></td><td>100 GiB</td><td>100%</td><td>2026-12-31</td><td>已停用 · 流量已用尽</td></tr>' "车主页: 停用成员一行"
 cp_assert_contains "${_cpPage}" '<tr class="active"><td>bob-x</td><td>11 B</td><td>不限</td><td>-</td><td>-</td><td>正常</td></tr>' "车主页: 不限额成员一行"
 cp_assert_contains "${_cpPage}" '<li>2026-10-31 11:55 · alice 已停用（流量已用尽）</li>' "车主页: 最近事件"
+cp_assert_contains "${_cpPage}" '下次清零 2026-11-15</p><p>整机本周期 - · 成员合计 107.37 GB · 计费口径：只计出站</p><table>' "车主页: 周期行下面一行整机与成员合计"
+_cpPage2=$(carpoolRenderOwnerPage "$(jq -c '.billing = "both" | .plan = {sizeGB: 1000, warnPercent: 85, interface: ""} | .machine = {bootId: "b", ifaces: ["eth0"], last: {}, rx: 100000000000, tx: 150000000000}' <<<"${_cpS}")" "${_cpNorm}" 2026-10-31 now '[]' '')
+cp_assert_contains "${_cpPage2}" '<p>整机本周期 250 GB / 套餐 1000 GB（25%）· 成员合计 214.74 GB · 计费口径：双向（进 + 出）</p>' "车主页: 有套餐与读数时整机一行带百分比"
+cp_assert_contains "${_cpPage2}" '<td>alice</td><td>200 GiB<div class="bar">' "车主页: both 下成员已用列按口径翻倍"
+cp_assert_contains "${_cpPage2}" '<td>200%</td>' "车主页: 百分比也按口径算"
+cp_assert_not_contains "${_cpPage2}" 'eth0' "车主页: 不写网卡名"
+cp_assert_contains "$(carpoolRenderOwnerPage "$(carpoolAppendEvents "${_cpS}" '[{"type":"planWarn","percent":90,"used":1,"size":2}]' "2026-10-31 12:05")" "${_cpNorm}" 2026-10-31 now '[]' '')" '<li>2026-10-31 12:05 · 整机用量预警</li>' "车主页: 整机预警事件有文案"
 cp_assert_not_contains "${_cpPage}" "${_cpU1}" "车主页: 不含任何 UUID"
 cp_assert_not_contains "${_cpPage}" '<script' "车主页: 无脚本"
 cp_assert_not_contains "${_cpPage}" 'http' "车主页: 无外链"
@@ -914,11 +1042,18 @@ cp_assert_not_contains "${_cpPage}" '未纳入拼车的账号' "车主页: 没�
 assert_equals "1" "$(grep -c '<p>还没有成员</p>' <<<"$(carpoolRenderOwnerPage "$(cp_state 2026-10-01 '{}')" "${_cpNorm}" 2026-10-31 now)")" "车主页: 没有成员时的提示"
 _cpPage=$(carpoolRenderMemberPage "${_cpS}" "${_cpNorm}" bob-x 2026-10-31 "2026-10-31 12:00")
 cp_assert_contains "${_cpPage}" '<h1>&lt;b&gt;小车&lt;/b&gt;&amp;&quot;x&quot; · bob-x</h1>' "成员页: 标题是标签加本人名"
-cp_assert_contains "${_cpPage}" '<tr><th>已用</th><td>11 B</td></tr><tr><th>配额</th><td>不限</td></tr><tr><th>到期</th><td>-</td></tr><tr><th>状态</th><td>正常</td></tr>' "成员页: 四行"
+cp_assert_contains "${_cpPage}" '<tr><th>已用</th><td>11 B</td></tr><tr><th>配额</th><td>不限</td></tr><tr><th>计费口径</th><td>只计出站</td></tr><tr><th>到期</th><td>-</td></tr><tr><th>状态</th><td>正常</td></tr>' "成员页: 五行，含计费口径"
 cp_assert_not_contains "${_cpPage}" 'alice' "成员页: 看不到别人"
 cp_assert_not_contains "${_cpPage}" "${_cpU2}" "成员页: 不含本人 UUID"
 _cpPage=$(carpoolRenderMemberPage "${_cpS}" "${_cpNorm}" alice 2026-10-31 now)
 cp_assert_contains "${_cpPage}" '<td>100 GiB (100%)<div class="bar"><i class="hot" style="width:100%"></i></div></td>' "成员页: 有配额时带百分比"
+_cpPage=$(carpoolRenderMemberPage "$(jq -c '.billing = "both" | .machine = {bootId: "b", ifaces: ["eth0"], last: {}, rx: 1, tx: 2}' <<<"${_cpS}")" "${_cpNorm}" alice 2026-10-31 now)
+cp_assert_contains "${_cpPage}" '<td>200 GiB (200%)<div class="bar">' "成员页: both 下已用与百分比按口径翻倍"
+cp_assert_contains "${_cpPage}" '<tr><th>计费口径</th><td>双向（进 + 出）</td></tr>' "成员页: 写明计费口径，成员看得懂为什么是两倍"
+cp_assert_not_contains "${_cpPage}" '整机' "成员页: 不显示整机用量"
+cp_assert_not_contains "${_cpPage}" "${_cpU1}" "成员页: 仍不含 UUID"
+cp_assert_not_contains "${_cpPage}" '<script' "成员页: 无脚本"
+cp_assert_not_contains "${_cpPage}" 'http' "成员页: 无外链"
 assert_equals "1" "$(carpoolRenderMemberPage "${_cpS}" "${_cpNorm}" nobody 2026-10-31 now >/dev/null; echo $?)" "成员页: 不是成员返回 1"
 
 # --- 关闭分组、清零、差异文案 ---
@@ -991,7 +1126,7 @@ assert_equals "统计采集已连续失败 3 次" "$(carpoolEventText '{"type":"
 assert_equals "拼车已关闭。恢复：a, b；仍停用：c" "$(carpoolEventText '{"type":"closed","restored":"a, b","kept":"c"}')" "carpoolEventText: closed"
 assert_equals $'[车]\nalice 已停用（流量已用尽）\nbob 已恢复' "$(carpoolNotifyText 车 '[{"type":"disabled","name":"alice","reason":"quota"},{"type":"restored","name":"bob"}]')" "carpoolNotifyText: 标签一行 + 每事件一行"
 assert_equals "" "$(carpoolNotifyText 车 '[]')" "carpoolNotifyText: 没有事件输出空"
-assert_equals $'每日摘要 2026-10-20\nalice: 3 B / 不限 · 正常' "$(carpoolDigestText "${_cpS}" 2026-10-20)" "carpoolDigestText: 标题 + 每人一行"
+assert_equals $'每日摘要 2026-10-20\nalice: 3 B / 不限 · 正常\n整机本周期 - · 成员合计 3 B · 计费口径：只计出站' "$(carpoolDigestText "${_cpS}" 2026-10-20)" "carpoolDigestText: 标题 + 每人一行 + 末尾整机一行"
 cp_assert_not_contains "$(carpoolNotifyText 车 '[{"type":"disabled","name":"alice","reason":"quota"}]')$(carpoolDigestText "${_cpS}" 2026-10-20)" "${_cpU1}" "通知文案: 不含 UUID"
 _cpEv=$(carpoolAppendEvents "${_cpS}" '[{"type":"digest","date":"x"},{"type":"collectFailed","count":3}]' now)
 assert_equals '[{"time":"now","type":"collectFailed","count":3}]' "$(jq -c '.events' <<<"${_cpEv}")" "carpoolAppendEvents: 摘要不进页面事件，collectFailed 带次数"

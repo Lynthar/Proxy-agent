@@ -1109,6 +1109,7 @@ CP_ROOT="${MOCK_ROOT}/carpool.root"
 CP_TABLE="${MOCK_ROOT}/carpool_crontab"
 CP_CALLS="${MOCK_ROOT}/carpool_calls"
 CP_STATS="${MOCK_ROOT}/carpool_stats.json"
+CP_NET="${MOCK_ROOT}/carpool_net.json"
 CP_U1="11111111-1111-1111-1111-111111111111"
 CP_U2="22222222-2222-2222-2222-222222222222"
 GiB=1073741824
@@ -1145,6 +1146,7 @@ EOF
     jq -n --arg u1 "${CP_U1}" --arg u2 "${CP_U2}" --arg period "${CP_PERIOD}" --argjson q $((5 * GiB)) '{
         enabled: true, apiPort: 23456, period: $period, lastTick: "", resetDay: 1,
         notify: {label: "车", warnPercent: 80, digestHour: null, expireNoticeDays: 3},
+        billing: "both", plan: {sizeGB: 0, warnPercent: 85, interface: ""}, machine: {},
         pageEnabled: false, pageToken: "", collectFailures: 0, notified: {}, events: [],
         members: {
           alice: {uuid: $u1, quotaBytes: $q, expire: "", protocols: [0, 7], upBytes: 0, downBytes: 0, status: "active", reason: ""},
@@ -1167,13 +1169,14 @@ server {
 EOF
     : >"${CP_TABLE}"
     : >"${CP_CALLS}"
-    rm -f "${CP_STATS}"
+    rm -f "${CP_STATS}" "${CP_NET}"
 }
 
 # run_cp CMD → 在干净 bash 里以模拟树为安装根执行 CMD；可用环境变量：CP_CORE（内核）、CP_SUBPORT（订阅端口）、
-# XRAY_TEST_RC（桩 xray 的 -test 退出码）、CP_RELOAD_INJECT（reloadCore 桩往 state 里塞一笔用量）
+# XRAY_TEST_RC（桩 xray 的 -test 退出码）、CP_RELOAD_INJECT（reloadCore 桩往 state 里塞一笔用量）。
+# 整机读数取自 CP_NET 文件（carpoolMachineSample 的输出形状），文件不存在就当读不到网卡：不读宿主机的 /proc
 run_cp() (
-    env PROXY_AGENT_DIR="${CP_ROOT}" CP_FNS="${CP_FNS}" CP_TABLE="${CP_TABLE}" CP_CALLS="${CP_CALLS}" CP_STATS="${CP_STATS}" \
+    env PROXY_AGENT_DIR="${CP_ROOT}" CP_FNS="${CP_FNS}" CP_TABLE="${CP_TABLE}" CP_CALLS="${CP_CALLS}" CP_STATS="${CP_STATS}" CP_NET="${CP_NET}" \
         V2RAY_LANG=zh_CN XRAY_TEST_RC="${XRAY_TEST_RC:-0}" CP_CORE="${CP_CORE:-1}" CP_SUBPORT="${CP_SUBPORT:-}" CP_RELOAD_INJECT="${CP_RELOAD_INJECT:-}" \
         CP_XRAY_VERSION="${CP_XRAY_VERSION:-26.3.27}" CP_CROND_RC="${CP_CROND_RC:-0}" CP_PROTOS="${CP_PROTOS:-}" \
         CP_SUBTYPE="${CP_SUBTYPE:-https}" CP_NGINX_T_RC="${CP_NGINX_T_RC:-0}" CP_CURL_FAIL="${CP_CURL_FAIL:-}" CP_ENV_RC="${CP_ENV_RC:-0}" bash -c '
@@ -1201,6 +1204,7 @@ run_cp() (
         nginx() { echo "nginx $*" >>"${CP_CALLS}"; if [[ "$1" == "-t" ]]; then return "${CP_NGINX_T_RC}"; fi; }
         handleNginx() { echo "handleNginx $*" >>"${CP_CALLS}"; }
         carpoolXrayServiceEnv() { echo "serviceEnv $1" >>"${CP_CALLS}"; return "${CP_ENV_RC}"; }
+        carpoolMachineSample() { echo "machineSample $1" >>"${CP_CALLS}"; [[ -s "${CP_NET}" ]] && cat "${CP_NET}"; }
         getPublicIP() { echo 203.0.113.9; }
         nginxConfigPath="${PROXY_AGENT_DIR}/nginx/"
         currentHost=example.com
@@ -1367,7 +1371,7 @@ cp_reset_tree
 jq --argjson six $((6 * GiB)) '.members.alice.status = "disabled" | .members.alice.reason = "quota" | .members.alice.upBytes = $six' "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/s.tmp" && mv "${CP_ROOT}/carpool/s.tmp" "${CP_ROOT}/carpool/state.json"
 jq 'del(.inbounds[0].settings.clients[1])' "${CP_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json" >"${CP_ROOT}/t.json" && mv "${CP_ROOT}/t.json" "${CP_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
 jq 'del(.inbounds[1].settings.clients[1])' "${CP_ROOT}/xray/conf/07_VLESS_vision_reality_inbounds.json" >"${CP_ROOT}/t.json" && mv "${CP_ROOT}/t.json" "${CP_ROOT}/xray/conf/07_VLESS_vision_reality_inbounds.json"
-printf '%s\n' '{"members": {"alice": {"quotaGiB": 10}, "bob": {}}}' >"${CP_ROOT}/carpool/members.json"
+printf '%s\n' '{"billing": "out", "members": {"alice": {"quotaGiB": 10}, "bob": {}}}' >"${CP_ROOT}/carpool/members.json"
 printf '%s\n' '{}' >"${CP_STATS}"
 _out=$(CP_SUBPORT=12345 run_cp 'carpoolTick; echo "rc=$?"' 2>&1)
 assert_contains "${_out}" "alice 已恢复" "tick（恢复）：日志里有恢复事件"
@@ -1377,7 +1381,7 @@ assert_equals "${CP_U1}" "$(jq -r '.inbounds[1].settings.clients[1].id' "${CP_RO
 assert_equals "1" "$(grep -c '^subscribe false true$' "${CP_CALLS}")" "tick（恢复）：订阅已装时以 subscribe false true 重建"
 cp_reset_tree
 jq --argjson six $((6 * GiB)) '.members.alice.status = "disabled" | .members.alice.reason = "quota" | .members.alice.upBytes = $six' "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/s.tmp" && mv "${CP_ROOT}/carpool/s.tmp" "${CP_ROOT}/carpool/state.json"
-printf '%s\n' '{"members": {"alice": {"quotaGiB": 10}, "bob": {}}}' >"${CP_ROOT}/carpool/members.json"
+printf '%s\n' '{"billing": "out", "members": {"alice": {"quotaGiB": 10}, "bob": {}}}' >"${CP_ROOT}/carpool/members.json"
 printf '%s\n' '{}' >"${CP_STATS}"
 run_cp 'carpoolTick' >/dev/null 2>&1
 assert_equals "0" "$(grep -c '^subscribe' "${CP_CALLS}")" "tick（恢复）：没装订阅就不调 subscribe（它会在 cron 下交互）"
@@ -1391,6 +1395,63 @@ jq '.enabled = false' "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/s.tmp
 : >"${CP_CALLS}"
 run_cp 'carpoolCollectBeforeStop' >/dev/null 2>&1
 assert_equals "0" "$(grep -c statsquery "${CP_CALLS}")" "carpoolCollectBeforeStop：关着就不查"
+
+# 计费口径：文件里的 billing 每个 tick 同步进 state，判定按它乘；state 里存的仍是原始字节
+cp_reset_tree
+jq -n --argjson three $((3 * GiB)) '{stat: [{name: "user>>>alice-VLESS_TCP/TLS_Vision>>>traffic>>>uplink", value: $three}]}' >"${CP_STATS}"
+run_cp 'carpoolTick' >/dev/null 2>&1
+assert_equals "both|disabled|quota|$((3 * GiB))" "$(cp_state '"\(.billing)|\(.members.alice.status)|\(.members.alice.reason)|\(.members.alice.upBytes)"')" \
+    "口径（不写即 both）：3 GiB 按 6 GiB 计，超过 5 GiB 配额即停用，state 存原始字节"
+cp_reset_tree
+printf '%s\n' '{"billing": "out", "notify": {"label": "车", "digestHour": null}, "members": {"alice": {"quotaGiB": 5}, "bob": {}}}' >"${CP_ROOT}/carpool/members.json"
+jq -n --argjson three $((3 * GiB)) '{stat: [{name: "user>>>alice-VLESS_TCP/TLS_Vision>>>traffic>>>uplink", value: $three}]}' >"${CP_STATS}"
+run_cp 'carpoolTick' >/dev/null 2>&1
+assert_equals "out|active" "$(cp_state '"\(.billing)|\(.members.alice.status)"')" "口径 out：同样的 3 GiB 按原值计，不停用"
+
+# 整机：第一次读数只记基线；之后按增量累加；到套餐的 warnPercent 预警一次；重启按 bootId 认出
+cp_net() { jq -n --arg b "$1" --argjson rx "$2" --argjson tx "$3" '{bootId: $b, counters: {eth0: {rx: $rx, tx: $tx}}}' >"${CP_NET}"; }
+cp_reset_tree
+printf '%s\n' '{"plan": {"sizeGB": 1}, "notify": {"label": "车", "digestHour": null}, "members": {"alice": {"quotaGiB": 5}, "bob": {}}}' >"${CP_ROOT}/carpool/members.json"
+printf '%s\n' '{}' >"${CP_STATS}"
+cp_net b1 5000000000 6000000000
+run_cp 'carpoolTick' >/dev/null 2>&1
+assert_equals '["eth0"]|0|0|6000000000' "$(cp_state '"\(.machine.ifaces | tojson)|\(.machine.rx)|\(.machine.tx)|\(.machine.last.eth0.tx)"')" "整机：第一次读数只记基线，不加"
+assert_equals "1" "$(grep -c '^machineSample $' "${CP_CALLS}")" "整机：plan 没写 interface 时按默认路由取"
+cp_net b1 5400000000 6500000000
+_out=$(run_cp 'carpoolTick' 2>&1)
+assert_equals "400000000|500000000" "$(cp_state '"\(.machine.rx)|\(.machine.tx)"')" "整机：同一次开机按增量累加"
+assert_contains "${_out}" "整机本周期已用套餐的 90%（900 MB / 1 GB）" "整机：both 下收发合计 900 MB 是 1 GB 套餐的 90%，过 85% 预警"
+assert_equals "true" "$(cp_state '.notified["plan:warn"]')" "整机：预警的去重键记下"
+cp_net b1 5450000000 6550000000
+_out=$(run_cp 'pgrep() { :; }; carpoolTick' 2>&1)
+assert_equals "450000000|550000000" "$(cp_state '"\(.machine.rx)|\(.machine.tx)"')" "整机：Xray 没在跑也照样读网卡"
+assert_equals "0" "$(grep -c '整机本周期已用套餐' <<<"${_out}")" "整机：同一周期不再重复预警"
+cp_net b2 100000000 0
+run_cp 'carpoolTick' >/dev/null 2>&1
+assert_equals "550000000|550000000|b2" "$(cp_state '"\(.machine.rx)|\(.machine.tx)|\(.machine.bootId)"')" "整机：重启后（bootId 变了）本次读数整段算增量"
+_out=$(run_cp 'carpoolShowUsage' 2>&1)
+assert_contains "${_out}" "整机本周期 1.1 GB / 套餐 1 GB（110%）· 成员合计 0 B · 计费口径：双向（进 + 出） · 网卡 eth0" "查看用量：整机一行带套餐、成员合计、口径与网卡"
+rm -f "${CP_NET}"
+_out=$(run_cp 'carpoolTick' 2>&1)
+assert_contains "${_out}" "找不到默认路由所在的网卡" "整机：读不到网卡时记一行"
+assert_equals "550000000" "$(cp_state '.machine.rx')" "整机：读不到网卡时累计不动"
+printf '%s\n' '{"plan": {"sizeGB": 1, "interface": "eth9"}, "notify": {"label": "车", "digestHour": null}, "members": {"alice": {"quotaGiB": 5}, "bob": {}}}' >"${CP_ROOT}/carpool/members.json"
+: >"${CP_CALLS}"
+_out=$(run_cp 'carpoolTick' 2>&1)
+assert_equals "1" "$(grep -c '^machineSample eth9$' "${CP_CALLS}")" "整机：plan.interface 当次 tick 就按它取读数"
+assert_contains "${_out}" "读不到网卡 eth9 的计数" "整机：指定的网卡读不到时点名"
+
+# 换周期：整机累计随成员一起清零，读数基线保留；周期事件带上期整机用量
+cp_reset_tree
+printf '%s\n' '{"plan": {"sizeGB": 1}, "notify": {"label": "车", "digestHour": null}, "members": {"alice": {"quotaGiB": 5}, "bob": {}}}' >"${CP_ROOT}/carpool/members.json"
+printf '%s\n' '{}' >"${CP_STATS}"
+cp_net b1 1000 2000
+run_cp 'carpoolTick' >/dev/null 2>&1
+jq '.period = "2000-01-01" | .notified = {"plan:warn": true}' "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/s.tmp" && mv "${CP_ROOT}/carpool/s.tmp" "${CP_ROOT}/carpool/state.json"
+cp_net b1 300001000 200002000
+_out=$(run_cp 'carpoolTick' 2>&1)
+assert_contains "${_out}" "  整机: 500 MB" "换周期：周期事件附上期整机用量（both：收发合计）"
+assert_equals "0|0|300001000|{}" "$(cp_state '"\(.machine.rx)|\(.machine.tx)|\(.machine.last.eth0.rx)|\(.notified | tojson)"')" "换周期：整机累计清零、读数基线保留、预警键清空"
 
 # cron 分支与快照
 assert_equals "3" "$(run_cp 'carpoolTick() { return 3; }; cronName=CarpoolTick; cronFunction' >/dev/null 2>&1; echo $?)" "cronFunction CarpoolTick：退出码原样带出"
@@ -1619,6 +1680,7 @@ assert_equals "3" "$(find "${CP_ROOT}/subscribe/carpool" -type f | wc -l | tr -d
 jq -n --argjson six $((6 * GiB)) '{stat: [{name: "user>>>alice-VLESS_TCP/TLS_Vision>>>traffic>>>uplink", value: $six}]}' >"${CP_STATS}"
 run_cp 'carpoolTick' >/dev/null 2>&1
 assert_contains "$(cat "${CP_ROOT}/subscribe/carpool/${_token}")" "已停用 · 流量已用尽" "tick 后：车主页显示停用"
+assert_contains "$(cat "${CP_ROOT}/subscribe/carpool/${_token}")" "<p>整机本周期 - · 成员合计 12.88 GB · 计费口径：双向（进 + 出）</p>" "tick 后：车主页有整机一行（还没有读数时整机写 -），成员合计按口径"
 assert_contains "$(cat "${CP_ROOT}/subscribe/carpool/${CP_ALICE_MD5}")" "已停用 · 流量已用尽" "tick 后：成员页同步"
 # 配置文件待应用 / 无效 的提示
 printf '%s\n' '{"members": {"alice": {"quotaGiB": 50}, "bob": {}}}' >"${CP_ROOT}/carpool/members.json"

@@ -7979,6 +7979,20 @@ carpoolCollect() {
     carpoolAddUsage "$1" "${sums}"
 }
 
+# carpoolMachineSample [IFACE] → {"bootId", "counters": {网卡: {rx, tx}}}：IFACE 为空就取默认路由所在的网卡（v4 / v6 各一）；
+# 一块都读不到返回 1。bootId 用来认出重启：重启后内核计数从 0 起
+carpoolMachineSample() {
+    local ifaces counters
+    if [[ -n "$1" ]]; then
+        ifaces=$(jq -cn --arg i "$1" '[$i]')
+    else
+        ifaces=$(carpoolDefaultRouteIfaces "$(cat /proc/net/route 2>/dev/null)" "$(cat /proc/net/ipv6_route 2>/dev/null)") || return 1
+    fi
+    counters=$(carpoolNetDevCounters "$(cat /proc/net/dev 2>/dev/null)" "${ifaces}") || return 1
+    [[ "$(jq 'length' <<<"${counters}")" -gt 0 ]] || return 1
+    jq -cn --arg b "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" --argjson c "${counters}" '{bootId: $b, counters: $c}'
+}
+
 # carpoolCollectBeforeStop → handleXray stop 的钩子：拼车开着且 Xray 在跑就先把内存里的计数收进 state（否则随进程丢）
 carpoolCollectBeforeStop() {
     local state newState
@@ -8136,7 +8150,7 @@ carpoolTick() {
         state=$(jq -c '.collectFailures += 1' <<<"${state}")
         echoContent yellow " ---> ${now} $(t CARPOOL_TICK_COLLECT_FAILED "$(jq -r '.collectFailures' <<<"${state}")")"
     fi
-    local membersOk=true fileId notices extra
+    local membersOk=true fileId notices extra iface sample machine
     installed=$(scanInstalledProtocols "${XRAY_CONF_DIR}")
     if errors=$(carpoolValidateMembers "${CARPOOL_MEMBERS_FILE}" "${installed}" "$(carpoolForeignAccounts "${state}" "$(carpoolCurrentClientsMap)")"); then
         normalized=$(carpoolNormalizeMembers "${CARPOOL_MEMBERS_FILE}" "${installed}")
@@ -8145,6 +8159,15 @@ carpoolTick() {
         membersOk=false
         echoContent yellow " ---> ${now} $(t CARPOOL_TICK_MEMBERS_INVALID "${CARPOOL_MEMBERS_FILE}")"
         echo "${errors}"
+    fi
+    # 整机读网卡，不看 Xray 在不在跑；网卡按刚同步的 plan.interface 取
+    iface=$(jq -r '.plan.interface // ""' <<<"${state}")
+    if sample=$(carpoolMachineSample "${iface}") && machine=$(carpoolMachineAdvance "$(jq -c '.machine // {}' <<<"${state}")" "${sample}"); then
+        state=$(jq -c --argjson m "${machine}" '.machine = $m' <<<"${state}")
+    elif [[ -n "${iface}" ]]; then
+        echoContent yellow " ---> ${now} $(t CARPOOL_TICK_NO_IFACE "${iface}")"
+    else
+        echoContent yellow " ---> ${now} $(t CARPOOL_TICK_NO_ROUTE)"
     fi
     # 文件无效按内容摘要只提醒一次；采集失败满 3 次 / 恢复各一次；每日摘要到点一次
     fileId=$(md5sum "${CARPOOL_MEMBERS_FILE}" 2>/dev/null | awk '{print $1}')
@@ -8484,7 +8507,8 @@ carpoolShowUsage() {
         return 0
     fi
     echoContent skyBlue "\n$(jq -r '.notify.label' <<<"${state}") · $(if [[ "$(jq -r '.enabled' <<<"${state}")" == "true" ]]; then t CARPOOL_USAGE_STATE_ON; else t CARPOOL_USAGE_STATE_OFF; fi)"
-    echoContent yellow " ---> $(t CARPOOL_PAGE_PERIOD) $(jq -r '.period' <<<"${state}") · $(t CARPOOL_PAGE_NEXT_RESET) $(carpoolNextPeriodStart "$(date +%F)" "$(jq -r '.resetDay' <<<"${state}")") · $(t CARPOOL_USAGE_LAST_TICK) $(jq -r '.lastTick | if . == "" then "-" else . end' <<<"${state}")\n"
+    echoContent yellow " ---> $(t CARPOOL_PAGE_PERIOD) $(jq -r '.period' <<<"${state}") · $(t CARPOOL_PAGE_NEXT_RESET) $(carpoolNextPeriodStart "$(date +%F)" "$(jq -r '.resetDay' <<<"${state}")") · $(t CARPOOL_USAGE_LAST_TICK) $(jq -r '.lastTick | if . == "" then "-" else . end' <<<"${state}")"
+    echoContent yellow " ---> $(carpoolMachineSummary "${state}") · $(t CARPOOL_USAGE_IFACES "$(jq -r '(.machine.ifaces // []) | if length == 0 then "-" else join(", ") end' <<<"${state}")")\n"
     printf '%-24s %-12s %-12s %-12s %s\n' "$(t CARPOOL_PAGE_NAME)" "$(t CARPOOL_PAGE_USED)" "$(t CARPOOL_PAGE_QUOTA)" "$(t CARPOOL_PAGE_EXPIRE)" "$(t CARPOOL_PAGE_STATUS)"
     while IFS=$'\t' read -r n u q e st; do
         [[ -n "${n}" ]] && printf '%-24s %-12s %-12s %-12s %s\n' "${n}" "${u}" "${q}" "${e}" "${st}"
