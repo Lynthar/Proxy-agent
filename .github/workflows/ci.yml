@@ -136,13 +136,23 @@ jobs:
           done
 
   install-e2e:
-    name: real ${{ matrix.core }} install in a ${{ matrix.os }} container
+    name: real ${{ matrix.core }} install in a ${{ matrix.os }} container, ${{ matrix.client == 'same' && matrix.core || matrix.client }} client
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         os: [alpine, debian]
         core: [xray, singbox]
+        # `same` = handshake with the core that was just installed. The include below
+        # only becomes a fifth cell because its `client` conflicts with this value;
+        # without the axis it would merge into the debian/xray cell and replace it.
+        client: [same]
+        # Cross leg: the sing-box subscriptions this script emits must complete the
+        # Reality handshake against the Xray-core it installs.
+        include:
+          - os: debian
+            core: xray
+            client: singbox
     steps:
       - uses: actions/checkout@v4
 
@@ -150,4 +160,4 @@ jobs:
         # Root in a throwaway container: real downloads and service manager, then the
         # core's own config check, a real Reality handshake through the emitted share link,
         # pasly re-entry, doctor and uninstall. tests/e2e/run.sh is the same command locally.
-        run: bash tests/e2e/run.sh ${{ matrix.os }} ${{ matrix.core }}
+        run: bash tests/e2e/run.sh ${{ matrix.os }} ${{ matrix.core }} ${{ matrix.client == 'same' && matrix.core || matrix.client }}

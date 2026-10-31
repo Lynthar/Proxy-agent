@@ -47,6 +47,11 @@ readonly SINGBOX_MIN_VERSION="1.12.0"
 # 想跟随 Xray 收紧策略的用户可手动改成 26.3.27
 readonly REALITY_MIN_CLIENT_VER="1.8.0"
 
+# Xray-core 默认钉在官方 sing-box 客户端还能完成 REALITY 握手的最后一个稳定版：26.9.8 起服务端要求
+# ClientHello 带 X25519MLKEM768 份额，sing-box 会剥掉它（SagerNet/sing-box#4520），脚本自己发的
+# sing-box 订阅在 7/12 上报 reality verification failed。升级菜单可显式装最新版；sing-box 修好前别动
+readonly XRAY_PINNED_VERSION="v26.3.27"
+
 # ============================================================================
 # 脚本版本（SCRIPT_VERSION 由 install.sh 从 VERSION 文件加载，此处仅默认值）
 # ============================================================================

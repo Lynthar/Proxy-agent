@@ -488,6 +488,8 @@ socks5://...       (SOCKS5)
 
 > 菜单 16 的子选项编号 Xray-core 与 sing-box 不一致：以"按提示选择"为准，下列编号是当前版本实际值。
 
+> **Xray-core 默认钉在 v26.3.27**：16 → 1「升级 Xray-core」装的是这个版本，不是 GitHub 最新版。Xray-core 26.9.8 起的 Reality 入站要求客户端带 X25519MLKEM768 密钥份额，官方 sing-box 客户端（含 1.14.x）不带，连接会报 `reality verification failed`——脚本自己发的 sing-box 订阅就连不上 Reality 节点。只用 mihomo / v2rayN 这类 Xray 系客户端、想要最新版的，选 16 → 10「安装最新稳定版」，脚本会打一行警告后照装。
+
 ---
 
 ## 故障排查指南
@@ -646,6 +648,19 @@ pasly doctor
 ## 升级与迁移提示
 
 下面是从旧版本升级时**可能注意到**的行为变化。这里只列出真正会让用户看到不同/需要动手的项；其它修复对最终用户透明，不必关心。
+
+### Xray-core：「升级」会装回 v26.3.27
+
+**适用对象**：用 Xray 内核、且装有 Reality（菜单里的 VLESS+Reality+Vision 或 XHTTP）的用户。
+
+**现象**：更新脚本后进 16 → 1「升级 Xray-core」，提示「将把 Xray-core 从 v26.10.x 换成 v26.3.27」。
+
+**原因**：Xray-core 26.9.8 起 Reality 服务端要求客户端带 X25519MLKEM768 密钥份额，官方 sing-box 客户端不带，握手失败报 `reality verification failed`。脚本发出的 sing-box 订阅因此在新版内核上连不上，所以默认钉回最后一个两边都能连的稳定版。
+
+**要不要处理**：
+- 有人用 sing-box 系客户端（sing-box、SFI/SFA、Karing 这类）连你的 Reality 节点：按提示换成 v26.3.27。
+- 只有 mihomo / Xray 系客户端：可以留在新版，或用 16 → 10 显式装最新版。
+- sing-box 上游修复发布后脚本会解钉，届时「升级」重新指向最新版。
 
 ### Cloudflare WARP：升级后 `apt update` 可能有 legacy keyring 警告
 

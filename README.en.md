@@ -171,9 +171,12 @@ previous script from `backup/`, or simply leaves the target alone.
 
 **It installs a few third-party components for you**: acme.sh through its official
 installer, BBR through a third-party script, and the Xray and sing-box binaries
-from their own GitHub releases. None of these are version-pinned. The masquerade
-site assets are a GitHub archive zip with no checksum — static files that never
-enter an execution path.
+from their own GitHub releases. sing-box is the latest stable release; Xray-core is
+pinned to v26.3.27 by default, because newer releases reject the Reality handshake
+of official sing-box clients and the sing-box subscriptions this script emits would
+stop connecting (the core menu can install the latest release explicitly). Nothing
+else is version-pinned. The masquerade site assets are a GitHub archive zip with no
+checksum — static files that never enter an execution path.
 
 **Under SELinux enforcing the script exits** and points at `docs/selinux.md`.
 That's deliberate.

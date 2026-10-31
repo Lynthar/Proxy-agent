@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test_install_e2e.sh - 真装机端到端：以 root 在一次性 Linux 容器里跑 install.sh 的「一键 Reality」安装
-# （菜单 19 → E2E_CORE 选的内核），装完用内核自检、真实 Reality 握手、pasly 重入与 doctor 验收，再卸载。
-# 跑法: bash tests/e2e/run.sh alpine|debian [xray|singbox]（本机与 CI 同一条命令）
+# （菜单 19 → E2E_CORE 选的内核），装完用内核自检、真实 Reality 握手（客户端由 E2E_CLIENT 选，默认同内核）、
+# pasly 重入与 doctor 验收，再卸载。跑法: bash tests/e2e/run.sh alpine|debian [xray|singbox] [xray|singbox]
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -68,6 +68,7 @@ SINGBOX_BIN="${INSTALL_ROOT}/sing-box/sing-box"
 SINGBOX_FRAGMENT_DIR="${INSTALL_ROOT}/sing-box/conf/config"
 E2E_LOG="/tmp/proxy-agent-e2e-install.log"
 E2E_CORE="${E2E_CORE:-xray}"
+E2E_CLIENT="${E2E_CLIENT:-${E2E_CORE}}"
 
 case "${E2E_CORE}" in
 xray)
@@ -81,6 +82,11 @@ singbox)
     exit 2
     ;;
 esac
+# 交叉腿只有一种：sing-box 客户端对 Xray 服务端（脚本发的 sing-box 订阅必须连得上 Reality）
+if [[ "${E2E_CLIENT}" != "${E2E_CORE}" && ! ("${E2E_CLIENT}" == "singbox" && "${E2E_CORE}" == "xray") ]]; then
+    echo -e "${RED}E2E_CLIENT 只能与 E2E_CORE 相同，或 singbox 对 xray；收到 ${E2E_CLIENT} 对 ${E2E_CORE}${NC}"
+    exit 2
+fi
 
 if [[ "$(id -u)" != "0" || "$(uname -s)" != "Linux" ]]; then
     echo -e "${RED}必须在 Linux 上以 root 运行${NC}"
@@ -118,7 +124,7 @@ E2E_SNI="dl.google.com"
 
 echo "=============================================="
 echo -e "${YELLOW}Proxy-agent 真装机端到端测试${NC}"
-echo -e "${YELLOW}$(. /etc/os-release && echo "${PRETTY_NAME}") · $(uname -m) · ${SERVICE_MANAGER} · ${CORE_LABEL}${NC}"
+echo -e "${YELLOW}$(. /etc/os-release && echo "${PRETTY_NAME}") · $(uname -m) · ${SERVICE_MANAGER} · ${CORE_LABEL} · 客户端 ${E2E_CLIENT}${NC}"
 echo "=============================================="
 echo ""
 
@@ -164,6 +170,10 @@ assert_equals "yes" "$([[ -x "${CORE_BIN}" ]] && echo yes || echo no)" "${CORE_L
 assert_equals "0" "$("${CORE_BIN}" version >/dev/null 2>&1; echo $?)" "${CORE_LABEL} 二进制能在本机运行（架构与 libc 都对）"
 if [[ "${E2E_CORE}" == "xray" ]]; then
     assert_equals "yes" "$([[ -s "${INSTALL_ROOT}/xray/geosite.dat" && -s "${INSTALL_ROOT}/xray/geoip.dat" ]] && echo yes || echo no)" "geosite.dat / geoip.dat 已下载"
+    # 默认装的是钉住的版本，不是 GitHub 最新：更新的 Xray-core 会让下面的 sing-box 交叉握手失败
+    pinnedXray=$(sed -n 's/^readonly XRAY_PINNED_VERSION="\(.*\)"$/\1/p' "${PROJECT_ROOT}/lib/constants.sh")
+    assert_not_empty "${pinnedXray}" "lib/constants.sh 里有 XRAY_PINNED_VERSION"
+    assert_equals "${pinnedXray#v}" "$("${XRAY_BIN}" version 2>/dev/null | head -1 | awk '{print $2}')" "装的是钉住的 Xray-core ${pinnedXray}"
 else
     assert_equals "no" "$([[ -e "${XRAY_BIN}" ]] && echo yes || echo no)" "sing-box 一键 Reality 不装 Xray"
 fi
@@ -247,7 +257,7 @@ fi
 assert_equals "yes" "$(timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/${E2E_PORT}" 2>/dev/null && echo yes || echo no)" "127.0.0.1:${E2E_PORT} 接受 TCP 连接"
 
 # ============================================================================
-# 订阅链接可用：拿脚本发给用户的 vless:// 链接，用同一个内核起客户端，穿过服务端访问外网
+# 订阅链接可用：拿脚本发给用户的 vless:// 链接，用 E2E_CLIENT 选的内核起客户端，穿过服务端访问外网
 # ============================================================================
 
 echo ""
@@ -283,9 +293,29 @@ assert_equals "${publicKey}" "$(linkParam pbk)" "链接 pbk 是配置里的 publ
 assert_equals "$(head -n 1 <<<"${shortIds:-}")" "$(linkParam sid)" "链接 sid 是配置里的第一个 shortId"
 assert_equals "xtls-rprx-vision" "$(linkParam flow)" "链接 flow=xtls-rprx-vision"
 
+# 客户端二进制：默认就是刚装好的内核；交叉腿另下一份官方 sing-box 最新稳定版（releases/latest 不含预览版）
+CLIENT_BIN="${CORE_BIN}"
+if [[ "${E2E_CLIENT}" != "${E2E_CORE}" ]]; then
+    clientDir=/tmp/proxy-agent-e2e-client-core
+    clientTag=$(curl -sIL -o /dev/null -w '%{url_effective}' --max-time 20 https://github.com/SagerNet/sing-box/releases/latest)
+    clientTag=${clientTag##*/}
+    case "$(uname -m)" in
+    x86_64) clientArch=amd64 ;;
+    aarch64) clientArch=arm64 ;;
+    *) clientArch= ;;
+    esac
+    clientLibc=""
+    [[ -f /etc/alpine-release ]] && clientLibc="-musl"
+    mkdir -p "${clientDir}"
+    curl -sSL --max-time 120 "https://github.com/SagerNet/sing-box/releases/download/${clientTag}/sing-box-${clientTag#v}-linux-${clientArch}${clientLibc}.tar.gz" |
+        tar -xz -C "${clientDir}" --strip-components=1
+    CLIENT_BIN="${clientDir}/sing-box"
+    assert_equals "yes" "$([[ -x "${CLIENT_BIN}" ]] && echo yes || echo no)" "交叉腿：sing-box ${clientTag} 客户端二进制已就位"
+fi
+
 clientConf=/tmp/proxy-agent-e2e-client.json
 # 客户端的每个字段都取自链接，端口与传输也不例外：链接写错什么，握手就在什么上失败
-if [[ "${E2E_CORE}" == "xray" ]]; then
+if [[ "${E2E_CLIENT}" == "xray" ]]; then
     jq -n --arg id "${linkUUID}" --arg port "${linkPort}" --arg net "$(linkParam type)" --arg sni "$(linkParam sni)" \
         --arg pbk "$(linkParam pbk)" --arg sid "$(linkParam sid)" --arg fp "$(linkParam fp)" --arg pqv "$(linkParam pqv)" '{
         log: {loglevel: "warning"},
@@ -299,7 +329,7 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
                     + (if $pqv == "" then {} else {mldsa65Verify: $pqv} end))}
         }]
     }' >"${clientConf}"
-    clientCmd=("${XRAY_BIN}" run -c "${clientConf}")
+    clientCmd=("${CLIENT_BIN}" run -c "${clientConf}")
 else
     jq -n --arg id "${linkUUID}" --arg port "${linkPort}" --arg flow "$(linkParam flow)" --arg sni "$(linkParam sni)" \
         --arg pbk "$(linkParam pbk)" --arg sid "$(linkParam sid)" --arg fp "$(linkParam fp)" '{
@@ -311,7 +341,7 @@ else
                 reality: {enabled: true, public_key: $pbk, short_id: $sid}}
         }]
     }' >"${clientConf}"
-    clientCmd=("${SINGBOX_BIN}" run -c "${clientConf}")
+    clientCmd=("${CLIENT_BIN}" run -c "${clientConf}")
 fi
 "${clientCmd[@]}" >/tmp/proxy-agent-e2e-client.log 2>&1 &
 clientPid=$!

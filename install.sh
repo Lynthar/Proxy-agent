@@ -3480,41 +3480,34 @@ installSingBox() {
 
 # checkWgetShowProgress 由 lib/system-detect.sh 提供（Alpine 上跳过探测的语义已 port）。
 
+# 回显要装的 Xray-core 标签：pinned 不联网，latest / prerelease 查 GitHub 取最新稳定版 / 预览版
+resolveXrayVersion() {
+    local mode=${1:-pinned}
+    if [[ "${mode}" == "pinned" ]]; then
+        echo "${XRAY_PINNED_VERSION}"
+        return 0
+    fi
+    local wantPrerelease=false
+    if [[ "${mode}" == "prerelease" ]]; then
+        wantPrerelease=true
+    fi
+    # per_page=30：XTLS 偶尔会连续发好几个 prerelease，5 个窗口太窄
+    curl -s --connect-timeout 10 "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=30" |
+        jq -r --argjson pre "${wantPrerelease}" '.[] | select(.prerelease == $pre) | .tag_name' | head -1
+}
+
 # 安装xray
 installXray() {
     readInstallType
-    local prereleaseStatus=false
+    local versionMode=pinned
     if [[ "$2" == "true" ]]; then
-        prereleaseStatus=true
+        versionMode=prerelease
     fi
 
     echoContent skyBlue "\n进度  $1/${totalProgress} : 安装Xray"
 
     if [[ ! -f "${XRAY_BIN}" ]]; then
-
-        # 缓存原始响应，区分"GitHub 完全访问不到"vs"访问到但筛选后为空"两种失败模式
-        # per_page=30：XTLS 偶尔会连续发好几个 prerelease，5 个窗口太窄；30 个足以覆盖近期所有稳定版
-        local releasesJson
-        releasesJson=$(curl -s --connect-timeout 10 "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=30")
-
-        version=$(echo "${releasesJson}" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
-
-        # 优雅降级：30 个里都没有稳定版的极端情况下，让用户决定是否使用最新预览版
-        if [[ -z "${version}" && "${prereleaseStatus}" == "false" && -n "${releasesJson}" ]]; then
-            local latestAnyVersion
-            latestAnyVersion=$(echo "${releasesJson}" | jq -r '.[].tag_name' | head -1)
-            if [[ -n "${latestAnyVersion}" ]]; then
-                echoContent yellow "\n ---> 最近 30 个 release 中没有找到稳定版（XTLS 异常密集地发布预览版）"
-                echoContent yellow " ---> 最新版本: ${latestAnyVersion} (预览版)"
-                read -r -p "是否使用此预览版继续安装？[y/n]" usePrereleaseStatus
-                if isYesInput "${usePrereleaseStatus}"; then
-                    version="${latestAnyVersion}"
-                else
-                    echoContent yellow " ---> 已取消安装（如需稳定版请稍后重试，或从菜单选择预览版安装）"
-                    return 1
-                fi
-            fi
-        fi
+        version=$(resolveXrayVersion "${versionMode}")
 
         # 检查版本获取是否成功（网络/API 失败导致空）
         if [[ -z "${version}" ]]; then
@@ -3632,13 +3625,16 @@ xrayVersionManageMenu() {
     echoContent yellow "7.更新geosite、geoip"
     echoContent yellow "8.设置自动更新geo文件[每天凌晨更新]"
     echoContent yellow "9.查看日志"
+    echoContent yellow "$(t XRAY_MENU_LATEST)"
     echoContent red "=============================================================="
+    echoContent yellow "$(t XRAY_PINNED_NOTE "${XRAY_PINNED_VERSION}")"
     read -r -p "请选择:" selectXrayType
     if [[ "${selectXrayType}" == "1" ]]; then
-        prereleaseStatus=false
+        xrayVersionMode=pinned
         updateXray
     elif [[ "${selectXrayType}" == "2" ]]; then
-        prereleaseStatus=true
+        xrayVersionMode=prerelease
+        echoContent yellow " ---> $(t XRAY_UNPINNED_WARN)"
         updateXray
     elif [[ "${selectXrayType}" == "3" ]]; then
         echoContent yellow "\n1.只可以回退最近的五个版本"
@@ -3667,6 +3663,10 @@ xrayVersionManageMenu() {
         installCronUpdateGeo
     elif [[ "${selectXrayType}" == "9" ]]; then
         checkLog 1
+    elif [[ "${selectXrayType}" == "10" ]]; then
+        xrayVersionMode=latest
+        echoContent yellow " ---> $(t XRAY_UNPINNED_WARN)"
+        updateXray
     fi
 }
 
@@ -3721,7 +3721,7 @@ updateXray() {
         if [[ -n "${1:-}" ]]; then
             version=$1
         else
-            version=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=30" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
+            version=$(resolveXrayVersion "${xrayVersionMode:-pinned}")
         fi
 
         if [[ -z "${version}" ]]; then
@@ -3776,29 +3776,31 @@ updateXray() {
         handleXray stop
         handleXray start
     else
-        echoContent green " ---> 当前版本:v$(${XRAY_BIN} --version | awk '{print $2}' | head -1)"
-        remoteVersion=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=30" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
-
-        echoContent green " ---> 最新版本:${remoteVersion}"
+        local currentVersion
+        currentVersion="v$(${XRAY_BIN} --version | awk '{print $2}' | head -1)"
+        echoContent green " ---> 当前版本:${currentVersion}"
 
         if [[ -n "${1:-}" ]]; then
             version=$1
         else
-            version=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=30" | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
+            version=$(resolveXrayVersion "${xrayVersionMode:-pinned}")
         fi
+        if [[ -z "${version}" ]]; then
+            echoContent red " ---> $(t UPDATE_CORE_VERSION_FAIL)"
+            return 1
+        fi
+        echoContent green " ---> $(t XRAY_TARGET_VERSION "${version}")"
 
         if [[ -n "${1:-}" ]]; then
             read -r -p "回退版本为${version}，是否继续？[y/n]:" rollbackXrayStatus
             if [[ "${rollbackXrayStatus}" == "y" ]]; then
-                echoContent green " ---> 当前Xray-core版本:$(${XRAY_BIN} --version | awk '{print $2}' | head -1)"
-
                 mv -f ${XRAY_BIN} "${xrayBakBin}"
                 updateXray "${version}"
             else
                 echoContent green " ---> 放弃回退版本"
             fi
-        elif [[ "${version}" == "v$(${XRAY_BIN} --version | awk '{print $2}' | head -1)" ]]; then
-            read -r -p "当前版本与最新版相同，是否重新安装？[y/n]:" reInstallXrayStatus
+        elif [[ "${version}" == "${currentVersion}" ]]; then
+            read -r -p "$(t XRAY_SAME_VERSION "${version}")" reInstallXrayStatus
             if [[ "${reInstallXrayStatus}" == "y" ]]; then
                 mv -f ${XRAY_BIN} "${xrayBakBin}"
                 updateXray
@@ -3806,14 +3808,13 @@ updateXray() {
                 echoContent green " ---> 放弃重新安装"
             fi
         else
-            read -r -p "最新版本为:${version}，是否更新？[y/n]:" installXrayStatus
+            read -r -p "$(t XRAY_SWITCH_CONFIRM "${currentVersion}" "${version}")" installXrayStatus
             if [[ "${installXrayStatus}" == "y" ]]; then
                 mv -f ${XRAY_BIN} "${xrayBakBin}"
                 updateXray
             else
                 echoContent green " ---> 放弃更新"
             fi
-
         fi
     fi
 }

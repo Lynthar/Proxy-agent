@@ -982,6 +982,38 @@ for _core in 1 2; do
 done
 
 # ============================================================================
+# resolveXrayVersion：默认钉版不联网；latest / prerelease 才查 GitHub
+# ============================================================================
+
+echo -e "${YELLOW}=== 测试 resolveXrayVersion ===${NC}"
+
+RESOLVE_XRAY_FN=$(sed -n '/^resolveXrayVersion() {/,/^}/p' install.sh)
+assert_not_empty "${RESOLVE_XRAY_FN}" "resolveXrayVersion：抽到函数原文"
+assert_equals "yes" "$([[ "${XRAY_PINNED_VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] && echo yes || echo no)" \
+    "XRAY_PINNED_VERSION 是一个完整的 release 标签（${XRAY_PINNED_VERSION}）"
+
+# 桩 curl：第一个参数是 fail 时模拟断网并记录被调用，否则回一份含稳定版与预览版的 release 列表
+run_resolve_xray() (
+    eval "${RESOLVE_XRAY_FN}"
+    XRAY_RELEASES_STUB='[{"tag_name":"v26.10.29","prerelease":false},{"tag_name":"v26.9.30","prerelease":true},{"tag_name":"v26.3.27","prerelease":false}]'
+    curl() { if [[ "${XRAY_CURL_MODE}" == "fail" ]]; then echo "CURL_CALLED" >&2; return 1; fi; printf '%s' "${XRAY_RELEASES_STUB}"; }
+    XRAY_CURL_MODE="$2"
+    resolveXrayVersion "$1" 2>&1
+)
+assert_equals "${XRAY_PINNED_VERSION}" "$(run_resolve_xray pinned fail)" "pinned：回钉住的标签且不联网（断网桩未被调用）"
+assert_equals "${XRAY_PINNED_VERSION}" "$(run_resolve_xray "" ok)" "无参默认即 pinned"
+assert_equals "v26.10.29" "$(run_resolve_xray latest ok)" "latest：取列表里第一个非预览版"
+assert_equals "v26.9.30" "$(run_resolve_xray prerelease ok)" "prerelease：取列表里第一个预览版"
+assert_equals "CURL_CALLED" "$(run_resolve_xray latest fail)" "latest：断网时真的去查了且不回任何标签，由调用方报错"
+
+# 两个装核入口都只经 resolveXrayVersion 取版本：直接拼 API 的旧写法回潮就会绕过钉版
+INSTALL_XRAY_FN=$(sed -n '/^installXray() {/,/^}/p;/^updateXray() {/,/^}/p' install.sh)
+assert_equals "0" "$(grep -c 'api.github.com/repos/XTLS' <<<"${INSTALL_XRAY_FN}")" "installXray / updateXray 不再直接查 GitHub release 列表"
+assert_equals "3" "$(grep -c 'resolveXrayVersion' <<<"${INSTALL_XRAY_FN}")" "installXray 一处、updateXray 两处经 resolveXrayVersion 取版本"
+
+echo ""
+
+# ============================================================================
 # 测试：updateGeoSite 的失败语义——下载失败要返回 1，旧 geo 文件不能先被删掉
 # ============================================================================
 
