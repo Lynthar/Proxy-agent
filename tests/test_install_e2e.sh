@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test_install_e2e.sh - 真装机端到端：以 root 在一次性容器里跑「一键 Reality」（菜单 19 → E2E_CORE 选的内核），
 # 用内核自检、真实 Reality 握手（客户端由 E2E_CLIENT 选，默认同内核）、pasly 重入与 doctor 验收；Xray 内核再开拼车、
-# 走一遍真实计量、到期停用与关闭恢复，最后卸载。跑法: bash tests/e2e/run.sh alpine|debian [xray|singbox] [xray|singbox]
+# 走一遍真实计量、到期停用与关闭恢复（chain 腿另在中间接上、拆掉链式），最后卸载。跑法见 tests/e2e/run.sh
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -85,6 +85,11 @@ esac
 # 交叉腿只有一种：sing-box 客户端对 Xray 服务端（脚本发的 sing-box 订阅必须连得上 Reality）
 if [[ "${E2E_CLIENT}" != "${E2E_CORE}" && ! ("${E2E_CLIENT}" == "singbox" && "${E2E_CORE}" == "xray") ]]; then
     echo -e "${RED}E2E_CLIENT 只能与 E2E_CORE 相同，或 singbox 对 xray；收到 ${E2E_CLIENT} 对 ${E2E_CORE}${NC}"
+    exit 2
+fi
+# E2E_CHAIN_CODE 由 run.sh chain 传入（出口机的配置码）：拼车开着时把本机接成链式入口，跑完再拆掉
+if [[ -n "${E2E_CHAIN_CODE:-}" && "${E2E_CORE}" != "xray" ]]; then
+    echo -e "${RED}E2E_CHAIN_CODE 只用于 Xray 内核（拼车只在 Xray 上开）${NC}"
     exit 2
 fi
 
@@ -468,6 +473,16 @@ xrayEnviron() {
     [[ -n "${pid}" ]] && tr '\0' '\n' <"/proc/${pid}/environ"
 }
 
+# carpoolIntact WHEN → 拼车在 Xray 一侧的五样都还在：统计 API 片段与它只听回环、policy 两个开关、服务环境、cron 行
+carpoolIntact() {
+    assert_equals "127.0.0.1:${apiPort}" "$(jq -r '.api.listen' "${XRAY_CONF_DIR}/12_stats_api.json" 2>/dev/null)" "$1：12_stats_api.json 还在"
+    assert_equals "0100007F" "$(listenAddrs "${apiPort}")" "$1：统计 API 仍只在 127.0.0.1 上监听"
+    assert_equals "true true" "$(jq -r '.policy.levels."0" | "\(.statsUserUplink) \(.statsUserDownlink)"' "${XRAY_CONF_DIR}/12_policy.json" 2>/dev/null)" \
+        "$1：12_policy.json 的统计开关还在"
+    assert_contains "$(xrayEnviron)" "XRAY_BUF_SPLICE=disable" "$1：Xray 进程仍带 XRAY_BUF_SPLICE=disable"
+    assert_equals "${carpoolCron}" "$(crontab -l 2>/dev/null | grep -F 'install.sh CarpoolTick')" "$1：CarpoolTick 的 cron 行还在"
+}
+
 # midTransferDown STAT → 起客户端，限速 500 KB/s 下 4 MB，第 4 秒读一次该计数器的值并打印；下完再关客户端
 midTransferDown() {
     local pid curlPid value
@@ -544,10 +559,42 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
     assert_equals "0" "$(statsValue "$("${XRAY_BIN}" api statsquery -s "127.0.0.1:${apiPort}" -t 3 -pattern 'user>>>' 2>&1)" "${statName}")" \
         "tick 采集之后该计数器归零"
 
+    chainOut=
+    unchainOut=
+    if [[ -n "${E2E_CHAIN_CODE:-}" ]]; then
+        echo ""
+        echo -e "${YELLOW}=== 菜单 3 → 1 → 3：拼车开着时把本机接成链式入口 ===${NC}"
+        routingBefore=$(cat "${XRAY_CONF_DIR}/09_routing.json" 2>/dev/null)
+        chainOut=$(printf '3\n1\n3\n%s\n' "${E2E_CHAIN_CODE}" | V2RAY_LANG=en pasly 2>&1)
+        chainRc=$?
+        chainOut=$(sed 's/\x1b\[[0-9;]*m//g' <<<"${chainOut}")
+        if [[ ${chainRc} -ne 0 || "${chainOut}" != *"链路测试通过"* ]]; then
+            tail -n 40 <<<"${chainOut}"
+        fi
+        assert_equals "0" "${chainRc}" "配置链式入口退出码 0"
+        assert_contains "${chainOut}" "链路测试通过" "入口自测：经 sing-box 桥、出口机访问外网"
+        assert_equals "chain_proxy" "$(jq -r '.routing.rules[-1].outboundTag' "${XRAY_CONF_DIR}/09_routing.json" 2>/dev/null)" \
+            "Xray 路由的兜底规则改成 chain_proxy（没有直连回落，下面能通就是走了出口）"
+        carpoolIntact "装上链式之后"
+        assert_contains "$(V2RAY_LANG=en pasly </dev/null 2>&1 | sed 's/\x1b\[[0-9;]*m//g')" "Core: Xray-core [Running]" \
+            "多了 sing-box 桥之后内核仍认作 Xray（拼车只在 Xray 上计量）"
+        assert_equals "204" "$(realityProbe)" "接上链式后客户端经入口 → 出口访问外网"
+    fi
+
     # Vision 下行走 splice 时要到连接关闭才计数，传输中只看得到握手那几十 KB；关掉 splice 后边传边记
     midDown=$(midTransferDown "${statName}")
     assert_equals "yes" "$([[ "${midDown}" =~ ^[0-9]+$ && "${midDown}" -gt 300000 ]] && echo yes || echo no)" \
         "限速下载进行到一半时下行计数已过 300 KB（${midDown} 字节）"
+    if [[ -n "${E2E_CHAIN_CODE:-}" ]]; then
+        chainTickOut=$(runCarpoolTick "${carpoolCron}")
+        chainTickRc=$?
+        [[ ${chainTickRc} -ne 0 ]] && echo "${chainTickOut}"
+        assert_equals "0" "${chainTickRc}" "链式开着时 CarpoolTick 退出码 0"
+        usedAfter=$(jq -r --arg u "${E2E_USER}" '.members[$u] | .upBytes + .downBytes' "${carpoolDir}/state.json" 2>/dev/null)
+        assert_equals "yes" "$([[ "${usedAfter}" =~ ^[0-9]+$ && $((usedAfter - usedBytes)) -ge 4000000 ]] && echo yes || echo no)" \
+            "经链式的 4 MB 下载记进了 ${E2E_USER} 名下（增加 $((usedAfter - usedBytes)) 字节）"
+        tickOut+=$'\n'"${chainTickOut}"
+    fi
 
     echo ""
     echo -e "${YELLOW}=== 拼车：到期日改到过去 → tick 停用 → 原链接连不上 ===${NC}"
@@ -566,6 +613,21 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
         "${E2E_USER} 已从 Reality 入站拿掉"
     assert_not_empty "$(pgrep -f "${XRAY_BIN}" || true)" "入站里一个用户都不剩时 Xray 照样在跑"
     assert_equals "no" "$([[ "$(realityProbe 2>/dev/null)" == "204" ]] && echo yes || echo no)" "停用后用原链接连不上"
+
+    if [[ -n "${E2E_CHAIN_CODE:-}" ]]; then
+        echo ""
+        echo -e "${YELLOW}=== 菜单 3 → 5：拼车开着时拆掉链式 ===${NC}"
+        unchainOut=$(printf '3\n5\ny\n' | V2RAY_LANG=en pasly 2>&1)
+        unchainRc=$?
+        unchainOut=$(sed 's/\x1b\[[0-9;]*m//g' <<<"${unchainOut}")
+        [[ ${unchainRc} -ne 0 ]] && tail -n 30 <<<"${unchainOut}"
+        assert_equals "0" "${unchainRc}" "卸载链式退出码 0"
+        assert_equals "${routingBefore}" "$(cat "${XRAY_CONF_DIR}/09_routing.json" 2>/dev/null)" "09_routing.json 还原成接链式之前的内容"
+        assert_equals "no" "$([[ -e "${XRAY_CONF_DIR}/chain_outbound.json" ]] && echo yes || echo no)" "Xray 的 chain_outbound.json 已删"
+        carpoolIntact "拆掉链式之后"
+        assert_equals "0" "$(jq --arg id "${E2E_UUID}" '[.inbounds[1].settings.clients[]? | select(.id == $id)] | length' "${realityConf}" 2>/dev/null)" \
+            "拆链式重启 Xray 之后，到期的 ${E2E_USER} 仍不在 Reality 入站里"
+    fi
 
     echo ""
     echo -e "${YELLOW}=== 菜单 7 → 6 → 4：关闭拼车，到期的也一并恢复 ===${NC}"
@@ -593,7 +655,7 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
     assert_equals "yes" "$([[ -s "${carpoolDir}/members.json" ]] && echo yes || echo no)" "members.json 保留"
     assert_equals "204" "$(realityProbe)" "恢复后原链接重新连得上（客户端配置没动过）"
 
-    noisyLines=$(grep -E 'command not found|No such file or directory' <<<"${carpoolOut}"$'\n'"${tickOut}"$'\n'"${expireOut}"$'\n'"${disableOut}" || true)
+    noisyLines=$(grep -E 'command not found|No such file or directory' <<<"${carpoolOut}"$'\n'"${tickOut}"$'\n'"${expireOut}"$'\n'"${chainOut}"$'\n'"${unchainOut}"$'\n'"${disableOut}" || true)
     if [[ -n "${noisyLines}" ]]; then
         echo "${noisyLines}"
     fi

@@ -1,13 +1,32 @@
 #!/usr/bin/env bash
-# run.sh alpine|debian [xray|singbox] [xray|singbox] — 在一次性容器里跑 tests/test_install_e2e.sh（真装机）。
+# run.sh alpine|debian [xray|singbox] [xray|singbox] | chain — 在一次性容器里跑 tests/test_install_e2e.sh（真装机）。
 # 第二参是服务端内核（默认 xray），第三参是握手用的客户端内核（默认同服务端；singbox 对 xray 是交叉腿）。
-# alpine 用 OpenRC；debian 先把 systemd 当 PID 1 起来再 exec 进去，两条服务管理路径各验一遍。
+# alpine 用 OpenRC；debian 先把 systemd 当 PID 1 起来再 exec 进去。chain 是两台 Debian：入口 Xray 开拼车接链式，出口 sing-box
 set -euo pipefail
 
 E2E_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${E2E_DIR}/../.." && pwd)"
 E2E_CORE="${2:-xray}"
 E2E_CLIENT="${3:-${E2E_CORE}}"
+
+# startDebian [docker run 参数…] → 起一个 systemd 当 PID 1 的 Debian 容器，等它进入 running / degraded，打印容器 ID
+startDebian() {
+    local cid state
+    docker build -q -t proxy-agent-e2e-debian -f "${E2E_DIR}/debian-systemd.Dockerfile" "${E2E_DIR}" >/dev/null
+    cid=$(docker run -d --rm --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw "$@" \
+        -v "${PROJECT_ROOT}:/src:ro" proxy-agent-e2e-debian)
+    for _ in $(seq 1 30); do
+        state=$(docker exec "${cid}" systemctl is-system-running 2>/dev/null || true)
+        [[ "${state}" == "running" || "${state}" == "degraded" ]] && break
+        sleep 1
+    done
+    printf '%s\n' "${cid}"
+}
+
+# txBytes CID → 容器里 eth0 累计发出的字节数
+txBytes() {
+    docker exec "$1" awk '/^ *eth0:/ { sub(/.*:/, ""); print $9 }' /proc/net/dev
+}
 
 case "${1:-}" in
 alpine)
@@ -17,19 +36,39 @@ alpine)
         sh -c 'apk add -q bash openrc busybox-openrc && bash /src/tests/test_install_e2e.sh'
     ;;
 debian)
-    docker build -q -t proxy-agent-e2e-debian -f "${E2E_DIR}/debian-systemd.Dockerfile" "${E2E_DIR}" >/dev/null
-    cid=$(docker run -d --rm --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
-        -v "${PROJECT_ROOT}:/src:ro" proxy-agent-e2e-debian)
+    cid=$(startDebian)
     trap 'docker stop -t 2 "${cid}" >/dev/null' EXIT
-    for _ in $(seq 1 30); do
-        state=$(docker exec "${cid}" systemctl is-system-running 2>/dev/null || true)
-        [[ "${state}" == "running" || "${state}" == "degraded" ]] && break
-        sleep 1
-    done
     docker exec -e "E2E_CORE=${E2E_CORE}" -e "E2E_CLIENT=${E2E_CLIENT}" "${cid}" bash /src/tests/test_install_e2e.sh
     ;;
+chain)
+    net="proxy-agent-e2e-chain-$$"
+    exitCid=
+    entryCid=
+    docker network create "${net}" >/dev/null
+    trap 'docker stop -t 2 ${exitCid} ${entryCid} >/dev/null 2>&1; docker network rm "${net}" >/dev/null' EXIT
+    exitCid=$(startDebian --network "${net}")
+    entryCid=$(startDebian --network "${net}")
+    chainCode=$(docker exec "${exitCid}" bash /src/tests/e2e/chain-exit.sh)
+    # 配置码里是出口机自己探到的公网 IP，容器里探到的是宿主机的出口，入口连不过去；换成出口容器在这个网络里的地址
+    exitIP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${exitCid}")
+    codeRest=${chainCode#*@}
+    chainCode="chain://ss2022@${exitIP}:${codeRest#*:}"
+    exitTxBefore=$(txBytes "${exitCid}")
+    rc=0
+    docker exec -e E2E_CORE=xray -e E2E_CLIENT=xray -e "E2E_CHAIN_CODE=${chainCode}" "${entryCid}" \
+        bash /src/tests/test_install_e2e.sh || rc=$?
+    # 入口那边经链式下了 4 MB：这段时间出口机必须真的往外发了这么多，否则流量没走出口
+    exitTx=$(($(txBytes "${exitCid}") - exitTxBefore))
+    if ((exitTx >= 4000000)); then
+        echo "✓ 出口机在入口测试期间发出 ${exitTx} 字节，经链式的 4 MB 下载确实由出口转发"
+    else
+        echo "✗ 出口机在入口测试期间只发出 ${exitTx} 字节，不到经链式下载的 4 MB"
+        rc=1
+    fi
+    exit "${rc}"
+    ;;
 *)
-    echo "usage: $0 alpine|debian [xray|singbox] [xray|singbox]" >&2
+    echo "usage: $0 alpine|debian [xray|singbox] [xray|singbox] | chain" >&2
     exit 2
     ;;
 esac
