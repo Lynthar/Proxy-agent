@@ -2100,6 +2100,7 @@ installTools() {
             ${installType} crontabs >/dev/null 2>&1
         fi
     fi
+    ensureCronService
     if ! jq --help >/dev/null 2>&1; then
         echoContent green " ---> $(t INSTALL_TOOL "jq")"
         ${installType} jq >/dev/null 2>&1
@@ -2211,6 +2212,30 @@ bootStartup() {
         systemctl daemon-reload
         systemctl enable "${serviceName}"
     fi
+}
+# 让 cron 守护进程真的在跑：BusyBox 自带 crontab 但 Alpine 从不自启 crond，定时任务会静默不执行
+ensureCronService() {
+    local serviceName=cron
+    if [[ "${release}" == "alpine" || "${release}" == "centos" ]]; then
+        serviceName=crond
+    fi
+    if [[ "${release}" == "alpine" ]]; then
+        rc-service "${serviceName}" status >/dev/null 2>&1 && return 0
+    else
+        systemctl is-active --quiet "${serviceName}" 2>/dev/null && return 0
+    fi
+    bootStartup "${serviceName}" >/dev/null 2>&1
+    local startOk=true
+    if [[ "${release}" == "alpine" ]]; then
+        rc-service "${serviceName}" start >/dev/null 2>&1 || startOk=false
+    else
+        systemctl start "${serviceName}" >/dev/null 2>&1 || startOk=false
+    fi
+    if [[ "${startOk}" != "true" ]]; then
+        echoContent yellow " ---> $(t CRON_SERVICE_START_FAILED "${serviceName}")"
+        return 1
+    fi
+    echoContent green " ---> $(t CRON_SERVICE_STARTED "${serviceName}")"
 }
 # 安装Nginx
 installNginxTools() {
@@ -3198,15 +3223,15 @@ handleNginx() {
     fi
 }
 
-# 定时任务更新tls证书
+# 定时任务更新tls证书。cron 行带 PROXY_AGENT_DIR 前缀：脚本不记住安装根，非默认根的机器 cron 里才找得到自己
 installCronTLS() {
     if [[ -z "${btDomain}" ]]; then
         echoContent skyBlue "\n进度 $1/${totalProgress} : 添加定时维护证书"
-        crontab -l >${PROXY_AGENT_DIR}/backup_crontab.cron
-        local historyCrontab
-        historyCrontab=$(sed '/v2ray-agent/d;/Proxy-agent/d;/acme.sh/d' ${PROXY_AGENT_DIR}/backup_crontab.cron)
-        echo "${historyCrontab}" >${PROXY_AGENT_DIR}/backup_crontab.cron
-        echo "30 1 * * * /bin/bash ${PROXY_AGENT_DIR}/install.sh RenewTLS >> ${PROXY_AGENT_DIR}/crontab_tls.log 2>&1" >>${PROXY_AGENT_DIR}/backup_crontab.cron
+        # 只换掉自己的 RenewTLS 行与 v2ray-agent / acme.sh 的遗留行，别的行（含 UpdateGeo）原样保留
+        {
+            crontab -l 2>/dev/null | grep -v -F -e "${PROXY_AGENT_DIR}/install.sh RenewTLS" -e "v2ray-agent" -e "acme.sh"
+            echo "30 1 * * * PROXY_AGENT_DIR=${PROXY_AGENT_DIR} /bin/bash ${PROXY_AGENT_DIR}/install.sh RenewTLS >> ${PROXY_AGENT_DIR}/crontab_tls.log 2>&1"
+        } >${PROXY_AGENT_DIR}/backup_crontab.cron
         crontab ${PROXY_AGENT_DIR}/backup_crontab.cron
         echoContent green "\n ---> 添加定时维护证书成功"
     fi
@@ -3220,9 +3245,19 @@ installCronUpdateGeo() {
         fi
         echoContent skyBlue "\n进度 1/1 : 添加定时更新geo文件"
         crontab -l >${PROXY_AGENT_DIR}/backup_crontab.cron
-        echo "35 1 * * * /bin/bash ${PROXY_AGENT_DIR}/install.sh UpdateGeo >> ${PROXY_AGENT_DIR}/crontab_tls.log 2>&1" >>${PROXY_AGENT_DIR}/backup_crontab.cron
+        echo "35 1 * * * PROXY_AGENT_DIR=${PROXY_AGENT_DIR} /bin/bash ${PROXY_AGENT_DIR}/install.sh UpdateGeo >> ${PROXY_AGENT_DIR}/crontab_tls.log 2>&1" >>${PROXY_AGENT_DIR}/backup_crontab.cron
         crontab ${PROXY_AGENT_DIR}/backup_crontab.cron
         echoContent green "\n ---> 添加定时更新geo文件成功"
+    fi
+}
+# 删掉 crontab 里指向本安装根 install.sh 的全部定时任务；卸载后它们只会指向一个不存在的脚本
+removeOwnCronEntries() {
+    local current remaining
+    current=$(crontab -l 2>/dev/null) || return 0
+    remaining=$(grep -v -F "${PROXY_AGENT_DIR}/install.sh" <<<"${current}" || true)
+    if ! crontab - <<<"${remaining}"; then
+        echoContent yellow " ---> $(t CRON_REMOVE_FAILED)"
+        return 1
     fi
 }
 
@@ -7301,6 +7336,7 @@ unInstall() {
         fi
     fi
 
+    removeOwnCronEntries
     rm -rf ${PROXY_AGENT_DIR}
     rm -rf "${nginxConfigPath}alone.conf"
     rm -rf "${nginxConfigPath}checkPortOpen.conf" >/dev/null 2>&1

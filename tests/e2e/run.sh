@@ -11,9 +11,10 @@ E2E_CLIENT="${3:-${E2E_CORE}}"
 
 case "${1:-}" in
 alpine)
-    # 真 Alpine 机器由 OpenRC 引导，容器镜像里没有，补上；bash 是脚本自己的硬要求
+    # 真 Alpine 机器由 OpenRC 引导并带 BusyBox 的 init 脚本（crond 那份在 busybox-openrc 里），
+    # 容器镜像里都没有，补上；bash 是脚本自己的硬要求
     docker run --rm -e "E2E_CORE=${E2E_CORE}" -e "E2E_CLIENT=${E2E_CLIENT}" -v "${PROJECT_ROOT}:/src:ro" alpine:3.20 \
-        sh -c 'apk add -q bash openrc && bash /src/tests/test_install_e2e.sh'
+        sh -c 'apk add -q bash openrc busybox-openrc && bash /src/tests/test_install_e2e.sh'
     ;;
 debian)
     docker build -q -t proxy-agent-e2e-debian -f "${E2E_DIR}/debian-systemd.Dockerfile" "${E2E_DIR}" >/dev/null

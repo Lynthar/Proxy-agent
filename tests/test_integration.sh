@@ -1014,6 +1014,87 @@ assert_equals "3" "$(grep -c 'resolveXrayVersion' <<<"${INSTALL_XRAY_FN}")" "ins
 echo ""
 
 # ============================================================================
+# cron 行的卫生：installCronTLS 只换自己的行、unInstall 清掉指向本根的行、crond 真的被拉起
+# ============================================================================
+
+echo -e "${YELLOW}=== 测试 cron 行与 cron 守护进程 ===${NC}"
+
+CRON_FNS=$(sed -n '/^installCronTLS() {/,/^}/p;/^removeOwnCronEntries() {/,/^}/p;/^ensureCronService() {/,/^}/p;/^bootStartup() {/,/^}/p' install.sh)
+assert_not_empty "${CRON_FNS}" "cron：抽到四个函数原文"
+CRON_FAKE_ROOT="${MOCK_ROOT}/cron.root"
+mkdir -p "${CRON_FAKE_ROOT}"
+CRON_TABLE="${MOCK_ROOT}/fake_crontab"
+
+# 桩 crontab：-l 读假表（表不存在时像没有 crontab 一样失败）、- 从 stdin 写、FILE 从文件写
+run_cron_fn() (
+    env PROXY_AGENT_DIR="${CRON_FAKE_ROOT}" CRON_FNS="${CRON_FNS}" CRON_TABLE="${CRON_TABLE}" bash -c '
+        source lib/constants.sh
+        eval "${CRON_FNS}"
+        crontab() { case "$1" in -l) cat "${CRON_TABLE}" 2>/dev/null ;; -) cat >"${CRON_TABLE}" ;; *) cat "$1" >"${CRON_TABLE}" ;; esac; }
+        echoContent() { :; }; t() { echo "$1"; }
+        btDomain=; totalProgress=1
+        "$1"' _ "$1" >/dev/null 2>&1
+)
+
+printf '%s\n' "0 0 * * * /usr/local/bin/backup.sh" \
+    "35 1 * * * PROXY_AGENT_DIR=${CRON_FAKE_ROOT} /bin/bash ${CRON_FAKE_ROOT}/install.sh UpdateGeo >> ${CRON_FAKE_ROOT}/crontab_tls.log 2>&1" \
+    "30 1 * * * /bin/bash ${CRON_FAKE_ROOT}/install.sh RenewTLS >> ${CRON_FAKE_ROOT}/crontab_tls.log 2>&1" \
+    '0 2 * * * "/root/.acme.sh"/acme.sh --cron --home "/root/.acme.sh" > /dev/null' \
+    "0 3 * * * /bin/bash /etc/v2ray-agent/install.sh RenewTLS" >"${CRON_TABLE}"
+run_cron_fn installCronTLS
+assert_equals "1" "$(grep -c 'backup.sh' "${CRON_TABLE}")" "installCronTLS：无关的用户行原样保留"
+assert_equals "1" "$(grep -c 'install.sh UpdateGeo' "${CRON_TABLE}")" "installCronTLS：UpdateGeo 行不再被一起抹掉"
+assert_equals "0" "$(grep -c -e 'acme.sh' -e 'v2ray-agent' "${CRON_TABLE}")" "installCronTLS：acme.sh 与 v2ray-agent 的遗留行删掉"
+assert_equals "30 1 * * * PROXY_AGENT_DIR=${CRON_FAKE_ROOT} /bin/bash ${CRON_FAKE_ROOT}/install.sh RenewTLS >> ${CRON_FAKE_ROOT}/crontab_tls.log 2>&1" \
+    "$(grep 'install.sh RenewTLS' "${CRON_TABLE}")" "installCronTLS：旧格式的 RenewTLS 行换成唯一一条带安装根前缀的新行"
+run_cron_fn installCronTLS
+assert_equals "1" "$(grep -c 'install.sh RenewTLS' "${CRON_TABLE}")" "installCronTLS：再跑一次仍只有一条 RenewTLS"
+assert_equals "3" "$(grep -c . "${CRON_TABLE}")" "installCronTLS：两次之后表里恰好三行"
+
+printf '%s\n' "0 0 * * * /usr/local/bin/backup.sh" \
+    "35 1 * * * PROXY_AGENT_DIR=${CRON_FAKE_ROOT} /bin/bash ${CRON_FAKE_ROOT}/install.sh UpdateGeo" \
+    "30 1 * * * /bin/bash ${CRON_FAKE_ROOT}/install.sh RenewTLS" \
+    "30 1 * * * /bin/bash /opt/other-root/install.sh RenewTLS" >"${CRON_TABLE}"
+run_cron_fn removeOwnCronEntries
+assert_equals "$(printf '%s\n' '0 0 * * * /usr/local/bin/backup.sh' '30 1 * * * /bin/bash /opt/other-root/install.sh RenewTLS')" \
+    "$(cat "${CRON_TABLE}")" "removeOwnCronEntries：只删指向本根 install.sh 的行，用户行与别的根保留"
+rm -f "${CRON_TABLE}"
+run_cron_fn removeOwnCronEntries
+assert_equals "no" "$([[ -e "${CRON_TABLE}" ]] && echo yes || echo no)" "removeOwnCronEntries：本来没有 crontab 时不会凭空建一张"
+
+# 桩服务管理器：记录每次调用；守护进程是否在跑由 $2 决定，其余子命令一律成功
+run_cron_service() (
+    env CRON_FNS="${CRON_FNS}" CRON_CALLS="${MOCK_ROOT}/cron.calls" bash -c '
+        eval "${CRON_FNS}"
+        echoContent() { :; }; t() { echo "$1"; }
+        release="$1"; CRON_STATE="$2"
+        : >"${CRON_CALLS}"
+        systemctl() { echo "systemctl $*" >>"${CRON_CALLS}"; if [[ "$1" == "is-active" ]]; then [[ "${CRON_STATE}" == "running" ]]; fi; }
+        rc-service() { echo "rc-service $*" >>"${CRON_CALLS}"; if [[ "$2" == "status" ]]; then [[ "${CRON_STATE}" == "running" ]]; fi; }
+        rc-update() { echo "rc-update $*" >>"${CRON_CALLS}"; }
+        ensureCronService
+        echo "rc=$?"
+        cat "${CRON_CALLS}"' _ "$1" "$2"
+)
+assert_equals "$(printf '%s\n' 'rc=0' 'systemctl is-active --quiet cron')" "$(run_cron_service debian running)" "ensureCronService：Debian 上 cron 已在跑时只探测不动"
+assert_contains "$(run_cron_service debian stopped)" "systemctl enable cron" "ensureCronService：Debian 上 cron 没跑时 enable"
+assert_contains "$(run_cron_service debian stopped)" "systemctl start cron" "ensureCronService：Debian 上 cron 没跑时 start"
+assert_contains "$(run_cron_service centos stopped)" "systemctl start crond" "ensureCronService：RHEL 系的服务名是 crond"
+assert_equals "$(printf '%s\n' 'rc=0' 'rc-service crond status' 'rc-update add crond default' 'rc-service crond start')" \
+    "$(run_cron_service alpine stopped)" "ensureCronService：Alpine 上 crond 没跑时 rc-update add + rc-service start"
+assert_equals "$(printf '%s\n' 'rc=0' 'rc-service crond status')" "$(run_cron_service alpine running)" "ensureCronService：Alpine 上 crond 在跑时不动"
+
+# installTools 装完 crontab 包就得确保守护进程在跑，而不是只在刚装包时
+INSTALL_TOOLS_FN=$(sed -n '/^installTools() {/,/^}/p' install.sh)
+assert_equals "1" "$(grep -c '^    ensureCronService$' <<<"${INSTALL_TOOLS_FN}")" "installTools：无条件调用 ensureCronService（Alpine 自带 crontab、不会走装包分支）"
+UNINSTALL_FN=$(sed -n '/^unInstall() {/,/^}/p' install.sh)
+assert_equals "yes" "$(grep -n -E 'removeOwnCronEntries|rm -rf \$\{PROXY_AGENT_DIR\}$' <<<"${UNINSTALL_FN}" | head -1 | grep -q removeOwnCronEntries && echo yes || echo no)" \
+    "unInstall：先清 cron 行再 rm -rf 安装根"
+rm -rf "${CRON_FAKE_ROOT}" "${MOCK_ROOT}/cron.calls"
+
+echo ""
+
+# ============================================================================
 # 测试：updateGeoSite 的失败语义——下载失败要返回 1，旧 geo 文件不能先被删掉
 # ============================================================================
 

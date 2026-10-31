@@ -255,6 +255,8 @@ else
     assert_contains "$(rc-update show default 2>/dev/null)" "${CORE_SERVICE}" "OpenRC: ${CORE_SERVICE} 在 default 运行级"
 fi
 assert_equals "yes" "$(timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/${E2E_PORT}" 2>/dev/null && echo yes || echo no)" "127.0.0.1:${E2E_PORT} 接受 TCP 连接"
+# 安装顺手把 cron 守护进程拉起来：Alpine 的 BusyBox 带 crontab 却从不自启 crond，定时任务会静默不跑
+assert_not_empty "$(pgrep cron || true)" "cron 守护进程在跑（证书续期与 geo 更新的定时任务有人执行）"
 
 # ============================================================================
 # 订阅链接可用：拿脚本发给用户的 vless:// 链接，用 E2E_CLIENT 选的内核起客户端，穿过服务端访问外网
@@ -381,6 +383,20 @@ assert_equals "" "$(grep -F '[FAIL]' <<<"${doctorOut}" || true)" "doctor 零 FAI
 assert_contains "${doctorOut}" "[PASS] Core process" "doctor 看到核心进程"
 assert_contains "${doctorOut}" "[PASS] Config file validation" "doctor 配置校验通过"
 
+# 菜单 16 → 1 → 8 加 geo 自动更新：cron 行要带安装根前缀，卸载时要被清掉
+if [[ "${E2E_CORE}" == "xray" ]]; then
+    echo ""
+    echo -e "${YELLOW}=== 菜单 16 → 1 → 8：添加 geo 定时更新 ===${NC}"
+    geoCronOut=$(printf '16\n1\n8\n' | V2RAY_LANG=en pasly 2>&1)
+    geoCronRc=$?
+    if [[ ${geoCronRc} -ne 0 ]]; then
+        sed 's/\x1b\[[0-9;]*m//g' <<<"${geoCronOut}" | tail -n 10
+    fi
+    assert_equals "0" "${geoCronRc}" "添加 geo 定时更新退出码 0"
+    assert_equals "35 1 * * * PROXY_AGENT_DIR=${INSTALL_ROOT} /bin/bash ${INSTALL_ROOT}/install.sh UpdateGeo >> ${INSTALL_ROOT}/crontab_tls.log 2>&1" \
+        "$(crontab -l 2>/dev/null | grep -F 'install.sh UpdateGeo')" "crontab 里的 UpdateGeo 行带安装根前缀"
+fi
+
 # ============================================================================
 # 卸载：菜单 20，确认 y；整机回到装前
 # ============================================================================
@@ -405,6 +421,7 @@ else
 fi
 assert_equals "" "$(pgrep -f "${CORE_BIN}" || true)" "${CORE_SERVICE} 进程已退出"
 assert_equals "no" "$(timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/${E2E_PORT}" 2>/dev/null && echo yes || echo no)" "127.0.0.1:${E2E_PORT} 不再监听"
+assert_equals "" "$(crontab -l 2>/dev/null | grep -F "${INSTALL_ROOT}/install.sh" || true)" "crontab 里不再有指向已删 install.sh 的定时任务"
 
 # ============================================================================
 # 测试结果汇总
