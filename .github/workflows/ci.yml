@@ -54,6 +54,30 @@ jobs:
       - name: library loading without host actions
         run: bash tests/test_library.sh
 
+  tests-jq16:
+    # Debian 12 and Ubuntu 22.04 ship jq 1.6, ubuntu-latest has 1.7. Filters that
+    # only 1.7 accepts (a keyword as a variable name, `if` without `else`, pick,
+    # abs, ...) pass the job above and break on those systems.
+    name: unit + integration tests on jq 1.6 (Debian 12)
+    runs-on: ubuntu-latest
+    container: debian:bookworm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install jq and openssl
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends jq openssl
+          jq --version
+
+      - name: module unit tests
+        run: bash tests/test_modules.sh
+
+      - name: integration tests (mocked VPS tree)
+        run: bash tests/test_integration.sh
+
+      - name: library loading without host actions
+        run: bash tests/test_library.sh
+
   lang-parity:
     name: bilingual MSG_ key parity
     runs-on: ubuntu-latest
