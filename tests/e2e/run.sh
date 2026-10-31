@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# run.sh alpine|debian [xray|singbox] [xray|singbox] | chain — 在一次性容器里跑 tests/test_install_e2e.sh（真装机）。
+# run.sh alpine|debian [xray|singbox] [xray|singbox] | chain [xray|singbox] — 在一次性容器里跑 tests/test_install_e2e.sh（真装机）。
 # 第二参是服务端内核（默认 xray），第三参是握手用的客户端内核（默认同服务端；singbox 对 xray 是交叉腿）。
-# alpine 用 OpenRC；debian 先把 systemd 当 PID 1 起来再 exec 进去。chain 是两台 Debian：入口 Xray 开拼车接链式，出口 sing-box
+# alpine 用 OpenRC；debian 先把 systemd 当 PID 1 起来再 exec 进去。chain 是两台 Debian：入口 Xray 开拼车接链式，出口内核取第二参
 set -euo pipefail
 
 E2E_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,7 +48,7 @@ chain)
     trap 'docker stop -t 2 ${exitCid} ${entryCid} >/dev/null 2>&1; docker network rm "${net}" >/dev/null' EXIT
     exitCid=$(startDebian --network "${net}")
     entryCid=$(startDebian --network "${net}")
-    chainCode=$(docker exec "${exitCid}" bash /src/tests/e2e/chain-exit.sh)
+    chainCode=$(docker exec -e "E2E_EXIT_CORE=${E2E_CORE}" "${exitCid}" bash /src/tests/e2e/chain-exit.sh)
     # 配置码里是出口机自己探到的公网 IP，容器里探到的是宿主机的出口，入口连不过去；换成出口容器在这个网络里的地址
     exitIP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${exitCid}")
     codeRest=${chainCode#*@}
@@ -68,7 +68,7 @@ chain)
     exit "${rc}"
     ;;
 *)
-    echo "usage: $0 alpine|debian [xray|singbox] [xray|singbox] | chain" >&2
+    echo "usage: $0 alpine|debian [xray|singbox] [xray|singbox] | chain [xray|singbox]" >&2
     exit 2
     ;;
 esac

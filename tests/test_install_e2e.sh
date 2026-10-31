@@ -483,17 +483,21 @@ carpoolIntact() {
     assert_equals "${carpoolCron}" "$(crontab -l 2>/dev/null | grep -F 'install.sh CarpoolTick')" "$1：CarpoolTick 的 cron 行还在"
 }
 
-# midTransferDown STAT → 起客户端，限速 500 KB/s 下 4 MB，第 4 秒读一次该计数器的值并打印；下完再关客户端
+# midTransferDown STAT → 起客户端，限速 500 KB/s 下 4 MB，下载期间每 0.5 秒读一次该计数器，打印其中最大的值；下完再关客户端。
+# 只认取样之后 curl 还在跑的值：splice 要到连接关闭才计数，curl 退出后取到的满额证明不了什么；不卡固定时刻，建连慢也不误报
 midTransferDown() {
-    local pid curlPid value
+    local pid curlPid value=0 sample
     "${clientCmd[@]}" >/tmp/proxy-agent-e2e-client.log 2>&1 &
     pid=$!
     sleep 2
     curl -sS -o /dev/null --max-time 30 --limit-rate 500K --proxy socks5h://127.0.0.1:10808 \
         'https://speed.cloudflare.com/__down?bytes=4000000' 2>/tmp/proxy-agent-e2e-curl.log &
     curlPid=$!
-    sleep 4
-    value=$(statsValue "$("${XRAY_BIN}" api statsquery -s "127.0.0.1:${apiPort}" -t 3 -pattern 'user>>>' 2>&1)" "$1")
+    while sleep 0.5; do
+        sample=$(statsValue "$("${XRAY_BIN}" api statsquery -s "127.0.0.1:${apiPort}" -t 3 -pattern 'user>>>' 2>&1)" "$1")
+        kill -0 "${curlPid}" 2>/dev/null || break
+        [[ "${sample}" =~ ^[0-9]+$ ]] && ((sample > value)) && value=${sample}
+    done
     wait "${curlPid}" || cat /tmp/proxy-agent-e2e-curl.log >&2
     kill "${pid}" 2>/dev/null
     wait "${pid}" 2>/dev/null

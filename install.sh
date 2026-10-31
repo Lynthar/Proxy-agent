@@ -10905,11 +10905,18 @@ EOF
         echoContent green " ---> 已开放端口 ${chainPort}"
     fi
 
-    # 合并配置并重启
+    # 出口只改了 sing-box，必须显式重启它：Xray 内核上 sing-box 是旁挂，reloadCore 只在装了 6 / 9 时才碰，出口会根本没起来
     if ! singBoxMergeConfig; then
         return 1
     fi
-    reloadCore
+    handleSingBox stop >/dev/null 2>&1
+    handleSingBox start
+    sleep 1
+    if ! pgrep -x "sing-box" >/dev/null 2>&1; then
+        echoContent red " ---> sing-box 启动失败"
+        echoContent yellow "请手动执行: ${SINGBOX_BIN} run -c ${SINGBOX_MERGED_CONFIG}"
+        return 1
+    fi
 
     # 生成并显示配置码
     echoContent green "\n=============================================================="
