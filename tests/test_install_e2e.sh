@@ -461,6 +461,30 @@ statsValue() {
     jq -r --arg n "$2" '[.stat[]? | select(.name == $n) | (.value // 0 | tonumber)] | first // "missing"' <<<"$1" 2>/dev/null
 }
 
+# xrayEnviron → 正在跑的 Xray 进程的环境变量，每行一个
+xrayEnviron() {
+    local pid
+    pid=$(pgrep -f "${XRAY_BIN}" | head -n 1)
+    [[ -n "${pid}" ]] && tr '\0' '\n' <"/proc/${pid}/environ"
+}
+
+# midTransferDown STAT → 起客户端，限速 500 KB/s 下 4 MB，第 4 秒读一次该计数器的值并打印；下完再关客户端
+midTransferDown() {
+    local pid curlPid value
+    "${clientCmd[@]}" >/tmp/proxy-agent-e2e-client.log 2>&1 &
+    pid=$!
+    sleep 2
+    curl -sS -o /dev/null --max-time 30 --limit-rate 500K --proxy socks5h://127.0.0.1:10808 \
+        'https://speed.cloudflare.com/__down?bytes=4000000' 2>/tmp/proxy-agent-e2e-curl.log &
+    curlPid=$!
+    sleep 4
+    value=$(statsValue "$("${XRAY_BIN}" api statsquery -s "127.0.0.1:${apiPort}" -t 3 -pattern 'user>>>' 2>&1)" "$1")
+    wait "${curlPid}" || cat /tmp/proxy-agent-e2e-curl.log >&2
+    kill "${pid}" 2>/dev/null
+    wait "${pid}" 2>/dev/null
+    printf '%s\n' "${value}"
+}
+
 if [[ "${E2E_CORE}" == "xray" ]]; then
     echo ""
     echo -e "${YELLOW}=== 菜单 7 → 6 → 4：开启拼车 ===${NC}"
@@ -490,6 +514,7 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
     assert_not_empty "$(command -v flock || true)" "flock 可用（state 的读改写靠它加锁）"
     assert_contains "$("${XRAY_BIN}" run -test -confdir "${XRAY_CONF_DIR}" 2>&1)" "Configuration OK" \
         "Xray 在跑、统计 API 端口被它占着时 run -test 照样通过（每次重载前都要过这一关）"
+    assert_contains "$(xrayEnviron)" "XRAY_BUF_SPLICE=disable" "开着拼车时 Xray 进程带 XRAY_BUF_SPLICE=disable（${SERVICE_MANAGER}）"
 
     echo ""
     echo -e "${YELLOW}=== 拼车：真实流量 → 按 cron 的环境跑一次 tick ===${NC}"
@@ -513,6 +538,11 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
     # 采集带 -reset：取过的计数器要归零，否则每个 tick 都把累计值重加一遍
     assert_equals "0" "$(statsValue "$("${XRAY_BIN}" api statsquery -s "127.0.0.1:${apiPort}" -t 3 -pattern 'user>>>' 2>&1)" "${statName}")" \
         "tick 采集之后该计数器归零"
+
+    # Vision 下行走 splice 时要到连接关闭才计数，传输中只看得到握手那几十 KB；关掉 splice 后边传边记
+    midDown=$(midTransferDown "${statName}")
+    assert_equals "yes" "$([[ "${midDown}" =~ ^[0-9]+$ && "${midDown}" -gt 300000 ]] && echo yes || echo no)" \
+        "限速下载进行到一半时下行计数已过 300 KB（${midDown} 字节）"
 
     echo ""
     echo -e "${YELLOW}=== 拼车：到期日改到过去 → tick 停用 → 原链接连不上 ===${NC}"
@@ -548,6 +578,9 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
     assert_equals "1" "$(jq --arg id "${E2E_UUID}" '[.inbounds[1].settings.clients[]? | select(.id == $id)] | length' "${realityConf}" 2>/dev/null)" \
         "${E2E_USER} 用原 UUID 放回了 Reality 入站"
     assert_equals "no" "$([[ -e "${XRAY_CONF_DIR}/12_stats_api.json" ]] && echo yes || echo no)" "12_stats_api.json 已撤掉"
+    assert_equals "" "$(xrayEnviron | grep XRAY_BUF_SPLICE || true)" "关掉拼车后 Xray 进程不再带 XRAY_BUF_SPLICE"
+    assert_equals "no" "$([[ -e /etc/systemd/system/xray.service.d/carpool.conf || -e /etc/conf.d/xray ]] && echo yes || echo no)" \
+        "systemd drop-in / OpenRC conf.d 撤干净"
     assert_equals "false false" "$(jq -r '.policy.levels."0" | "\(has("statsUserUplink")) \(has("statsUserDownlink"))"' "${XRAY_CONF_DIR}/12_policy.json" 2>/dev/null)" \
         "12_policy.json 的两个统计字段已撤掉"
     assert_equals "" "$(crontab -l 2>/dev/null | grep -F 'install.sh CarpoolTick' || true)" "CarpoolTick 的 cron 行已删"

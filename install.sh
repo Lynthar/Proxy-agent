@@ -7499,6 +7499,7 @@ unInstall() {
     if [[ -z $(pgrep -x "nginx") ]]; then
         echoContent green " ---> 停止Nginx成功"
     fi
+    carpoolXrayServiceEnv off
     if [[ "${release}" == "alpine" ]]; then
         if [[ "${coreKind}" == "1" ]]; then
             handleXray stop
@@ -7877,18 +7878,51 @@ ensureCarpoolCron() {
     } | crontab - || echoContent yellow " ---> $(t CARPOOL_CRON_FAILED)"
 }
 
-# ensureCarpoolXray → 拼车开着：补齐 policy 统计字段与 12_stats_api.json、确保 cron 行、对账 clients；关着：撤掉前两样。
-# 挂在 handleXray start，绝不 exit：对账失败只打一行，事务已回滚，下个 tick 重试
+# carpoolXrayServiceEnv on|off → Xray 服务带不带 XRAY_BUF_SPLICE=disable；systemd 写 drop-in（有改动才 daemon-reload），OpenRC 写 conf.d。
+# 拼车开着必须带：Vision 下行走 splice 时要到连接关闭才计入用户统计，重载时在途的整段丢。须在 Xray 启动前调
+carpoolXrayServiceEnv() {
+    local dropIn=/etc/systemd/system/xray.service.d/carpool.conf confD=/etc/conf.d/xray
+    local unit=$'[Service]\nEnvironment=XRAY_BUF_SPLICE=disable' line='export XRAY_BUF_SPLICE=disable'
+    if [[ -f /etc/systemd/system/xray.service ]]; then
+        if [[ "$1" == "on" && "$(cat "${dropIn}" 2>/dev/null)" != "${unit}" ]]; then
+            if ! { mkdir -p "${dropIn%/*}" && printf '%s\n' "${unit}" >"${dropIn}"; }; then
+                echoContent red " ---> $(t CARPOOL_ENSURE_WRITE_FAILED "${dropIn}")"
+                return 1
+            fi
+        elif [[ "$1" == "off" && -e "${dropIn}" ]]; then
+            rm -f "${dropIn}"
+            rmdir "${dropIn%/*}" 2>/dev/null
+        else
+            return 0
+        fi
+        systemctl daemon-reload
+    elif [[ -f /etc/init.d/xray ]]; then
+        if [[ "$1" == "on" ]] && ! grep -qxF "${line}" "${confD}" 2>/dev/null; then
+            if ! printf '%s\n' "${line}" >>"${confD}"; then
+                echoContent red " ---> $(t CARPOOL_ENSURE_WRITE_FAILED "${confD}")"
+                return 1
+            fi
+        elif [[ "$1" == "off" ]] && grep -qxF "${line}" "${confD}" 2>/dev/null; then
+            sed -i "/^${line}\$/d" "${confD}"
+            [[ -s "${confD}" ]] || rm -f "${confD}"
+        fi
+    fi
+}
+
+# ensureCarpoolXray → 拼车开着：补齐 Xray 服务环境、policy 统计字段与 12_stats_api.json、确保 cron 行、对账 clients；
+# 关着：撤掉前三样。挂在 handleXray start，绝不 exit：对账失败只打一行，事务已回滚，下个 tick 重试
 ensureCarpoolXray() {
     local statsFile="${XRAY_CONF_DIR}/12_stats_api.json" policyFile="${XRAY_CONF_DIR}/12_policy.json"
     local state want
     if ! state=$(carpoolReadState) || [[ "$(jq -r '.enabled' <<<"${state}")" != "true" ]]; then
+        carpoolXrayServiceEnv off
         [[ -f "${statsFile}" ]] && rm -f "${statsFile}"
         if [[ -f "${policyFile}" ]] && jq -e '.policy.levels."0" | has("statsUserUplink") or has("statsUserDownlink")' "${policyFile}" >/dev/null 2>&1; then
             jsonModifyFile "${policyFile}" 'del(.policy.levels."0".statsUserUplink, .policy.levels."0".statsUserDownlink)' false
         fi
         return 0
     fi
+    carpoolXrayServiceEnv on || return 1
     if [[ ! -f "${policyFile}" ]]; then
         echoContent red " ---> $(t CARPOOL_POLICY_MISSING "${policyFile}")"
         return 1

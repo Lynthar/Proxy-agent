@@ -1176,7 +1176,7 @@ run_cp() (
     env PROXY_AGENT_DIR="${CP_ROOT}" CP_FNS="${CP_FNS}" CP_TABLE="${CP_TABLE}" CP_CALLS="${CP_CALLS}" CP_STATS="${CP_STATS}" \
         V2RAY_LANG=zh_CN XRAY_TEST_RC="${XRAY_TEST_RC:-0}" CP_CORE="${CP_CORE:-1}" CP_SUBPORT="${CP_SUBPORT:-}" CP_RELOAD_INJECT="${CP_RELOAD_INJECT:-}" \
         CP_XRAY_VERSION="${CP_XRAY_VERSION:-26.3.27}" CP_CROND_RC="${CP_CROND_RC:-0}" CP_PROTOS="${CP_PROTOS:-}" \
-        CP_SUBTYPE="${CP_SUBTYPE:-https}" CP_NGINX_T_RC="${CP_NGINX_T_RC:-0}" CP_CURL_FAIL="${CP_CURL_FAIL:-}" bash -c '
+        CP_SUBTYPE="${CP_SUBTYPE:-https}" CP_NGINX_T_RC="${CP_NGINX_T_RC:-0}" CP_CURL_FAIL="${CP_CURL_FAIL:-}" CP_ENV_RC="${CP_ENV_RC:-0}" bash -c '
         source lib/i18n.sh; source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh; source lib/carpool.sh
         eval "${CP_FNS}"
         export CP_CALLS CP_STATS XRAY_TEST_RC CP_XRAY_VERSION
@@ -1200,6 +1200,7 @@ run_cp() (
         singBoxMergeConfig() { :; }
         nginx() { echo "nginx $*" >>"${CP_CALLS}"; if [[ "$1" == "-t" ]]; then return "${CP_NGINX_T_RC}"; fi; }
         handleNginx() { echo "handleNginx $*" >>"${CP_CALLS}"; }
+        carpoolXrayServiceEnv() { echo "serviceEnv $1" >>"${CP_CALLS}"; return "${CP_ENV_RC}"; }
         getPublicIP() { echo 203.0.113.9; }
         nginxConfigPath="${PROXY_AGENT_DIR}/nginx/"
         currentHost=example.com
@@ -1224,6 +1225,7 @@ assert_equals '{"api":{"listen":"127.0.0.1:23456","services":["StatsService"],"t
 assert_equals "*/5 * * * * PROXY_AGENT_DIR=${CP_ROOT} /bin/bash ${CP_ROOT}/install.sh CarpoolTick >> ${CP_ROOT}/crontab_carpool.log 2>&1" "$(cat "${CP_TABLE}")" \
     "ensure：cron 行带安装根前缀、每 5 分钟一次"
 assert_equals "${_i02}" "$(cp_inode "${CP_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json")" "ensure：无漂移时协议文件零写入（inode 不变）"
+assert_contains "$(cat "${CP_CALLS}")" "serviceEnv on" "ensure：开着时给 Xray 服务带上关 splice 的环境"
 _sig=$(cat "${CP_ROOT}/xray/conf/12_policy.json" "${CP_ROOT}/xray/conf/12_stats_api.json" "${CP_TABLE}" | cp_md5)
 run_cp 'ensureCarpoolXray' >/dev/null 2>&1
 assert_equals "${_sig}" "$(cat "${CP_ROOT}/xray/conf/12_policy.json" "${CP_ROOT}/xray/conf/12_stats_api.json" "${CP_TABLE}" | cp_md5)" "ensure：幂等，第二次不改任何东西"
@@ -1239,7 +1241,9 @@ assert_equals "0" "$(grep -c 'install.sh' "${CP_TABLE}")" "removeOwnCronEntries 
 
 # --- ensureCarpoolXray：关着就撤 ---
 jq '.enabled = false' "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/s.tmp" && mv "${CP_ROOT}/carpool/s.tmp" "${CP_ROOT}/carpool/state.json"
+: >"${CP_CALLS}"
 run_cp 'ensureCarpoolXray' >/dev/null 2>&1
+assert_contains "$(cat "${CP_CALLS}")" "serviceEnv off" "ensure（关）：Xray 服务的关 splice 环境撤掉"
 assert_equals "no" "$([[ -f "${CP_ROOT}/xray/conf/12_stats_api.json" ]] && echo yes || echo no)" "ensure（关）：12_stats_api.json 撤掉"
 assert_equals '{"connIdle":280,"handshake":2}' "$(jq -Sc '.policy.levels."0"' "${CP_ROOT}/xray/conf/12_policy.json")" "ensure（关）：统计开关撤掉，其余字段原样"
 rm -f "${CP_ROOT}/carpool/state.json"
@@ -1251,6 +1255,10 @@ _out=$(run_cp 'ensureCarpoolXray; echo "rc=$?"' 2>&1)
 assert_contains "${_out}" "rc=1" "ensure：12_policy.json 缺失时返回 1、不自己造一份"
 assert_contains "${_out}" "不存在，无法开启按用户统计" "ensure：缺 policy 时红字说清"
 assert_equals "no" "$([[ -f "${CP_ROOT}/xray/conf/12_policy.json" ]] && echo yes || echo no)" "ensure：缺 policy 时不凭空创建"
+cp_reset_tree
+_out=$(CP_ENV_RC=1 run_cp 'ensureCarpoolXray; echo "rc=$?"' 2>&1)
+assert_contains "${_out}" "rc=1" "ensure：服务环境写不上时返回 1"
+assert_equals "no" "$([[ -f "${CP_ROOT}/xray/conf/12_stats_api.json" ]] && echo yes || echo no)" "ensure：服务环境写不上时不开统计 API（计数不准就不计）"
 
 # --- 账户事务 set ---
 cp_reset_tree
