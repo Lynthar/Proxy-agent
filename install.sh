@@ -1955,6 +1955,7 @@ cleanUp() {
     if [[ "$1" == "xrayDel" ]]; then
         handleXray stop
         rm -rf ${XRAY_DIR}/*
+        rm -f "${nginxConfigPath}http_redirect.conf"
     elif [[ "$1" == "singBoxDel" ]]; then
         handleSingBox stop
         rm -rf ${SINGBOX_MERGED_CONFIG} >/dev/null 2>&1
@@ -2571,6 +2572,36 @@ server {
 }
 EOF
     handleNginx stop
+    writeHttpRedirectNginxConf
+}
+
+# writeHttpRedirectNginxConf → 80 上把域名 301 到 0 的 https 端口，和普通网站一样。nginx 须已停：80 是否空闲靠它判
+# 只给 Xray 的 0 用（443 背后有伪装站）；宝塔 / 1Panel 自己管 80，80 被别的程序占着也不写，免得 nginx 整个起不来
+writeHttpRedirectNginxConf() {
+    local conf="${nginxConfigPath}http_redirect.conf" listen="listen 80;" target="https://${domain}"
+    rm -f "${conf}"
+    if [[ -n "${btDomain}" || "${port}" == "80" ]]; then
+        return 0
+    fi
+    if portListed 80 "$(listeningPorts tcp)"; then
+        echoContent yellow " ---> $(t NGINX_HTTP_REDIRECT_SKIPPED)"
+        return 0
+    fi
+    if [[ -f /proc/net/if_inet6 ]]; then
+        listen="${listen} listen [::]:80;"
+    fi
+    if [[ "${port}" != "443" ]]; then
+        target="${target}:${port}"
+    fi
+    cat <<EOF >"${conf}"
+server {
+	${listen}
+	server_name ${domain};
+	server_tokens off;
+	return 301 ${target}\$request_uri;
+}
+EOF
+    allowPort 80
 }
 # singbox Nginx config
 singBoxNginxConfig() {
@@ -2832,10 +2863,9 @@ customPortFunction() {
             # 回车随机生成 10000-30000；输入需为合法端口
             readValidPort "端口:" port "RANDOM" 10000 30000 || exit 1
         else
-            echo
-            echoContent yellow "请输入端口[默认: 443]，可自定义端口[回车使用默认]"
-            # 回车默认 443；输入需为合法端口
-            readValidPort "端口:" port 443 || exit 1
+            # 0 优先：KEEP 只列 0 自己（又被跳过），别的协议的旧端口都不算占用——它们都在 0 之后重配，撞上的会被改走。
+            # 这样带域名的 Xray 不论先装过什么，0 都拿 443，和全新安装的布局一致
+            port=$(pickInboundPort 0 "" "${XRAY_CONF_DIR}" ",0," "")
             if [[ "${port}" == "${xrayVLESSRealityPort}" ]]; then
                 handleXray stop
             fi
@@ -2851,13 +2881,93 @@ customPortFunction() {
     fi
 }
 
-# 检测端口是否占用
-checkPort() {
-    if [[ -n "${1:-}" ]] && lsof -i "tcp:$1" | grep -q LISTEN; then
-        echoContent red "\n ---> $1端口被占用，请手动关闭后安装\n"
-        lsof -i "tcp:$1" | grep LISTEN
-        exit 1
+# listeningPorts tcp|udp → 本机此刻占着的端口，每行一个（TCP 只算 LISTEN，UDP 绑上就算）
+# 读 /proc/net：UDP 套接字没有 LISTEN 状态，按 lsof 的 LISTEN 过滤查不出来
+listeningPorts() {
+    local state= hex
+    [[ "$1" == "tcp" ]] && state=0A
+    awk -v s="${state}" 'FNR > 1 && (s == "" || $4 == s) { split($2, a, ":"); print a[2] }' \
+        "/proc/net/$1" "/proc/net/${1}6" 2>/dev/null | sort -u | while read -r hex; do
+        printf '%d\n' "$((16#${hex}))"
+    done
+}
+
+# configuredPorts DIR tcp|udp [KEEP] [SKIP] → DIR 下入站配置在该网络上的对外端口，每行一个
+# KEEP 非空时只算其中的协议，SKIP 里的不算（都是 ",0,7," 形式）；只听 127.0.0.1 的回落入站不算
+configuredPorts() {
+    local dir=$1 network=$2 keep=${3:-} skip=${4:-} file id listenNetwork
+    while IFS= read -r file; do
+        id=$(parseProtocolIdFromFileName "${file}") || continue
+        [[ -n "${keep}" && "${keep}" != *",${id},"* ]] && continue
+        [[ "${skip}" == *",${id},"* ]] && continue
+        listenNetwork=$(getProtocolListenNetwork "${id}") || continue
+        [[ "${listenNetwork}" == "both" || "${listenNetwork}" == "${network}" ]] || continue
+        if [[ "${id}" == "11" ]]; then
+            # sing-box 的 11 入站只听回环，对外那一端是 nginx
+            grep 'listen' <"${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf" 2>/dev/null | awk '{print $2}'
+        else
+            jq -r '.inbounds[]? | select((.listen // "") | startswith("127.") | not) | (.port // .listen_port // empty)' "${file}" 2>/dev/null
+        fi
+    done < <(find "${dir}" -maxdepth 1 -name '*_inbounds.json' -type f 2>/dev/null)
+}
+
+# portsTakenFor ID DIR KEEP SKIP [EXTRA...] → 给 ID 选端口时已被占的端口，每行一个。DIR 是 ID 所在内核的配置目录，
+# KEEP / SKIP 同 configuredPorts（ID 自己总被跳过），EXTRA 是本次已选定、还没写进文件的端口
+portsTakenFor() {
+    local id=$1 dir=$2 keep=$3 skip="$4,$1," network ours port net
+    shift 4
+    network=$(getProtocolListenNetwork "${id}") || network=tcp
+    for net in tcp udp; do
+        [[ "${network}" == "both" || "${network}" == "${net}" ]] || continue
+        configuredPorts "${dir}" "${net}" "${keep}" "${skip}"
+        # 自己的内核可能还在跑旧配置，它占的端口由上一行按配置判；活着的监听只算本脚本配置里没有的
+        ours=$(configuredPorts "${XRAY_CONF_DIR}" "${net}"; configuredPorts "${SINGBOX_FRAGMENT_DIR}" "${net}")
+        while IFS= read -r port; do
+            portListed "${port}" "${ours}" || printf '%s\n' "${port}"
+        done < <(listeningPorts "${net}")
+    done
+    if (($#)); then printf '%s\n' "$@"; fi
+}
+
+# pickInboundPort ID OLD_PORT DIR KEEP SKIP [EXTRA...] → 选定的端口打到 stdout，提示走 stderr；其余参数同 portsTakenFor
+# 跑在 $(…) / <(…) 里，所以不 exit：OLD_PORT 已被别的协议或程序占着就不再沿用，手输撞上已占端口就重问
+pickInboundPort() {
+    local id=$1 oldPort=$2 taken port= reuse= defaultPort= network
+    shift 2
+    taken=$(portsTakenFor "${id}" "$@")
+    if [[ -n "${oldPort}" ]]; then
+        if portListed "${oldPort}" "${taken}"; then
+            echoContent yellow " ---> $(t PORT_REUSE_TAKEN "${oldPort}")" >&2
+        elif [[ -n "${lastInstallationConfig}" ]]; then
+            port=${oldPort}
+        else
+            read -r -p "$(t PORT_REUSE_PROMPT "${oldPort}")" reuse
+            if isYesInput "${reuse}"; then
+                port=${oldPort}
+            fi
+        fi
     fi
+    if [[ -z "${port}" ]] && protocolUsesPortPool "${id}"; then
+        network=$(getProtocolListenNetwork "${id}")
+        # shellcheck disable=SC2086 # 池是空格分隔的端口表，按词展开
+        if ! defaultPort=$(firstFreePort "${taken}" ${TLS_PORT_POOL}); then
+            echoContent yellow " ---> $(t PORT_POOL_FULL "${TLS_PORT_POOL}")" >&2
+        elif [[ "${defaultPort}" != "${TLS_PORT_POOL%% *}" ]]; then
+            echoContent yellow " ---> $(t PORT_POOL_SHIFTED "${TLS_PORT_POOL%% *}/${network/both/tcp+udp}" "${defaultPort}")" >&2
+        fi
+    fi
+    while [[ -z "${port}" ]]; do
+        if [[ -n "${defaultPort}" ]]; then
+            readValidPort "$(t PORT_PROMPT_DEFAULT "${defaultPort}")" port "${defaultPort}" >&2 || continue
+        else
+            readValidPort "$(t PORT_PROMPT_RANDOM)" port RANDOM 10000 30000 >&2 || continue
+        fi
+        if portListed "${port}" "${taken}"; then
+            echoContent yellow " ---> $(t PORT_TAKEN "${port}")" >&2
+            port=
+        fi
+    done
+    printf '%s\n' "${port}"
 }
 
 # 安装TLS
@@ -5265,9 +5375,17 @@ singBoxMergeConfig() {
     return 0
 }
 
-# 初始化sing-box端口
+# initSingBoxPort OLD_PORT [ID KEEP] → 端口打到最后一行。带 ID 按协议取默认端口并查重（KEEP 同 configuredPorts），
+# 不带 ID 的是订阅端口，回车随机
 initSingBoxPort() {
     local port=$1
+    if [[ -n "${2:-}" ]]; then
+        port=$(pickInboundPort "$2" "${port}" "${SINGBOX_FRAGMENT_DIR}" "${3:-}" "")
+        allowPort "${port}"
+        allowPort "${port}" "udp"
+        echo "${port}"
+        return 0
+    fi
     if [[ -n "${port}" && -z "${lastInstallationConfig}" ]]; then
         read -r -p "读取到上次使用的端口，是否使用 ？[y/n]:" historyPort
         if [[ "${historyPort}" != "y" ]]; then
@@ -5297,6 +5415,15 @@ initXrayConfig() {
         echoContent red " ---> Xray-core 二进制不存在，无法初始化配置"
         echoContent yellow "     预期路径: ${XRAY_BIN}"
         exit 1
+    fi
+    # 端口查重：非追加的自定义安装里没选的协议随后会被删，旧端口不算占用；0 的端口已在 customPortFunction 定下、文件还没写
+    local portKeep=${selectCustomInstallType} portSkip= portExtra=
+    if [[ "$1" == "all" || -n "${3:-}" ]]; then
+        portKeep=
+    fi
+    if [[ "$1" == "all" ]] || echo "${selectCustomInstallType}" | grep -q ",0,"; then
+        portSkip=",0,"
+        portExtra=${port}
     fi
     local uuid=
     local addClientsStatus=
@@ -5483,7 +5610,7 @@ EOF
     fi
     # VLESS_Reality_XHTTP_TLS
     if echo "${selectCustomInstallType}" | grep -q ",12," || [[ "$1" == "all" ]]; then
-        initXrayXHTTPort
+        initXrayXHTTPort "${portKeep}" "${portSkip}" ${portExtra:+"${portExtra}"}
         initRealityClientServersName
         initRealityKey
         initRealityShortIds
@@ -5610,13 +5737,14 @@ EOF
 EOF
     elif [[ -z "${3:-}" ]]; then
         rm ${XRAY_CONF_DIR}/02_VLESS_TCP_inbounds.json >/dev/null 2>&1
+        rm -f "${nginxConfigPath}http_redirect.conf"
     fi
 
     # VLESS_TCP/reality
     if echo "${selectCustomInstallType}" | grep -q ",7," || [[ "$1" == "all" ]]; then
         echoContent skyBlue "\n===================== 配置VLESS+Reality =====================\n"
 
-        initXrayRealityPort
+        initXrayRealityPort "${portKeep}" "${portSkip}" ${portExtra:+"${portExtra}"}
         initRealityClientServersName
         initRealityKey
         initRealityShortIds
@@ -5754,6 +5882,11 @@ initSingBoxConfig() {
         echoContent yellow "     预期路径: ${SINGBOX_BIN}"
         exit 1
     fi
+    # 端口查重：非追加的自定义安装里没选的协议随后会被删，旧端口不算占用
+    local portKeep=${selectCustomInstallType}
+    if [[ "$1" == "all" || -n "${3:-}" ]]; then
+        portKeep=
+    fi
     local uuid=
     local addClientsStatus=
     local sslDomain=
@@ -5815,7 +5948,7 @@ initSingBoxConfig() {
         echoContent yellow "\n===================== 配置VLESS+Vision =====================\n"
         echoContent skyBlue "\n开始配置VLESS+Vision协议端口"
         echo
-        mapfile -t result < <(initSingBoxPort "${singBoxVLESSVisionPort}")
+        mapfile -t result < <(initSingBoxPort "${singBoxVLESSVisionPort}" 0 "${portKeep}")
         echoContent green "\n ---> VLESS_Vision端口：${result[-1]}"
 
         checkDNSIP "${domain}"
@@ -5850,7 +5983,7 @@ EOF
         echoContent yellow "\n===================== 配置VLESS+WS =====================\n"
         echoContent skyBlue "\n开始配置VLESS+WS协议端口"
         echo
-        mapfile -t result < <(initSingBoxPort "${singBoxVLESSWSPort}")
+        mapfile -t result < <(initSingBoxPort "${singBoxVLESSWSPort}" 1 "${portKeep}")
         echoContent green "\n ---> VLESS_WS端口：${result[-1]}"
 
         checkDNSIP "${domain}"
@@ -5891,7 +6024,7 @@ EOF
         echoContent yellow "\n===================== 配置VMess+ws =====================\n"
         echoContent skyBlue "\n开始配置VMess+ws协议端口"
         echo
-        mapfile -t result < <(initSingBoxPort "${singBoxVMessWSPort}")
+        mapfile -t result < <(initSingBoxPort "${singBoxVMessWSPort}" 3 "${portKeep}")
         echoContent green "\n ---> VMess_ws端口：${result[-1]}"
 
         checkDNSIP "${domain}"
@@ -5936,7 +6069,7 @@ EOF
         initRealityShortIds
         echoContent skyBlue "\n开始配置VLESS+Reality+Vision协议端口"
         echo
-        mapfile -t result < <(initSingBoxPort "${singBoxVLESSRealityVisionPort}")
+        mapfile -t result < <(initSingBoxPort "${singBoxVLESSRealityVisionPort}" 7 "${portKeep}")
         echoContent green "\n ---> VLESS_Reality_Vision端口：${result[-1]}"
         cat <<EOF >${SINGBOX_FRAGMENT_DIR}/07_VLESS_vision_reality_inbounds.json
 {
@@ -5981,7 +6114,7 @@ EOF
         echoContent yellow "\n================== 配置 Hysteria2 ==================\n"
         echoContent skyBlue "\n开始配置Hysteria2协议端口"
         echo
-        mapfile -t result < <(initSingBoxPort "${singBoxHysteria2Port}")
+        mapfile -t result < <(initSingBoxPort "${singBoxHysteria2Port}" 6 "${portKeep}")
         echoContent green "\n ---> Hysteria2端口：${result[-1]}"
         initHysteria2Network
 
@@ -6029,7 +6162,7 @@ EOF
         echoContent yellow "\n================== 配置 Trojan ==================\n"
         echoContent skyBlue "\n开始配置Trojan协议端口"
         echo
-        mapfile -t result < <(initSingBoxPort "${singBoxTrojanPort}")
+        mapfile -t result < <(initSingBoxPort "${singBoxTrojanPort}" 4 "${portKeep}")
         echoContent green "\n ---> Trojan端口：${result[-1]}"
         cat <<EOF >${SINGBOX_FRAGMENT_DIR}/04_trojan_TCP_inbounds.json
 {
@@ -6058,7 +6191,7 @@ EOF
         echoContent yellow "\n==================== 配置 Tuic =====================\n"
         echoContent skyBlue "\n开始配置Tuic协议端口"
         echo
-        mapfile -t result < <(initSingBoxPort "${singBoxTuicPort}")
+        mapfile -t result < <(initSingBoxPort "${singBoxTuicPort}" 9 "${portKeep}")
         echoContent green "\n ---> Tuic端口：${result[-1]}"
         initTuicProtocol
         cat <<EOF >${SINGBOX_FRAGMENT_DIR}/09_tuic_inbounds.json
@@ -6095,7 +6228,7 @@ EOF
         echoContent yellow "\n==================== 配置 Naive =====================\n"
         echoContent skyBlue "\n开始配置Naive协议端口"
         echo
-        mapfile -t result < <(initSingBoxPort "${singBoxNaivePort}")
+        mapfile -t result < <(initSingBoxPort "${singBoxNaivePort}" 10 "${portKeep}")
         echoContent green "\n ---> Naive端口：${result[-1]}"
         cat <<EOF >${SINGBOX_FRAGMENT_DIR}/10_naive_inbounds.json
 {
@@ -6123,7 +6256,7 @@ EOF
         echoContent yellow "\n===================== 配置VMess+HTTPUpgrade =====================\n"
         echoContent skyBlue "\n开始配置VMess+HTTPUpgrade协议端口"
         echo
-        mapfile -t result < <(initSingBoxPort "${singBoxVMessHTTPUpgradePort}")
+        mapfile -t result < <(initSingBoxPort "${singBoxVMessHTTPUpgradePort}" 11 "${portKeep}")
         echoContent green "\n ---> VMess_HTTPUpgrade端口：${result[-1]}"
 
         checkDNSIP "${domain}"
@@ -6159,7 +6292,7 @@ EOF
         echoContent yellow "\n================== 配置 AnyTLS ==================\n"
         echoContent skyBlue "\n开始配置AnyTLS协议端口"
         echo
-        mapfile -t result < <(initSingBoxPort "${singBoxAnyTLSPort}")
+        mapfile -t result < <(initSingBoxPort "${singBoxAnyTLSPort}" 13 "${portKeep}")
         echoContent green "\n ---> AnyTLS端口：${result[-1]}"
         cat <<EOF >${SINGBOX_FRAGMENT_DIR}/13_anytls_inbounds.json
 {
@@ -7347,6 +7480,7 @@ unInstall() {
     rm -rf "${nginxConfigPath}alone.conf"
     rm -rf "${nginxConfigPath}checkPortOpen.conf" >/dev/null 2>&1
     rm -rf "${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf" >/dev/null 2>&1
+    rm -f "${nginxConfigPath}http_redirect.conf"
 
     unInstallSubscribe
 
@@ -17421,69 +17555,19 @@ initRealityClientServersName() {
     checkRealityDest "${realityServerName}"
     echoContent yellow "\n ---> 客户端可用域名: ${realityServerName}:${realityDomainPort}\n"
 }
-# 初始化reality端口
+# initXrayRealityPort KEEP SKIP [EXTRA...] → 选 7 的对外端口写进 realityPort，参数同 portsTakenFor
+# 选出的端口若还被旧的 Xray 占着，handleXray start 重启时随新配置接管，这里不用先停
 initXrayRealityPort() {
-    if [[ -n "${xrayVLESSRealityPort}" && -z "${lastInstallationConfig}" ]]; then
-        read -r -p "读取到上次安装记录，是否使用上次安装时的端口 ？[y/n]:" historyRealityPortStatus
-        if [[ "${historyRealityPortStatus}" == "y" ]]; then
-            realityPort=${xrayVLESSRealityPort}
-        fi
-    elif [[ -n "${xrayVLESSRealityPort}" && -n "${lastInstallationConfig}" ]]; then
-        realityPort=${xrayVLESSRealityPort}
-    fi
-
-    if [[ -z "${realityPort}" ]]; then
-        echoContent yellow "请输入端口[回车随机10000-30000]"
-
-        read -r -p "端口:" realityPort
-        if [[ -z "${realityPort}" ]]; then
-            realityPort=$(randomNum 10000 30000)
-        fi
-        if [[ -n "${realityPort}" && "${xrayVLESSRealityPort}" == "${realityPort}" ]]; then
-            handleXray stop
-        else
-            checkPort "${realityPort}"
-        fi
-    fi
-    if [[ -z "${realityPort}" ]]; then
-        initXrayRealityPort
-    else
-        allowPort "${realityPort}"
-        echoContent yellow "\n ---> 端口: ${realityPort}"
-    fi
-
+    realityPort=$(pickInboundPort 7 "${xrayVLESSRealityPort}" "${XRAY_CONF_DIR}" "$@")
+    allowPort "${realityPort}"
+    echoContent yellow "\n ---> 端口: ${realityPort}"
 }
-# 初始化XHTTP端口
+# initXrayXHTTPort KEEP SKIP [EXTRA...] → 选 12 的对外端口写进 xHTTPort，同上
 initXrayXHTTPort() {
-    if [[ -n "${xrayVLESSRealityXHTTPort}" && -z "${lastInstallationConfig}" ]]; then
-        read -r -p "读取到上次安装记录，是否使用上次安装时的端口 ？[y/n]:" historyXHTTPortStatus
-        if [[ "${historyXHTTPortStatus}" == "y" ]]; then
-            xHTTPort=${xrayVLESSRealityXHTTPort}
-        fi
-    elif [[ -n "${xrayVLESSRealityXHTTPort}" && -n "${lastInstallationConfig}" ]]; then
-        xHTTPort=${xrayVLESSRealityXHTTPort}
-    fi
-
-    if [[ -z "${xHTTPort}" ]]; then
-
-        echoContent yellow "请输入端口[回车随机10000-30000]"
-        read -r -p "端口:" xHTTPort
-        if [[ -z "${xHTTPort}" ]]; then
-            xHTTPort=$(randomNum 10000 30000)
-        fi
-        if [[ -n "${xHTTPort}" && "${xrayVLESSRealityXHTTPort}" == "${xHTTPort}" ]]; then
-            handleXray stop
-        else
-            checkPort "${xHTTPort}"
-        fi
-    fi
-    if [[ -z "${xHTTPort}" ]]; then
-        initXrayXHTTPort
-    else
-        allowPort "${xHTTPort}"
-        allowPort "${xHTTPort}" "udp"
-        echoContent yellow "\n ---> 端口: ${xHTTPort}"
-    fi
+    xHTTPort=$(pickInboundPort 12 "${xrayVLESSRealityXHTTPort}" "${XRAY_CONF_DIR}" "$@")
+    allowPort "${xHTTPort}"
+    allowPort "${xHTTPort}" "udp"
+    echoContent yellow "\n ---> 端口: ${xHTTPort}"
 }
 
 # reality管理

@@ -137,13 +137,13 @@ cp -r "${PROJECT_ROOT}/lib" "${HOME}/lib"
 mkdir -p "${HOME}/shell"
 cp -r "${PROJECT_ROOT}/shell/lang" "${HOME}/shell/lang"
 
-# 答案按提示顺序喂 stdin。Xray：UUID、用户名、端口、目标域名、私钥（回车生成）；
+# 答案按提示顺序喂 stdin。Xray：UUID、用户名、端口（回车取默认，空机器上应是 443）、目标域名、私钥（回车生成）；
 # sing-box 先问目标域名再问端口，密钥由 sing-box 自己生成、不问
 echo -e "${YELLOW}=== 菜单 19 → ${MENU_CORE_CHOICE}：一键 Reality（${CORE_LABEL}）===${NC}"
 if [[ "${E2E_CORE}" == "xray" ]]; then
-    printf '19\n1\n%s\n%s\n%s\n%s:443\n\n' "${E2E_UUID}" "${E2E_USER}" "${E2E_PORT}" "${E2E_SNI}"
+    printf '19\n1\n%s\n%s\n\n%s:443\n\n' "${E2E_UUID}" "${E2E_USER}" "${E2E_SNI}"
 else
-    printf '19\n2\n%s\n%s\n%s:443\n%s\n' "${E2E_UUID}" "${E2E_USER}" "${E2E_SNI}" "${E2E_PORT}"
+    printf '19\n2\n%s\n%s\n%s:443\n\n' "${E2E_UUID}" "${E2E_USER}" "${E2E_SNI}"
 fi | V2RAY_LANG=en bash "${HOME}/install.sh" >"${E2E_LOG}" 2>&1
 installRc=$?
 if [[ ${installRc} -ne 0 ]]; then
@@ -209,7 +209,7 @@ assert_equals "0" "${coreTestRc}" "${CORE_LABEL} 自检合并后的配置通过"
 
 if [[ -f "${realityConf}" && "${E2E_CORE}" == "xray" ]]; then
     assert_contains "${coreTestOut}" "Configuration OK" "xray run -test 报 Configuration OK"
-    assert_equals "${E2E_PORT}" "$(jq -r '.inbounds[0].port' "${realityConf}")" "对外端口是喂进去的 ${E2E_PORT}"
+    assert_equals "${E2E_PORT}" "$(jq -r '.inbounds[0].port' "${realityConf}")" "对外端口是回车默认的 ${E2E_PORT}"
     assert_equals "${E2E_UUID}" "$(jq -r '.inbounds[1].settings.clients[0].id' "${realityConf}")" "客户端 UUID 是喂进去的值"
     assert_equals "${E2E_USER}-vless_reality_vision" "$(jq -r '.inbounds[1].settings.clients[0].email' "${realityConf}")" "客户端 email 带协议后缀"
     assert_equals "xtls-rprx-vision" "$(jq -r '.inbounds[1].settings.clients[0].flow' "${realityConf}")" "flow 是 xtls-rprx-vision"
@@ -224,7 +224,7 @@ if [[ -f "${realityConf}" && "${E2E_CORE}" == "xray" ]]; then
     assert_not_empty "${privateKey}" "privateKey 非空"
     assert_equals "${publicKey}" "${derivedPublic}" "publicKey 与 privateKey 派生值一致"
 elif [[ -f "${realityConf}" ]]; then
-    assert_equals "${E2E_PORT}" "$(jq -r '.inbounds[0].listen_port' "${realityConf}")" "对外端口是喂进去的 ${E2E_PORT}"
+    assert_equals "${E2E_PORT}" "$(jq -r '.inbounds[0].listen_port' "${realityConf}")" "对外端口是回车默认的 ${E2E_PORT}"
     assert_equals "${E2E_UUID}" "$(jq -r '.inbounds[0].users[0].uuid' "${realityConf}")" "客户端 UUID 是喂进去的值"
     assert_equals "${E2E_USER}-VLESS_Reality_Vision" "$(jq -r '.inbounds[0].users[0].name' "${realityConf}")" "客户端名带协议后缀"
     assert_equals "xtls-rprx-vision" "$(jq -r '.inbounds[0].users[0].flow' "${realityConf}")" "flow 是 xtls-rprx-vision"
@@ -255,6 +255,10 @@ else
     assert_contains "$(rc-update show default 2>/dev/null)" "${CORE_SERVICE}" "OpenRC: ${CORE_SERVICE} 在 default 运行级"
 fi
 assert_equals "yes" "$(timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/${E2E_PORT}" 2>/dev/null && echo yes || echo no)" "127.0.0.1:${E2E_PORT} 接受 TCP 连接"
+# 端口查重靠 /proc/net：BusyBox 与 Debian 上都得认出内核刚占上的端口，否则「已被占用」形同虚设
+LISTEN_FN=$(sed -n '/^listeningPorts() {/,/^}/p' "${PROJECT_ROOT}/install.sh")
+assert_equals "yes" "$(eval "${LISTEN_FN}"; listeningPorts tcp | grep -qx "${E2E_PORT}" && echo yes || echo no)" \
+    "listeningPorts 认出 ${E2E_PORT}/tcp 正被监听"
 # 安装顺手把 cron 守护进程拉起来：Alpine 的 BusyBox 带 crontab 却从不自启 crond，定时任务会静默不跑
 assert_not_empty "$(pgrep cron || true)" "cron 守护进程在跑（证书续期与 geo 更新的定时任务有人执行）"
 

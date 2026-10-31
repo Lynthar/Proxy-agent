@@ -123,6 +123,15 @@ assert_true "[[ ${num} -ge 100 && ${num} -le 200 ]]" "randomNum(100, 200) 生成
 port=$(randomPort)
 assert_true "[[ ${port} -ge 10000 && ${port} -le 30000 ]]" "randomPort() 生成有效端口: ${port}"
 
+# 测试 portListed / firstFreePort
+assert_true 'portListed 443 "8443 443"' "portListed: 空格分隔的列表里找得到"
+assert_true "portListed 443 \$'8443\\n443'" "portListed: 换行分隔也认"
+assert_true '! portListed 44 "443 8443"' "portListed: 不按子串匹配"
+assert_true '! portListed "" "443  8443"' "portListed: 空端口永远不算在列表里"
+assert_equals "8443" "$(firstFreePort "443" 443 8443 2053)" "firstFreePort: 跳过已占的，取第一个空闲的"
+assert_equals "443" "$(firstFreePort "" 443 8443)" "firstFreePort: 没有占用时取第一个"
+assert_true '! firstFreePort "443 8443" 443 8443 >/dev/null' "firstFreePort: 全被占返回 1"
+
 # 测试 trim
 trimmed=$(trim "  hello  ")
 assert_equals "hello" "${trimmed}" "trim() 去除空格"
@@ -199,6 +208,19 @@ assert_true "! protocolRequiresTLS 7" "VLESS_REALITY_VISION does not require TLS
 assert_true "protocolRequiresTLS 6" "Hysteria2 requires TLS (ACME cert under tls/)"
 assert_true "protocolRequiresTLS 9" "TUIC requires TLS (ACME cert under tls/)"
 assert_true "! protocolRequiresTLS 14" "SS2022 does not require TLS"
+
+# 测试 getProtocolListenNetwork / protocolUsesPortPool：逐格钉住，错一格就会和别的协议撞端口或拿错默认端口
+for _cell in 0:tcp 1:tcp 3:tcp 4:tcp 6:udp 7:tcp 9:udp 10:both 11:tcp 12:tcp 13:tcp 14:both; do
+    assert_equals "${_cell#*:}" "$(getProtocolListenNetwork "${_cell%%:*}")" "getProtocolListenNetwork(${_cell%%:*}) = ${_cell#*:}"
+done
+assert_true '! getProtocolListenNetwork 99 >/dev/null' "getProtocolListenNetwork: 未知 ID 返回 1"
+for _id in 0 4 6 7 9 10 11 12 13; do
+    assert_true "protocolUsesPortPool ${_id}" "protocolUsesPortPool(${_id}): 回车默认从 443 端口池取"
+done
+for _id in 1 3 14 20; do
+    assert_true "! protocolUsesPortPool ${_id}" "protocolUsesPortPool(${_id}): 不进端口池，回车随机"
+done
+assert_equals "443 8443 2053 2083 2087 2096" "${TLS_PORT_POOL}" "TLS_PORT_POOL: 443 打头，其后是 Cloudflare 也转发的 HTTPS 端口"
 
 # 测试 anyProtocolRequiresTLS（三处装机白名单的派生源）
 assert_true 'anyProtocolRequiresTLS ",0,7,"' "anyProtocolRequiresTLS: VLESS_TCP + Reality needs a cert"

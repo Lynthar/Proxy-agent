@@ -143,6 +143,26 @@ anyProtocolRequiresTLS() {
     return 1
 }
 
+# getProtocolListenNetwork ID → 对外端口占用的网络：tcp / udp / both
+# sing-box 的 naive 与 shadowsocks 不写 network 就两种都监听，判端口冲突要按 both 算，否则会和 6 / 9 撞 UDP
+getProtocolListenNetwork() {
+    case "$1" in
+        6|9) echo "udp" ;;
+        10|14) echo "both" ;;
+        0|1|2|3|4|5|7|8|11|12|13|20) echo "tcp" ;;
+        *) return 1 ;;
+    esac
+}
+
+# protocolUsesPortPool ID → 0=回车默认端口从 TLS_PORT_POOL 取，1=随机
+# 1 / 3 不进池：池只有六个位，sing-box 全装时要留给 0 4 7 10 11 13
+protocolUsesPortPool() {
+    case "$1" in
+        0|4|6|7|9|10|11|12|13) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # ============================================================================
 # 账户字段映射（按内核区分——同名文件在两个内核下的用户数组结构不同）
 # ============================================================================

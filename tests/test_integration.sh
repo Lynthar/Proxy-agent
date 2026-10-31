@@ -1984,6 +1984,8 @@ echo -e "${YELLOW}=== 测试 customPortFunction ===${NC}"
 
 CUSTOM_PORT_FN=$(sed -n '/^customPortFunction() {/,/^}/p;/^isYesInput() {/,/^}/p' install.sh lib/utils.sh)
 assert_not_empty "${CUSTOM_PORT_FN}" "customPortFunction：抽到函数原文"
+PICK_PORT_FNS=$(sed -n '/^configuredPorts() {/,/^}/p;/^portsTakenFor() {/,/^}/p;/^pickInboundPort() {/,/^}/p' install.sh)
+assert_not_empty "${PICK_PORT_FNS}" "端口选择：抽到 configuredPorts / portsTakenFor / pickInboundPort 原文"
 # 子 shell 里跑：$1 currentPort，$2 lastInstallationConfig，$3 喂给 read 的输入；打印最终的 port
 run_custom_port() (
     echoContent() { :; }
@@ -1992,7 +1994,10 @@ run_custom_port() (
     removeNginxDefaultConf() { :; }
     checkPortOpen() { :; }
     handleXray() { :; }
+    t() { printf '%s' "$1"; }
     eval "${PORT_FN}"
+    eval "${PICK_PORT_FNS}"
+    listeningPorts() { :; }
     eval "${CUSTOM_PORT_FN}"
     currentPort="$1" lastInstallationConfig="$2" customPort= btDomain= port=
     customPortFunction <<<"$3" >/dev/null
@@ -2004,6 +2009,102 @@ assert_equals "443" "$(run_custom_port 8443 '' $'\n')" "customPortFunction：直
 assert_equals "2053" "$(run_custom_port 8443 '' $'n\n2053')" "customPortFunction：答 n 后输入新端口"
 assert_equals "8443" "$(run_custom_port 8443 true '')" "customPortFunction：沿用上次配置时不问、直接用上次端口"
 assert_equals "443" "$(run_custom_port '' '' $'\n')" "customPortFunction：首装直接问端口"
+
+echo ""
+
+echo -e "${YELLOW}=== 测试 端口池与查重 ===${NC}"
+
+PP_FNS="${PORT_FN}
+${PICK_PORT_FNS}
+${CUSTOM_PORT_FN}
+$(awk 'f && /^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{/ {exit} /^writeHttpRedirectNginxConf\(\) \{/ {f=1} f' install.sh)"
+PP_ROOT="${MOCK_ROOT}/portpool"
+# pp_run CODE → 在安装根指向 PP_ROOT 的干净 bash 里跑抽出的原文；LIVE_TCP / LIVE_UDP 是桩掉的本机监听
+pp_run() {
+    env PROXY_AGENT_DIR="${PP_ROOT}" PP_FNS="${PP_FNS}" LIVE_TCP="${LIVE_TCP:-}" LIVE_UDP="${LIVE_UDP:-}" bash -c '
+        source lib/constants.sh; source lib/utils.sh; source lib/protocol-registry.sh
+        eval "${PP_FNS}"
+        listeningPorts() { if [[ "$1" == "tcp" ]]; then printf "%s\n" ${LIVE_TCP}; else printf "%s\n" ${LIVE_UDP}; fi; }
+        t() { printf "%s" "$1"; }
+        echoContent() { :; }
+        allowPort() { :; }
+        checkDNSIP() { :; }; removeNginxDefaultConf() { :; }; checkPortOpen() { :; }; handleXray() { :; }
+        nginxConfigPath="${PROXY_AGENT_DIR}/nginx/"
+        '"$1" 2>/dev/null
+}
+pp_reset() {
+    rm -rf "${PP_ROOT}"
+    mkdir -p "${PP_ROOT}/xray/conf" "${PP_ROOT}/sing-box/conf/config" "${PP_ROOT}/nginx"
+}
+pp_xray() { printf '%s\n' "$2" >"${PP_ROOT}/xray/conf/$1"; }
+pp_sb() { printf '%s\n' "$2" >"${PP_ROOT}/sing-box/conf/config/$1"; }
+PP_XRAY_PICK='pickInboundPort "${ID}" "${OLD}" "${XRAY_CONF_DIR}" "${KEEP}" "${SKIP}" ${EXTRA} <<<"${IN}"'
+PP_SB_PICK='pickInboundPort "${ID}" "${OLD}" "${SINGBOX_FRAGMENT_DIR}" "${KEEP}" "" <<<"${IN}"'
+# pp_pick xray|sb ID OLD KEEP SKIP EXTRA INPUT → pickInboundPort 选出的端口
+pp_pick() {
+    local code=${PP_XRAY_PICK}
+    [[ "$1" == "sb" ]] && code=${PP_SB_PICK}
+    pp_run "ID='$2' OLD='$3' KEEP='$4' SKIP='$5' EXTRA='$6' IN=\$'$7'; ${code}"
+}
+
+pp_reset
+assert_equals "443" "$(pp_pick xray 7 '' '' '' '' '')" "端口池：空机器回车取 443"
+assert_equals "8443" "$(LIVE_TCP=443 pp_pick xray 7 '' '' '' '' '')" "端口池：443 被别的程序占着，回车取 8443"
+assert_equals "2083" "$(LIVE_TCP='443 8443 2053' pp_pick xray 7 '' '' '' '' '')" "端口池：按 443 8443 2053 2083 的顺序取第一个空的"
+_ppRandom=$(LIVE_TCP='443 8443 2053 2083 2087 2096' pp_pick xray 7 '' '' '' '' '')
+assert_true "[[ ${_ppRandom:-0} -ge 10000 && ${_ppRandom:-0} -le 30000 ]]" "端口池：六个全被占，回车落回 10000-30000 随机（${_ppRandom}）"
+_ppRandom=$(pp_pick sb 1 '' '' '' '' '')
+assert_true "[[ ${_ppRandom:-0} -ge 10000 && ${_ppRandom:-0} -le 30000 ]]" "端口池：VLESS WS 不进池，空机器回车也是随机（${_ppRandom}）"
+assert_equals "2053" "$(pp_pick xray 7 '' '' '' '' '2053')" "端口池：手输的空闲端口照收"
+assert_equals "443" "$(LIVE_TCP=8443 pp_pick xray 7 '' '' '' '' '8443\n')" "端口池：手输撞上已占端口要重问，再回车取默认"
+
+pp_xray 07_VLESS_vision_reality_inbounds.json '{"inbounds":[{"tag":"dokodemo-in-VLESSReality","port":443,"protocol":"dokodemo-door"},{"listen":"127.0.0.1","port":45987,"protocol":"vless"}]}'
+pp_xray 04_trojan_TCP_inbounds.json '{"inbounds":[{"listen":"127.0.0.1","port":8443,"protocol":"trojan"}]}'
+assert_equals "8443" "$(LIVE_TCP=443 pp_pick xray 12 '' '' '' '' '')" "查重：7 的对外端口算占用，只听回环的回落入站不算"
+assert_equals "443" "$(LIVE_TCP=443 pp_pick xray 7 443 '' '' '' 'y')" "查重：自己的旧端口可沿用，旧 Xray 还占着它也不算外来占用"
+assert_equals "443" "$(LIVE_TCP=443 pp_pick xray 12 '' ',12,' '' '' '')" "查重：非追加安装里没选的协议随后会被删，旧端口不算占用"
+assert_equals "8443" "$(pp_pick xray 12 '' '' '' '' '')" "查重：KEEP 为空时目录里别的协议的旧端口都算占用"
+
+pp_reset
+pp_xray 02_VLESS_TCP_inbounds.json '{"inbounds":[{"port":8443,"protocol":"vless"}]}'
+assert_equals "8443" "$(pp_pick xray 7 '' '' ',0,' 443 '')" "查重：0 本次选定的端口还没落盘，按 EXTRA 算占用；0 的旧文件不作数"
+assert_equals "8443" "$(pp_pick xray 7 443 '' ',0,' 443 '')" "查重：7 的旧端口已被这次的 0 拿走，不再问沿用，回车取下一个"
+assert_equals "2053" "$(pp_pick xray 7 2053 '' ',0,' 443 'y')" "查重：旧端口空着，答 y 沿用"
+assert_equals "2053" "$(pp_run 'lastInstallationConfig=true; pickInboundPort 7 2053 "${XRAY_CONF_DIR}" "" ",0," 443 <<<""')" "查重：沿用上次配置时不问、直接用旧端口"
+
+pp_reset
+pp_sb 13_anytls_inbounds.json '{"inbounds":[{"type":"anytls","listen":"::","listen_port":443}]}'
+assert_equals "8443" "$(LIVE_TCP=443 pp_pick sb 0 '' ',0,13,' '' '' '')" "sing-box：会留下的 13 在 443，0 默认取 8443"
+assert_equals "443" "$(LIVE_TCP=443 pp_pick sb 0 '' ',0,' '' '' '')" "sing-box：13 这次不装、sing-box 还在跑旧配置占着 443，0 照样默认 443"
+assert_equals "443" "$(pp_pick sb 6 '' '' '' '' '')" "sing-box：TCP 的 443 不挡 Hysteria2 的 443/udp"
+assert_equals "8443" "$(LIVE_UDP=443 pp_pick sb 6 '' '' '' '' '')" "sing-box：443/udp 被别的程序占着，Hysteria2 默认 8443"
+pp_sb 06_hysteria2_inbounds.json '{"inbounds":[{"type":"hysteria2","listen":"::","listen_port":443}]}'
+assert_equals "8443" "$(pp_pick sb 9 '' '' '' '' '')" "sing-box：Hysteria2 占了 443/udp，TUIC 默认 8443"
+assert_equals "8443" "$(pp_pick sb 10 '' ',6,10,' '' '' '')" "sing-box：naive 同时听 TCP 和 UDP，TCP 443 空着、UDP 443 被占也要避开"
+assert_equals "443" "$(LIVE_UDP=443 pp_pick sb 6 443 '' '' '' 'y')" "sing-box：Hysteria2 沿用自己的 443/udp"
+pp_sb 11_VMess_HTTPUpgrade_inbounds.json '{"inbounds":[{"type":"vmess","listen":"127.0.0.1","listen_port":31306}]}'
+printf 'server {\n\tlisten 8443 so_keepalive=on ssl;http2 on;\n}\n' >"${PP_ROOT}/nginx/sing_box_VMess_HTTPUpgrade.conf"
+assert_equals "2053" "$(pp_pick sb 4 '' '' '' '' '')" "sing-box：11 的对外端口在 nginx 配置里，也算占用"
+assert_equals "2053" "$(LIVE_TCP=8443 pp_pick sb 4 '' '' '' '' '')" "sing-box：nginx 为 11 占着的端口不当外来占用重复算，结果不变"
+
+pp_reset
+pp_xray 07_VLESS_vision_reality_inbounds.json '{"inbounds":[{"port":443,"protocol":"dokodemo-door"}]}'
+pp_cpf() { pp_run "currentPort= customPort= lastInstallationConfig= btDomain= port= selectCustomInstallType='$1'; customPortFunction <<<\$'$2' >/dev/null; echo \"\${port}\""; }
+assert_equals "443" "$(LIVE_TCP=443 pp_cpf ',0,7,' '')" "customPortFunction：7 已在 443、旧 Xray 还占着它，带域名重装时 0 照样默认 443"
+assert_equals "443" "$(pp_cpf '' '')" "customPortFunction：全装同样 0 优先"
+assert_equals "443" "$(pp_cpf ',0,7,' '443')" "customPortFunction：手填 443 也收，7 的旧端口不挡 0"
+rm -f "${PP_ROOT}/xray/conf/07_VLESS_vision_reality_inbounds.json"
+assert_equals "8443" "$(LIVE_TCP=443 pp_cpf ',0,' '')" "customPortFunction：443 被别的程序占着才让到 8443"
+
+pp_redirect() { pp_run "domain=example.com port='$1' btDomain='${2:-}'; writeHttpRedirectNginxConf; cat \"\${nginxConfigPath}http_redirect.conf\" 2>/dev/null || echo absent"; }
+pp_reset
+assert_contains "$(pp_redirect 443)" 'return 301 https://example.com$request_uri;' "80 跳转：0 在 443 时跳到不带端口的 https"
+assert_contains "$(pp_redirect 443)" 'listen 80;' "80 跳转：监听 80"
+assert_contains "$(pp_redirect 8443)" 'return 301 https://example.com:8443$request_uri;' "80 跳转：0 不在 443 时带上端口"
+assert_equals "absent" "$(pp_redirect 443 bt.example.com)" "80 跳转：宝塔 / 1Panel 场景不写，旧文件也删掉"
+assert_equals "absent" "$(LIVE_TCP=80 pp_redirect 443)" "80 跳转：80 被别的程序占着就不写"
+assert_equals "absent" "$(pp_redirect 80)" "80 跳转：0 自己就在 80 上时不写"
+rm -rf "${PP_ROOT}"
 
 echo ""
 

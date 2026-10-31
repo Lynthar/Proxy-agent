@@ -103,6 +103,25 @@ randomPort() {
     randomNum 10000 30000
 }
 
+# portListed PORT "LIST" → 0=PORT 在空白分隔（含换行）的 LIST 里
+portListed() {
+    local list=" ${2//$'\n'/ } "
+    [[ -n "$1" && "${list}" == *" $1 "* ]]
+}
+
+# firstFreePort "TAKEN" CANDIDATE... → 第一个不在 TAKEN 里的候选；全被占时返回 1
+firstFreePort() {
+    local taken=$1 candidate
+    shift
+    for candidate in "$@"; do
+        if ! portListed "${candidate}" "${taken}"; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # ============================================================================
 # 版本比较函数
 # ============================================================================
