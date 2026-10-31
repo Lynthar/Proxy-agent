@@ -91,8 +91,8 @@ V2RAY_LANG=en pasly
 | Family | Protocols |
 |---|---|
 | VLESS | TCP/Vision · WS · Reality Vision · Reality XHTTP |
-| VMess | WS · HTTPUpgrade |
-| Others | Trojan TCP · Hysteria2 · TUIC · NaiveProxy · AnyTLS · Shadowsocks 2022 |
+| VMess (deprecated by Xray) | WS · HTTPUpgrade |
+| Others | Trojan TCP (deprecated by Xray) · Hysteria2 · TUIC · NaiveProxy · AnyTLS · Shadowsocks 2022 |
 
 Only Reality Vision and Shadowsocks 2022 work without a domain; everything else
 needs a domain and a certificate (Reality XHTTP is installed alongside VLESS
@@ -131,11 +131,15 @@ The generators still perform port, firewall, and destination checks; invoke them
 
 ## Limitations
 
-- **It isn't a panel.** A TTY menu, no web UI, no API, and no accounting of
-  traffic, expiry or per-user quotas.
+- **It isn't a panel.** A TTY menu, no web UI, no API. Per-user traffic,
+  expiry and quotas exist only through carpool on the Xray core: the owner
+  edits a JSON file to manage members, and members get a read-only page.
 - **Three gRPC variants are deprecated**: Trojan gRPC, VLESS gRPC and VLESS
   vision gRPC are still in the registry but marked deprecated. Don't build new
   deployments on them.
+- **VMess and Trojan are deprecated by Xray since 26.1.23**: they still install
+  and still get subscriptions, but new deployments should use VLESS; the user
+  guide has the migration steps.
 - **CentOS 7 won't work.** Its bash is 4.2.46, below the 4.3 the script requires
   at the top — nameref and negative array indices fail quietly on 4.2, so it
   refuses to run instead.

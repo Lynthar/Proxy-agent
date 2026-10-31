@@ -85,8 +85,8 @@ V2RAY_LANG=en pasly
 | 类别 | 协议 |
 |---|---|
 | VLESS | TCP/Vision · WS · Reality Vision · Reality XHTTP |
-| VMess | WS · HTTPUpgrade |
-| 其它 | Trojan TCP · Hysteria2 · TUIC · NaiveProxy · AnyTLS · Shadowsocks 2022 |
+| VMess（Xray 已标弃用） | WS · HTTPUpgrade |
+| 其它 | Trojan TCP（Xray 已标弃用） · Hysteria2 · TUIC · NaiveProxy · AnyTLS · Shadowsocks 2022 |
 
 不需要域名的只有 Reality Vision 和 Shadowsocks 2022，其余都要域名和证书（Reality XHTTP 要与
 VLESS TCP/Vision 同装，所以也要）。Reality 不能挂在 CDN 后面，走 CDN 只能用 WS / HTTPUpgrade。
@@ -120,9 +120,10 @@ sing-box 的 shadowsocks 出站，还开了 sing-box 特有的 h2mux 多路复�
 
 ## 能力边界
 
-- **它不是面板。** 纯 TTY 菜单，没有 Web UI、没有 API，也不统计流量、到期或多用户配额。
+- **它不是面板。** 纯 TTY 菜单，没有 Web UI、没有 API。按人计流量、到期和配额只有 Xray 内核下的拼车会做：车主改一个 JSON 文件管成员，成员只看得到一个只读页面。
 - **三个 gRPC 变体已废弃**：Trojan gRPC、VLESS gRPC、VLESS vision gRPC 仍在注册表里
   但标了废弃，别在新部署上用。
+- **VMess 与 Trojan 被 Xray 26.1.23 标为弃用**：仍能装、订阅照出，新部署换用 VLESS，迁移方法见用户指南。
 - **CentOS 7 装不了。** 它的 bash 是 4.2.46，达不到脚本开头要求的 4.3——脚本用了
   nameref 和负数组下标，在 4.2 上会静默出错，所以直接拒绝运行。
 - **卸载不回收防火墙规则。** 端口的 allow 规则会留着，虽然那时已经没有东西在监听。

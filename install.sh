@@ -6945,7 +6945,7 @@ showAccounts() {
 
     # VMess WS
     if echo ${currentInstallProtocolType} | grep -q ",3,"; then
-        echoContent skyBlue "\n================================ VMess WS TLS [仅CDN推荐]  ================================\n"
+        echoContent skyBlue "\n================================ $(t ACCOUNT_TITLE_VMESS_WS) ================================\n"
         local path="${currentPath}vws"
         if [[ ${coreKind} == "1" ]]; then
             path="/${currentPath}vws"
@@ -6975,7 +6975,7 @@ showAccounts() {
 
     # trojan tcp
     if echo ${currentInstallProtocolType} | grep -q ",4,"; then
-        echoContent skyBlue "\n==================================  Trojan TLS [不推荐] ==================================\n"
+        echoContent skyBlue "\n================================== $(t ACCOUNT_TITLE_TROJAN) ==================================\n"
         jq .inbounds[0].settings.clients//.inbounds[0].users ${configPath}04_trojan_TCP_inbounds.json | jq -c '.[]' | while read -r user; do
             local email=
             email=$(echo "${user}" | jq -r .email//.name)
@@ -7053,7 +7053,7 @@ showAccounts() {
     fi
     # VMess HTTPUpgrade
     if echo ${currentInstallProtocolType} | grep -q ",11,"; then
-        echoContent skyBlue "\n================================ VMess HTTPUpgrade TLS [仅CDN推荐]  ================================\n"
+        echoContent skyBlue "\n================================ $(t ACCOUNT_TITLE_VMESS_HTTPUPGRADE) ================================\n"
         local path="${currentPath}vws"
         if [[ ${coreKind} == "1" ]]; then
             path="/${currentPath}vws"
@@ -16170,13 +16170,13 @@ customSingBoxInstall() {
     echoContent skyBlue "\n========================个性化安装============================"
     echoContent yellow "0.VLESS+TLS_Vision+TCP"
     echoContent yellow "1.VLESS+TLS+WS[仅CDN推荐]"
-    echoContent yellow "3.VMess+TLS+WS[仅CDN推荐]"
-    echoContent yellow "4.Trojan+TLS[不推荐]"
+    echoContent yellow "$(t INSTALL_ITEM_VMESS_WS)"
+    echoContent yellow "$(t INSTALL_ITEM_TROJAN)"
     echoContent yellow "6.Hysteria2"
     echoContent yellow "7.VLESS+Reality+Vision"
     echoContent yellow "9.Tuic"
     echoContent yellow "10.Naive"
-    echoContent yellow "11.VMess+TLS+HTTPUpgrade"
+    echoContent yellow "$(t INSTALL_ITEM_VMESS_HTTPUPGRADE)"
     echoContent yellow "13.AnyTLS"
     echoContent yellow "14.Shadowsocks 2022[无需TLS证书]"
 
@@ -16238,8 +16238,8 @@ customXrayInstall() {
     echoContent yellow "VLESS前置，默认安装0，无域名安装Reality只选择7即可"
     echoContent yellow "0.VLESS+TLS_Vision+TCP[推荐]"
     echoContent yellow "1.VLESS+TLS+WS[仅CDN推荐]"
-    echoContent yellow "3.VMess+TLS+WS[仅CDN推荐]"
-    echoContent yellow "4.Trojan+TLS[不推荐]"
+    echoContent yellow "$(t INSTALL_ITEM_VMESS_WS)"
+    echoContent yellow "$(t INSTALL_ITEM_TROJAN)"
     echoContent yellow "7.VLESS+Reality+uTLS+Vision[推荐]"
     echoContent yellow "12.VLESS+Reality+XHTTP"
     read -r -p "请选择[多选]，[例如:1,2,3]:" selectCustomInstallType
