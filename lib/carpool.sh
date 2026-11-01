@@ -10,7 +10,7 @@ readonly _CARPOOL_LOADED=1
 # 可纳入拼车计量的协议：Xray 自己承载的入站。6/9 在 Xray 内核下跑在 sing-box sidecar，v2ray_api 计不到
 readonly CARPOOL_PROTOCOLS=",0,1,3,4,7,12,"
 
-# jq 侧共享定义。日期算术只有这一份实现（Hinnant days_from_civil，输入 "YYYY-MM-DD"），bash 侧与判定共用；
+# jq 侧共享定义。日期算术只有这一份实现（Hinnant days_from_civil，输入 "YYYY-MM-DD"），判定算到期天数用它；
 # 用量也只在这里算：成员 = 上下行合计 × 口径系数（both 为 2），整机按网卡收发（out 只计发、max 取大）
 readonly _CARPOOL_JQ_DEFS='
 def carpoolDays:
@@ -61,6 +61,17 @@ carpoolIsValidUUID() {
     [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]
 }
 
+# carpoolUnmanagedProtocols ",2,7,8," → xray/conf 扫出的协议里由 Xray 承载、带用户却不在 CARPOOL_PROTOCOLS 的 ID，每行一个
+# 对账只管名单内的入站，名单外的那里停用与删人都无效（v1.0.x 留下的 gRPC 2 / 5 / 8，或新协议忘了加进名单）
+carpoolUnmanagedProtocols() {
+    local id
+    for id in ${1//,/ }; do
+        [[ "${CARPOOL_PROTOCOLS}" == *",${id},"* ]] && continue
+        [[ -n "$(getProtocolUsersPath 1 "${id}")" ]] && echo "${id}"
+    done
+    return 0
+}
+
 # carpoolInstalledProtocolsJson ",0,6,7," → 其中可纳入拼车的 ID 升序数组 [0,7]
 carpoolInstalledProtocolsJson() {
     local id out=
@@ -92,11 +103,6 @@ carpoolIsValidDate() {
     [[ ${d} -le $(carpoolDaysInMonth "${y}" "${m}") ]]
 }
 
-# carpoolDaysBetween FROM TO → TO - FROM 的天数（可为负）
-carpoolDaysBetween() {
-    jq -rn --arg from "$1" --arg to "$2" "${_CARPOOL_JQ_DEFS}"'($to | carpoolDays) - ($from | carpoolDays)'
-}
-
 # carpoolPeriodStart TODAY RESETDAY → 当前周期起始日：本月的 RESETDAY，今天的日小于它则取上月的
 carpoolPeriodStart() {
     local y m d r=$2
@@ -123,10 +129,11 @@ carpoolNextPeriodStart() {
 # members.json：校验、归一化、播种
 # ============================================================================
 
-# carpoolValidateMembers FILE INSTALLED [FOREIGN_JSON] → 0=合法；否则逐行打印原因（已本地化）并返回 1
-# INSTALLED 形如 ",0,7,"；FOREIGN_JSON 是 inbound 里不归拼车管的账号 {name: uuid}，查 uuid 撞车
+# carpoolValidateMembers FILE INSTALLED [FOREIGN_JSON] [RETIRED_JSON] → 0=合法；否则逐行打印原因（已本地化）并返回 1
+# RETIRED_JSON 是 carpoolRetiredNames 的输出：名字第一段撞上其中文件里已没有的人，就是把那人的旧订阅链接交给新成员
+# INSTALLED 形如 ",0,7,"；FOREIGN_JSON 是 inbound 里不归拼车管的账号 {name: uuid}，查 uuid 与订阅键撞车
 carpoolValidateMembers() {
-    local file=$1 installed=$2 foreign=${3:-"{}"}
+    local file=$1 installed=$2 foreign=${3:-"{}"} retired=${4:-"[]"}
     if [[ ! -f "${file}" ]]; then
         t CARPOOL_ERR_FILE_MISSING "${file}"
         echo
@@ -140,7 +147,7 @@ carpoolValidateMembers() {
 
     local installedJson raw
     installedJson=$(carpoolInstalledProtocolsJson "${installed}")
-    raw=$(jq -r --argjson installed "${installedJson}" --argjson foreign "${foreign}" \
+    raw=$(jq -r --argjson installed "${installedJson}" --argjson foreign "${foreign}" --argjson retired "${retired}" \
         --argjson allowed "$(carpoolInstalledProtocolsJson "${CARPOOL_PROTOCOLS}")" '
       if type != "object" then "NOT_OBJECT\t" else
         ( keys[] | select(. != "resetDay" and . != "notify" and . != "billing" and . != "plan" and . != "members") | "UNKNOWN_FIELD\t\(.)" ),
@@ -172,6 +179,10 @@ carpoolValidateMembers() {
             | ( $m | keys_unsorted[] | select(test("^[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}$") | not) | "BAD_NAME\t\(.)" ),
               ( [$m | keys_unsorted[]] | group_by(ascii_downcase) | .[] | select(length > 1) | "DUP_NAME_CASE\t\(join(","))" ),
               ( [$m | keys_unsorted[]] | group_by(split("-")[0]) | .[] | select(length > 1) | "DUP_SUB_KEY\t\(join(","))" ),
+              ( $m | keys_unsorted[] as $name | $foreign | keys_unsorted[]
+                | select(. != $name and split("-")[0] == ($name | split("-")[0])) | "SUB_KEY_TAKEN\t\($name)\t\(.)" ),
+              ( $m | keys_unsorted[] as $name | $retired[]
+                | select(. as $r | $r != $name and ($m | has($r) | not) and ($r | split("-")[0]) == ($name | split("-")[0])) | "SUB_KEY_RETIRED\t\($name)\t\(.)" ),
               ( [$m | to_entries[] | select((.value | type) == "object" and (.value.uuid | type) == "string")] | group_by(.value.uuid) | .[] | select(length > 1) | "DUP_UUID\t\(map(.key) | join(","))" ),
               ( $m | to_entries[] | .key as $name | .value as $v
                 | if ($v | type) != "object" then "BAD_MEMBER\t\($name)" else
@@ -215,6 +226,8 @@ carpoolValidateMembers() {
             BAD_NAME) t CARPOOL_ERR_BAD_NAME "${a}" ;;
             DUP_NAME_CASE) t CARPOOL_ERR_DUP_NAME_CASE "${a}" ;;
             DUP_SUB_KEY) t CARPOOL_ERR_DUP_SUB_KEY "${a}" ;;
+            SUB_KEY_TAKEN) t CARPOOL_ERR_SUB_KEY_TAKEN "${a}" "${b}" ;;
+            SUB_KEY_RETIRED) t CARPOOL_ERR_SUB_KEY_RETIRED "${a}" "${b}" ;;
             DUP_UUID) t CARPOOL_ERR_DUP_UUID "${a}" ;;
             BAD_MEMBER) t CARPOOL_ERR_BAD_MEMBER "${a}" ;;
             BAD_QUOTA) t CARPOOL_ERR_BAD_QUOTA "${a}" ;;
@@ -232,12 +245,11 @@ carpoolValidateMembers() {
     [[ -z "${failed}" ]]
 }
 
-# carpoolNormalizeMembers FILE INSTALLED → 默认值填好、"all" 展开、配额换成字节的 JSON；先过校验再调
-# digestHour 为 null 表示关闭，保留 null；口径不写按 both：多算只是成员提前停，少算是整机被服务商限速
+# carpoolNormalizeMembers FILE → 默认值填好、配额换成字节的 JSON；先过校验再调。protocols 省略即 "all"，原样保留到对账时再按已装解析：
+# 在这里展开就冻结成当时的已装集合，之后再装的协议会把成员全剔出去。digestHour 为 null 表示关闭，保留 null；
+# 口径不写按 both：多算只是成员提前停，少算是整机被服务商限速
 carpoolNormalizeMembers() {
-    local installedJson
-    installedJson=$(carpoolInstalledProtocolsJson "$2")
-    jq -c --argjson installed "${installedJson}" --arg defaultLabel "$(t CARPOOL_DEFAULT_LABEL)" '
+    jq -c --arg defaultLabel "$(t CARPOOL_DEFAULT_LABEL)" '
       (.notify // {}) as $n | (.plan // {}) as $p
       | {
           resetDay: (.resetDay // 1),
@@ -252,15 +264,10 @@ carpoolNormalizeMembers() {
           members: ((.members // {}) | with_entries(.value |= {
             quotaBytes: ((.quotaGiB // 0) * 1073741824),
             expire: (.expire // ""),
-            protocols: (if (.protocols // "all") == "all" then $installed else (.protocols | unique) end),
+            protocols: (if (.protocols // "all") == "all" then "all" else (.protocols | unique) end),
             uuid: (.uuid // "")
           }))
         }' "$1"
-}
-
-# carpoolAccountsFromClients CLIENTS_JSON → [{name, uuid}]，name 已剥协议后缀，凭据取 id 或 password
-carpoolAccountsFromClients() {
-    jq -c '[ .[]? | {name: ((.email // "") | sub("-[^-]*$"; "")), uuid: (.id // .password // "")} | select(.name != "") ]' <<<"$1"
 }
 
 # carpoolSeedMembers ACCOUNTS_JSON → 从现有账号生成初始 members.json：全员不限额、不限期、全协议
@@ -383,39 +390,74 @@ carpoolMergeState() {
       | .billing = $members.billing | .plan = $members.plan' <<<"$1"
 }
 
-# carpoolSyncLimits STATE NORMALIZED → 文件里的即时类字段同步进 state：resetDay、notify、billing、plan、在册成员的 quotaBytes 与 expire
-# protocols 与 uuid 是「需应用」类不动；文件里没有的成员也不动（增删只在应用时做）
+# carpoolSyncLimits STATE NORMALIZED → 文件里的即时类字段同步进 state：notify、billing、plan、在册成员的 quotaBytes 与 expire
+# protocols、uuid 与 resetDay 是「需应用」类不动（resetDay 一改可能当场全员清零，要先在差异里看到后果）；文件里没有的成员也不动
 carpoolSyncLimits() {
     jq -c --argjson m "$2" '
-      .resetDay = $m.resetDay | .notify = $m.notify | .billing = $m.billing | .plan = $m.plan
+      .notify = $m.notify | .billing = $m.billing | .plan = $m.plan
       | .members |= with_entries(.key as $k
           | if $m.members[$k] then .value.quotaBytes = $m.members[$k].quotaBytes | .value.expire = $m.members[$k].expire else . end)' <<<"$1"
 }
 
-# carpoolForeignAccounts STATE CURRENT_MAP → {name: uuid}，inbound 里不归拼车管的账号（校验 uuid 撞车用）
+# carpoolMarkRemoved STATE NAMES_JSON → 车主确认删除的成员记进 .removing：对账把他们的 clients 删掉，而不是当成不归拼车管的账号留下；
+# 同时记进 .retiredNames（永不清）：订阅文件按名字第一段定位，以后谁再用这一段就拿到被删的人手里那条旧链接
+carpoolMarkRemoved() {
+    jq -c --argjson names "$2" '
+      .removing = ((.removing // []) + $names | unique) | if .removing == [] then del(.removing) else . end
+      | if ($names | length) > 0 then .retiredNames = ((.retiredNames // []) + $names | unique) else . end' <<<"$1"
+}
+
+# carpoolReenableChanges MERGED_STATE INBOUND_JSON → 重开拼车时客户端看得见的改动 {restore: [name], uuid: [{name, from, to}]}：
+# restore 是 state 记着凭据、入站里却没有的成员（关闭期间在菜单里删了），uuid 是入站同名账号的凭据将被改回 state 里的。INBOUND_JSON 形如 {name: uuid}
+carpoolReenableChanges() {
+    jq -c --argjson inbound "$2" '
+      [.members | to_entries[] | select(.value.uuid != "")] as $m
+      | {restore: [$m[] | select($inbound[.key] == null) | .key],
+         uuid: [$m[] | select($inbound[.key] != null and $inbound[.key] != .value.uuid) | {name: .key, from: $inbound[.key], to: .value.uuid}]}' <<<"$1"
+}
+
+# carpoolRetiredNames STATE → 校验订阅键用的名字表：已删除的、待删的与在册成员（在册而文件里没有的就是这次要删的人）
+carpoolRetiredNames() {
+    jq -c '(.retiredNames // []) + (.removing // []) + ((.members // {}) | keys) | unique' <<<"$1"
+}
+
+# carpoolPruneRemoved STATE CURRENT_MAP → .removing 只留 inbound 里还有 clients、又没重新加回成员的名字；
+# 对账失败时名字留着，下个 tick 重试。CURRENT_MAP 形如 {"<ID>": [clients…]}
+carpoolPruneRemoved() {
+    jq -c --argjson map "$2" '
+      ([$map[] | .[]? | (.email // "") | sub("-[^-]*$"; "")] | unique) as $present
+      | .members as $m
+      | .removing = [(.removing // [])[] | select(. as $k | ($present | index($k)) != null and ($m | has($k) | not))]
+      | if .removing == [] then del(.removing) else . end' <<<"$1"
+}
+
+# carpoolForeignAccounts STATE CURRENT_MAP → {name: uuid}，inbound 里不归拼车管的账号（校验 uuid 撞车用）；待删的不算
 # CURRENT_MAP 形如 {"<ID>": [clients…]}
 carpoolForeignAccounts() {
     jq -c --argjson state "$1" '
       [.[] | .[]?] | map({key: ((.email // "") | sub("-[^-]*$"; "")), value: (.id // .password // "")})
-      | map(select(.key != "" and (.key as $k | $state.members | has($k) | not))) | from_entries' <<<"$2"
+      | map(select(.key != "" and (.key as $k | ($state.members | has($k) | not) and (($state.removing // []) | index($k)) == null)))
+      | from_entries' <<<"$2"
 }
 
 # carpoolDiffMembers OLD_STATE NORMALIZED INBOUND_JSON → 应用前给车主看的差异：
-# {added, removed, protocols:[{name,from,to}], uuid:[name], quota:[{name,from,to}], expire:[{name,from,to}], unmanaged:[name]}
+# {added, removed, protocols:[{name,from,to}], uuid:[name], quota:[{name,from,to}], expire:[{name,from,to}], resetDay:[{from,to}], unmanaged:[name]}
 carpoolDiffMembers() {
     jq -c --argjson members "$2" --argjson inbound "$3" '
-      .members as $old | $members.members as $new
+      def protos: if type == "array" then sort else . end;
+      .members as $old | $members.members as $new | .resetDay as $oldDay
       | {
           added: [$new | keys_unsorted[] | select($old[.] == null)],
           removed: [$old | keys_unsorted[] | select($new[.] == null)],
-          protocols: [$new | to_entries[] | select($old[.key] != null and ($old[.key].protocols | sort) != (.value.protocols | sort))
+          protocols: [$new | to_entries[] | select($old[.key] != null and ($old[.key].protocols | protos) != (.value.protocols | protos))
                       | {name: .key, from: $old[.key].protocols, to: .value.protocols}],
           uuid: [$new | to_entries[] | select($old[.key] != null and .value.uuid != "" and ($old[.key].uuid // "") != "" and .value.uuid != $old[.key].uuid) | .key],
           quota: [$new | to_entries[] | select($old[.key] != null and $old[.key].quotaBytes != .value.quotaBytes)
                   | {name: .key, from: $old[.key].quotaBytes, to: .value.quotaBytes}],
           expire: [$new | to_entries[] | select($old[.key] != null and $old[.key].expire != .value.expire)
                    | {name: .key, from: $old[.key].expire, to: .value.expire}],
-          unmanaged: [$inbound | keys_unsorted[] | select($new[.] == null)]
+          resetDay: [select($oldDay != $members.resetDay) | {from: $oldDay, to: $members.resetDay}],
+          unmanaged: [$inbound | keys_unsorted[] | select($new[.] == null and $old[.] == null)]
         }' <<<"$1"
 }
 
@@ -424,8 +466,8 @@ carpoolDiffMembers() {
 # ============================================================================
 
 # carpoolJudge STATE NOTIFY TODAY PERIOD_START → {"state": …, "events": […]}，一次过：
-# 换周期清零（成员与整机）→ 逐人按到期 / 配额定目标状态（到期优先于超额，manual 永不自动恢复）→ 预警与到期提醒 → 整机套餐预警
-# 用量按 state.billing 的口径算；去重键记在 state.notified，换周期清空；events 元素形如 {type, name, …}
+# 起点晚于 .period 才算换周期、清零成员与整机（改 resetDay 让起点前移时只改起点、不清零）→ 逐人按到期 / 配额定目标状态（到期优先于超额，manual 永不自动恢复）→ 预警与到期提醒 → 整机套餐预警
+# 用量按 state.billing 的口径算；去重键记在 state.notified，换周期只清本函数记的 warn / expire / plan（tick 级的键清了会重复提醒、漏报恢复）；events 元素形如 {type, name, …}
 carpoolJudge() {
     jq -c --argjson notify "$2" --arg today "$3" --arg period "$4" "${_CARPOOL_JQ_DEFS}"'
       (.billing // "both") as $billing
@@ -439,13 +481,14 @@ carpoolJudge() {
         else {status: "active", reason: ""} end;
       def daysLeft: (.expire | carpoolDays) - ($today | carpoolDays);
 
-      (if .period != $period then
+      (if $period > .period then
          {type: "period", previous: .period, usage: (.members | map_values(usage)),
           machine: (if carpoolHasMachine then (.machine | carpoolMachineUsage($billing)) else null end)} as $ev
          | .members |= map_values(.upBytes = 0 | .downBytes = 0)
          | .machine = ((.machine // {}) | .rx = 0 | .tx = 0)
-         | .notified = {} | .period = $period | .pendingEvents = [$ev]
-       else .pendingEvents = [] end)
+         | .notified = ((.notified // {}) | with_entries(select(.key | test("^(warn|expire|plan):") | not)))
+         | .period = $period | .pendingEvents = [$ev]
+       else .period = $period | .pendingEvents = [] end)
       | reduce (.members | to_entries[]) as $e (.;
           $e.key as $n | $e.value as $m | ($m | target) as $t
           | .members[$n].status = $t.status | .members[$n].reason = $t.reason
@@ -495,11 +538,11 @@ carpoolCloseGroups() {
         }' <<<"$1"
 }
 
-# carpoolApplyClose STATE GROUPS RESTORE_ALL → restore 组恢复，expiredNow 翻成 expired；RESTORE_ALL=true 时其余停用者也恢复
+# carpoolApplyClose STATE GROUPS RESTORE_ALL → restore 组恢复，expiredNow 翻成 expired；RESTORE_ALL=true 时其余停用者（含 expiredNow）也恢复
 carpoolApplyClose() {
     jq -c --argjson g "$2" --argjson all "$3" '
       .members |= with_entries(.key as $k
-        | if ($g.restore | index($k)) != null or ($all and (($g.keepExpired + $g.keepManual) | index($k)) != null)
+        | if ($g.restore | index($k)) != null or ($all and (($g.expiredNow + $g.keepExpired + $g.keepManual) | index($k)) != null)
           then .value.status = "active" | .value.reason = ""
           elif ($g.expiredNow | index($k)) != null then .value.reason = "expired"
           else . end)' <<<"$1"
@@ -514,7 +557,7 @@ carpoolResetUsageState() {
 
 # carpoolDiffIsEmpty DIFF → 0=除「未纳入」以外没有任何差异
 carpoolDiffIsEmpty() {
-    jq -e '(.added + .removed + .protocols + .uuid + .quota + .expire) | length == 0' <<<"$1" >/dev/null 2>&1
+    jq -e '(.added + .removed + .protocols + .uuid + .quota + .expire + .resetDay) | length == 0' <<<"$1" >/dev/null 2>&1
 }
 
 # carpoolDiffNeedsConfirm DIFF → 0=含删除成员或换 UUID，应用前要逐项确认
@@ -530,7 +573,7 @@ carpoolDiffText() {
     while IFS= read -r line; do [[ -n "${line}" ]] && t CARPOOL_DIFF_REMOVED "${line}" && echo; done < <(jq -r '.removed[]' <<<"${d}")
     while IFS=$'\t' read -r name from to; do
         [[ -n "${name}" ]] && t CARPOOL_DIFF_PROTOCOLS "${name}" "${from}" "${to}" && echo
-    done < <(jq -r '.protocols[] | "\(.name)\t\(.from | tojson)\t\(.to | tojson)"' <<<"${d}")
+    done < <(jq -r 'def p: if type == "string" then . else tojson end; .protocols[] | "\(.name)\t\(.from | p)\t\(.to | p)"' <<<"${d}")
     while IFS= read -r line; do [[ -n "${line}" ]] && t CARPOOL_DIFF_UUID "${line}" && echo; done < <(jq -r '.uuid[]' <<<"${d}")
     while IFS=$'\t' read -r name from to; do
         [[ -n "${name}" ]] && t CARPOOL_DIFF_QUOTA "${name}" "${from}" "${to}" && echo
@@ -538,6 +581,9 @@ carpoolDiffText() {
     while IFS=$'\t' read -r name from to; do
         [[ -n "${name}" ]] && t CARPOOL_DIFF_EXPIRE "${name}" "${from}" "${to}" && echo
     done < <(jq -r '.expire[] | "\(.name)\t\(if .from == "" then "-" else .from end)\t\(if .to == "" then "-" else .to end)"' <<<"${d}")
+    while IFS=$'\t' read -r from to; do
+        [[ -n "${from}" ]] && t CARPOOL_DIFF_RESET_DAY "${from}" "${to}" && echo
+    done < <(jq -r '.resetDay[] | "\(.from)\t\(.to)"' <<<"${d}")
     line=$(jq -r '.unmanaged | join(", ")' <<<"${d}")
     if [[ -n "${line}" ]]; then
         t CARPOOL_DIFF_UNMANAGED "${line}"
@@ -550,7 +596,8 @@ carpoolDiffText() {
 # ============================================================================
 
 # carpoolExpectedClients ID STATE CURRENT_CLIENTS → 该协议文件应有的 clients 数组：
-# [不归拼车管的账号，原序] + [active、协议含 ID、uuid 已定的成员，members 顺序]；对象形状与 initXrayClients 一致
+# [不归拼车管的账号，原序] + [active、协议是 "all" 或含 ID、uuid 已定的成员，members 顺序]；对象形状与 initXrayClients 一致。
+# .removing 里的名字两边都不进，即从 inbound 删掉
 carpoolExpectedClients() {
     local id=$1 suffix
     [[ "${CARPOOL_PROTOCOLS}" == *",${id},"* ]] || return 1
@@ -562,9 +609,10 @@ carpoolExpectedClients() {
         elif $id == 3 then {id: $u, email: ($n + "-" + $suffix), alterId: 0}
         elif $id == 4 then {password: $u, email: ($n + "-" + $suffix)}
         else {id: $u, email: ($n + "-" + $suffix)} end;
-      [ .[]? | select(((.email // "") | sub("-[^-]*$"; "")) as $k | ($state.members | has($k)) | not) ]
+      [ .[]? | select(((.email // "") | sub("-[^-]*$"; "")) as $k
+          | ($state.members | has($k) | not) and (($state.removing // []) | index($k)) == null) ]
       + [ $state.members | to_entries[]
-          | select(.value.status == "active" and (.value.protocols | index($id)) != null and .value.uuid != "")
+          | select(.value.status == "active" and (.value.protocols == "all" or (.value.protocols | index($id)) != null) and .value.uuid != "")
           | shape(.key; .value.uuid) ]' <<<"$3"
 }
 
@@ -742,11 +790,13 @@ carpoolReadTelegramConf() {
 }
 
 # carpoolTickNotices STATE TODAY HOUR MEMBERS_OK FILE_ID → {"state", "events"}：tick 级通知的去重判断
-# 文件无效按 FILE_ID（内容摘要）一次；采集连续失败满 3 次一次、恢复一次；每日摘要在 digestHour 之后的第一次 tick 一次
+# 文件无效按 FILE_ID（内容摘要）一次、文件恢复有效就清掉这些键；采集连续失败满 3 次一次、恢复一次；
+# 每日摘要在 digestHour 之后的第一次 tick 一次，只留当天的键（这些键换周期不清，不自己清就只增不减）
 carpoolTickNotices() {
     jq -c --arg today "$2" --argjson hour "$3" --argjson ok "$4" --arg fid "$5" '
       .pendingEvents = []
-      | if ($ok | not) and ((.notified["invalid:" + $fid] // false) | not) then
+      | if $ok then .notified = ((.notified // {}) | with_entries(select(.key | startswith("invalid:") | not)))
+        elif ((.notified["invalid:" + $fid] // false) | not) then
           .notified["invalid:" + $fid] = true | .pendingEvents += [{type: "invalid"}]
         else . end
       | if .collectFailures >= 3 and ((.notified["collect:failed"] // false) | not) then
@@ -755,7 +805,8 @@ carpoolTickNotices() {
           del(.notified["collect:failed"]) | .pendingEvents += [{type: "collectRecovered"}]
         else . end
       | if (.notify.digestHour != null) and $hour >= .notify.digestHour and ((.notified["digest:" + $today] // false) | not) then
-          .notified["digest:" + $today] = true | .pendingEvents += [{type: "digest", date: $today}]
+          .notified = ((.notified // {}) | with_entries(select(.key | startswith("digest:") | not)))
+          | .notified["digest:" + $today] = true | .pendingEvents += [{type: "digest", date: $today}]
         else . end
       | {state: del(.pendingEvents), events: .pendingEvents}' <<<"$1"
 }

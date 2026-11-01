@@ -1076,6 +1076,23 @@ done
 
 echo ""
 
+# 拼车名单、Xray 可装协议、账户事务白名单是三份手写清单：Xray 能装却不在拼车名单里，那个入站里停用与删人都无效；
+# 在拼车名单里却不在事务白名单里，对账的 set 会静默跳过它
+echo -e "${BLUE}[carpool] 拼车协议名单 ↔ Xray 可装协议 ↔ 账户事务白名单${NC}"
+CP_IDS=$(grep -oE '^readonly CARPOOL_PROTOCOLS=",[0-9,]+,"' lib/carpool.sh | grep -oE '[0-9]+' | sort -n | tr '\n' ' ')
+XRAY_IDS=$(sed -n '/^customXrayInstall() {/,/^}/p' install.sh | grep -oE 'validateCustomInstallTokens "\$\{selectCustomInstallType\}"( [0-9]+)+' | grep -oE ' [0-9]+' | tr -d ' ' | sort -n | tr '\n' ' ')
+TX_IDS=$(sed -n '/^applyAccountChangeAllProtocols() {/,/^}/p' install.sh | grep -E '^ +0 \|' | grep -oE '[0-9]+' | sort -n | tr '\n' ' ')
+assert_not_empty "${XRAY_IDS}" "抽到 customXrayInstall 的可装协议清单"
+assert_not_empty "${TX_IDS}" "抽到 applyAccountChangeAllProtocols 的协议白名单"
+for _pid in ${XRAY_IDS}; do
+    assert_contains " ${CP_IDS}" " ${_pid} " "Xray 可装的 ${_pid} 在拼车名单里"
+done
+for _pid in ${CP_IDS}; do
+    assert_contains " ${TX_IDS}" " ${_pid} " "拼车名单里的 ${_pid} 在账户事务白名单里"
+done
+
+echo ""
+
 # ============================================================================
 # lib 模块清单：install.sh 里每一处手打的清单都必须与 ls lib/ 一致（自举健康检查、损坏清理、raw 文件表、
 # source 顺序、回滚下载、自更新下载、doctor 各有一份，少一处新模块就在那条路径上不落地）
@@ -1090,6 +1107,9 @@ while IFS= read -r _line; do
     _mods=$(sed -E 's/.* in (i18n[a-z -]*); do.*/\1/; s/.*libFiles=\(([^)]*)\).*/\1/; s/\.sh//g' <<<"${_line}" | tr ' ' '\n' | sort | tr '\n' ' ')
     assert_equals "${LIB_ON_DISK}" "${_mods}" "模块清单与 lib/ 一致: install.sh:${_line%%:*}"
 done <<<"${LIB_LIST_LINES}"
+for _m in ${LIB_ON_DISK}; do
+    assert_equals "yes" "$(grep -qF -- "${_m}.sh" install.sh && echo yes || echo no)" "install.sh 里写着 ${_m}.sh（从 GitHub 回滚靠它判断目标版本有没有这个模块）"
+done
 assert_contains "$(sed -n '/^_required_lib_fns=(/,/^)/p' install.sh)" "carpoolJudge" "_required_lib_fns 含拼车入口函数，lib/carpool.sh 没加载会在启动时报出"
 
 echo ""
@@ -1100,7 +1120,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试拼车钩子与 tick ===${NC}"
 
-CP_FN_NAMES="applyAccountChangeAllProtocols readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled carpoolCurrentClientsMap ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolGuardAccountMenu carpoolCheckPrerequisites carpoolPortFree carpoolPickApiPort carpoolAllAccounts carpoolFillUuids carpoolRemoveCron carpoolRemoveSubscriptionFiles carpoolEnable carpoolDisable carpoolApply carpoolResetUsage carpoolShowUsage carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMenu addUser removeUser cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountStateFile chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget"
+CP_FN_NAMES="applyAccountChangeAllProtocols readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled carpoolCurrentClientsMap ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolGuardAccountMenu carpoolCheckPrerequisites carpoolPickApiPort carpoolAllAccounts carpoolFillUuids carpoolRemoveCron carpoolRemoveSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable carpoolHasTty carpoolApply carpoolResetUsage carpoolShowUsage carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMenu addUser removeUser cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountStateFile chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget"
 CP_FNS=$(sed -n "$(for _f in ${CP_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_not_empty "${CP_FNS}" "拼车：抽到 install.sh 原文"
 assert_equals "$(wc -w <<<"${CP_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CP_FNS}")" "拼车：每个函数都抽到了（抽不到说明函数体里出现了顶格的 }）"
@@ -1149,8 +1169,8 @@ EOF
         billing: "both", plan: {sizeGB: 0, warnPercent: 85, interface: ""}, machine: {},
         pageEnabled: false, pageToken: "", collectFailures: 0, notified: {}, events: [],
         members: {
-          alice: {uuid: $u1, quotaBytes: $q, expire: "", protocols: [0, 7], upBytes: 0, downBytes: 0, status: "active", reason: ""},
-          bob: {uuid: $u2, quotaBytes: 0, expire: "", protocols: [0, 7], upBytes: 0, downBytes: 0, status: "active", reason: ""}}}' >"${CP_ROOT}/carpool/state.json"
+          alice: {uuid: $u1, quotaBytes: $q, expire: "", protocols: "all", upBytes: 0, downBytes: 0, status: "active", reason: ""},
+          bob: {uuid: $u2, quotaBytes: 0, expire: "", protocols: "all", upBytes: 0, downBytes: 0, status: "active", reason: ""}}}' >"${CP_ROOT}/carpool/state.json"
     echo testsalt >"${CP_ROOT}/subscribe_local/subscribeSalt"
     mkdir -p "${CP_ROOT}/nginx"
     cat >"${CP_ROOT}/nginx/subscribe.conf" <<'EOF'
@@ -1187,7 +1207,7 @@ run_cp() (
         pgrep() { echo 4242; }
         command -v flock >/dev/null 2>&1 || flock() { :; }
         command -v md5sum >/dev/null 2>&1 || md5sum() { md5 -q "$@"; }
-        lsof() { :; }
+        listeningPorts() { :; }
         curl() { printf "curl %s\n" "$*" >>"${CP_CALLS}"; if [[ -n "${CP_CURL_FAIL}" ]]; then return 7; fi; echo "{\"ok\":true}"; }
         ensureCronService() { return "${CP_CROND_RC}"; }
         manageAccount() { echo "MENU $*"; }
@@ -1251,8 +1271,12 @@ assert_contains "$(cat "${CP_CALLS}")" "serviceEnv off" "ensure（关）：Xray 
 assert_equals "no" "$([[ -f "${CP_ROOT}/xray/conf/12_stats_api.json" ]] && echo yes || echo no)" "ensure（关）：12_stats_api.json 撤掉"
 assert_equals '{"connIdle":280,"handshake":2}' "$(jq -Sc '.policy.levels."0"' "${CP_ROOT}/xray/conf/12_policy.json")" "ensure（关）：统计开关撤掉，其余字段原样"
 rm -f "${CP_ROOT}/carpool/state.json"
+printf '%s\n' '{"policy":{"levels":{"0":{"handshake":2,"statsUserUplink":true,"statsUserDownlink":true}}}}' >"${CP_ROOT}/xray/conf/12_policy.json"
+: >"${CP_CALLS}"
 run_cp 'ensureCarpoolXray' >/dev/null 2>&1
 assert_equals "no" "$([[ -f "${CP_ROOT}/xray/conf/12_stats_api.json" ]] && echo yes || echo no)" "ensure（没开过）：什么都不生成"
+assert_equals "true|true" "$(jq -r '.policy.levels."0" | "\(.statsUserUplink)|\(.statsUserDownlink)"' "${CP_ROOT}/xray/conf/12_policy.json")" "ensure（没开过）：车主自己开的统计开关不动"
+assert_equals "" "$(cat "${CP_CALLS}")" "ensure（没开过）：服务环境也不碰"
 cp_reset_tree
 rm -f "${CP_ROOT}/xray/conf/12_policy.json"
 _out=$(run_cp 'ensureCarpoolXray; echo "rc=$?"' 2>&1)
@@ -1353,7 +1377,7 @@ cp_reset_tree
 printf '%s\n' '{"resetDay": 20, "notify": {"warnPercent": 10}, "members": {"alice": {"quotaGiB": 50, "expire": "2099-01-01"}, "bob": {}}}' >"${CP_ROOT}/carpool/members.json"
 printf '%s\n' '{}' >"${CP_STATS}"
 run_cp 'carpoolTick' >/dev/null 2>&1
-assert_equals "$((50 * GiB))|2099-01-01|20|10" "$(cp_state '"\(.members.alice.quotaBytes)|\(.members.alice.expire)|\(.resetDay)|\(.notify.warnPercent)"')" "tick：即时类字段（配额、到期、resetDay、notify）从文件同步进 state"
+assert_equals "$((50 * GiB))|2099-01-01|1|10" "$(cp_state '"\(.members.alice.quotaBytes)|\(.members.alice.expire)|\(.resetDay)|\(.notify.warnPercent)"')" "tick：即时类字段（配额、到期、notify）从文件同步进 state；resetDay 要应用才生效，tick 不动它"
 
 # 没开 / 不是 Xray：静默退出，不碰 state
 cp_reset_tree
@@ -1463,8 +1487,14 @@ run_cp "backupConfigSnapshot ${_snap}" >/dev/null 2>&1
 assert_equals "yes" "$([[ -f "${_snap}/carpool/members.json" && -f "${_snap}/carpool/state.json" ]] && echo yes || echo no)" "backupConfigSnapshot：快照含 carpool/"
 assert_equals "-rw-------" "$(ls -l "${_snap}/carpool/telegram.conf" | awk '{print $1}' | cut -c1-10)" "backupConfigSnapshot：快照里的 telegram.conf 仍是 600"
 printf '%s\n' '{"members": {}}' >"${CP_ROOT}/carpool/members.json"
+jq '.members.alice.upBytes = 777' "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/s.tmp" && mv "${CP_ROOT}/carpool/s.tmp" "${CP_ROOT}/carpool/state.json"
 run_cp "restoreConfigSnapshot ${_snap}" >/dev/null 2>&1
 assert_equals '{"notify":{"label":"车","digestHour":null},"members":{"alice":{"quotaGiB":5},"bob":{}}}' "$(jq -c . "${CP_ROOT}/carpool/members.json")" "restoreConfigSnapshot：快照里的 carpool/ 覆盖回来"
+assert_equals "777" "$(cp_state '.members.alice.upBytes')" "restoreConfigSnapshot：现场的 state.json 留着，用量不倒回快照那天"
+assert_equals "0" "$(find "${CP_ROOT}" -maxdepth 1 -name '.carpool-state.*' | wc -l | tr -d ' ')" "restoreConfigSnapshot：暂存的 state 副本不留在安装根"
+rm -f "${CP_ROOT}/carpool/state.json"
+run_cp "restoreConfigSnapshot ${_snap}" >/dev/null 2>&1
+assert_equals "no" "$([[ -f "${CP_ROOT}/carpool/state.json" ]] && echo yes || echo no)" "restoreConfigSnapshot：现场没有 state 时也不从快照拿（不然拼车带着旧用量复活）"
 rm -rf "${_snap}/carpool"
 printf '%s\n' '{"members": {"keep": {}}}' >"${CP_ROOT}/carpool/members.json"
 run_cp "restoreConfigSnapshot ${_snap}" >/dev/null 2>&1
@@ -1481,7 +1511,8 @@ assert_contains "${_out}" "拼车已开启" "开启：成功提示"
 assert_contains "${_out}" "成员名取自现有账号名，改名等于换订阅链接" "开启：提示成员名的来历"
 assert_equals '{"zed":{"quotaGiB":0,"expire":"","protocols":"all"},"alice":{"quotaGiB":0,"expire":"","protocols":"all"},"bob":{"quotaGiB":0,"expire":"","protocols":"all"}}' "$(jq -c '.members' "${CP_ROOT}/carpool/members.json")" "开启：播种的成员 = 现有账号，全员不限额不限期全协议"
 assert_equals "true|${CP_PERIOD}|1" "$(cp_state '"\(.enabled)|\(.period)|\(.resetDay)"')" "开启：state 开着、周期按 resetDay 算"
-assert_equals "yes" "$([[ "$(cp_state '.apiPort')" -ge 10000 && "$(cp_state '.apiPort')" -le 30000 ]] && echo yes || echo no)" "开启：apiPort 在 10000–30000"
+assert_equals "31211" "$(cp_state '.apiPort')" "开启：apiPort 取紧挨桥端口段那一段里第一个空闲的（本机封锁按端口封，被封的都落在 31111-31299）"
+assert_equals "31213" "$(run_cp 'listeningPorts() { printf "31211\n31212\n"; }; carpoolPickApiPort' 2>/dev/null)" "carpoolPickApiPort：跳过本机已在监听的端口（按 /proc/net，不靠 lsof）"
 assert_equals "zz|${CP_U1}|${CP_U2}" "$(cp_state '[.members[].uuid] | join("|")')" "开启：uuid 从 inbound 采用"
 assert_equals "active|active|active" "$(cp_state '[.members[].status] | join("|")')" "开启：全员 active"
 assert_equals "1" "$(grep -c '^reloadCore$' "${CP_CALLS}")" "开启：重载一次"
@@ -1492,7 +1523,7 @@ assert_equals "drwx------" "$(ls -ld "${CP_ROOT}/carpool" | awk '{print $1}' | c
 _out=$(run_cp 'carpoolEnable; echo "rc=$?"' 2>&1)
 assert_contains "${_out}" "拼车已经开着" "开启：已开着时提示"
 
-# 开启被拒的五种情形都不写 state
+# 开启被拒的六种情形都不写 state
 cp_reset_tree
 rm -f "${CP_ROOT}/carpool/state.json"
 _out=$(CP_CORE=2 run_cp 'carpoolEnable; echo "rc=$?"' 2>&1)
@@ -1507,7 +1538,13 @@ _out=$(CP_CROND_RC=1 run_cp 'carpoolEnable; echo "rc=$?"' 2>&1)
 assert_contains "${_out}" "cron 守护进程没在跑" "开启（crond 起不来）：拒绝"
 _out=$(run_cp 'flock() { :; }; command() { if [[ "$2" == "flock" ]]; then return 1; fi; builtin command "$@"; }; carpoolEnable; echo "rc=$?"' 2>&1)
 assert_contains "${_out}" "缺少 flock 命令" "开启（没有 flock）：拒绝"
-assert_equals "no" "$([[ -f "${CP_ROOT}/carpool/state.json" ]] && echo yes || echo no)" "开启（被拒 ×5）：仍没有 state"
+jq -n '{inbounds: [{listen: "127.0.0.1", port: 31305, protocol: "vless", settings: {clients: [{id: "zz", email: "zed-VLESS_Reality_gRPC"}], decryption: "none"}}]}' \
+    >"${CP_ROOT}/xray/conf/08_VLESS_vision_gRPC_inbounds.json"
+_out=$(run_cp 'carpoolEnable; echo "rc=$?"' 2>&1)
+assert_contains "${_out}" "rc=1" "开启（v1.0.x 留下的 gRPC 入站）：返回 1"
+assert_contains "${_out}" "08_VLESS_vision_gRPC_inbounds.json" "开启（v1.0.x 留下的 gRPC 入站）：点名对账管不到的文件"
+rm -f "${CP_ROOT}/xray/conf/08_VLESS_vision_gRPC_inbounds.json"
+assert_equals "no" "$([[ -f "${CP_ROOT}/carpool/state.json" ]] && echo yes || echo no)" "开启（被拒 ×6）：仍没有 state"
 
 # 再次开启：沿用上次的 members.json 与计数
 cp_reset_tree
@@ -1517,6 +1554,31 @@ _out=$(run_cp 'carpoolEnable; echo "rc=$?"' 2>&1)
 assert_contains "${_out}" "rc=0" "重开：返回 0"
 assert_equals "true|12345|23456" "$(cp_state '"\(.enabled)|\(.members.alice.upBytes)|\(.apiPort)"')" "重开：计数与 apiPort 沿用"
 assert_equals "no" "$([[ "${_out}" == *"已按现有账号生成"* ]] && echo yes || echo no)" "重开：已有 members.json 不再播种"
+# 关着时在菜单里删了 bob（只改协议文件，state 还记着他的 UUID）：重开要列出来、在终端里逐项确认，不确认就不开
+cp_reset_tree
+jq '.enabled = false' "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/s.tmp" && mv "${CP_ROOT}/carpool/s.tmp" "${CP_ROOT}/carpool/state.json"
+jq 'del(.inbounds[0].settings.clients[2])' "${CP_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json" >"${CP_ROOT}/t.json" && mv "${CP_ROOT}/t.json" "${CP_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
+jq 'del(.inbounds[1].settings.clients[2])' "${CP_ROOT}/xray/conf/07_VLESS_vision_reality_inbounds.json" >"${CP_ROOT}/t.json" && mv "${CP_ROOT}/t.json" "${CP_ROOT}/xray/conf/07_VLESS_vision_reality_inbounds.json"
+printf '%s\n' '{}' >"${CP_STATS}"
+_out=$(run_cp 'carpoolHasTty() { return 1; }; carpoolEnable; echo "rc=$?"' 2>&1 </dev/null)
+assert_contains "${_out}" "rc=1" "重开（关着时删了 bob，非 tty）：返回 1"
+assert_contains "${_out}" "bob 现在不在任何协议里" "重开（关着时删了 bob）：说出谁会被放回"
+assert_contains "${_out}" "需要在终端里逐项确认" "重开（非 tty）：说明要交互"
+assert_equals 'false|["zed","alice"]' "$(cp_state '.enabled')|$(cp_emails 02_VLESS_TCP_inbounds.json '.inbounds[0].settings.clients')" "重开（非 tty）：不开启，bob 不回来"
+_out=$(printf 'n\n' | run_cp 'carpoolHasTty() { return 0; }; carpoolEnable; echo "rc=$?"' 2>&1)
+assert_contains "${_out}" "已取消" "重开（回答 n）：取消"
+assert_equals 'false|["zed","alice"]' "$(cp_state '.enabled')|$(cp_emails 02_VLESS_TCP_inbounds.json '.inbounds[0].settings.clients')" "重开（回答 n）：不开启，bob 不回来"
+_out=$(printf 'y\n' | run_cp 'carpoolHasTty() { return 0; }; carpoolEnable; echo "rc=$?"' 2>&1)
+assert_contains "${_out}" "rc=0" "重开（回答 y）：返回 0"
+assert_equals "true|${CP_U2}" "$(cp_state '.enabled')|$(jq -r '.inbounds[0].settings.clients[] | select(.email | startswith("bob-")) | .id' "${CP_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json")" "重开（回答 y）：开启，bob 按原 UUID 放回"
+# 关着时给 bob 换了新 UUID：重开会改回 state 里的，同样要先说出来
+cp_reset_tree
+jq '.enabled = false' "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/s.tmp" && mv "${CP_ROOT}/carpool/s.tmp" "${CP_ROOT}/carpool/state.json"
+jq '.inbounds[0].settings.clients[2].id = "99999999-9999-9999-9999-999999999999"' "${CP_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json" >"${CP_ROOT}/t.json" && mv "${CP_ROOT}/t.json" "${CP_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
+jq '.inbounds[1].settings.clients[2].id = "99999999-9999-9999-9999-999999999999"' "${CP_ROOT}/xray/conf/07_VLESS_vision_reality_inbounds.json" >"${CP_ROOT}/t.json" && mv "${CP_ROOT}/t.json" "${CP_ROOT}/xray/conf/07_VLESS_vision_reality_inbounds.json"
+_out=$(run_cp 'carpoolHasTty() { return 1; }; carpoolEnable; echo "rc=$?"' 2>&1 </dev/null)
+assert_contains "${_out}" "bob 现在的 UUID 是 99999999-9999-9999-9999-999999999999，开启会改回拼车记着的 ${CP_U2}" "重开（关着时换了 UUID）：说出新旧两个 UUID"
+assert_equals "false" "$(cp_state '.enabled')" "重开（关着时换了 UUID，非 tty）：不开启"
 
 # --- 关闭：只恢复超额停用者；事务失败不关闭 ---
 cp_reset_tree
@@ -1536,6 +1598,10 @@ assert_equals "false|active|" "$(cp_state '"\(.enabled)|\(.members.alice.status)
 assert_equals '["zed","alice","bob"]' "$(cp_emails 02_VLESS_TCP_inbounds.json '.inbounds[0].settings.clients')" "关闭：alice 放回 02"
 assert_equals "no" "$([[ -f "${CP_ROOT}/xray/conf/12_stats_api.json" ]] && echo yes || echo no)" "关闭：reload 的 start 钩子撤掉 12_stats_api.json"
 assert_equals "0" "$(grep -c 'install.sh CarpoolTick' "${CP_TABLE}")" "关闭：cron 行删掉"
+# CarpoolTick 是 crontab 唯一一行时（一键 Reality 没有 RenewTLS），grep -v 空输出返回 1，在 install.sh 的 pipefail 下不能报成清理失败
+printf '%s\n' "*/5 * * * * PROXY_AGENT_DIR=${CP_ROOT} /bin/bash ${CP_ROOT}/install.sh CarpoolTick >> /dev/null 2>&1" >"${CP_TABLE}"
+_out=$(run_cp 'set -o pipefail; carpoolRemoveCron; echo "rc=$?"' 2>&1)
+assert_equals "no|0" "$([[ "${_out}" == *"清理 crontab 失败"* ]] && echo yes || echo no)|$(grep -c 'CarpoolTick' "${CP_TABLE}")" "关闭（cron 里只有 CarpoolTick）：删掉且不报失败"
 assert_equals "$((6 * GiB))" "$(cp_state '.members.alice.upBytes')" "关闭：计数不清零"
 # 到期停用者默认保持，回答第二问 y 才一并恢复
 cp_reset_tree
@@ -1594,6 +1660,40 @@ assert_contains "${_out}" "删除成员 bob" "应用（非 tty 删人）：先�
 assert_contains "${_out}" "需要在终端里逐项确认" "应用（非 tty 删人）：说明要交互"
 assert_equals "${_before02}" "$(cat "${CP_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json")" "应用（非 tty 删人）：协议文件不动"
 assert_equals "true" "$(cp_state '.members | has("bob")')" "应用（非 tty 删人）：state 不动"
+# 在终端里确认删人：账号从每个协议文件删掉（不是变成「不归拼车管的账号」留下），state 忘掉他
+: >"${CP_CALLS}"
+_out=$(printf 'y\n' | CP_SUBPORT=12345 run_cp 'carpoolHasTty() { return 0; }; carpoolApply; echo "rc=$?"' 2>&1)
+assert_contains "${_out}" "rc=0" "应用（确认删人）：返回 0"
+assert_equals '["zed","alice","carol"]' "$(cp_emails 02_VLESS_TCP_inbounds.json '.inbounds[0].settings.clients')" "应用（确认删人）：bob 从 02 删掉，zed 不动"
+assert_equals '["zed","alice","carol"]' "$(cp_emails 07_VLESS_vision_reality_inbounds.json '.inbounds[1].settings.clients')" "应用（确认删人）：bob 从 07 删掉"
+assert_equals "false|[\"bob\"]" "$(cp_state '"\(.members | has("bob"))|\(.removing | tojson)"')" "应用（确认删人）：成员表里没有 bob，待删记到 removing"
+assert_equals "1" "$(grep -c '^reloadCore$' "${CP_CALLS}")" "应用（确认删人）：重载一次"
+printf '%s\n' '{}' >"${CP_STATS}"
+run_cp 'carpoolTick' >/dev/null 2>&1
+assert_equals "null" "$(cp_state '.removing')" "应用（确认删人）：inbound 里已经没有他，下个 tick 清掉 removing"
+assert_equals '["bob"]' "$(cp_state '.retiredNames | tojson')" "应用（确认删人）：bob 记进 retiredNames，清掉 removing 后也留着"
+# 之后另一次应用加 bob-2：订阅文件按第一段定位，bob 手里的旧链接会拉到 bob-2 的凭据，要拒绝
+jq '.members["bob-2"] = {}' "${CP_ROOT}/carpool/members.json" >"${CP_ROOT}/m.tmp" && mv "${CP_ROOT}/m.tmp" "${CP_ROOT}/carpool/members.json"
+_out=$(run_cp 'carpoolApply; echo "rc=$?"' 2>&1 </dev/null)
+assert_contains "${_out}" "rc=1" "应用（复用已删成员的第一段）：返回 1"
+assert_contains "${_out}" "成员 bob-2 与已删除的成员 bob 名字的第一段相同" "应用（复用已删成员的第一段）：说明撞上了谁"
+assert_equals "false" "$(cp_state '.members | has("bob-2")')" "应用（复用已删成员的第一段）：state 不动"
+# 删人时对账失败：removing 留着，下个 tick 重试删掉
+cp_reset_tree
+printf '%s\n' '{"members": {"alice": {"quotaGiB": 5}}}' >"${CP_ROOT}/carpool/members.json"
+printf 'y\n' | XRAY_TEST_RC=1 run_cp 'carpoolHasTty() { return 0; }; carpoolApply' >/dev/null 2>&1
+assert_equals '["zed","alice","bob"]|["bob"]' "$(cp_emails 02_VLESS_TCP_inbounds.json '.inbounds[0].settings.clients')|$(cp_state '.removing | tojson')" "应用（删人时事务失败）：协议文件不动，removing 留着"
+printf '%s\n' '{}' >"${CP_STATS}"
+run_cp 'carpoolTick' >/dev/null 2>&1
+assert_equals '["zed","alice"]' "$(cp_emails 02_VLESS_TCP_inbounds.json '.inbounds[0].settings.clients')" "应用（删人时事务失败）：下个 tick 补删"
+run_cp 'carpoolTick' >/dev/null 2>&1
+assert_equals "null" "$(cp_state '.removing')" "应用（删人时事务失败）：删干净后 removing 清掉"
+printf '%s\n' '{"members": {"alice": {"quotaGiB": 5}, "bob": {}}}' >"${CP_ROOT}/carpool/members.json"
+_out=$(CP_SUBPORT=12345 run_cp 'carpoolApply; echo "rc=$?"' 2>&1 </dev/null)
+assert_equals '["zed","alice","bob"]' "$(cp_emails 02_VLESS_TCP_inbounds.json '.inbounds[0].settings.clients')" "应用（删了再加回）：bob 作为新成员回来"
+cp_reset_tree
+printf '%s\n' '{"members": {"alice": {"quotaGiB": 5}, "bob": {}, "carol": {"quotaGiB": 1, "protocols": [0, 7]}}}' >"${CP_ROOT}/carpool/members.json"
+run_cp 'carpoolApply' >/dev/null 2>&1 </dev/null
 # 文件无效
 printf '%s\n' '{"members": {"alice": {"quotaGiB": -1}}}' >"${CP_ROOT}/carpool/members.json"
 _out=$(run_cp 'carpoolApply; echo "rc=$?"' 2>&1 </dev/null)
@@ -1610,7 +1710,7 @@ assert_contains "${_out}" "拼车未开启" "应用（没开）：提示"
 cp_reset_tree
 for _d in default clashMeta clashMetaProfiles sing-box sing-box_profiles carpool; do mkdir -p "${CP_ROOT}/subscribe/${_d}"; echo x >"${CP_ROOT}/subscribe/${_d}/${CP_ALICE_MD5}"; done
 run_cp 'carpoolRemoveSubscriptionFiles alice' >/dev/null 2>&1
-assert_equals "0" "$(ls "${CP_ROOT}"/subscribe/*/"${CP_ALICE_MD5}" 2>/dev/null | wc -l | tr -d ' ')" "carpoolRemoveSubscriptionFiles：五个订阅目录与成员页都删"
+assert_equals "${CP_ROOT}/subscribe/carpool/${CP_ALICE_MD5}" "$(ls "${CP_ROOT}"/subscribe/*/"${CP_ALICE_MD5}" 2>/dev/null)" "carpoolRemoveSubscriptionFiles：五个订阅目录都删，页面目录不归它管"
 
 # --- 清零 ---
 cp_reset_tree
@@ -1631,6 +1731,8 @@ _out=$(run_cp 'read() { echo READ-CALLED; }; addUser; removeUser' 2>&1 </dev/nul
 assert_equals "2" "$(grep -c '拼车开启期间账号由' <<<"${_out}")" "守卫：拼车开着时 addUser / removeUser 都提示由配置文件管理"
 assert_equals "2" "$(grep -c '^MENU 1$' <<<"${_out}")" "守卫：拦住后回账号菜单"
 assert_equals "0" "$(grep -c 'READ-CALLED' <<<"${_out}")" "守卫：没有走到交互"
+_out=$(run_cp 'manageAccount() { echo "MENU $*"; return 1; }; read() { echo READ-CALLED; }; addUser; removeUser' 2>&1 </dev/null)
+assert_equals "0" "$(grep -c 'READ-CALLED' <<<"${_out}")" "守卫：回到的账号菜单以非零结束（比如输错选项）也不落进手动增删"
 jq '.enabled = false' "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/s.tmp" && mv "${CP_ROOT}/carpool/s.tmp" "${CP_ROOT}/carpool/state.json"
 _out=$(run_cp 'read() { echo READ-CALLED; userNum=0; }; addUser' 2>&1 </dev/null)
 assert_equals "1" "$(grep -c 'READ-CALLED' <<<"${_out}")" "守卫：关着时 addUser 照常进入交互"
@@ -1653,14 +1755,16 @@ assert_contains "${_out}" "rc=0" "页面开启：返回 0"
 _token=$(cp_state '.pageToken')
 assert_equals "true|yes" "$(cp_state '.pageEnabled')|$([[ "${_token}" =~ ^[0-9a-f]{32}$ ]] && echo yes || echo no)" "页面开启：state 记下 32 位十六进制令牌"
 assert_equals "yes" "$([[ -f "${CP_ROOT}/subscribe/carpool/${_token}" ]] && echo yes || echo no)" "页面开启：车主页文件 = 令牌"
-assert_equals "yes" "$([[ -f "${CP_ROOT}/subscribe/carpool/${CP_ALICE_MD5}" ]] && echo yes || echo no)" "页面开启：成员页文件 = md5(订阅键+salt)"
+_alicePage=$(printf '%s:alice' "${_token}" | cp_md5)
+assert_equals "yes" "$([[ -f "${CP_ROOT}/subscribe/carpool/${_alicePage}" ]] && echo yes || echo no)" "页面开启：成员页文件 = md5(车主页令牌:成员名)"
+assert_equals "no" "$([[ -f "${CP_ROOT}/subscribe/carpool/${CP_ALICE_MD5}" ]] && echo yes || echo no)" "页面开启：成员页不用订阅 md5（转发成员页不等于转发订阅）"
 assert_equals "3" "$(find "${CP_ROOT}/subscribe/carpool" -type f | wc -l | tr -d ' ')" "页面开启：车主页 + 两个成员页，没有别的文件"
 assert_equals "-rw-r--r--" "$(ls -l "${CP_ROOT}/subscribe/carpool/${_token}" | awk '{print $1}' | cut -c1-10)" "页面开启：文件 644（nginx 要读）"
 _page=$(cat "${CP_ROOT}/subscribe/carpool/${_token}")
 assert_contains "${_page}" "<td>alice</td>" "车主页：有成员行"
 assert_contains "${_page}" "未纳入拼车的账号: zed" "车主页：列出未纳入的账号"
 assert_equals "no" "$([[ "${_page}" == *"${CP_U1}"* ]] && echo yes || echo no)" "车主页：不含 UUID"
-_member=$(cat "${CP_ROOT}/subscribe/carpool/${CP_ALICE_MD5}")
+_member=$(cat "${CP_ROOT}/subscribe/carpool/${_alicePage}")
 assert_contains "${_member}" "· alice</h1>" "成员页：本人"
 assert_equals "no" "$([[ "${_member}" == *"bob"* ]] && echo yes || echo no)" "成员页：看不到别人"
 assert_equals "1" "$(grep -c 'location ~ "^/s/carpool/' "${CP_ROOT}/nginx/subscribe.conf")" "页面开启：subscribe.conf 多一个 location"
@@ -1668,7 +1772,7 @@ assert_equals "1" "$(grep -c '^    location ~ "^/s/(clashMeta' "${CP_ROOT}/nginx
 assert_equals "yes" "$(awk '/carpool-page-end/{e=NR} /^    location \/ \{/{l=NR} END{print (e && l && e < l) ? "yes" : "no"}' "${CP_ROOT}/nginx/subscribe.conf")" "页面开启：块插在 location / 之前"
 assert_equals "1|1" "$(grep -c '^nginx -t$' "${CP_CALLS}")|$(grep -c '^nginx -s reload$' "${CP_CALLS}")" "页面开启：nginx -t 过了才 reload"
 assert_contains "${_out}" "车主页: https://example.com:12345/s/carpool/${_token}" "页面开启：车主链接走订阅的域名与端口"
-assert_contains "${_out}" "成员页 alice: https://example.com:12345/s/carpool/${CP_ALICE_MD5}" "页面开启：成员链接"
+assert_contains "${_out}" "成员页 alice: https://example.com:12345/s/carpool/${_alicePage}" "页面开启：成员链接"
 echo junk >"${CP_ROOT}/subscribe/carpool/0123456789abcdef0123456789abcdef"
 : >"${CP_CALLS}"
 run_cp 'carpoolRenderPages' >/dev/null 2>&1
@@ -1681,7 +1785,7 @@ jq -n --argjson six $((6 * GiB)) '{stat: [{name: "user>>>alice-VLESS_TCP/TLS_Vis
 run_cp 'carpoolTick' >/dev/null 2>&1
 assert_contains "$(cat "${CP_ROOT}/subscribe/carpool/${_token}")" "已停用 · 流量已用尽" "tick 后：车主页显示停用"
 assert_contains "$(cat "${CP_ROOT}/subscribe/carpool/${_token}")" "<p>整机本周期 - · 成员合计 12.88 GB · 计费口径：双向（进 + 出）</p>" "tick 后：车主页有整机一行（还没有读数时整机写 -），成员合计按口径"
-assert_contains "$(cat "${CP_ROOT}/subscribe/carpool/${CP_ALICE_MD5}")" "已停用 · 流量已用尽" "tick 后：成员页同步"
+assert_contains "$(cat "${CP_ROOT}/subscribe/carpool/${_alicePage}")" "已停用 · 流量已用尽" "tick 后：成员页同步"
 # 配置文件待应用 / 无效 的提示
 printf '%s\n' '{"members": {"alice": {"quotaGiB": 50}, "bob": {}}}' >"${CP_ROOT}/carpool/members.json"
 run_cp 'carpoolRenderPages' >/dev/null 2>&1
@@ -1835,6 +1939,12 @@ cp_reset_tree; cp_tg_conf
 jq -n --argjson six $((6 * GiB)) '{stat: [{name: "user>>>alice-VLESS_TCP/TLS_Vision>>>traffic>>>uplink", value: $six}]}' >"${CP_STATS}"
 XRAY_TEST_RC=1 run_cp 'carpoolTick' >/dev/null 2>&1
 assert_contains "$(cat "${CP_CALLS}")" "账户事务失败，协议文件未改动" "通知（事务失败）：发一条"
+XRAY_TEST_RC=1 run_cp 'carpoolTick' >/dev/null 2>&1
+assert_equals "1" "$(grep -c '账户事务失败' "${CP_CALLS}")" "通知（事务失败）：每个 tick 都失败也只发一次"
+run_cp 'carpoolTick' >/dev/null 2>&1
+assert_equals "null" "$(cp_state '.notified["tx:failed"]')" "通知（事务失败）：对账成功一次后去重键清掉"
+XRAY_TEST_RC=1 run_cp 'jq ".members.alice.status = \"active\"" "${CARPOOL_STATE_FILE}" > "${CARPOOL_STATE_FILE}.t" && mv "${CARPOOL_STATE_FILE}.t" "${CARPOOL_STATE_FILE}"; carpoolSettle "[]"' >/dev/null 2>&1
+assert_equals "2" "$(grep -c '账户事务失败' "${CP_CALLS}")" "通知（事务失败）：恢复之后再失败，重新发一次"
 # cron 入口的 EXIT 陷阱：reload 把进程带走时补一条；正常结束不发
 cp_reset_tree; cp_tg_conf
 jq -n --argjson six $((6 * GiB)) '{stat: [{name: "user>>>alice-VLESS_TCP/TLS_Vision>>>traffic>>>uplink", value: $six}]}' >"${CP_STATS}"
@@ -1875,7 +1985,36 @@ assert_equals "1" "$(grep -c 'ensureCarpoolXray' <<<"${HANDLE_XRAY_FN}")" "handl
 assert_equals "1" "$(grep -c 'carpoolCollectBeforeStop' <<<"${HANDLE_XRAY_FN}")" "handleXray stop 里挂了采集钩子"
 SUBSCRIBE_FN=$(sed -n '/^subscribe() {/,/^}/p' install.sh)
 assert_equals "1" "$(grep -c 'carpoolWritePlaceholders' <<<"${SUBSCRIBE_FN}")" "subscribe 末尾给停用成员补占位"
-assert_equals "2" "$(grep -c 'wget -O "${_singboxTplFile}" -q --timeout=15' <<<"${SUBSCRIBE_FN}")" "subscribe：sing-box 模板的两处 wget 带超时（cron 下不能挂死）"
+assert_equals "2" "$(grep -c 'wget -O "${_singboxTpl}" -q --timeout=15' <<<"${SUBSCRIBE_FN}")" "subscribe：sing-box 模板的两处 wget 带超时（cron 下不能挂死）"
+
+# subscribe false true（carpoolRefreshSubscribe 走的静默重建）：三种格式都重建；模板拉不到时已有的 sing-box 配置不动
+CP_ZED_MD5=$(printf 'zedtestsalt\n' | cp_md5)
+CP_SUB_STUBS='readInstallProtocolType() { :; }; installSubscribe() { :; }
+    showAccounts() {
+        local n
+        mkdir -p "${SUBSCRIBE_LOCAL_DIR}/default" "${SUBSCRIBE_LOCAL_DIR}/clashMeta" "${SUBSCRIBE_LOCAL_DIR}/sing-box"
+        for n in alice zed; do
+            echo "vless://${n}" >"${SUBSCRIBE_LOCAL_DIR}/default/${n}"
+            echo "  - {name: ${n}}" >"${SUBSCRIBE_LOCAL_DIR}/clashMeta/${n}"
+            echo "[{\"tag\": \"${n}-out\", \"type\": \"vless\"}]" >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${n}"
+        done
+    }
+    clashMetaConfig() { echo "$1" >"${SUBSCRIBE_DIR}/clashMetaProfiles/$2"; }'
+CP_WGET_OK='wget() { local out; while [[ $# -gt 0 ]]; do [[ "$1" == -O ]] && out=$2; shift; done; echo "{\"outbounds\": [{\"tag\": \"select\", \"outbounds\": []}]}" >"${out}"; }'
+cp_reset_tree
+mkdir -p "${CP_ROOT}/subscribe/clashMetaProfiles"
+echo stale >"${CP_ROOT}/subscribe/clashMeta/${CP_ALICE_MD5}"
+echo placeholder >"${CP_ROOT}/subscribe/sing-box/${CP_ALICE_MD5}"
+run_cp "${SUBSCRIBE_FN}; ${CP_SUB_STUBS}; ${CP_WGET_OK}; subscribe false true" >/dev/null 2>&1
+assert_equals "proxies:|  - {name: zed}" "$(paste -sd'|' "${CP_ROOT}/subscribe/clashMeta/${CP_ZED_MD5}")" "subscribe 静默：别人的 clashMeta 文件也重建，不是删光了事"
+assert_contains "$(cat "${CP_ROOT}/subscribe/clashMetaProfiles/${CP_ALICE_MD5}" 2>/dev/null)" "/s/clashMeta/${CP_ALICE_MD5}" "subscribe 静默：clashMetaProfiles 照常生成、指向重建的 clashMeta"
+assert_equals '["select","alice-out"]|["alice-out"]' "$(jq -c '[.outbounds[].tag]' "${CP_ROOT}/subscribe/sing-box/${CP_ALICE_MD5}" 2>/dev/null)|$(jq -c '.outbounds[0].outbounds' "${CP_ROOT}/subscribe/sing-box/${CP_ALICE_MD5}" 2>/dev/null)" \
+    "subscribe 静默：恢复的人的 sing-box 配置从占位换回真配置"
+assert_equals "yes" "$([[ -s "${CP_ROOT}/subscribe/sing-box_profiles/${CP_ZED_MD5}" ]] && echo yes || echo no)" "subscribe 静默：sing-box_profiles 照常生成"
+echo placeholder >"${CP_ROOT}/subscribe/sing-box/${CP_ALICE_MD5}"
+run_cp "${SUBSCRIBE_FN}; ${CP_SUB_STUBS}; wget() { return 4; }; subscribe false true" >/dev/null 2>&1
+assert_equals "placeholder" "$(cat "${CP_ROOT}/subscribe/sing-box/${CP_ALICE_MD5}")" "subscribe：模板拉不到时不动已有的 sing-box 配置"
+assert_equals "proxies:" "$(head -1 "${CP_ROOT}/subscribe/clashMeta/${CP_ALICE_MD5}")" "subscribe：模板拉不到不影响 clashMeta 重建"
 
 rm -rf "${CP_ROOT}" "${_snap}" "${CP_TABLE}" "${CP_CALLS}" "${CP_STATS}"
 echo ""
@@ -2082,6 +2221,10 @@ jq -cn '{accounts: {bob: "chain_outbound"}}' >"${CA_ENTRY}"
 cp "${CA_MERGED}.orig" "${CA_MERGED}"
 run_ca "chainAccountInject ${CA_MERGED}" >/dev/null 2>&1
 assert_equals '["bob-VLESS_Reality_Vision","bob-singbox_naive"]' "$(jq -c '.route.rules[0].auth_user' "${CA_MERGED}")" "注入（状态缺 role）：照常读映射，不当成「不是入口」跳过"
+# sing-box 1.12.0–1.14.3 的 merge 把 naive 的用户写成 Go 字段名 Username / Password，1.14.4 起才是小写
+jq '.inbounds[1].users = [{Username: "bob-singbox_naive", Password: "p"}]' "${CA_MERGED}.orig" >"${CA_MERGED}"
+run_ca "chainAccountInject ${CA_MERGED}" >/dev/null 2>&1
+assert_equals '["bob-VLESS_Reality_Vision","bob-singbox_naive"]' "$(jq -c '.route.rules[0].auth_user' "${CA_MERGED}")" "注入（旧版 merge 的大写 Username）：naive 账号照样进规则，不落到默认出口"
 
 # --- 没有映射、external_single、坏状态 ---
 ca_reset
@@ -2203,7 +2346,14 @@ run_ca 'ensureXrayLocalBlock' >/dev/null 2>&1
 assert_equals '["local_pass",["dokodemo-in-VLESSReality"]]|local_block|local_block|4' "$(ca_rules '"\([.routing.rules[0].outboundTag, .routing.rules[0].inboundTag] | tojson)|\(.routing.rules[1].outboundTag)|\(.routing.rules[2].outboundTag)|\(.routing.rules | length)"' | jq -r .)" \
     "本机封锁（Xray）：dokodemo-door 入站转给 127.0.0.1 写死端口的那一跳先放行（Reality 的 443 就是这样转给 45987 的）"
 printf '%s\n' '{"routing":' >"${CA_X}/09_routing.json"
-assert_contains "$(run_ca 'ensureXrayLocalBlock; echo rc=$?' 2>&1)" "rc=1" "本机封锁（Xray）：路由文件读不懂时返回 1（handleXray 随之不启动）"
+_caOut=$(run_ca 'ensureXrayLocalBlock; echo rc=$?' 2>&1)
+assert_contains "${_caOut}" "rc=1" "本机封锁（Xray）：路由文件读不懂时返回 1（handleXray 随之不启动）"
+assert_contains "${_caOut}" "jq 读不了 ${CA_X}/09_routing.json" "本机封锁（Xray）：点名读不懂的文件"
+printf '%s\n' '{"routing":{"rules":[]}}' >"${CA_X}/09_routing.json"
+printf '%s\n' '// hand-written note' '{"log":{"loglevel":"warning"}}' >"${CA_X}/00_log.json"
+_caOut=$(run_ca 'ensureXrayLocalBlock; echo rc=$?' 2>&1)
+assert_contains "${_caOut}" "jq 读不了 ${CA_X}/00_log.json" "本机封锁（Xray）：别的片段带注释也点名它，不赖路由文件"
+assert_equals "0" "$(grep -c "jq 读不了 ${CA_X}/09_routing.json" <<<"${_caOut}")" "本机封锁（Xray）：读得懂的文件不点名"
 
 ca_reset
 printf '%s\n' '{"stats":{},"api":{"tag":"api","listen":"127.0.0.1:23456","services":["StatsService"]}}' >"${CA_X}/12_stats_api.json"
@@ -2528,6 +2678,8 @@ pp_reset
 assert_contains "$(pp_redirect 443)" 'return 301 https://example.com$request_uri;' "80 跳转：0 在 443 时跳到不带端口的 https"
 assert_contains "$(pp_redirect 443)" 'listen 80;' "80 跳转：监听 80"
 assert_contains "$(pp_redirect 8443)" 'return 301 https://example.com:8443$request_uri;' "80 跳转：0 不在 443 时带上端口"
+# 这个块常是 :80 唯一的 server：别的 Host（含不带 Host 的 HTTP/1.0）也会落进来，要先断开再谈跳转
+assert_contains "$(pp_redirect 443)" $'\tif ($http_host !~* "^example\\.com(:80)?$") {\n\t\treturn 444;\n\t}\n\treturn 301' "80 跳转：只有 Host 是本域名才跳，其余 444 断开（看 \$http_host，点号转义）"
 assert_equals "absent" "$(pp_redirect 443 bt.example.com)" "80 跳转：宝塔 / 1Panel 场景不写，旧文件也删掉"
 assert_equals "absent" "$(LIVE_TCP=80 pp_redirect 443)" "80 跳转：80 被别的程序占着就不写"
 assert_equals "absent" "$(pp_redirect 80)" "80 跳转：0 自己就在 80 上时不写"
@@ -2888,6 +3040,83 @@ assert_equals "0" "$(grep -c 'ssl_reject_handshake' "${SUB_CONF}")" "installSubs
 assert_equals "23456|https" "$(run_sub none cert v4)" "installSubscribe：先装 nginx 再配订阅"
 assert_equals "1" "$(grep -c 'ssl_reject_handshake on;' "${SUB_CONF}")" "installSubscribe：按装完后的 nginx 版本判，不用装之前的 not found"
 assert_contains "$(grep -m1 listen "${SUB_CONF}")" "http2 on;" "installSubscribe：装完后的 nginx ≥ 1.25.1 时开 http2"
+
+echo ""
+
+echo -e "${YELLOW}=== 测试 rollbackScript 从 GitHub 回滚 ===${NC}"
+
+RB_FN=$(sed -n '/^rollbackScript() {/,/^}/p' install.sh)
+assert_not_empty "${RB_FN}" "rollbackScript：抽到函数原文"
+RB_ROOT="${MOCK_ROOT}/rollback.root"
+RB_TAG="${MOCK_ROOT}/rollback.tag"
+
+# $1：目标 tag 的 install.sh 提不提 carpool.sh（yes|no）；$2：那个 tag 下有没有 lib/carpool.sh（yes|no）。输出退出码
+run_rb() {
+    local m
+    rm -rf "${RB_ROOT}" "${RB_TAG}"
+    mkdir -p "${RB_ROOT}/lib" "${RB_ROOT}/shell/lang" "${RB_TAG}/lib" "${RB_TAG}/shell/lang"
+    for m in i18n constants utils json-utils system-detect protocol-registry carpool; do
+        echo "# new ${m}" >"${RB_ROOT}/lib/${m}.sh"
+        echo "# old ${m}" >"${RB_TAG}/lib/${m}.sh"
+    done
+    [[ "$2" == yes ]] || rm -f "${RB_TAG}/lib/carpool.sh"
+    printf 'libFiles=(i18n.sh constants.sh utils.sh json-utils.sh system-detect.sh protocol-registry.sh%s)\n' "$([[ "$1" == yes ]] && echo ' carpool.sh')" >"${RB_TAG}/install.sh"
+    echo '# zh' >"${RB_TAG}/shell/lang/zh_CN.sh"
+    echo '# en' >"${RB_TAG}/shell/lang/en_US.sh"
+    echo 1.5.0 >"${RB_ROOT}/VERSION"
+    printf '1\ny\n' | env PROXY_AGENT_DIR="${RB_ROOT}" RB_TAG="${RB_TAG}" RB_FN="${RB_FN}" V2RAY_LANG=zh_CN bash -c '
+        source lib/i18n.sh; source lib/utils.sh
+        listScriptVersions() { scriptVersionList=("github:v1.4.1"); }
+        backupScript() { echo "${PROXY_AGENT_DIR}/backup/x"; }
+        verifyInstallSHA256() { return 0; }
+        wget() {
+            local out url
+            while [[ $# -gt 0 ]]; do case "$1" in -O) out=$2; shift 2 ;; -*) shift ;; *) url=$1; shift ;; esac; done
+            [[ -f "${RB_TAG}/${url#*/v1.4.1/}" ]] || return 8
+            cp "${RB_TAG}/${url#*/v1.4.1/}" "${out}"
+        }
+        eval "${RB_FN}"
+        rollbackScript' >/dev/null 2>&1
+    echo $?
+}
+
+assert_equals "0" "$(run_rb no no)" "rollbackScript（GitHub）：回到还没有 carpool 的版本照样成功"
+assert_equals "1.4.1|# old i18n" "$(cat "${RB_ROOT}/VERSION")|$(cat "${RB_ROOT}/lib/i18n.sh")" "rollbackScript（GitHub）：版本号与旧模块落盘"
+assert_equals "no" "$([[ -f "${RB_ROOT}/lib/carpool.sh" ]] && echo yes || echo no)" "rollbackScript（GitHub）：目标版本没有的模块删掉，与本地备份回滚一致"
+assert_equals "1" "$(run_rb yes no)" "rollbackScript（GitHub）：目标版本要 carpool 却下不到时中止"
+assert_equals "1.5.0|# new carpool" "$(cat "${RB_ROOT}/VERSION")|$(cat "${RB_ROOT}/lib/carpool.sh")" "rollbackScript（GitHub）：中止时一个文件都不动"
+assert_equals "0" "$(run_rb yes yes)" "rollbackScript（GitHub）：目标版本有 carpool 时照常下"
+assert_equals "# old carpool" "$(cat "${RB_ROOT}/lib/carpool.sh")" "rollbackScript（GitHub）：carpool 换成目标版本的"
+rm -rf "${RB_ROOT}" "${RB_TAG}"
+
+echo ""
+
+echo -e "${YELLOW}=== 测试 IPv6 / WARP 分流的状态显示 ===${NC}"
+
+RT_FN=$(sed -n '/^xrayRoutingHasOutbound() {/,/^}/p;/^showIPv6Routing() {/,/^}/p;/^showWireGuardDomain() {/,/^}/p' install.sh)
+assert_equals "3" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${RT_FN}")" "分流显示：三个函数都抽到了"
+RT_DIR="${MOCK_ROOT}/routing-show/"
+# $1 = 09_routing.json 的内容（none 表示没有这个文件），其余参数是要建的出站文件名；输出两个显示函数打印的内容
+run_rt() {
+    local f
+    rm -rf "${RT_DIR}"; mkdir -p "${RT_DIR}"
+    [[ "$1" == none ]] || printf '%s\n' "$1" >"${RT_DIR}09_routing.json"
+    shift
+    for f in "$@"; do echo '{}' >"${RT_DIR}${f}.json"; done
+    env RT_DIR="${RT_DIR}" RT_FN="${RT_FN}" bash -c '
+        source lib/utils.sh
+        configPath="${RT_DIR}"; coreKind=1; singBoxConfigPath=
+        eval "${RT_FN}"
+        showIPv6Routing; showWireGuardDomain IPv4' 2>&1
+}
+RT_BLOCK='{"routing":{"rules":[{"type":"field","ruleTag":"local-block","port":"31111-31210","outboundTag":"local_block"}]}}'
+assert_contains "$(run_rt "${RT_BLOCK}" IPv6_out)" "已设置IPv6全局分流" "分流显示：全局模式下 09_routing.json 只剩本机封锁规则，仍认得出是 IPv6 全局"
+assert_contains "$(run_rt "${RT_BLOCK}" wireguard_out_IPv4)" "已设置warp IPv4全局分流" "分流显示：WARP 全局同理"
+assert_contains "$(run_rt none IPv6_out)" "已设置IPv6全局分流" "分流显示：还没起过 Xray、文件真不在时照旧"
+_rtOut=$(run_rt '{"routing":{"rules":[{"type":"field","domain":["geosite:netflix"],"outboundTag":"IPv6_out"}]}}' IPv6_out)
+assert_contains "${_rtOut}" "geosite:netflix" "分流显示：按域名分流时列出域名"
+assert_contains "${_rtOut}" "未安装warp IPv4分流" "分流显示：没有 WARP 出站时显示未安装"
+rm -rf "${RT_DIR}"
 
 echo ""
 

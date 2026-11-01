@@ -29,6 +29,9 @@ readonly CHAIN_MULTI_INFO="${SINGBOX_CONF_DIR}/chain_multi_info.json"
 # 低于 Linux 临时端口段，也不与 randomPort 的 10000-30000 重叠
 readonly CHAIN_BRIDGE_PORT=31111
 readonly CHAIN_BRIDGE_PORT_LAST=31210
+# 拼车统计 API 从紧挨桥端口段的这段里挑：本机封锁按端口封、对所有目标生效，被封的端口因此都在 31111-31299 之内
+readonly CARPOOL_API_PORT_FIRST=31211
+readonly CARPOOL_API_PORT_LAST=31299
 readonly EXTERNAL_NODE_FILE="${SINGBOX_CONF_DIR}/external_node_info.json"
 readonly TLS_DIR="${PROXY_AGENT_DIR}/tls"
 readonly SUBSCRIBE_DIR="${PROXY_AGENT_DIR}/subscribe"

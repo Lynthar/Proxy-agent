@@ -65,6 +65,15 @@ chain)
         echo "✗ 出口机在入口测试期间只发出 ${exitTx} 字节，不到经链式下载的 4 MB"
         rc=1
     fi
+    # 出口机不拆链式直接卸载：sing-box 只为链式而起（没有 6 / 9），也得停掉、删掉服务单元，否则卸完照常转发、重启后无限重试
+    docker exec "${exitCid}" bash -c "printf '20\ny\n' | pasly" >/dev/null 2>&1
+    left=$(docker exec "${exitCid}" bash -c 'pgrep -x sing-box; ls /etc/systemd/system/sing-box.service 2>/dev/null' || true)
+    if [[ -z "${left}" ]]; then
+        echo "✓ 出口机直接卸载后 sing-box 已停、服务单元已删"
+    else
+        echo "✗ 出口机卸载后 sing-box 还在：${left}"
+        rc=1
+    fi
     exit "${rc}"
     ;;
 *)

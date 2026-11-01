@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test_install_e2e.sh - 真装机端到端：以 root 在一次性容器里跑「一键 Reality」（菜单 19 → E2E_CORE 选的内核），
 # 用内核自检、真实 Reality 握手（客户端由 E2E_CLIENT 选，默认同内核）、pasly 重入与 doctor 验收；Xray 内核再开拼车、
-# 走一遍真实计量、到期停用与关闭恢复（chain 腿另在中间接上、拆掉链式），最后卸载。跑法见 tests/e2e/run.sh
+# 走一遍真实计量、增删成员、回滚、到期停用与关闭恢复（chain 腿另在中间接上、拆掉链式），最后卸载。跑法见 tests/e2e/run.sh
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -383,10 +383,10 @@ else
     }' >"${clientConf}"
     clientCmd=("${CLIENT_BIN}" run -c "${clientConf}")
 fi
-# realityProbe → 起一次客户端、经服务端访问外网、关掉客户端，打印 HTTP 状态码（连不上是 000）
+# realityProbe [CLIENT_CONF] → 起一次客户端（默认用按链接配的那份）、经服务端访问外网、关掉客户端，打印 HTTP 状态码（连不上是 000）
 realityProbe() {
     local pid code
-    "${clientCmd[@]}" >/tmp/proxy-agent-e2e-client.log 2>&1 &
+    "${CLIENT_BIN}" run -c "${1:-${clientConf}}" >/tmp/proxy-agent-e2e-client.log 2>&1 &
     pid=$!
     sleep 2
     code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 --proxy socks5h://127.0.0.1:10808 \
@@ -459,7 +459,7 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
 fi
 
 # ============================================================================
-# 拼车（只有 Xray 内核能开）：菜单 7 → 6 → 4 开启，真实流量要被 cron 那条 tick 记进成员名下；再到期停用、关闭时恢复
+# 拼车（只有 Xray 内核能开）：菜单 7 → 6 → 4 开启，真实流量要被 cron 那条 tick 记进成员名下；增删成员、回滚不倒回用量，再到期停用、关闭时恢复
 # ============================================================================
 
 # listenAddrs PORT → 该 TCP 端口上 LISTEN 的本地地址（/proc/net/tcp{,6} 的十六进制形式），每行一个
@@ -499,6 +499,22 @@ carpoolIntact() {
         "$1：12_policy.json 的统计开关还在"
     assert_contains "$(xrayEnviron)" "XRAY_BUF_SPLICE=disable" "$1：Xray 进程仍带 XRAY_BUF_SPLICE=disable"
     assert_equals "${carpoolCron}" "$(crontab -l 2>/dev/null | grep -F 'install.sh CarpoolTick')" "$1：CarpoolTick 的 cron 行还在"
+}
+
+# applyMembers [tty] → 菜单 7 → 6 → 2 应用 members.json，打印去色后的输出，退出码随 pasly。
+# 带 tty 时经 util-linux 的 script 给它一个终端、对删除确认答 y；pty 的换行是 \r\n，去掉，外面套 timeout 防挂住
+applyMembers() {
+    if [[ "${1:-}" == "tty" ]]; then
+        printf '7\n6\n2\ny\n' | timeout 120 script -qec 'V2RAY_LANG=en pasly' /dev/null 2>&1 | tr -d '\r' | sed 's/\x1b\[[0-9;]*m//g'
+    else
+        printf '7\n6\n2\n' | V2RAY_LANG=en pasly 2>&1 | sed 's/\x1b\[[0-9;]*m//g'
+    fi
+    return "${PIPESTATUS[1]}"
+}
+
+# memberUsed NAME [STATE_FILE] → state 里该成员的原始上下行合计（默认读现场的 state.json）
+memberUsed() {
+    jq -r --arg u "$1" '.members[$u] | .upBytes + .downBytes' "${2:-${carpoolDir}/state.json}" 2>/dev/null
 }
 
 # accountExit KEYS → 经菜单 3 → 8 按账号选出口（KEYS 是 printf 格式的后续输入），打印去色后的输出，退出码随 pasly
@@ -574,7 +590,7 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
     fi
     assert_equals "0" "${tickRc}" "CarpoolTick 在 cron 的环境下退出码 0"
     carpoolState=$(cat "${carpoolDir}/state.json" 2>/dev/null)
-    usedBytes=$(jq -r --arg u "${E2E_USER}" '.members[$u] | .upBytes + .downBytes' <<<"${carpoolState}" 2>/dev/null)
+    usedBytes=$(memberUsed "${E2E_USER}")
     assert_equals "yes" "$([[ "${usedBytes}" =~ ^[0-9]+$ && "${usedBytes}" -gt 0 ]] && echo yes || echo no)" \
         "这次流量记进了 ${E2E_USER} 名下（${usedBytes} 字节）"
     assert_equals "0" "$(jq -r '.collectFailures' <<<"${carpoolState}" 2>/dev/null)" "采集没有失败计数"
@@ -594,6 +610,91 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
             --data-binary @/tmp/proxy-agent-e2e-reset.bin "http://${localTarget}:${apiPort}/xray.app.stats.command.StatsService/QueryStats")" \
             "经代理连统计 API（${localTarget}:${apiPort}）被拦下，清零请求发不过去"
     done
+
+    echo ""
+    echo -e "${YELLOW}=== 菜单 7 → 6 → 2：文件里加一个成员并应用，新成员用自己的 UUID 连得上 ===${NC}"
+    E2E_GUEST="e2eguest"
+    membersBefore=$(cat "${carpoolDir}/members.json")
+    # 不写 uuid：应用时由 Xray 现生成，state 里记下
+    membersWithGuest=$(jq --arg g "${E2E_GUEST}" '.members[$g] = {quotaGiB: 0, expire: "", protocols: "all"}' <<<"${membersBefore}")
+    printf '%s\n' "${membersWithGuest}" >"${carpoolDir}/members.json"
+    addOut=$(applyMembers)
+    addRc=$?
+    [[ ${addRc} -ne 0 ]] && tail -n 20 <<<"${addOut}"
+    assert_equals "0" "${addRc}" "只有新增、不用确认：不在 tty 上也应用成功"
+    guestUUID=$(jq -r --arg g "${E2E_GUEST}" '.members[$g].uuid // empty' "${carpoolDir}/state.json" 2>/dev/null)
+    assert_equals "yes" "$([[ "${guestUUID}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] && echo yes || echo no)" \
+        "文件里没写 UUID，state 给 ${E2E_GUEST} 生成了一个（${guestUUID}）"
+    assert_equals "${E2E_GUEST}-vless_reality_vision" "$(jq -r --arg id "${guestUUID}" '.inbounds[1].settings.clients[]? | select(.id == $id) | .email' "${realityConf}" 2>/dev/null)" \
+        "${E2E_GUEST} 以这个 UUID 进了 Reality 入站"
+    guestConf=/tmp/proxy-agent-e2e-client-guest.json
+    if [[ "${E2E_CLIENT}" == "xray" ]]; then
+        jq --arg id "${guestUUID}" '.outbounds[0].settings.vnext[0].users[0].id = $id' "${clientConf}" >"${guestConf}"
+    else
+        jq --arg id "${guestUUID}" '.outbounds[0].uuid = $id' "${clientConf}" >"${guestConf}"
+    fi
+    assert_equals "204" "$(realityProbe "${guestConf}")" "${E2E_GUEST} 用自己的 UUID 经服务端访问外网"
+
+    echo ""
+    echo -e "${YELLOW}=== 拼车：从文件删掉这个成员 → 不在 tty 上应用被拒、什么都不改 → 在 tty 上确认删除 ===${NC}"
+    printf '%s\n' "${membersBefore}" >"${carpoolDir}/members.json"
+    refuseOut=$(applyMembers)
+    refuseRc=$?
+    assert_equals "yes" "$([[ ${refuseRc} -ne 0 ]] && echo yes || echo no)" "删除要逐项确认，不在 tty 上应用以非零退出（${refuseRc}）"
+    assert_contains "${refuseOut}" "must be confirmed item by item in a terminal" "拒绝时告诉车主要在终端里确认"
+    assert_equals "true" "$(jq --arg g "${E2E_GUEST}" '.members | has($g)' "${carpoolDir}/state.json" 2>/dev/null)" "被拒后 ${E2E_GUEST} 仍在 state 的成员表里"
+    assert_equals "204" "$(realityProbe "${guestConf}")" "被拒后 ${E2E_GUEST} 照样连得上（没有半应用）"
+    if command -v script >/dev/null 2>&1; then
+        removeOut=$(applyMembers tty)
+        removeRc=$?
+        [[ ${removeRc} -ne 0 ]] && tail -n 20 <<<"${removeOut}"
+        assert_equals "0" "${removeRc}" "在 tty 上确认删除，应用退出码 0"
+        assert_contains "${removeOut}" "Remove member ${E2E_GUEST} (account and subscription files)?" "确认提示点名 ${E2E_GUEST}"
+        assert_equals "0" "$(jq --arg id "${guestUUID}" '[.inbounds[1].settings.clients[]? | select(.id == $id)] | length' "${realityConf}" 2>/dev/null)" \
+            "${E2E_GUEST} 已从 Reality 入站拿掉"
+        assert_equals "no" "$([[ "$(realityProbe "${guestConf}" 2>/dev/null)" == "204" ]] && echo yes || echo no)" "被删的 ${E2E_GUEST} 用原 UUID 连不上"
+        assert_equals "204" "$(realityProbe)" "${E2E_USER} 不受影响，照常上网"
+        removeTickOut=$(runCarpoolTick "${carpoolCron}")
+        removeTickRc=$?
+        [[ ${removeTickRc} -ne 0 ]] && echo "${removeTickOut}"
+        assert_equals "0|0|false" "${removeTickRc}|$(jq --arg id "${guestUUID}" '[.inbounds[1].settings.clients[]? | select(.id == $id)] | length' "${realityConf}" 2>/dev/null)|$(jq 'has("removing")' "${carpoolDir}/state.json" 2>/dev/null)" \
+            "删人后的 tick：退出码 0，${E2E_GUEST} 没被加回来，待删记录已清"
+        tickOut+=$'\n'"${removeTickOut}"
+    else
+        # Alpine 只有 BusyBox、没有 script；装 util-linux 会连 BusyBox 的 flock 一起换掉，这条腿就不再测它了
+        echo -e "${YELLOW}跳过在 tty 上确认删人：容器里没有 script，这一步只在 Debian 腿上验${NC}"
+        printf '%s\n' "${membersWithGuest}" >"${carpoolDir}/members.json"
+    fi
+
+    echo ""
+    echo -e "${YELLOW}=== 菜单 22 → 3 备份、跑流量，再 22 → 2 回滚并恢复配置：用量不倒回快照那天 ===${NC}"
+    backupOut=$(printf '22\n3\n' | V2RAY_LANG=en pasly 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+    backupDir=$(ls -1td "${INSTALL_ROOT}"/backup/v* 2>/dev/null | head -n 1)
+    assert_contains "${backupOut}" "Backup successful" "手动备份成功"
+    snapshotUsed=$(memberUsed "${E2E_USER}" "${backupDir}/config/carpool/state.json")
+    membersAtBackup=$(cat "${carpoolDir}/members.json")
+    # 备份之后改一下文件（只改配额，tick 会同步、不用应用）：回滚后它回到快照里的样子，才说明快照真的恢复了
+    jq --arg u "${E2E_USER}" '.members[$u].quotaGiB = 500' <<<"${membersAtBackup}" >"${carpoolDir}/members.json"
+    assert_equals "yes" "$([[ "${snapshotUsed}" =~ ^[0-9]+$ ]] && echo yes || echo no)" "备份的配置快照里带着 carpool/state.json（${E2E_USER} 当时 ${snapshotUsed} 字节）"
+    realityProbe >/dev/null
+    runCarpoolTick "${carpoolCron}" >/dev/null
+    usedBeforeRollback=$(memberUsed "${E2E_USER}")
+    assert_equals "yes" "$([[ "${usedBeforeRollback}" =~ ^[0-9]+$ && "${snapshotUsed}" =~ ^[0-9]+$ && usedBeforeRollback -gt snapshotUsed ]] && echo yes || echo no)" \
+        "备份之后的流量已记账：${usedBeforeRollback} > 快照里的 ${snapshotUsed}"
+    # 这段流量不跑 tick：要么回滚停 Xray 时由停机钩子收进 state，要么被 cron 的 tick 先收走
+    realityProbe >/dev/null
+    rollbackOut=$(printf '22\n2\n1\ny\ny\n' | V2RAY_LANG=en pasly 2>&1)
+    rollbackRc=$?
+    rollbackOut=$(sed 's/\x1b\[[0-9;]*m//g' <<<"${rollbackOut}")
+    [[ ${rollbackRc} -ne 0 || "${rollbackOut}" != *"Config restored"* ]] && tail -n 30 <<<"${rollbackOut}"
+    assert_equals "0" "${rollbackRc}" "回滚退出码 0"
+    assert_contains "${rollbackOut}" "Config restored" "选了恢复配置，配置快照已恢复"
+    usedAfterRollback=$(memberUsed "${E2E_USER}")
+    assert_equals "yes" "$([[ "${usedAfterRollback}" =~ ^[0-9]+$ && "${usedBeforeRollback}" =~ ^[0-9]+$ && usedAfterRollback -gt usedBeforeRollback ]] && echo yes || echo no)" \
+        "回滚后用量 ${usedAfterRollback} 字节：没倒回快照（${snapshotUsed}），回滚前那段流量也记上了（回滚前 ${usedBeforeRollback}）"
+    assert_equals "${membersAtBackup}" "$(cat "${carpoolDir}/members.json" 2>/dev/null)" "备份后改过的 members.json 回到快照里的内容"
+    carpoolIntact "回滚之后"
+    assert_equals "204" "$(realityProbe)" "回滚后 ${E2E_USER} 照常上网"
 
     chainOut=
     unchainOut=
@@ -626,7 +727,7 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
         chainTickRc=$?
         [[ ${chainTickRc} -ne 0 ]] && echo "${chainTickOut}"
         assert_equals "0" "${chainTickRc}" "链式开着时 CarpoolTick 退出码 0"
-        usedAfter=$(jq -r --arg u "${E2E_USER}" '.members[$u] | .upBytes + .downBytes' "${carpoolDir}/state.json" 2>/dev/null)
+        usedAfter=$(memberUsed "${E2E_USER}")
         assert_equals "yes" "$([[ "${usedAfter}" =~ ^[0-9]+$ && $((usedAfter - usedBytes)) -ge 4000000 ]] && echo yes || echo no)" \
             "经链式的 4 MB 下载记进了 ${E2E_USER} 名下（增加 $((usedAfter - usedBytes)) 字节）"
         tickOut+=$'\n'"${chainTickOut}"
@@ -724,7 +825,7 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
     assert_equals "yes" "$([[ -s "${carpoolDir}/members.json" ]] && echo yes || echo no)" "members.json 保留"
     assert_equals "204" "$(realityProbe)" "恢复后原链接重新连得上（客户端配置没动过）"
 
-    noisyLines=$(grep -E 'command not found|No such file or directory' <<<"${carpoolOut}"$'\n'"${tickOut}"$'\n'"${expireOut}"$'\n'"${chainOut}"$'\n'"${unchainOut}"$'\n'"${disableOut}" || true)
+    noisyLines=$(grep -E 'command not found|No such file or directory' <<<"${carpoolOut}"$'\n'"${tickOut}"$'\n'"${addOut}"$'\n'"${refuseOut}"$'\n'"${removeOut}"$'\n'"${backupOut}"$'\n'"${rollbackOut}"$'\n'"${expireOut}"$'\n'"${chainOut}"$'\n'"${unchainOut}"$'\n'"${disableOut}" || true)
     if [[ -n "${noisyLines}" ]]; then
         echo "${noisyLines}"
     fi

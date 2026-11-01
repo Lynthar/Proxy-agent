@@ -558,6 +558,9 @@ assert_true 'carpoolIsValidUUID "550e8400-e29b-41d4-a716-446655440000"' "carpool
 assert_true '! carpoolIsValidUUID "550e8400-e29b-41d4-a716"' "carpoolIsValidUUID: 短了拒绝"
 assert_equals "[0,1,7,12]" "$(carpoolInstalledProtocolsJson ",0,1,6,7,9,12,")" "carpoolInstalledProtocolsJson: 6/9 不入拼车，升序"
 assert_equals "[]" "$(carpoolInstalledProtocolsJson ",6,9,")" "carpoolInstalledProtocolsJson: 只装 6/9 时为空"
+assert_equals "" "$(carpoolUnmanagedProtocols ",0,1,3,4,7,12,")" "carpoolUnmanagedProtocols: 现在 Xray 能装的协议都在名单里"
+assert_equals "2 8" "$(carpoolUnmanagedProtocols ",2,7,8," | tr '\n' ' ' | sed 's/ $//')" "carpoolUnmanagedProtocols: v1.0.x 留下的 gRPC 2 / 8 带用户却不归拼车管，挑出来"
+assert_equals "" "$(carpoolUnmanagedProtocols ",0,7,20,")" "carpoolUnmanagedProtocols: 没有用户的入站（20 SOCKS5）不算"
 
 # --- 日期 ---
 assert_true 'carpoolIsValidDate 2024-02-29' "carpoolIsValidDate: 闰年 2 月 29"
@@ -568,11 +571,12 @@ assert_true '! carpoolIsValidDate 2026-04-31' "carpoolIsValidDate: 4 月 31 拒�
 assert_true '! carpoolIsValidDate 2026-13-01' "carpoolIsValidDate: 13 月拒绝"
 assert_true '! carpoolIsValidDate 31/12/2026' "carpoolIsValidDate: 非 YYYY-MM-DD 拒绝"
 assert_true '! carpoolIsValidDate 2026-1-5' "carpoolIsValidDate: 不补零拒绝"
-assert_equals "0" "$(carpoolDaysBetween 1970-01-01 1970-01-01)" "carpoolDaysBetween: 同一天为 0"
-assert_equals "1" "$(carpoolDaysBetween 1970-01-01 1970-01-02)" "carpoolDaysBetween: 纪元次日为 1"
-assert_equals "2" "$(carpoolDaysBetween 2000-02-28 2000-03-01)" "carpoolDaysBetween: 跨闰日"
-assert_equals "61" "$(carpoolDaysBetween 2026-10-31 2026-12-31)" "carpoolDaysBetween: 10-31 到 12-31"
-assert_equals "-1" "$(carpoolDaysBetween 2027-01-01 2026-12-31)" "carpoolDaysBetween: 反向为负"
+cp_days() { jq -rn --arg from "$1" --arg to "$2" "${_CARPOOL_JQ_DEFS}"'($to | carpoolDays) - ($from | carpoolDays)'; }
+assert_equals "0" "$(cp_days 1970-01-01 1970-01-01)" "carpoolDays: 同一天差 0"
+assert_equals "1" "$(cp_days 1970-01-01 1970-01-02)" "carpoolDays: 纪元次日差 1"
+assert_equals "2" "$(cp_days 2000-02-28 2000-03-01)" "carpoolDays: 跨闰日"
+assert_equals "61" "$(cp_days 2026-10-31 2026-12-31)" "carpoolDays: 10-31 到 12-31"
+assert_equals "-1" "$(cp_days 2027-01-01 2026-12-31)" "carpoolDays: 反向为负"
 assert_equals "2026-10-01" "$(carpoolPeriodStart 2026-10-31 1)" "carpoolPeriodStart: resetDay 1 取本月 1 日"
 assert_equals "2026-09-15" "$(carpoolPeriodStart 2026-10-10 15)" "carpoolPeriodStart: 日期早于 resetDay 取上月"
 assert_equals "2026-10-15" "$(carpoolPeriodStart 2026-10-15 15)" "carpoolPeriodStart: 当天就是 resetDay"
@@ -644,6 +648,15 @@ assert_equals "0" "$(printf '%s\n' '{"members": {"alice": {"protocols": [1, 12]}
 cp_expect_error '{"members": {"alice": {"uuid": "nope"}}}' "成员 alice 的 uuid 格式不合法" "校验: uuid 格式"
 cp_expect_error '{"members": {"alice": {"uuid": "550e8400-e29b-41d4-a716-446655440000"}, "bob": {"uuid": "550e8400-e29b-41d4-a716-446655440000"}}}' "成员 alice,bob 使用了同一个 uuid" "校验: 两人同 uuid"
 cp_expect_error '{"members": {"alice": {"uuid": "550e8400-e29b-41d4-a716-446655440000"}}}' "成员 alice 的 uuid 已被不归拼车管的账号使用" "校验: uuid 撞上外部账号" ",0,7,12," '{"dave":"550e8400-e29b-41d4-a716-446655440000"}'
+cp_expect_error '{"members": {"bob": {}}}' "成员 bob 与不归拼车管的账号 bob-laptop 名字的第一段相同" "校验: 订阅键撞上外部账号（停用时的占位会盖掉他的订阅）" ",0,7,12," '{"bob-laptop":"x"}'
+printf '%s\n' '{"members": {"alice": {}, "tom-2": {}}}' > "${_cpMembers}"
+_cpOut=$(carpoolValidateMembers "${_cpMembers}" ",0,7," '{}' '["alice","tom"]')
+assert_equals "1" "$?" "校验: 新成员的第一段撞上已删除的成员，返回 1"
+cp_assert_contains "${_cpOut}" "成员 tom-2 与已删除的成员 tom 名字的第一段相同" "校验: 说出撞上的是哪个已删成员（被删的人拿旧链接会拉到新成员的凭据）"
+assert_equals "0" "$(printf '%s\n' '{"members": {"tom": {}}}' > "${_cpMembers}"; carpoolValidateMembers "${_cpMembers}" ",0,7," '{}' '["tom"]' >/dev/null; echo $?)" "校验: 原名加回同一个人不算撞车"
+assert_equals "0" "$(printf '%s\n' '{"members": {"alice": {}, "bob": {}}}' > "${_cpMembers}"; carpoolValidateMembers "${_cpMembers}" ",0,7," '{}' '["alice","bob","carol"]' >/dev/null; echo $?)" "校验: 名单里仍在文件中的、第一段不同的都不算撞车"
+printf '%s\n' '{"members": {"bob": {}}}' > "${_cpMembers}"
+assert_equals "0" "$(carpoolValidateMembers "${_cpMembers}" ",0,7," '{"bob":"x","carol-a":"y"}' >/dev/null; echo $?)" "校验: 与外部账号同名不算订阅键撞车（那是纳入它的写法）"
 assert_equals "1" "$(carpoolValidateMembers "${_cpDir}/nope.json" ",0,7," >/dev/null; echo $?)" "校验: 文件不存在返回 1"
 printf '%s\n' '{"members": {"alice": {"uuid": "550e8400-e29b-41d4-a716-446655440000"}}}' > "${_cpMembers}"
 _cpOut=$(carpoolValidateMembers "${_cpMembers}" ",0,7," '"not-an-object"')
@@ -675,23 +688,22 @@ assert_equals "0" "$(printf '%s\n' '{"plan": {"interface": "abcdefghijklmno"}, "
 cat > "${_cpMembers}" <<'EOF'
 {"members": {"alice": {}, "bob": {"quotaGiB": 2, "expire": "2026-12-31", "protocols": [7, 0, 7]}}}
 EOF
-_cpNorm=$(carpoolNormalizeMembers "${_cpMembers}" ",0,7,12,")
+_cpNorm=$(carpoolNormalizeMembers "${_cpMembers}")
 assert_equals "1" "$(jq -r '.resetDay' <<<"${_cpNorm}")" "carpoolNormalizeMembers: resetDay 默认 1"
 assert_equals "拼车|80|8|3" "$(jq -r '.notify | "\(.label)|\(.warnPercent)|\(.digestHour)|\(.expireNoticeDays)"' <<<"${_cpNorm}")" "carpoolNormalizeMembers: notify 默认值"
-assert_equals "[0,7,12]" "$(jq -c '.members.alice.protocols' <<<"${_cpNorm}")" "carpoolNormalizeMembers: 省略 protocols 等于 all，展开成已装集合"
+assert_equals '"all"' "$(jq -c '.members.alice.protocols' <<<"${_cpNorm}")" "carpoolNormalizeMembers: 省略 protocols 等于 all，原样留到对账时再按已装解析"
 assert_equals '0||' "$(jq -r '.members.alice | "\(.quotaBytes)|\(.expire)|\(.uuid)"' <<<"${_cpNorm}")" "carpoolNormalizeMembers: 省略字段的默认值"
 assert_equals "2147483648" "$(jq -r '.members.bob.quotaBytes' <<<"${_cpNorm}")" "carpoolNormalizeMembers: quotaGiB 2 = 2×2^30 字节"
 assert_equals "[0,7]" "$(jq -c '.members.bob.protocols' <<<"${_cpNorm}")" "carpoolNormalizeMembers: 显式 protocols 去重排序"
 printf '%s\n' '{"notify": {"digestHour": null, "label": "L"}, "members": {}}' > "${_cpMembers}"
-assert_equals "null|L" "$(carpoolNormalizeMembers "${_cpMembers}" ",0,7," | jq -r '.notify | "\(.digestHour)|\(.label)"')" "carpoolNormalizeMembers: digestHour null（关闭）保留为 null"
-assert_equals 'both|{"sizeGB":0,"warnPercent":85,"interface":""}' "$(carpoolNormalizeMembers "${_cpMembers}" ",0,7," | jq -r '"\(.billing)|\(.plan | tojson)"')" "carpoolNormalizeMembers: 口径默认 both，套餐默认 0（不提醒）/ 85% / 自动找网卡"
+assert_equals "null|L" "$(carpoolNormalizeMembers "${_cpMembers}" | jq -r '.notify | "\(.digestHour)|\(.label)"')" "carpoolNormalizeMembers: digestHour null（关闭）保留为 null"
+assert_equals 'both|{"sizeGB":0,"warnPercent":85,"interface":""}' "$(carpoolNormalizeMembers "${_cpMembers}" | jq -r '"\(.billing)|\(.plan | tojson)"')" "carpoolNormalizeMembers: 口径默认 both，套餐默认 0（不提醒）/ 85% / 自动找网卡"
 printf '%s\n' '{"billing": "max", "plan": {"sizeGB": 2000, "warnPercent": 0, "interface": "ens5"}, "members": {}}' > "${_cpMembers}"
-assert_equals 'max|{"sizeGB":2000,"warnPercent":0,"interface":"ens5"}' "$(carpoolNormalizeMembers "${_cpMembers}" ",0,7," | jq -r '"\(.billing)|\(.plan | tojson)"')" "carpoolNormalizeMembers: 显式口径与套餐原样保留，warnPercent 0 不被默认值顶掉"
+assert_equals 'max|{"sizeGB":2000,"warnPercent":0,"interface":"ens5"}' "$(carpoolNormalizeMembers "${_cpMembers}" | jq -r '"\(.billing)|\(.plan | tojson)"')" "carpoolNormalizeMembers: 显式口径与套餐原样保留，warnPercent 0 不被默认值顶掉"
 printf '%s\n' '{"plan": {"sizeGB": 500}, "members": {}}' > "${_cpMembers}"
-assert_equals '{"sizeGB":500,"warnPercent":85,"interface":""}' "$(carpoolNormalizeMembers "${_cpMembers}" ",0,7," | jq -c '.plan')" "carpoolNormalizeMembers: plan 只写 sizeGB 时其余补默认"
+assert_equals '{"sizeGB":500,"warnPercent":85,"interface":""}' "$(carpoolNormalizeMembers "${_cpMembers}" | jq -c '.plan')" "carpoolNormalizeMembers: plan 只写 sizeGB 时其余补默认"
 
-_cpAccounts=$(carpoolAccountsFromClients '[{"id":"u1","email":"alice-VLESS_TCP/TLS_Vision"},{"password":"u2","email":"bob-x-trojan_tcp"},{"id":"u3","email":"3fa85f64-5717-4562-b3fc-2c963f66afa6"}]')
-assert_equals '[{"name":"alice","uuid":"u1"},{"name":"bob-x","uuid":"u2"},{"name":"3fa85f64-5717-4562-b3fc","uuid":"u3"}]' "${_cpAccounts}" "carpoolAccountsFromClients: 名字剥后缀，凭据取 id 或 password"
+_cpAccounts='[{"name":"alice","uuid":"u1"},{"name":"bob-x","uuid":"u2"},{"name":"3fa85f64-5717-4562-b3fc","uuid":"u3"}]'
 _cpSeed=$(carpoolSeedMembers "${_cpAccounts}")
 assert_equals '["alice","bob-x","3fa85f64-5717-4562-b3fc"]' "$(jq -c '.members | keys_unsorted' <<<"${_cpSeed}")" "carpoolSeedMembers: 全部账号入册、顺序不变"
 assert_equals '{"quotaGiB":0,"expire":"","protocols":"all"}' "$(jq -c '.members.alice' <<<"${_cpSeed}")" "carpoolSeedMembers: 不限额不限期全协议、不写 uuid"
@@ -746,7 +758,7 @@ assert_equals "" "$(ls "${_cpDir}"/state.json.bak.* 2>/dev/null)" "carpoolWriteS
 
 _cpOld=$(cp_state 2026-10-01 "{\"alice\": $(cp_member "${_cpU1}" 0 "" '[0,7]' 5 6 disabled quota), \"gone\": $(cp_member "${_cpU3}" 0 "" '[0]' 1 1 active "")}")
 printf '%s\n' '{"members": {"bob": {"uuid": "22222222-2222-2222-2222-222222222222"}, "alice": {"quotaGiB": 1, "expire": "2026-12-31", "protocols": [0]}, "carol": {}, "dave": {}}}' > "${_cpMembers}"
-_cpNorm=$(carpoolNormalizeMembers "${_cpMembers}" ",0,7,")
+_cpNorm=$(carpoolNormalizeMembers "${_cpMembers}")
 _cpMerged=$(carpoolMergeState "${_cpOld}" "${_cpNorm}" "{\"carol\": \"${_cpU3}\", \"zed\": \"zz\"}")
 assert_equals '["bob","alice","carol","dave"]' "$(jq -c '.members | keys_unsorted' <<<"${_cpMerged}")" "carpoolMergeState: 成员顺序随文件，文件里没有的 gone 删掉"
 assert_equals "${_cpU2}" "$(jq -r '.members.bob.uuid' <<<"${_cpMerged}")" "carpoolMergeState: uuid 文件给的优先"
@@ -758,26 +770,42 @@ assert_equals "${GiB}|2026-12-31|[0]" "$(jq -r '.members.alice | "\(.quotaBytes)
 assert_equals "0|0|active|" "$(jq -r '.members.bob | "\(.upBytes)|\(.downBytes)|\(.status)|\(.reason)"' <<<"${_cpMerged}")" "carpoolMergeState: 新成员从零开始、active"
 assert_equals "2026-10-01|23456" "$(jq -r '"\(.period)|\(.apiPort)"' <<<"$(carpoolMergeState "${_cpInit}" "${_cpNorm}" '{}')")" "carpoolMergeState: 顶层字段不动"
 printf '%s\n' '{"resetDay": 20, "notify": {"label": "L", "warnPercent": 50}, "members": {"alice": {}}}' > "${_cpMembers}"
-assert_equals "20|L|50|8" "$(carpoolMergeState "${_cpInit}" "$(carpoolNormalizeMembers "${_cpMembers}" ",0,7,")" '{}' | jq -r '"\(.resetDay)|\(.notify.label)|\(.notify.warnPercent)|\(.notify.digestHour)"')" "carpoolMergeState: resetDay 与 notify 跟文件走"
+assert_equals "20|L|50|8" "$(carpoolMergeState "${_cpInit}" "$(carpoolNormalizeMembers "${_cpMembers}")" '{}' | jq -r '"\(.resetDay)|\(.notify.label)|\(.notify.warnPercent)|\(.notify.digestHour)"')" "carpoolMergeState: resetDay 与 notify 跟文件走"
 printf '%s\n' '{"billing": "out", "plan": {"sizeGB": 1000, "interface": "eth1"}, "members": {"alice": {}}}' > "${_cpMembers}"
-_cpMerged2=$(carpoolMergeState "$(jq -c '.machine = {rx: 5, tx: 6}' <<<"${_cpInit}")" "$(carpoolNormalizeMembers "${_cpMembers}" ",0,7,")" '{}')
+_cpMerged2=$(carpoolMergeState "$(jq -c '.machine = {rx: 5, tx: 6}' <<<"${_cpInit}")" "$(carpoolNormalizeMembers "${_cpMembers}")" '{}')
 assert_equals 'out|{"sizeGB":1000,"warnPercent":85,"interface":"eth1"}|{"rx":5,"tx":6}' "$(jq -r '"\(.billing)|\(.plan | tojson)|\(.machine | tojson)"' <<<"${_cpMerged2}")" "carpoolMergeState: 口径与套餐跟文件走，整机读数不动"
 
-# 即时类同步：resetDay / notify / 在册成员的 quotaBytes 与 expire；protocols、uuid、文件里没有的成员不动
+# 即时类同步：notify / 在册成员的 quotaBytes 与 expire；resetDay、protocols、uuid、文件里没有的成员不动
 printf '%s\n' '{"resetDay": 10, "notify": {"warnPercent": 70}, "members": {"alice": {"quotaGiB": 3, "expire": "2027-01-31", "protocols": [0], "uuid": "22222222-2222-2222-2222-222222222222"}, "newbie": {}}}' > "${_cpMembers}"
-_cpSynced=$(carpoolSyncLimits "${_cpMerged}" "$(carpoolNormalizeMembers "${_cpMembers}" ",0,7,")")
-assert_equals "10|70" "$(jq -r '"\(.resetDay)|\(.notify.warnPercent)"' <<<"${_cpSynced}")" "carpoolSyncLimits: resetDay 与 notify 同步"
+_cpSynced=$(carpoolSyncLimits "${_cpMerged}" "$(carpoolNormalizeMembers "${_cpMembers}")")
+assert_equals "$(jq -r '.resetDay' <<<"${_cpMerged}")|70" "$(jq -r '"\(.resetDay)|\(.notify.warnPercent)"' <<<"${_cpSynced}")" "carpoolSyncLimits: notify 同步，resetDay 不动（要应用才生效）"
 assert_equals "$((3 * GiB))|2027-01-31|[0]|${_cpU1}" "$(jq -r '.members.alice | "\(.quotaBytes)|\(.expire)|\(.protocols | tojson)|\(.uuid)"' <<<"${_cpSynced}")" "carpoolSyncLimits: 配额与到期同步，protocols 与 uuid 不动"
 assert_equals '["bob","alice","carol","dave"]' "$(jq -c '.members | keys_unsorted' <<<"${_cpSynced}")" "carpoolSyncLimits: 不增不删成员"
 assert_equals "0|" "$(jq -r '.members.bob | "\(.quotaBytes)|\(.expire)"' <<<"${_cpSynced}")" "carpoolSyncLimits: 文件里没有的成员原样"
 assert_equals 'both|{"sizeGB":0,"warnPercent":85,"interface":""}' "$(jq -r '"\(.billing)|\(.plan | tojson)"' <<<"${_cpSynced}")" "carpoolSyncLimits: 文件没写口径与套餐时同步成默认值"
 printf '%s\n' '{"billing": "max", "plan": {"sizeGB": 3000, "warnPercent": 90}, "members": {}}' > "${_cpMembers}"
-_cpSynced2=$(carpoolSyncLimits "$(jq -c '.billing = "out" | .machine = {rx: 1, tx: 2}' <<<"${_cpMerged}")" "$(carpoolNormalizeMembers "${_cpMembers}" ",0,7,")")
+_cpSynced2=$(carpoolSyncLimits "$(jq -c '.billing = "out" | .machine = {rx: 1, tx: 2}' <<<"${_cpMerged}")" "$(carpoolNormalizeMembers "${_cpMembers}")")
 assert_equals 'max|{"sizeGB":3000,"warnPercent":90,"interface":""}|{"rx":1,"tx":2}' "$(jq -r '"\(.billing)|\(.plan | tojson)|\(.machine | tojson)"' <<<"${_cpSynced2}")" "carpoolSyncLimits: 口径与套餐是即时类字段，下一次 tick 就同步；整机读数不动"
 
 _cpMap='{"0":[{"id":"zz","email":"zed-VLESS_TCP/TLS_Vision"},{"id":"'"${_cpU1}"'","email":"alice-VLESS_TCP/TLS_Vision"}],"4":[{"password":"pp","email":"pat-trojan_tcp"}]}'
 assert_equals '{"zed":"zz","pat":"pp"}' "$(carpoolForeignAccounts "${_cpMerged}" "${_cpMap}")" "carpoolForeignAccounts: 不在册的账号 → {名: 凭据}，id 或 password 都认"
 assert_equals '{}' "$(carpoolForeignAccounts "${_cpMerged}" '{}')" "carpoolForeignAccounts: 空映射得空对象"
+assert_equals '{"pat":"pp"}' "$(carpoolForeignAccounts "$(jq -c '.removing = ["zed"]' <<<"${_cpMerged}")" "${_cpMap}")" "carpoolForeignAccounts: 待删的不算外部账号"
+_cpRm=$(carpoolMarkRemoved "$(jq -c '.removing = ["zed"]' <<<"${_cpMerged}")" '["pat","zed"]')
+assert_equals '["pat","zed"]' "$(jq -c '.removing' <<<"${_cpRm}")" "carpoolMarkRemoved: 并进 removing、去重"
+assert_equals "null" "$(carpoolMarkRemoved "${_cpMerged}" '[]' | jq -c '.removing')" "carpoolMarkRemoved: 没人被删时不留空字段"
+assert_equals '["pat","tom","zed"]' "$(carpoolMarkRemoved "$(jq -c '.retiredNames = ["tom"]' <<<"${_cpMerged}")" '["pat","zed"]' | jq -c '.retiredNames')" "carpoolMarkRemoved: 删掉的名字并进 retiredNames、去重"
+assert_equals "null" "$(carpoolMarkRemoved "${_cpMerged}" '[]' | jq -c '.retiredNames')" "carpoolMarkRemoved: 没人被删时不加 retiredNames"
+assert_equals '["alice","bob","carol","dave","pat","tom"]' "$(carpoolRetiredNames "$(jq -c '.retiredNames = ["tom"] | .removing = ["pat"]' <<<"${_cpMerged}")")" \
+    "carpoolRetiredNames: 已删的、待删的与在册成员合在一起"
+_cpRe=$(jq -c --arg u1 "${_cpU1}" '.members = {alice: {uuid: $u1}, bob: {uuid: "22222222-2222-2222-2222-222222222222"}, carol: {uuid: "33333333-3333-3333-3333-333333333333"}, newbie: {uuid: ""}}' <<<"${_cpMerged}")
+assert_equals '{"restore":["bob"],"uuid":[{"name":"carol","from":"99999999-9999-9999-9999-999999999999","to":"33333333-3333-3333-3333-333333333333"}]}' \
+    "$(carpoolReenableChanges "${_cpRe}" "{\"alice\": \"${_cpU1}\", \"carol\": \"99999999-9999-9999-9999-999999999999\", \"zed\": \"z\"}")" \
+    "carpoolReenableChanges: 记着凭据却不在入站里的要恢复，入站里凭据不同的要改回；还没 UUID 的新成员与外部账号不算"
+assert_equals '{"restore":[],"uuid":[]}' "$(carpoolReenableChanges "${_cpRe}" "{\"alice\": \"${_cpU1}\", \"bob\": \"22222222-2222-2222-2222-222222222222\", \"carol\": \"33333333-3333-3333-3333-333333333333\"}")" \
+    "carpoolReenableChanges: 关着时没动过账号就没有改动"
+assert_equals '["zed"]' "$(carpoolPruneRemoved "$(jq -c '.removing = ["zed","gone"]' <<<"${_cpMerged}")" "${_cpMap}" | jq -c '.removing')" "carpoolPruneRemoved: inbound 里已经没有的名字清掉"
+assert_equals "null" "$(carpoolPruneRemoved "$(jq -c '.removing = ["alice"]' <<<"${_cpMerged}")" "${_cpMap}" | jq -c '.removing')" "carpoolPruneRemoved: 重新加回成员的名字清掉，清空后整个字段删掉"
 
 _cpDiff=$(carpoolDiffMembers "${_cpOld}" "${_cpNorm}" "{\"carol\": \"${_cpU3}\", \"zed\": \"zz\"}")
 assert_equals '["bob","carol","dave"]' "$(jq -c '.added' <<<"${_cpDiff}")" "carpoolDiffMembers: 新增"
@@ -787,8 +815,17 @@ assert_equals "[{\"name\":\"alice\",\"from\":0,\"to\":${GiB}}]" "$(jq -c '.quota
 assert_equals '[{"name":"alice","from":"","to":"2026-12-31"}]' "$(jq -c '.expire' <<<"${_cpDiff}")" "carpoolDiffMembers: 到期变更"
 assert_equals '[]' "$(jq -c '.uuid' <<<"${_cpDiff}")" "carpoolDiffMembers: 文件没给 uuid 不算换凭据"
 assert_equals '["zed"]' "$(jq -c '.unmanaged' <<<"${_cpDiff}")" "carpoolDiffMembers: 不在文件里的 inbound 账号只列出"
+assert_equals '["zed"]' "$(carpoolDiffMembers "${_cpOld}" "${_cpNorm}" '{"gone": "g", "zed": "zz"}' | jq -c '.unmanaged')" \
+    "carpoolDiffMembers: 这次要删的成员还在 inbound 里，不再同时列成「未纳入」"
+assert_equals '[]' "$(carpoolDiffMembers "$(jq -c '.resetDay = 1' <<<"${_cpOld}")" "${_cpNorm}" '{}' | jq -c '.resetDay')" "carpoolDiffMembers: resetDay 没变不列"
+assert_equals '[{"from":20,"to":1}]' "$(carpoolDiffMembers "$(jq -c '.resetDay = 20' <<<"${_cpOld}")" "${_cpNorm}" '{}' | jq -c '.resetDay')" "carpoolDiffMembers: resetDay 变了列出前后"
 printf '%s\n' "{\"members\": {\"alice\": {\"uuid\": \"${_cpU2}\"}}}" > "${_cpMembers}"
-assert_equals '["alice"]' "$(carpoolDiffMembers "${_cpOld}" "$(carpoolNormalizeMembers "${_cpMembers}" ",0,7,")" '{}' | jq -c '.uuid')" "carpoolDiffMembers: 文件给了不同的 uuid 算换凭据"
+assert_equals '["alice"]' "$(carpoolDiffMembers "${_cpOld}" "$(carpoolNormalizeMembers "${_cpMembers}")" '{}' | jq -c '.uuid')" "carpoolDiffMembers: 文件给了不同的 uuid 算换凭据"
+printf '%s\n' '{"members": {"alice": {}}}' > "${_cpMembers}"
+_cpDiff=$(carpoolDiffMembers "${_cpOld}" "$(carpoolNormalizeMembers "${_cpMembers}")" '{}')
+assert_equals '[{"name":"alice","from":[0,7],"to":"all"}]' "$(jq -c '.protocols' <<<"${_cpDiff}")" "carpoolDiffMembers: 数组改成 all 也列出"
+cp_assert_contains "$(carpoolDiffText "${_cpDiff}")" "alice 的协议 [0,7] → all" "carpoolDiffText: all 不带引号"
+assert_equals '[]' "$(carpoolDiffMembers "$(jq -c '.members.alice.protocols = "all"' <<<"${_cpOld}")" "$(carpoolNormalizeMembers "${_cpMembers}")" '{}' | jq -c '.protocols')" "carpoolDiffMembers: all 没变不列"
 
 _cpUsed=$(carpoolAddUsage "${_cpMerged}" '{"alice":{"up":100,"down":200},"zed":{"up":1,"down":1}}')
 assert_equals "105|206" "$(jq -r '.members.alice | "\(.upBytes)|\(.downBytes)"' <<<"${_cpUsed}")" "carpoolAddUsage: 增量累加"
@@ -882,7 +919,10 @@ _cpS=$(cp_state 2026-09-01 "{
 _cpJ=$(cp_judge "${_cpS}" "" 2026-10-02 2026-10-01)
 assert_equals "2026-10-01" "$(jq -r '.state.period' <<<"${_cpJ}")" "新周期: period 更新"
 assert_equals "0" "$(jq -r '[.state.members[] | .upBytes + .downBytes] | add' <<<"${_cpJ}")" "新周期: 全员清零"
-assert_equals "{}" "$(jq -c '.state.notified' <<<"${_cpJ}")" "新周期: notified 清空"
+assert_equals "{}" "$(jq -c '.state.notified' <<<"${_cpJ}")" "新周期: 预警去重键清掉"
+_cpTickKeys='{"digest:2026-10-02":true,"invalid:f1":true,"collect:failed":true,"tx:failed":true}'
+assert_equals "${_cpTickKeys}" "$(cp_judge "$(jq -c --argjson k "${_cpTickKeys}" '.notified += $k | .notified["expire:dave:2026-10-03"] = true' <<<"${_cpS}")" "" 2026-10-02 2026-10-01 | jq -c '.state.notified')" \
+    "新周期: 摘要、文件无效、采集与对账失败的键留着，到期提醒键清掉"
 assert_equals "active|" "$(jq -r '.state.members.alice | "\(.status)|\(.reason)"' <<<"${_cpJ}")" "新周期: 超额停用者恢复"
 assert_equals "disabled|expired" "$(jq -r '.state.members.bob | "\(.status)|\(.reason)"' <<<"${_cpJ}")" "新周期: 超额且已到期的翻成 expired、不恢复"
 assert_equals "disabled|expired" "$(jq -r '.state.members.carol | "\(.status)|\(.reason)"' <<<"${_cpJ}")" "新周期: 到期停用者保持"
@@ -949,6 +989,7 @@ _cpCur='[{"id":"zz","email":"zed-vless_reality_vision","flow":"xtls-rprx-vision"
 _cpExp=$(carpoolExpectedClients 7 "${_cpS}" "${_cpCur}")
 assert_equals '["zed-vless_reality_vision","yan-vless_reality_vision","alice-vless_reality_vision","carol-vless_reality_vision"]' "$(jq -c '[.[].email]' <<<"${_cpExp}")" "期望 clients: 外部账号原序在前，成员按文件顺序在后，停用者与无 uuid 者不在"
 assert_equals "${_cpU1}" "$(jq -r '.[2].id' <<<"${_cpExp}")" "期望 clients: 成员凭据来自 state，不是 inbound 里的旧值"
+assert_equals '["zed-vless_reality_vision","alice-vless_reality_vision","carol-vless_reality_vision"]' "$(carpoolExpectedClients 7 "$(jq -c '.removing = ["yan"]' <<<"${_cpS}")" "${_cpCur}" | jq -c '[.[].email]')" "期望 clients: removing 里的名字不再当外部账号留下，即从 inbound 删掉"
 assert_equals '{"id":"'"${_cpU1}"'","email":"alice-vless_reality_vision","flow":"xtls-rprx-vision"}' "$(jq -c '.[2]' <<<"${_cpExp}")" "期望 clients: 7 的形状 {id,email,flow}"
 assert_equals '{"id":"'"${_cpU1}"'","flow":"xtls-rprx-vision","email":"alice-VLESS_TCP/TLS_Vision"}' "$(carpoolExpectedClients 0 "${_cpS}" '[]' | jq -c '.[0]')" "期望 clients: 0 的形状 {id,flow,email}"
 assert_equals '{"id":"'"${_cpU1}"'","email":"alice-VLESS_WS"}' "$(carpoolExpectedClients 1 "$(jq -c '.members.alice.protocols = [0,1,7]' <<<"${_cpS}")" '[]' | jq -c '.[0]')" "期望 clients: 1 的形状 {id,email}"
@@ -957,6 +998,8 @@ assert_equals '{"id":"'"${_cpU1}"'","email":"alice-VMess_WS","alterId":0}' "$(ca
 assert_equals '{"password":"'"${_cpU1}"'","email":"alice-trojan_tcp"}' "$(carpoolExpectedClients 4 "$(jq -c '.members.alice.protocols = [0,4,7]' <<<"${_cpS}")" '[]' | jq -c '.[0]')" "期望 clients: 4 的形状 {password,email}"
 assert_equals '["alice-VLESS_Reality_XHTTP"]' "$(carpoolExpectedClients 12 "${_cpS}" '[]' | jq -c '[.[].email]')" "期望 clients: 协议子集——carol 没有 12 就不进 12 的文件"
 assert_equals "[]" "$(carpoolExpectedClients 4 "${_cpS}" '[]')" "期望 clients: 没人有该协议时为空数组"
+assert_equals '["zed-VLESS_WS","alice-VLESS_WS"]' "$(carpoolExpectedClients 1 "$(jq -c '.members.alice.protocols = "all"' <<<"${_cpS}")" '[{"id":"zz","email":"zed-VLESS_WS"}]' | jq -c '[.[].email]')" \
+    "期望 clients: \"all\" 的成员进任何可计量协议的文件，开启之后才装的也算"
 assert_equals "1" "$(carpoolExpectedClients 6 "${_cpS}" '[]' >/dev/null 2>&1; echo $?)" "期望 clients: 6 不是拼车协议，返回 1"
 assert_true 'carpoolClientsEqual "[{\"id\":\"a\",\"email\":\"x\"}]" "[{\"email\":\"x\",\"id\":\"a\"}]"' "carpoolClientsEqual: 键序无关"
 assert_true '! carpoolClientsEqual "[{\"id\":\"a\"},{\"id\":\"b\"}]" "[{\"id\":\"b\"},{\"id\":\"a\"}]"' "carpoolClientsEqual: 元素顺序有关"
@@ -1016,7 +1059,7 @@ assert_equals "整机本周期 - · 成员合计 700 GB · 计费口径：双向
 assert_equals "整机本周期 412.34 GB · 成员合计 350 GB · 计费口径：进出取大" "$(carpoolMachineSummary "$(jq -c '.billing = "max" | del(.plan)' <<<"${_cpSum}")")" "carpoolMachineSummary: max 取大；旧 state 没有 plan 也能出"
 
 printf '%s\n' '{"resetDay": 15, "notify": {"label": "<b>小车</b>&\"x\""}, "members": {"alice": {"quotaGiB": 100, "expire": "2026-12-31"}, "bob-x": {}}}' > "${_cpMembers}"
-_cpNorm=$(carpoolNormalizeMembers "${_cpMembers}" ",0,7,")
+_cpNorm=$(carpoolNormalizeMembers "${_cpMembers}")
 _cpPage=$(carpoolRenderOwnerPage "${_cpS}" "${_cpNorm}" 2026-10-31 "2026-10-31 12:00" '["zed<x>"]' "")
 cp_assert_contains "${_cpPage}" '<title>&lt;b&gt;小车&lt;/b&gt;&amp;&quot;x&quot;</title>' "车主页: 标题 HTML 转义"
 cp_assert_contains "${_cpPage}" 'zed&lt;x&gt;' "车主页: 未纳入拼车的账号名也转义"
@@ -1068,8 +1111,8 @@ assert_equals '{"restore":["a"],"expiredNow":["b"],"keepExpired":["c"],"keepManu
 _cpClosed=$(carpoolApplyClose "${_cpS}" "${_cpG}" false)
 assert_equals "active||disabled|expired|disabled|expired|disabled|manual|active|" "$(jq -r '[.members[] | .status, .reason] | join("|")' <<<"${_cpClosed}")" "carpoolApplyClose: 默认只恢复 restore 组，expiredNow 改 reason"
 _cpClosed=$(carpoolApplyClose "${_cpS}" "${_cpG}" true)
-assert_equals "active|disabled|active|active|active" "$(jq -r '[.members[] | .status] | join("|")' <<<"${_cpClosed}")" "carpoolApplyClose: 一并恢复时到期与手动的也放回"
-assert_equals "disabled|expired" "$(jq -r '.members.b | "\(.status)|\(.reason)"' <<<"$(carpoolApplyClose "${_cpS}" "${_cpG}" true)")" "carpoolApplyClose: 一并恢复也不恢复「超额且已到期」的 b"
+assert_equals "active|active|active|active|active" "$(jq -r '[.members[] | .status] | join("|")' <<<"${_cpClosed}")" "carpoolApplyClose: 一并恢复时到期与手动的也放回"
+assert_equals "active|" "$(jq -r '.members.b | "\(.status)|\(.reason)"' <<<"$(carpoolApplyClose "${_cpS}" "${_cpG}" true)")" "carpoolApplyClose: 一并恢复时「超额且已到期」的 b 也放回——它就列在「保持停用（已到期）」里，问的正是这一组"
 _cpR=$(carpoolResetUsageState "${_cpS}" a)
 assert_equals "0|$((GiB))|1" "$(jq -r '"\(.members.a.upBytes)|\(.members.b.upBytes)|\(.members.c.upBytes)"' <<<"${_cpR}")" "carpoolResetUsageState: 单人清零只动那个人"
 assert_equals '{"warn:e":true,"expire:b:2026-10-19":true}' "$(jq -c '.notified' <<<"${_cpR}")" "carpoolResetUsageState: 只清那个人的预警去重键"
@@ -1077,13 +1120,19 @@ _cpR=$(carpoolResetUsageState "${_cpS}")
 assert_equals "0" "$(jq -r '[.members[] | .upBytes + .downBytes] | add' <<<"${_cpR}")" "carpoolResetUsageState: 全员清零"
 assert_equals '{"expire:b:2026-10-19":true}' "$(jq -c '.notified' <<<"${_cpR}")" "carpoolResetUsageState: 全员清零清掉所有预警键、保留到期提醒键"
 assert_equals "active|" "$(carpoolJudge "${_cpR}" "${_cpNotify}" 2026-10-20 2026-10-01 | jq -r '.state.members.a | "\(.status)|\(.reason)"')" "清零后判定：超额停用者恢复"
+_cpP=$(cp_one alice "$(cp_member "${_cpU1}" 0 "" '[0]' 5 6 active "")" 2026-10-20)
+assert_equals "2026-10-01|5|[]" "$(cp_judge "${_cpP}" "" 2026-10-25 2026-10-01 | jq -r '"\(.state.period)|\(.state.members.alice.upBytes)|\(.events | tojson)"')" \
+    "判定: resetDay 改小让起点前移（20 → 1，今天 25 号），只改起点、不清零，本期拉长"
+assert_equals "2026-10-24|0|period" "$(cp_judge "${_cpP}" "" 2026-10-25 2026-10-24 | jq -r '"\(.state.period)|\(.state.members.alice.upBytes)|\(.events[0].type)"')" \
+    "判定: resetDay 改到本期已经过去的日子（20 → 24，今天 25 号），当即清零"
 
-_cpD='{"added":["new1"],"removed":["gone"],"protocols":[{"name":"alice","from":[0,7],"to":[0]}],"uuid":["bob"],"quota":[{"name":"alice","from":0,"to":1073741824}],"expire":[{"name":"alice","from":"","to":"2026-12-31"}],"unmanaged":["zed"]}'
+_cpD='{"added":["new1"],"removed":["gone"],"protocols":[{"name":"alice","from":[0,7],"to":[0]}],"uuid":["bob"],"quota":[{"name":"alice","from":0,"to":1073741824}],"expire":[{"name":"alice","from":"","to":"2026-12-31"}],"resetDay":[{"from":1,"to":20}],"unmanaged":["zed"]}'
 assert_true '! carpoolDiffIsEmpty "${_cpD}"' "carpoolDiffIsEmpty: 有差异"
-assert_true 'carpoolDiffIsEmpty "{\"added\":[],\"removed\":[],\"protocols\":[],\"uuid\":[],\"quota\":[],\"expire\":[],\"unmanaged\":[\"zed\"]}"' "carpoolDiffIsEmpty: 只有未纳入账号不算差异"
+assert_true 'carpoolDiffIsEmpty "{\"added\":[],\"removed\":[],\"protocols\":[],\"uuid\":[],\"quota\":[],\"expire\":[],\"resetDay\":[],\"unmanaged\":[\"zed\"]}"' "carpoolDiffIsEmpty: 只有未纳入账号不算差异"
+assert_true '! carpoolDiffIsEmpty "{\"added\":[],\"removed\":[],\"protocols\":[],\"uuid\":[],\"quota\":[],\"expire\":[],\"resetDay\":[{\"from\":1,\"to\":20}],\"unmanaged\":[]}"' "carpoolDiffIsEmpty: 只改了 resetDay 也算差异"
 assert_true 'carpoolDiffNeedsConfirm "${_cpD}"' "carpoolDiffNeedsConfirm: 含删除要确认"
-assert_true '! carpoolDiffNeedsConfirm "{\"added\":[\"x\"],\"removed\":[],\"protocols\":[],\"uuid\":[],\"quota\":[],\"expire\":[],\"unmanaged\":[]}"' "carpoolDiffNeedsConfirm: 只新增不用确认"
-assert_equals $'新增成员 new1\n删除成员 gone\nalice 的协议 [0,7] → [0]\nbob 换 UUID\nalice 的配额 不限 → 1 GiB\nalice 的到期 - → 2026-12-31\n未纳入拼车的账号（不动）: zed' "$(carpoolDiffText "${_cpD}")" "carpoolDiffText: 七类差异各一行"
+assert_true '! carpoolDiffNeedsConfirm "{\"added\":[\"x\"],\"removed\":[],\"protocols\":[],\"uuid\":[],\"quota\":[],\"expire\":[],\"resetDay\":[],\"unmanaged\":[]}"' "carpoolDiffNeedsConfirm: 只新增不用确认"
+assert_equals $'新增成员 new1\n删除成员 gone\nalice 的协议 [0,7] → [0]\nbob 换 UUID\nalice 的配额 不限 → 1 GiB\nalice 的到期 - → 2026-12-31\n清零日 1 号 → 20 号（立即生效：本周期起始日到今天之间已过新清零日的，用量当即清零；否则不清零，到下一个新清零日再清）\n未纳入拼车的账号（不动）: zed' "$(carpoolDiffText "${_cpD}")" "carpoolDiffText: 八类差异各一行"
 
 # --- Telegram：配置解析、tick 级通知去重、文案 ---
 _cpTg="${_cpDir}/telegram.conf"
@@ -1120,6 +1169,8 @@ _cpN2=$(carpoolTickNotices "$(jq -c '.state | .collectFailures = 7' <<<"${_cpN}"
 assert_equals "[]" "$(jq -c '.events' <<<"${_cpN2}")" "tick 通知: 继续失败不重复"
 _cpN2=$(carpoolTickNotices "$(jq -c '.state | .collectFailures = 0' <<<"${_cpN}")" 2026-10-20 0 true f1)
 assert_equals '[{"type":"collectRecovered"}]|{}' "$(jq -c '.events' <<<"${_cpN2}")|$(jq -c '.state.notified' <<<"${_cpN2}")" "tick 通知: 恢复报一次并清键"
+_cpN=$(carpoolTickNotices "$(jq -c '.notified = {"invalid:f1": true, "invalid:f0": true, "digest:2026-10-19": true}' <<<"${_cpS}")" 2026-10-20 8 true f2)
+assert_equals '{"digest:2026-10-20":true}' "$(jq -c '.state.notified' <<<"${_cpN}")" "tick 通知: 文件恢复有效清掉文件无效的键，摘要只留当天的键"
 
 assert_equals "配置已应用：新增成员 x" "$(carpoolEventText '{"type":"applied","summary":"新增成员 x"}')" "carpoolEventText: applied"
 assert_equals "统计采集已连续失败 3 次" "$(carpoolEventText '{"type":"collectFailed","count":3}')" "carpoolEventText: collectFailed"

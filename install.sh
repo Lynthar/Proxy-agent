@@ -2597,11 +2597,16 @@ writeHttpRedirectNginxConf() {
     if [[ "${port}" != "443" ]]; then
         target="${target}:${port}"
     fi
+    # 只对带本域名 Host 的请求跳转：这个块常是 :80 唯一的 server，别的 Host 也落到这里，跳转就把域名交给了按 IP 扫的人。
+    # 看 $http_host 不看 $host：请求不带 Host 时 $host 回落成 server_name，照样会跳
     cat <<EOF >"${conf}"
 server {
 	${listen}
 	server_name ${domain};
 	server_tokens off;
+	if (\$http_host !~* "^${domain//./\\.}(:80)?\$") {
+		return 444;
+	}
 	return 301 ${target}\$request_uri;
 }
 EOF
@@ -3642,7 +3647,7 @@ resolveXrayVersion() {
         wantPrerelease=true
     fi
     # per_page=30：XTLS 偶尔会连续发好几个 prerelease，5 个窗口太窄
-    curl -s --connect-timeout 10 "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=30" |
+    curl -s --connect-timeout 10 -m 30 "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=30" |
         jq -r --argjson pre "${wantPrerelease}" '.[] | select(.prerelease == $pre) | .tag_name' | head -1
 }
 
@@ -4207,7 +4212,7 @@ localBlockApiPort() {
 # 不封的话成员能经代理连到统计 API 清零自己的计数。09_routing.json 有好几个写入者，所以每次启动前补，不在写入处补
 ensureXrayLocalBlock() {
     local routing="${XRAY_CONF_DIR}/09_routing.json" outbound="${XRAY_CONF_DIR}/local_block_tail_outbound.json"
-    local outbounds apiPort hops current updated
+    local outbounds apiPort hops current updated file
     [[ -d "${XRAY_CONF_DIR}" ]] || return 0
     # 文件名必须带 tail：不带的出站会被插到最前当默认出站，z_direct_outbound 被 WARP / IPv6 全局模式删掉时就是它，全部流量进黑洞
     outbounds='{"outbounds":[{"tag":"local_block","protocol":"blackhole"},{"tag":"local_pass","protocol":"freedom"}]}'
@@ -4216,7 +4221,12 @@ ensureXrayLocalBlock() {
     fi
     apiPort=$(localBlockApiPort) || return 1
     # dokodemo-door 入站（Reality 的 443、附加端口）经路由把连接转给 127.0.0.1 上写死的端口，用户改不了目标：先放行，不然 Reality 全断
-    hops=$(jq -sc '[.[] | .inbounds[]? | select(.protocol == "dokodemo-door") | .tag | select(type == "string")] | unique' "${XRAY_CONF_DIR}"/*.json) || return 1
+    if ! hops=$(jq -sc '[.[] | .inbounds[]? | select(.protocol == "dokodemo-door") | .tag | select(type == "string")] | unique' "${XRAY_CONF_DIR}"/*.json 2>/dev/null); then
+        for file in "${XRAY_CONF_DIR}"/*.json; do
+            jq -e . "${file}" >/dev/null || echoContent red " ---> $(t XRAY_CONF_UNPARSABLE "${file}")"
+        done
+        return 1
+    fi
     current='{"routing":{"rules":[]}}'
     if [[ -f "${routing}" ]]; then
         current=$(cat "${routing}") || return 1
@@ -6699,8 +6709,9 @@ EOF
             local obfsType=${hysteria2ObfsType:-salamander}
             obfsUrlParam="obfs=${obfsType}&obfs-password=${_obfsPwUriEnc}&"
             obfsUrlParamEncode="obfs%3D${obfsType}%26obfs-password%3D${_obfsPwQrEnc}%26"
+            # 加引号：裸写时 true / null / 纯数字这类合法密码会被 YAML 读成布尔、空或整数（字符集已排除引号与反斜杠）
             clashMetaObfs="    obfs: ${obfsType}
-    obfs-password: ${hysteria2ObfsPassword}"
+    obfs-password: \"${hysteria2ObfsPassword}\""
             singBoxObfs=',"obfs":{"type":"'"${obfsType}"'","password":'"${_obfsPwJson}"'}'
         fi
 
@@ -7574,7 +7585,8 @@ unInstall() {
             rm -rf /etc/init.d/xray
             echoContent green " ---> 删除Xray开机自启完成"
         fi
-        if [[ "${coreKind}" == "2" || -n "${singBoxConfigPath}" ]]; then
+        # 看服务文件而不是 singBoxConfigPath：Xray 机上链式角色起的 sing-box 不算 6 / 9，漏掉它就留下一个照常转发的进程
+        if [[ "${coreKind}" == "2" || -n "${singBoxConfigPath}" || -f /etc/init.d/sing-box ]]; then
             handleSingBox stop
             rc-update del sing-box default
             rm -rf /etc/init.d/sing-box
@@ -7586,7 +7598,7 @@ unInstall() {
             rm -rf /etc/systemd/system/xray.service
             echoContent green " ---> 删除Xray开机自启完成"
         fi
-        if [[ "${coreKind}" == "2" || -n "${singBoxConfigPath}" ]]; then
+        if [[ "${coreKind}" == "2" || -n "${singBoxConfigPath}" || -f /etc/systemd/system/sing-box.service ]]; then
             handleSingBox stop
             rm -rf /etc/systemd/system/sing-box.service
             echoContent green " ---> 删除sing-box开机自启完成"
@@ -7984,6 +7996,8 @@ carpoolXrayServiceEnv() {
 ensureCarpoolXray() {
     local statsFile="${XRAY_CONF_DIR}/12_stats_api.json" policyFile="${XRAY_CONF_DIR}/12_policy.json"
     local state want
+    # 从没开过拼车（没有 state）就什么都不碰：车主自己开的 policy 统计字段不是拼车加的
+    [[ -f "${CARPOOL_STATE_FILE}" ]] || return 0
     if ! state=$(carpoolReadState) || [[ "$(jq -r '.enabled' <<<"${state}")" != "true" ]]; then
         carpoolXrayServiceEnv off
         [[ -f "${statsFile}" ]] && rm -f "${statsFile}"
@@ -8077,7 +8091,7 @@ carpoolCollectBeforeStop() {
     carpoolUnlock
 }
 
-# carpoolSubscribeMd5 NAME → 该成员订阅文件（与成员页）的文件名 = md5(订阅键 + salt)，与 subscribe 同一算法；无 salt 返回 1
+# carpoolSubscribeMd5 NAME → 该成员订阅文件的文件名 = md5(订阅键 + salt)，与 subscribe 同一算法；无 salt 返回 1
 carpoolSubscribeMd5() {
     local salt md5
     [[ -s "${SUBSCRIBE_LOCAL_DIR}/subscribeSalt" ]] || return 1
@@ -8085,6 +8099,15 @@ carpoolSubscribeMd5() {
     md5=$(echo -n "$(carpoolSubscribeKey "$1")${salt}"$'\n' | md5sum | awk '{print $1}')
     [[ "${md5}" =~ ^[0-9a-f]{32}$ ]] || return 1
     printf '%s\n' "${md5}"
+}
+
+# carpoolMemberPageKey TOKEN NAME → 成员页文件名 = md5(车主页令牌:成员名)。不能用订阅 md5：转发成员页链接就等于转发订阅；
+# 车主重生成令牌时成员页链接一起换
+carpoolMemberPageKey() {
+    local key
+    key=$(printf '%s:%s' "$1" "$2" | md5sum | awk '{print $1}')
+    [[ "${key}" =~ ^[0-9a-f]{32}$ ]] || return 1
+    printf '%s\n' "${key}"
 }
 
 # carpoolWritePlaceholders STATE → 给每个 disabled 且已不在 inbound 里的成员覆盖写四个占位订阅文件；没有 salt 或订阅目录就跳过
@@ -8122,6 +8145,20 @@ carpoolJudgeAndWrite() {
     printf '%s\n' "${events}"
 }
 
+# carpoolSetNotified KEY true|false → 持锁改 state.notified[KEY]；只有值真的翻转了才返回 0，调用方据此只发一次通知
+carpoolSetNotified() {
+    local state rc
+    carpoolLock || return 1
+    if ! state=$(carpoolReadState) || [[ "$(jq -r --arg k "$1" '.notified[$k] // false' <<<"${state}")" == "$2" ]]; then
+        carpoolUnlock
+        return 1
+    fi
+    carpoolWriteState "$(jq -c --arg k "$1" --argjson v "$2" 'if $v then .notified[$k] = true else del(.notified[$k]) end' <<<"${state}")"
+    rc=$?
+    carpoolUnlock
+    return "${rc}"
+}
+
 # carpoolSettle EVENTS [FORCE_REFRESH] → 放锁之后：对账 clients → 占位 → 有变更就重载 → 有恢复（或 FORCE）就重建订阅。
 # state 从磁盘重读，不用调用方的副本：reload 里的 stop 钩子还会再写一笔
 carpoolSettle() {
@@ -8131,10 +8168,15 @@ carpoolSettle() {
     while read -r ev; do
         [[ -n "${ev}" ]] && echoContent yellow " ---> ${now} $(carpoolEventText "${ev}")"
     done < <(jq -c '.[]' <<<"${events}")
+    # 对账失败时每个 tick 都会重试：txFailed 只在第一次失败时发，成功一次后清掉去重键
     if ! result=$(carpoolReconcile "${state}"); then
         echoContent red " ---> ${now} $(t CARPOOL_RECONCILE_FAILED)"
-        carpoolNotifyEvents "$(jq -c '. + [{type: "txFailed"}]' <<<"${events}")"
+        carpoolSetNotified "tx:failed" true && events=$(jq -c '. + [{type: "txFailed"}]' <<<"${events}")
+        carpoolNotifyEvents "${events}"
         return 1
+    fi
+    if [[ "$(jq -r '.notified["tx:failed"] // false' <<<"${state}")" == "true" ]]; then
+        carpoolSetNotified "tx:failed" false
     fi
     carpoolWritePlaceholders "${state}"
     if [[ "${result}" == "changed" ]]; then
@@ -8220,10 +8262,13 @@ carpoolTick() {
         state=$(jq -c '.collectFailures += 1' <<<"${state}")
         echoContent yellow " ---> ${now} $(t CARPOOL_TICK_COLLECT_FAILED "$(jq -r '.collectFailures' <<<"${state}")")"
     fi
-    local membersOk=true fileId notices extra iface sample machine
+    local membersOk=true fileId notices extra iface sample machine map
     installed=$(scanInstalledProtocols "${XRAY_CONF_DIR}")
-    if errors=$(carpoolValidateMembers "${CARPOOL_MEMBERS_FILE}" "${installed}" "$(carpoolForeignAccounts "${state}" "$(carpoolCurrentClientsMap)")"); then
-        normalized=$(carpoolNormalizeMembers "${CARPOOL_MEMBERS_FILE}" "${installed}")
+    if map=$(carpoolCurrentClientsMap); then
+        state=$(carpoolPruneRemoved "${state}" "${map}")
+    fi
+    if errors=$(carpoolValidateMembers "${CARPOOL_MEMBERS_FILE}" "${installed}" "$(carpoolForeignAccounts "${state}" "${map:-"{}"}")" "$(carpoolRetiredNames "${state}")"); then
+        normalized=$(carpoolNormalizeMembers "${CARPOOL_MEMBERS_FILE}")
         state=$(carpoolSyncLimits "${state}" "${normalized}")
     else
         membersOk=false
@@ -8265,6 +8310,7 @@ carpoolGuardAccountMenu() {
     carpoolEnabled || return 1
     echoContent yellow " ---> $(t CARPOOL_ACCOUNTS_MANAGED "${CARPOOL_MEMBERS_FILE}")"
     manageAccount 1
+    return 0
 }
 
 # carpoolCheckPrerequisites → 开启前的五项检查，逐条打印不满足的原因，任一不满足返回 1
@@ -8284,6 +8330,11 @@ carpoolCheckPrerequisites() {
         echoContent red " ---> $(t CARPOOL_REQ_NO_SIDECAR)"
         ok=
     fi
+    local id
+    for id in $(carpoolUnmanagedProtocols "$(scanInstalledProtocols "${XRAY_CONF_DIR}")"); do
+        echoContent red " ---> $(t CARPOOL_REQ_UNMANAGED_PROTOCOL "$(getProtocolDisplayName "${id}")" "$(getProtocolConfigPath "${id}" "${XRAY_CONF_DIR}/")")"
+        ok=
+    done
     if ! command -v flock >/dev/null 2>&1; then
         echoContent red " ---> $(t CARPOOL_FLOCK_MISSING)"
         ok=
@@ -8295,23 +8346,10 @@ carpoolCheckPrerequisites() {
     [[ -n "${ok}" ]]
 }
 
-# carpoolPortFree PORT → 0=本机没有进程在监听该 TCP 端口（没有 lsof 就当空闲）
-carpoolPortFree() {
-    command -v lsof >/dev/null 2>&1 || return 0
-    ! lsof -i "tcp:$1" 2>/dev/null | grep -q LISTEN
-}
-
-# carpoolPickApiPort → 10000–30000 里随机取一个没被监听的端口给统计 API
+# carpoolPickApiPort → CARPOOL_API_PORT_FIRST–LAST 里第一个没被监听的端口给统计 API
 carpoolPickApiPort() {
-    local port i
-    for i in $(seq 1 20); do
-        port=$(randomPort)
-        if carpoolPortFree "${port}"; then
-            printf '%s\n' "${port}"
-            return 0
-        fi
-    done
-    return 1
+    # shellcheck disable=SC2046
+    firstFreePort "$(listeningPorts tcp)" $(seq "${CARPOOL_API_PORT_FIRST}" "${CARPOOL_API_PORT_LAST}")
 }
 
 # carpoolAllAccounts CURRENT_MAP → {name: uuid}，inbound 里全部账号
@@ -8335,23 +8373,48 @@ carpoolFillUuids() {
 
 # carpoolRemoveCron → 删掉 CarpoolTick 的 cron 行
 carpoolRemoveCron() {
-    local current
+    local current remaining
     current=$(crontab -l 2>/dev/null) || return 0
-    grep -v -F "${PROXY_AGENT_DIR}/install.sh CarpoolTick" <<<"${current}" | crontab - || echoContent yellow " ---> $(t CRON_REMOVE_FAILED)"
+    # CarpoolTick 是唯一一行时 grep -v 没有输出、返回 1，接在管道里会把成功报成失败
+    remaining=$(grep -v -F "${PROXY_AGENT_DIR}/install.sh CarpoolTick" <<<"${current}" || true)
+    crontab - <<<"${remaining}" || echoContent yellow " ---> $(t CRON_REMOVE_FAILED)"
 }
 
-# carpoolRemoveSubscriptionFiles NAME → 删掉该成员的五个订阅文件（含占位）与成员页
+# carpoolRemoveSubscriptionFiles NAME → 删掉该成员的五个订阅文件（含占位）；成员页由 carpoolRenderPages 按期望集合清掉
 carpoolRemoveSubscriptionFiles() {
     local md5 dir
     md5=$(carpoolSubscribeMd5 "$1") || return 0
-    for dir in default clashMeta clashMetaProfiles sing-box sing-box_profiles carpool; do
+    for dir in default clashMeta clashMetaProfiles sing-box sing-box_profiles; do
         rm -f "${SUBSCRIBE_DIR}/${dir}/${md5}"
     done
 }
 
 # carpoolEnable → 检查 → 没有 members.json 就按现有账号播种 → 写 state → reloadCore（start 钩子写片段、cron 行、对账）→ 第一次 tick
+# carpoolConfirmReenable MERGED_STATE ACCOUNTS → 重开前把客户端看得见的改动列出来、逐项确认：0=照常开启，1=不在 tty 上（已报错），2=车主取消
+# 关闭期间在菜单里删掉、改过的账号，state 还记着旧凭据；不问就开，删掉的人会带着旧 UUID 回来
+carpoolConfirmReenable() {
+    local changes name from to answer
+    changes=$(carpoolReenableChanges "$1" "$2") || return 1
+    jq -e '(.restore + .uuid) | length == 0' <<<"${changes}" >/dev/null && return 0
+    echoContent skyBlue "\n$(t CARPOOL_REENABLE_TITLE)"
+    for name in $(jq -r '.restore[]' <<<"${changes}"); do
+        echoContent yellow " ---> $(t CARPOOL_REENABLE_RESTORE "${name}")"
+    done
+    while IFS=$'\t' read -r name from to; do
+        [[ -n "${name}" ]] && echoContent yellow " ---> $(t CARPOOL_REENABLE_UUID "${name}" "${from}" "${to}")"
+    done < <(jq -r '.uuid[] | "\(.name)\t\(.from)\t\(.to)"' <<<"${changes}")
+    if ! carpoolHasTty; then
+        echoContent red " ---> $(t CARPOOL_REENABLE_NEEDS_TTY)"
+        return 1
+    fi
+    for name in $(jq -r '.restore[], .uuid[].name' <<<"${changes}"); do
+        read -r -p "$(t CARPOOL_REENABLE_CONFIRM "${name}")" answer
+        isYesInput "${answer}" || return 2
+    done
+}
+
 carpoolEnable() {
-    local installed map accounts seed fileMembers errors normalized state today apiPort
+    local installed map accounts seed fileMembers errors normalized state oldState= retired='[]' today apiPort rc
     if carpoolEnabled; then
         echoContent yellow " ---> $(t CARPOOL_ALREADY_ENABLED)"
         return 0
@@ -8370,17 +8433,29 @@ carpoolEnable() {
         echoContent green " ---> $(t CARPOOL_SEEDED "${CARPOOL_MEMBERS_FILE}" "$(jq 'length' <<<"${accounts}")")"
     fi
     fileMembers=$(jq -c '{members: (.members // {})}' "${CARPOOL_MEMBERS_FILE}" 2>/dev/null) || fileMembers='{"members": {}}'
-    if ! errors=$(carpoolValidateMembers "${CARPOOL_MEMBERS_FILE}" "${installed}" "$(carpoolForeignAccounts "${fileMembers}" "${map}")"); then
+    if oldState=$(carpoolReadState); then
+        retired=$(carpoolRetiredNames "${oldState}")
+    fi
+    if ! errors=$(carpoolValidateMembers "${CARPOOL_MEMBERS_FILE}" "${installed}" "$(carpoolForeignAccounts "${fileMembers}" "${map}")" "${retired}"); then
         echoContent red " ---> $(t CARPOOL_MEMBERS_INVALID "${CARPOOL_MEMBERS_FILE}")"
         echo "${errors}"
         return 1
     fi
-    normalized=$(carpoolNormalizeMembers "${CARPOOL_MEMBERS_FILE}" "${installed}")
+    normalized=$(carpoolNormalizeMembers "${CARPOOL_MEMBERS_FILE}")
     today=$(date +%F)
-    if state=$(carpoolReadState); then
+    if [[ -n "${oldState}" ]]; then
+        # 关着时改过清零日的，开启就是应用它：后果与应用时一样先说出来
+        carpoolDiffText "$(carpoolDiffMembers "${oldState}" "${normalized}" "${accounts}" | jq -c '{added: [], removed: [], protocols: [], uuid: [], quota: [], expire: [], resetDay, unmanaged: []}')"
+        carpoolConfirmReenable "$(carpoolMergeState "${oldState}" "${normalized}" "${accounts}")" "${accounts}"
+        rc=$?
+        if [[ ${rc} -eq 2 ]]; then
+            echoContent yellow " ---> $(t CARPOOL_CANCELLED)"
+            return 0
+        fi
+        [[ ${rc} -eq 0 ]] || return 1
         # 之前关过：沿用计数；旧的 apiPort 被别人占了就换一个
-        state=$(jq -c '.enabled = true' <<<"${state}")
-        if ! carpoolPortFree "$(jq -r '.apiPort' <<<"${state}")"; then
+        state=$(jq -c '.enabled = true' <<<"${oldState}")
+        if portListed "$(jq -r '.apiPort' <<<"${state}")" "$(listeningPorts tcp)"; then
             apiPort=$(carpoolPickApiPort) || { echoContent red " ---> $(t CARPOOL_API_PORT_FAILED)"; return 1; }
             state=$(jq -c --argjson p "${apiPort}" '.apiPort = $p' <<<"${state}")
         fi
@@ -8441,7 +8516,7 @@ carpoolDisable() {
         echoContent red " ---> $(t CARPOOL_CLOSE_TX_FAILED)"
         return 1
     fi
-    state=$(jq -c '.enabled = false | .pageEnabled = false | .pageToken = ""' <<<"${state}")
+    state=$(jq -c '.enabled = false | .pageEnabled = false | .pageToken = "" | del(.removing)' <<<"${state}")
     if ! carpoolWriteState "${state}"; then
         carpoolUnlock
         echoContent red " ---> $(t CARPOOL_TICK_STATE_WRITE_FAILED)"
@@ -8464,6 +8539,11 @@ carpoolDisable() {
     carpoolNotifyEvents "$(jq -cn --arg r "${restoredList}" --arg k "${keptList}" '[{type: "closed", restored: $r, kept: $k}]')"
 }
 
+# carpoolHasTty → 0=标准输入是终端，删除成员与换 UUID 才能逐项确认
+carpoolHasTty() {
+    [[ -t 0 ]]
+}
+
 # carpoolApply → 应用 members.json：校验 → 显示差异 → 删除 / 换 UUID 逐项确认（非 tty 拒绝）→ 持锁重建成员表并判定 → settle
 carpoolApply() {
     local installed map fileMembers errors normalized state accounts diff answer events name force=
@@ -8474,13 +8554,13 @@ carpoolApply() {
     installed=$(scanInstalledProtocols "${XRAY_CONF_DIR}")
     map=$(carpoolCurrentClientsMap) || return 1
     fileMembers=$(jq -c '{members: (.members // {})}' "${CARPOOL_MEMBERS_FILE}" 2>/dev/null) || fileMembers='{"members": {}}'
-    if ! errors=$(carpoolValidateMembers "${CARPOOL_MEMBERS_FILE}" "${installed}" "$(carpoolForeignAccounts "${fileMembers}" "${map}")"); then
+    state=$(carpoolReadState) || return 1
+    if ! errors=$(carpoolValidateMembers "${CARPOOL_MEMBERS_FILE}" "${installed}" "$(carpoolForeignAccounts "${fileMembers}" "${map}")" "$(carpoolRetiredNames "${state}")"); then
         echoContent red " ---> $(t CARPOOL_MEMBERS_INVALID "${CARPOOL_MEMBERS_FILE}")"
         echo "${errors}"
         return 1
     fi
-    normalized=$(carpoolNormalizeMembers "${CARPOOL_MEMBERS_FILE}" "${installed}")
-    state=$(carpoolReadState) || return 1
+    normalized=$(carpoolNormalizeMembers "${CARPOOL_MEMBERS_FILE}")
     accounts=$(carpoolAllAccounts "${map}")
     diff=$(carpoolDiffMembers "${state}" "${normalized}" "${accounts}")
     if carpoolDiffIsEmpty "${diff}"; then
@@ -8490,7 +8570,7 @@ carpoolApply() {
     echoContent skyBlue "\n$(t CARPOOL_APPLY_TITLE)"
     carpoolDiffText "${diff}"
     if carpoolDiffNeedsConfirm "${diff}"; then
-        if [[ ! -t 0 ]]; then
+        if ! carpoolHasTty; then
             echoContent red " ---> $(t CARPOOL_APPLY_NEEDS_TTY)"
             return 1
         fi
@@ -8513,6 +8593,7 @@ carpoolApply() {
     jq -e '(.added | length) > 0' <<<"${diff}" >/dev/null 2>&1 && force=1
     carpoolLock || return 1
     state=$(carpoolMergeState "$(carpoolReadState)" "${normalized}" "${accounts}")
+    state=$(carpoolMarkRemoved "${state}" "$(jq -c '.removed' <<<"${diff}")")
     if ! state=$(carpoolFillUuids "${state}"); then
         carpoolUnlock
         return 1
@@ -8651,12 +8732,12 @@ carpoolPendingText() {
     installed=$(scanInstalledProtocols "${XRAY_CONF_DIR}")
     map=$(carpoolCurrentClientsMap) || return 0
     fileMembers=$(jq -c '{members: (.members // {})}' "${CARPOOL_MEMBERS_FILE}" 2>/dev/null) || fileMembers='{"members": {}}'
-    if ! carpoolValidateMembers "${CARPOOL_MEMBERS_FILE}" "${installed}" "$(carpoolForeignAccounts "${fileMembers}" "${map}")" >/dev/null; then
+    if ! carpoolValidateMembers "${CARPOOL_MEMBERS_FILE}" "${installed}" "$(carpoolForeignAccounts "${fileMembers}" "${map}")" "$(carpoolRetiredNames "$1")" >/dev/null; then
         t CARPOOL_PAGE_FILE_INVALID
         echo
         return 0
     fi
-    normalized=$(carpoolNormalizeMembers "${CARPOOL_MEMBERS_FILE}" "${installed}")
+    normalized=$(carpoolNormalizeMembers "${CARPOOL_MEMBERS_FILE}")
     diff=$(carpoolDiffMembers "$1" "${normalized}" "$(carpoolAllAccounts "${map}")")
     carpoolDiffIsEmpty "${diff}" && return 0
     t CARPOOL_PAGE_PENDING "$(carpoolDiffText "$(jq -c '.unmanaged = []' <<<"${diff}")" | paste -sd ';' - | sed 's/;/ · /g')"
@@ -8665,7 +8746,7 @@ carpoolPendingText() {
 
 # carpoolRenderPages → 页面开着就重生成车主页与成员页（期望集合之外的文件删掉），并确保 nginx location 在；关着就清空目录
 carpoolRenderPages() {
-    local state token today now meta others pending name md5 html keep=() file base
+    local state token today now meta others pending name key html keep=() file base
     state=$(carpoolReadState) || return 0
     if [[ "$(jq -r '.enabled and .pageEnabled' <<<"${state}")" != "true" ]]; then
         carpoolRemovePages
@@ -8686,9 +8767,9 @@ carpoolRenderPages() {
     fi
     keep+=("${token}")
     for name in $(jq -r '.members | keys_unsorted[]' <<<"${state}"); do
-        md5=$(carpoolSubscribeMd5 "${name}") || continue
+        key=$(carpoolMemberPageKey "${token}" "${name}") || continue
         html=$(carpoolRenderMemberPage "${state}" "${meta}" "${name}" "${today}" "${now}") || continue
-        carpoolWritePage "${CARPOOL_PAGE_DIR}/${md5}" "${html}" && keep+=("${md5}")
+        carpoolWritePage "${CARPOOL_PAGE_DIR}/${key}" "${html}" && keep+=("${key}")
     done
     while IFS= read -r file; do
         base=${file##*/}
@@ -8712,7 +8793,7 @@ carpoolPageUrlBase() {
 
 # carpoolShowPageLinks → 打印车主页与各成员页链接
 carpoolShowPageLinks() {
-    local state base name md5
+    local state base name key token
     state=$(carpoolReadState) || return 1
     if [[ "$(jq -r '.pageEnabled' <<<"${state}")" != "true" ]]; then
         echoContent yellow " ---> $(t CARPOOL_PAGE_STATUS_OFF)"
@@ -8722,14 +8803,11 @@ carpoolShowPageLinks() {
         echoContent red " ---> $(t CARPOOL_PAGE_NEEDS_SUBSCRIBE)"
         return 1
     fi
-    echoContent green " ---> $(t CARPOOL_PAGE_OWNER_LINK): ${base}$(jq -r '.pageToken' <<<"${state}")"
-    if [[ ! -s "${SUBSCRIBE_LOCAL_DIR}/subscribeSalt" ]]; then
-        echoContent yellow " ---> $(t CARPOOL_PAGE_NO_SALT)"
-        return 0
-    fi
+    token=$(jq -r '.pageToken' <<<"${state}")
+    echoContent green " ---> $(t CARPOOL_PAGE_OWNER_LINK): ${base}${token}"
     for name in $(jq -r '.members | keys_unsorted[]' <<<"${state}"); do
-        md5=$(carpoolSubscribeMd5 "${name}") || continue
-        echoContent yellow " ---> $(t CARPOOL_PAGE_MEMBER_LINK) ${name}: ${base}${md5}"
+        key=$(carpoolMemberPageKey "${token}" "${name}") || continue
+        echoContent yellow " ---> $(t CARPOOL_PAGE_MEMBER_LINK) ${name}: ${base}${key}"
     done
 }
 
@@ -8950,10 +9028,20 @@ restoreConfigSnapshot() {
     if [[ -f "${sourceDir}/lang_pref" ]]; then
         cp -f "${sourceDir}/lang_pref" "${installDir}/" 2>/dev/null && restored=1
     fi
-    # 快照里有 carpool/ 才覆盖：回滚到开拼车之前的快照不能把车主手写的 members.json 删掉
+    # 快照里有 carpool/ 才覆盖：回滚到开拼车之前的快照不能把车主手写的 members.json 删掉。
+    # 现场的 state.json 留着：它是计量数据，换成快照里的就把用量倒回快照那天，停机钩子刚收的那笔也丢了
     if [[ -d "${sourceDir}/carpool" ]]; then
+        local liveState=
+        if [[ -f "${installDir}/carpool/state.json" ]]; then
+            liveState=$(mktemp "${installDir}/.carpool-state.XXXXXX") && cp -pf "${installDir}/carpool/state.json" "${liveState}" || return 1
+        fi
         rm -rf "${installDir}/carpool"
         cp -rf "${sourceDir}/carpool" "${installDir}/" 2>/dev/null && restored=1
+        if [[ -n "${liveState}" ]]; then
+            mkdir -p "${installDir}/carpool" && mv -f "${liveState}" "${installDir}/carpool/state.json"
+        else
+            rm -f "${installDir}/carpool/state.json"
+        fi
     fi
 
     [[ ${restored} -eq 1 ]]
@@ -9259,6 +9347,8 @@ rollbackScript() {
         if [[ -n "${stagedOk}" ]]; then
             echoContent yellow " ---> 下载模块文件..."
             for module in i18n constants utils json-utils system-detect protocol-registry carpool; do
+                # 目标版本的 install.sh 没提到的模块是之后才加的（v1.4.1 及以前没有 carpool），那个 tag 下不存在，不下也不装
+                grep -qF -- "${module}.sh" "${stagingDir}/install.sh" || continue
                 if ! wget -q -O "${stagingDir}/lib/${module}.sh" "${rawBase}/${version}/lib/${module}.sh" ||
                     [[ ! -s "${stagingDir}/lib/${module}.sh" ]] ||
                     ! bash -n "${stagingDir}/lib/${module}.sh" 2>/dev/null; then
@@ -9298,6 +9388,11 @@ rollbackScript() {
         chmod 700 "${installDir}/install.sh"
         mkdir -p "${installDir}/lib" "${installDir}/shell/lang"
         for module in i18n constants utils json-utils system-detect protocol-registry carpool; do
+            # 没下的模块删掉，与本地备份分支整目录替换的结果一致
+            if [[ ! -f "${stagingDir}/lib/${module}.sh" ]]; then
+                rm -f "${installDir}/lib/${module}.sh"
+                continue
+            fi
             cp -f "${stagingDir}/lib/${module}.sh" "${installDir}/lib/${module}.sh.new" && mv -f "${installDir}/lib/${module}.sh.new" "${installDir}/lib/${module}.sh"
         done
         for langFile in zh_CN en_US; do
@@ -10083,13 +10178,19 @@ ipv6Routing() {
     reloadCore
 }
 
+# xrayRoutingHasOutbound TAG → 0=09_routing.json 里有规则指向出站 TAG（按域名分流）。全局模式靠「没有这类规则」判断，
+# 不能看文件在不在：全局模式删掉的 09_routing.json 会在下次启动时被 ensureXrayLocalBlock 补回来
+xrayRoutingHasOutbound() {
+    jq -e --arg tag "$1" 'any(.routing.rules[]?; .outboundTag == $tag)' "${configPath}09_routing.json" >/dev/null 2>&1
+}
+
 # ipv6分流规则展示
 showIPv6Routing() {
     if [[ "${coreKind}" == "1" ]]; then
-        if [[ -f "${configPath}09_routing.json" ]]; then
+        if xrayRoutingHasOutbound IPv6_out; then
             echoContent yellow "Xray-core："
             jq -r -c '.routing.rules[]|select (.outboundTag=="IPv6_out")|.domain' ${configPath}09_routing.json | jq -r
-        elif [[ ! -f "${configPath}09_routing.json" && -f "${configPath}IPv6_out.json" ]]; then
+        elif [[ -f "${configPath}IPv6_out.json" ]]; then
             echoContent yellow "Xray-core"
             echoContent green " ---> 已设置IPv6全局分流"
         else
@@ -10294,10 +10395,10 @@ showWireGuardDomain() {
     local type=$1
     # xray
     if [[ "${coreKind}" == "1" ]]; then
-        if [[ -f "${configPath}09_routing.json" ]]; then
+        if xrayRoutingHasOutbound "wireguard_out_${type}"; then
             echoContent yellow "Xray-core"
             jq -r -c '.routing.rules[]|select (.outboundTag=="wireguard_out_'"${type}"'")|.domain' ${configPath}09_routing.json | jq -r
-        elif [[ ! -f "${configPath}09_routing.json" && -f "${configPath}wireguard_out_${type}.json" ]]; then
+        elif [[ -f "${configPath}wireguard_out_${type}.json" ]]; then
             echoContent yellow "Xray-core"
             echoContent green " ---> 已设置warp ${type}全局分流"
         else
@@ -11770,7 +11871,7 @@ chainAccountInject() {
            then [$bridges[] | {type: "socks", tag: ("chain_acct_in_" + .name), listen: "127.0.0.1", listen_port: .port}]
            else [] end) as $inb
         | ($inb | map(.tag)) as $tags
-        | ([.inbounds[]? | .users[]? | (.name // .username) | select(type == "string" and test("-"))] | unique
+        | ([.inbounds[]? | .users[]? | (.name // .username // .Username) | select(type == "string" and test("-"))] | unique
            | map(. as $n | {name: $n, out: $acc[$n | sub("-[^-]*$"; "")]}) | map(select(.out != null))) as $hits
         | ((if ($tags | length) > 0
               then [{inbound: $tags, action: "sniff", timeout: "1s"}, {inbound: $tags, action: "resolve", strategy: "prefer_ipv4"}]
@@ -17474,6 +17575,23 @@ subscribe() {
                 fi
             fi
             local subscribePortLocal="${subscribePort}"
+            # sing-box 通用配置的模板从本仓库 docs/sing-box.json 拉，一轮只拉一次（cron 下逐人拉太慢）；
+            # 拉不到或不是合法 JSON 就不动已有的 sing-box 配置文件：一次瞬时失败不该让能用的配置变成 404
+            local _singboxTplUrl="https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/docs/sing-box.json"
+            local _singboxTpl= _singboxTplExit=0
+            if [[ -n $(ls "${SUBSCRIBE_LOCAL_DIR}/sing-box/" 2>/dev/null) ]] && _singboxTpl=$(mktemp); then
+                echoContent skyBlue " ---> 下载 sing-box 通用配置文件"
+                if [[ "${release}" == "alpine" ]]; then
+                    wget -O "${_singboxTpl}" -q --timeout=15 --tries=2 "${_singboxTplUrl}" || _singboxTplExit=$?
+                else
+                    wget -O "${_singboxTpl}" -q --timeout=15 --tries=2 ${wgetShowProgressStatus} "${_singboxTplUrl}" || _singboxTplExit=$?
+                fi
+                if [[ ${_singboxTplExit} -ne 0 ]] || [[ ! -s "${_singboxTpl}" ]] || ! jq -e . "${_singboxTpl}" >/dev/null 2>&1; then
+                    echoContent red " ---> sing-box 订阅模板下载或解析失败，跳过本次 sing-box 订阅 (URL: ${_singboxTplUrl})"
+                    rm -f "${_singboxTpl}"
+                    _singboxTpl=
+                fi
+            fi
             find ${SUBSCRIBE_LOCAL_DIR}/default/* | while read -r email; do
                 email=$(echo "${email}" | awk -F "[d][e][f][a][u][l][t][/]" '{print $2}')
 
@@ -17500,6 +17618,7 @@ subscribe() {
                         currentDomain="${currentHost}:${subscribePort}"
                     fi
                 fi
+                # 三种格式的文件不管打不打印都要重建：上面已经删光了 clashMeta，只建 default 会让所有人的 Clash 订阅 404
                 if [[ -z "${showStatus}" ]]; then
                     echoContent skyBlue "\n----------默认订阅----------\n"
                     echoContent green "email:${email}\n"
@@ -17508,64 +17627,49 @@ subscribe() {
                     if [[ "${release}" != "alpine" ]]; then
                         echo "${subscribeType}://${currentDomain}/s/default/${emailMd5}" | qrencode -s 10 -m 1 -t UTF8
                     fi
+                fi
 
-                    # clashMeta
-                    if [[ -f "${SUBSCRIBE_LOCAL_DIR}/clashMeta/${email}" ]]; then
-
-                        cat "${SUBSCRIBE_LOCAL_DIR}/clashMeta/${email}" >>"${SUBSCRIBE_DIR}/clashMeta/${emailMd5}"
-
-                        sed -i '1i\proxies:' "${SUBSCRIBE_DIR}/clashMeta/${emailMd5}"
-
-                        local clashProxyUrl="${subscribeType}://${currentDomain}/s/clashMeta/${emailMd5}"
-                        clashMetaConfig "${clashProxyUrl}" "${emailMd5}"
+                # clashMeta
+                if [[ -f "${SUBSCRIBE_LOCAL_DIR}/clashMeta/${email}" ]]; then
+                    { echo "proxies:"; cat "${SUBSCRIBE_LOCAL_DIR}/clashMeta/${email}"; } >"${SUBSCRIBE_DIR}/clashMeta/${emailMd5}"
+                    local clashProxyUrl="${subscribeType}://${currentDomain}/s/clashMeta/${emailMd5}"
+                    clashMetaConfig "${clashProxyUrl}" "${emailMd5}"
+                    if [[ -z "${showStatus}" ]]; then
                         echoContent skyBlue "\n----------clashMeta订阅----------\n"
                         echoContent yellow "url:${subscribeType}://${currentDomain}/s/clashMetaProfiles/${emailMd5}\n"
                         echoContent yellow "在线二维码:https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${subscribeType}://${currentDomain}/s/clashMetaProfiles/${emailMd5}\n"
                         if [[ "${release}" != "alpine" ]]; then
                             echo "${subscribeType}://${currentDomain}/s/clashMetaProfiles/${emailMd5}" | qrencode -s 10 -m 1 -t UTF8
                         fi
-
                     fi
-                    # sing-box
-                    if [[ -f "${SUBSCRIBE_LOCAL_DIR}/sing-box/${email}" ]]; then
-                        cp "${SUBSCRIBE_LOCAL_DIR}/sing-box/${email}" "${SUBSCRIBE_DIR}/sing-box_profiles/${emailMd5}"
-
-                        echoContent skyBlue " ---> 下载 sing-box 通用配置文件"
-                        # 模板从本仓库 docs/sing-box.json 拉取，便于跟脚本同步演进。
-                        local _singboxTplFile="${SUBSCRIBE_DIR}/sing-box/${emailMd5}"
-                        local _singboxTplUrl="https://raw.githubusercontent.com/Lynthar/Proxy-agent/master/docs/sing-box.json"
-                        local _singboxTplExit=0
-                        if [[ "${release}" == "alpine" ]]; then
-                            wget -O "${_singboxTplFile}" -q --timeout=15 --tries=2 "${_singboxTplUrl}" || _singboxTplExit=$?
-                        else
-                            wget -O "${_singboxTplFile}" -q --timeout=15 --tries=2 ${wgetShowProgressStatus} "${_singboxTplUrl}" || _singboxTplExit=$?
-                        fi
-
-                        # 失败兜底：wget 非 0 / 文件空 / 不是合法 JSON 任意一种都视为失败。
-                        # 早期实现下载失败后会让 jq 在空输入或 HTML 错误页上爆炸、留下半成
-                        # _tmp 文件，UX 更差。这里直接 rm + 跳过该用户的 sing-box 订阅广播。
-                        if [[ ${_singboxTplExit} -ne 0 ]] || [[ ! -s "${_singboxTplFile}" ]] || ! jq -e . "${_singboxTplFile}" >/dev/null 2>&1; then
-                            echoContent red " ---> sing-box 订阅模板下载或解析失败，跳过本次 sing-box 订阅 (URL: ${_singboxTplUrl})"
-                            rm -f "${_singboxTplFile}"
-                        else
-                            jq ".outbounds=$(jq ".outbounds|map(if has(\"outbounds\") then .outbounds += $(jq ".|map(.tag)" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${email}") else . end)" "${_singboxTplFile}")" "${_singboxTplFile}" >"${_singboxTplFile}_tmp" && mv "${_singboxTplFile}_tmp" "${_singboxTplFile}"
-                            jq ".outbounds += $(jq '.' "${SUBSCRIBE_LOCAL_DIR}/sing-box/${email}")" "${_singboxTplFile}" >"${_singboxTplFile}_tmp" && mv "${_singboxTplFile}_tmp" "${_singboxTplFile}"
-
-                            echoContent skyBlue "\n----------sing-box订阅----------\n"
-                            echoContent yellow "url:${subscribeType}://${currentDomain}/s/sing-box/${emailMd5}\n"
-                            echoContent yellow "在线二维码:https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${subscribeType}://${currentDomain}/s/sing-box/${emailMd5}\n"
-                            if [[ "${release}" != "alpine" ]]; then
-                                echo "${subscribeType}://${currentDomain}/s/sing-box/${emailMd5}" | qrencode -s 10 -m 1 -t UTF8
-                            fi
+                fi
+                # sing-box
+                if [[ -f "${SUBSCRIBE_LOCAL_DIR}/sing-box/${email}" ]]; then
+                    cp "${SUBSCRIBE_LOCAL_DIR}/sing-box/${email}" "${SUBSCRIBE_DIR}/sing-box_profiles/${emailMd5}"
+                    local _singboxFile="${SUBSCRIBE_DIR}/sing-box/${emailMd5}"
+                    if [[ -n "${_singboxTpl}" ]] && jq --slurpfile p "${SUBSCRIBE_LOCAL_DIR}/sing-box/${email}" \
+                        '($p[0] | map(.tag)) as $tags | .outbounds |= map(if has("outbounds") then .outbounds += $tags else . end) | .outbounds += $p[0]' \
+                        "${_singboxTpl}" >"${_singboxFile}.tmp" && mv "${_singboxFile}.tmp" "${_singboxFile}" && [[ -z "${showStatus}" ]]; then
+                        echoContent skyBlue "\n----------sing-box订阅----------\n"
+                        echoContent yellow "url:${subscribeType}://${currentDomain}/s/sing-box/${emailMd5}\n"
+                        echoContent yellow "在线二维码:https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${subscribeType}://${currentDomain}/s/sing-box/${emailMd5}\n"
+                        if [[ "${release}" != "alpine" ]]; then
+                            echo "${subscribeType}://${currentDomain}/s/sing-box/${emailMd5}" | qrencode -s 10 -m 1 -t UTF8
                         fi
                     fi
+                    rm -f "${_singboxFile}.tmp"
+                fi
 
+                if [[ -z "${showStatus}" ]]; then
                     echoContent skyBlue "--------------------------------------------------------------"
                 else
                     echoContent green " ---> email:${email}，订阅已更新，请使用客户端重新拉取"
                 fi
 
             done
+            if [[ -n "${_singboxTpl}" ]]; then
+                rm -f "${_singboxTpl}"
+            fi
         fi
         # 停用的拼车成员不在 inbound 里、上面没给他们生成文件，补上占位（关闭后保持停用的也算）
         if [[ -f "${CARPOOL_STATE_FILE}" ]]; then
