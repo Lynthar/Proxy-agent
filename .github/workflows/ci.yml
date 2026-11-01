@@ -185,3 +185,14 @@ jobs:
         # core's own config check, a real Reality handshake through the emitted share link,
         # pasly re-entry, doctor and uninstall. tests/e2e/run.sh is the same command locally.
         run: bash tests/e2e/run.sh ${{ matrix.os }} ${{ matrix.core }} ${{ matrix.client == 'same' && matrix.core || matrix.client }}
+
+  chain-e2e:
+    name: carpool and a chain proxy together on two real containers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: entry with carpool joins and leaves a chain to an Xray exit
+        # Two Debian containers on one docker network. Fails unless the exit really forwarded
+        # the traffic and carpool survives the chain going up and down.
+        run: bash tests/e2e/run.sh chain xray
