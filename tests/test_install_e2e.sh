@@ -628,6 +628,9 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
         assert_equals "0" "${unchainRc}" "卸载链式退出码 0"
         assert_equals "${routingBefore}" "$(cat "${XRAY_CONF_DIR}/09_routing.json" 2>/dev/null)" "09_routing.json 还原成接链式之前的内容"
         assert_equals "no" "$([[ -e "${XRAY_CONF_DIR}/chain_outbound.json" ]] && echo yes || echo no)" "Xray 的 chain_outbound.json 已删"
+        # 旁挂的 sing-box 没东西可服务了就得停：留着的话，本机任何进程都能经回环上的桥从出口出网
+        assert_equals "" "$(pgrep -x sing-box || true)" "拆掉链式后旁挂的 sing-box 已停"
+        assert_equals "" "$(listenAddrs 31111)" "拆掉链式后桥的 31111 不再监听"
         carpoolIntact "拆掉链式之后"
         assert_equals "0" "$(jq --arg id "${E2E_UUID}" '[.inbounds[1].settings.clients[]? | select(.id == $id)] | length' "${realityConf}" 2>/dev/null)" \
             "拆链式重启 Xray 之后，到期的 ${E2E_USER} 仍不在 Reality 入站里"

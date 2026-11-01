@@ -15869,6 +15869,15 @@ removeVMessWSRouting() {
 }
 
 # 重启核心
+# singBoxFragmentsHaveInbounds → 0=sing-box 片段目录里还有入站（链式的出口与桥、6 / 9）；没装 sing-box 或一个入站都没有返回 1。
+# 片段读不懂也返回 0：交给 handleSingBox start 的合并去报错，不能当成「没东西」把它停掉
+singBoxFragmentsHaveInbounds() {
+    local count
+    [[ -f "${SINGBOX_BIN}" ]] && compgen -G "${SINGBOX_FRAGMENT_DIR}/*.json" >/dev/null || return 1
+    count=$(jq -s '[.[].inbounds[]?] | length' "${SINGBOX_FRAGMENT_DIR}"/*.json 2>/dev/null) || return 0
+    [[ "${count}" -gt 0 ]]
+}
+
 reloadCore() {
     readInstallType
 
@@ -15876,9 +15885,12 @@ reloadCore() {
         handleXray stop
         handleXray start
     fi
-    if echo "${currentInstallProtocolType}" | grep -q ",20," || [[ "${coreKind}" == "2" || -n "${singBoxConfigPath}" ]]; then
+    # Xray 内核上 sing-box 是旁挂：片段里还有入站就跟着重启，一个都不剩就停掉——链式拆掉后不能留一条通到出口的桥
+    if echo "${currentInstallProtocolType}" | grep -q ",20," || [[ "${coreKind}" == "2" || -n "${singBoxConfigPath}" ]] || singBoxFragmentsHaveInbounds; then
         handleSingBox stop
         handleSingBox start
+    elif [[ "${coreKind}" == "1" && -n $(pgrep -x "sing-box") ]]; then
+        handleSingBox stop
     fi
 }
 

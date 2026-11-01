@@ -1913,6 +1913,49 @@ assert_equals "3" "$(grep -c 'resolveXrayVersion' <<<"${INSTALL_XRAY_FN}")" "ins
 echo ""
 
 # ============================================================================
+# reloadCore：Xray 内核上旁挂的 sing-box 片段里有入站就跟着重启，一个不剩就停掉
+# ============================================================================
+
+echo -e "${YELLOW}=== 测试 reloadCore 的分派 ===${NC}"
+
+RELOAD_FN=$(sed -n '/^singBoxFragmentsHaveInbounds() {/,/^}/p;/^reloadCore() {/,/^}/p' install.sh)
+assert_equals "2" "$(grep -c '^[a-zA-Z]*() {$' <<<"${RELOAD_FN}")" "reloadCore：抽到两个函数原文"
+RELOAD_DIR="${MOCK_ROOT}/reload"
+
+# run_reload CORE SIDECAR6_9 RUNNING → 在干净 bash 里以 RELOAD_DIR 为安装根跑 reloadCore，打印启停调用序列（空格分隔）
+run_reload() {
+    env PROXY_AGENT_DIR="${RELOAD_DIR}" RELOAD_FN="${RELOAD_FN}" R_CORE="$1" R_SIDECAR="$2" RUNNING="$3" bash -c '
+        source lib/constants.sh
+        eval "${RELOAD_FN}"
+        readInstallType() { coreKind="${R_CORE}"; singBoxConfigPath="${R_SIDECAR}"; currentInstallProtocolType=",7,"; }
+        handleXray() { calls+="xray-$1 "; }
+        handleSingBox() { calls+="singbox-$1 "; }
+        pgrep() { [[ -n "${RUNNING}" ]] && echo 4242; }
+        calls=
+        reloadCore
+        printf "%s\n" "${calls% }"'
+}
+reload_tree() { # FRAGMENT_JSON... → 重建安装根下的 sing-box 二进制与片段目录
+    local dir="${RELOAD_DIR}/sing-box/conf/config" i=0 f
+    rm -rf "${RELOAD_DIR}" && mkdir -p "${dir}" && touch "${RELOAD_DIR}/sing-box/sing-box"
+    for f in "$@"; do printf '%s\n' "${f}" >"${dir}/$((i++))_frag.json"; done
+}
+rm -rf "${RELOAD_DIR}"
+assert_equals "xray-stop xray-start" "$(run_reload 1 "" "")" "Xray 内核、没装 sing-box：只重启 Xray"
+reload_tree '{"log":{"level":"info"}}' '{"inbounds":[{"type":"socks","tag":"chain_bridge_in"}]}' '{"outbounds":[{"type":"direct"}]}'
+assert_equals "xray-stop xray-start singbox-stop singbox-start" "$(run_reload 1 "" "")" "Xray 内核、片段里有链式的桥：连旁挂的 sing-box 一起重启"
+reload_tree '{"log":{"level":"info"}}' '{"inbounds":[]}' '{"outbounds":[{"type":"direct"}]}'
+assert_equals "xray-stop xray-start singbox-stop" "$(run_reload 1 "" yes)" "Xray 内核、片段里一个入站都不剩、sing-box 还在跑：停掉它"
+assert_equals "xray-stop xray-start" "$(run_reload 1 "" "")" "Xray 内核、没有入站、sing-box 也没在跑：不碰它"
+reload_tree '{"inbounds":[' '{"outbounds":[]}'
+assert_equals "xray-stop xray-start singbox-stop singbox-start" "$(run_reload 1 "" yes)" "片段读不懂：照常重启，让合并去报错，不当成没东西停掉"
+reload_tree '{"outbounds":[]}'
+assert_equals "xray-stop xray-start singbox-stop singbox-start" "$(run_reload 1 "${RELOAD_DIR}/sing-box/conf/config/" "")" "Xray 内核装了 6 / 9（singBoxConfigPath 非空）：照旧重启"
+assert_equals "singbox-stop singbox-start" "$(run_reload 2 "${RELOAD_DIR}/sing-box/conf/config/" "")" "sing-box 内核：只重启 sing-box"
+
+echo ""
+
+# ============================================================================
 # cron 行的卫生：installCronTLS 只换自己的行、unInstall 清掉指向本根的行、crond 真的被拉起
 # ============================================================================
 
