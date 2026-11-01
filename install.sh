@@ -5412,6 +5412,12 @@ singBoxMergeConfig() {
         return 1
     fi
 
+    if ! chainAccountInject "${tmpFile}"; then
+        echoContent red " ---> $(t CHAIN_ACCOUNT_INJECT_FAILED)"
+        rm -f "${tmpFile}"
+        return 1
+    fi
+
     # 运行时校验：sing-box check 检查端口冲突、tag 唯一性、协议字段一致性
     # 等 merge 不查的项。失败保留旧 config.json，不替换。
     checkOutput=$(${SINGBOX_BIN} check -c "${tmpFile}" 2>&1)
@@ -7813,6 +7819,9 @@ removeUser() {
             manageAccount 1
             return
         fi
+        if ! chainAccountForget "${delUserKey}"; then
+            echoContent red " ---> $(t CHAIN_ACCOUNT_FORGET_FAILED "${delUserKey}")"
+        fi
         reloadCore
         readNginxSubscribe
         if [[ -n "${subscribePort}" ]]; then
@@ -8458,6 +8467,9 @@ carpoolApply() {
     carpoolUnlock
     for name in $(jq -r '.removed[]' <<<"${diff}"); do
         carpoolRemoveSubscriptionFiles "${name}"
+        if ! chainAccountForget "${name}"; then
+            echoContent red " ---> $(t CHAIN_ACCOUNT_FORGET_FAILED "${name}")"
+        fi
     done
     carpoolSettle "${events}" "${force}" || return 1
     echoContent green " ---> $(t CARPOOL_APPLIED)"
@@ -10453,6 +10465,7 @@ chainProxyMenu() {
     echoContent yellow "5.$(t CHAIN_MENU_UNINSTALL)"
     echoContent yellow "6.$(t EXT_MENU_TITLE)"
     echoContent yellow "7.$(t CHAIN_MENU_PROTOCOL_ROUTING)"
+    echoContent yellow "8.$(t CHAIN_MENU_ACCOUNT_EXIT)"
 
     read -r -p "$(t PROMPT_SELECT):" selectType
 
@@ -10477,6 +10490,9 @@ chainProxyMenu() {
         ;;
     7)
         configureProtocolChainRouting
+        ;;
+    8)
+        chainAccountExitMenu
         ;;
     esac
 }
@@ -11582,66 +11598,300 @@ EOF
     fi
 }
 
-# writeXrayChainConfig PORT → Xray 侧两件：chain_proxy 出站指向本机桥，09_routing.json 整份换成兜底走 chain_proxy
-# 换之前把原路由存成 .bak.chain，removeChainProxy 从它恢复
-writeXrayChainConfig() {
-    cat <<EOF >"${XRAY_CONF_DIR}/chain_outbound.json"
-{
-    "outbounds": [
-        {
-            "tag": "chain_proxy",
-            "protocol": "socks",
-            "settings": {
-                "servers": [
-                    {
-                        "address": "127.0.0.1",
-                        "port": $1
-                    }
-                ]
-            }
-        }
-    ]
-}
-EOF
+# ======================= 按账号选出口 =======================
+# 映射 accounts {账号名: 出口} 存在入口的链式状态文件里，出口写 sing-box 出站 tag：direct、单链路 / 多跳的 chain_outbound、
+# 多链路的链路名；没写的账号走 default_chain（单链路 / 多跳缺省 chain_outbound）。被指定的账号以映射为终态，域名分流只管没指定的
 
-    if [[ -f "${XRAY_CONF_DIR}/09_routing.json" ]]; then
-        cp "${XRAY_CONF_DIR}/09_routing.json" "${XRAY_CONF_DIR}/09_routing.json.bak.chain"
+# chainAccountStateFile → 能按账号选出口的入口状态文件（多链路、单链路、多跳）；没有或明说是别的角色 / external_single 返回 1
+# 读不懂、缺 role 也照样打印路径，让 chainAccountReadState 报错或照常读映射，不当成「没有映射」
+chainAccountStateFile() {
+    if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
+        echo "${CHAIN_MULTI_INFO}"
+        return 0
+    fi
+    [[ -f "${CHAIN_ENTRY_INFO}" ]] || return 1
+    jq -e '((.role | type) == "string" and .role != "entry") or ((.mode | type) == "string" and .mode != "multi_hop")' \
+        "${CHAIN_ENTRY_INFO}" >/dev/null 2>&1 && return 1
+    echo "${CHAIN_ENTRY_INFO}"
+}
+
+# chainAccountReadState → 打印当前入口的链式状态（一行 JSON），没有能选出口的入口时打印 {}
+# 状态读不懂或映射不合法返回 1：调用方必须中止，跳过映射等于让指定了出口的人静默走默认出口
+chainAccountReadState() {
+    local file state invalid
+    if ! file=$(chainAccountStateFile); then
+        echo '{}'
+        return 0
+    fi
+    if ! state=$(jq -ce 'select(type == "object")' "${file}" 2>/dev/null) || [[ -z "${state}" ]]; then
+        echoContent red " ---> $(t CHAIN_ACCOUNT_STATE_BAD "${file}")" >&2
+        return 1
+    fi
+    invalid=$(jq -r --argjson base "${CHAIN_BRIDGE_PORT}" --argjson last "${CHAIN_BRIDGE_PORT_LAST}" '
+        ((if .mode == "multi_chain" then [.chains[]?.name] else ["chain_outbound"] end) + ["direct"]) as $exits
+        | ([(.accounts // {})[] | select(. != "direct")] | unique) as $refs
+        | ( (.accounts // {}) | to_entries[]
+            | select((.key | test("\\A[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}\\z") | not) or ((.value as $v | $exits | index($v)) == null))
+            | "\(.key)=\(.value)" ),
+          ( select(.mode != "multi_chain" and .default_chain != null and .default_chain != "chain_outbound" and .default_chain != "direct")
+            | "default_chain=\(.default_chain)" ),
+          ( select(.mode == "multi_chain") | .chains[]? | select(.name as $n | $refs | index($n))
+            | select((.bridge_port | type) != "number" or .bridge_port <= $base or .bridge_port > $last) | "bridge_port(\(.name))=\(.bridge_port)" ),
+          ( select(.mode == "multi_chain") | [.chains[]?.bridge_port | select(. != null)] | select(length != (unique | length))
+            | "bridge_port=\(.)" )' <<<"${state}" 2>&1) || invalid="${invalid:-accounts}"
+    if [[ -n "${invalid}" ]]; then
+        echoContent red " ---> $(t CHAIN_ACCOUNT_STATE_INVALID "${file}" "$(paste -sd ' ' - <<<"${invalid}")")" >&2
+        return 1
+    fi
+    printf '%s\n' "${state}"
+}
+
+# chainAccountBridges STATE → 多链路里被映射引用的链路 [{name, port}]（按名字排序）；单链路 / 多跳返回 []
+# 端口是链路自己的 bridge_port，Xray 出站与 sing-box 入站都从这里取
+chainAccountBridges() {
+    jq -c 'if .mode == "multi_chain"
+        then ([(.accounts // {})[] | select(. != "direct")] | unique) as $refs
+            | [.chains[]? | select(.name as $n | $refs | index($n)) | {name, port: .bridge_port}] | sort_by(.name)
+        else [] end' <<<"$1"
+}
+
+# chainAccountAssignPorts STATE → 给多链路里新被引用、还没有 bridge_port 的链路分一个空着的桥端口；分过的链路在就一直留着。
+# 端口跟着链路不跟着排序：重载时两个内核先后重启，旧 sing-box 与新 Xray 端口对不上时只会连不上，不会进到别的出口
+chainAccountAssignPorts() {
+    jq -c --argjson base "${CHAIN_BRIDGE_PORT}" --argjson last "${CHAIN_BRIDGE_PORT_LAST}" '
+        if .mode != "multi_chain" then . else
+            ([(.accounts // {})[] | select(. != "direct")] | unique) as $refs
+            | reduce (.chains | to_entries[] | select((.value.name as $n | $refs | index($n)) and .value.bridge_port == null) | .key) as $i (.;
+                (([range($base + 1; $last + 1)] - [.chains[].bridge_port | select(. != null)]) | first) as $p
+                | if $p == null then error("no free bridge port") else .chains[$i].bridge_port = $p end)
+        end' <<<"$1"
+}
+
+# writeXrayChainConfig PORT → Xray 侧两件：chain_proxy 系列出站指向本机的桥；09_routing.json 整份换成链式路由：
+# 先封掉代理用户到桥端口段的连接（否则谁都能经回环换出口），再按账号映射分（user 正则，. + 转义——Xray 静默丢弃写坏的正则），
+# 其余交给默认出口。原路由只在第一次存成 .bak.chain：之后改映射也调这里，覆盖掉的话 removeChainProxy 就恢复不出原样
+writeXrayChainConfig() {
+    local port=$1 state bridges outbounds routing
+    state=$(chainAccountReadState) || return 1
+    bridges=$(chainAccountBridges "${state}") || return 1
+    outbounds=$(jq -n --argjson port "${port}" --argjson bridges "${bridges}" '
+        def socksOut($tag; $p): {tag: $tag, protocol: "socks", settings: {servers: [{address: "127.0.0.1", port: $p}]}};
+        {outbounds: ([socksOut("chain_proxy"; $port)] + [$bridges[] | socksOut("chain_proxy_" + .name; .port)]
+            + [{tag: "chain_block", protocol: "blackhole"}])}') || return 1
+    routing=$(jq -n --argjson s "${state}" --arg ports "${CHAIN_BRIDGE_PORT}-${CHAIN_BRIDGE_PORT_LAST}" '
+        ($s.mode // "") as $mode
+        | (if $mode != "multi_chain" and $s.default_chain == "direct" then "z_direct_outbound" else "chain_proxy" end) as $dflt
+        | {routing: {domainStrategy: "AsIs", rules: (
+            [{type: "field", ip: ["127.0.0.0/8", "::1"], port: $ports, outboundTag: "chain_block"},
+             {type: "field", ip: ["127.0.0.0/8", "::1"], outboundTag: "z_direct_outbound"}]
+            + ([($s.accounts // {}) | to_entries[]
+                | {re: ("regexp:^" + ([.key | explode[] | if . == 46 or . == 43 then [92, .] else [.] end] | add | implode) + "-[^-]*$"),
+                   tag: (if .value == "direct" then "z_direct_outbound" elif $mode == "multi_chain" then "chain_proxy_" + .value else "chain_proxy" end)}]
+               | group_by(.tag) | map({type: "field", user: map(.re), outboundTag: .[0].tag}))
+            + [{type: "field", domain: ["domain:gstatic.com", "domain:googleapis.com", "domain:googleapis.cn"], outboundTag: $dflt},
+               {type: "field", network: "tcp,udp", outboundTag: $dflt}])}}') || return 1
+
+    if [[ -f "${XRAY_CONF_DIR}/09_routing.json" && ! -f "${XRAY_CONF_DIR}/09_routing.json.bak.chain" ]]; then
+        cp "${XRAY_CONF_DIR}/09_routing.json" "${XRAY_CONF_DIR}/09_routing.json.bak.chain" || return 1
+    fi
+    jsonWriteFile "${XRAY_CONF_DIR}/chain_outbound.json" "${outbounds}" false || return 1
+    jsonWriteFile "${XRAY_CONF_DIR}/09_routing.json" "${routing}" false
+}
+
+# chainAccountInject MERGED → 把映射写进合并后的 sing-box 配置，规则插在最前：先拒掉到桥端口段的连接，再是多链路被引用的
+# 链路各一条桥（有 Xray 的桥时），再按 users[].name 全名匹配 sing-box 承载的用户（auth_user 只认全名，所以合并时现生成）。
+# 单链路 / 多跳 default_chain 为 direct 时 final 改成 direct。返回 1 时合并必须随之失败
+chainAccountInject() {
+    local merged=$1 state bridges out
+    state=$(chainAccountReadState) || return 1
+    [[ "${state}" == "{}" ]] && return 0
+    bridges=$(chainAccountBridges "${state}") || return 1
+    out=$(jq --argjson s "${state}" --argjson bridges "${bridges}" --arg ports "${CHAIN_BRIDGE_PORT}:${CHAIN_BRIDGE_PORT_LAST}" '
+        ($s.accounts // {}) as $acc
+        | (if ([.inbounds[]? | select(.tag == "chain_bridge_in")] | length) > 0
+           then [$bridges[] | {type: "socks", tag: ("chain_acct_in_" + .name), listen: "127.0.0.1", listen_port: .port}]
+           else [] end) as $inb
+        | ($inb | map(.tag)) as $tags
+        | ([.inbounds[]? | .users[]? | (.name // .username) | select(type == "string" and test("-"))] | unique
+           | map(. as $n | {name: $n, out: $acc[$n | sub("-[^-]*$"; "")]}) | map(select(.out != null))) as $hits
+        | ([{ip_cidr: ["127.0.0.0/8", "::1/128"], port_range: [$ports], action: "reject"}]
+           + (if ($tags | length) > 0
+              then [{inbound: $tags, action: "sniff", timeout: "1s"}, {inbound: $tags, action: "resolve", strategy: "prefer_ipv4"}]
+              else [] end)
+           + [$inb[] | {inbound: [.tag], outbound: (.tag | ltrimstr("chain_acct_in_"))}]
+           + ($hits | group_by(.out) | map({auth_user: map(.name), outbound: .[0].out}))) as $pre
+        | .inbounds = ((.inbounds // []) + $inb)
+        | .route.rules = ($pre + (.route.rules // []))
+        | (if ($s.mode // "") != "multi_chain" and $s.default_chain == "direct" then .route.final = "direct" else . end)
+    ' "${merged}") || return 1
+    jsonWriteFile "${merged}" "${out}" false
+}
+
+# chainAccountCarry INFO → 单链路 / 多跳的新状态带上旧状态的 accounts 与 default_chain；换出口配置码时不丢映射，
+# 否则标了直连的人会全进链路。旧状态读不懂返回 1，不带着空映射继续
+chainAccountCarry() {
+    local old='{}'
+    if [[ -f "${CHAIN_ENTRY_INFO}" ]] && ! old=$(jq -ce '
+            if (.role | type) == "string" and .role != "entry" or ((.mode | type) == "string" and .mode != "multi_hop") then {}
+            else {accounts, default_chain} | with_entries(select(.value != null)) end' "${CHAIN_ENTRY_INFO}" 2>/dev/null); then
+        echoContent red " ---> $(t CHAIN_ACCOUNT_CARRY_FAILED "${CHAIN_ENTRY_INFO}")" >&2
+        return 1
+    fi
+    jq -c --argjson old "${old}" '. + $old' <<<"$1"
+}
+
+# chainAccountApply → 映射或默认出口改过之后：Xray 侧（有的话）重写，sing-box 重新合并（注入在合并里），再重载内核
+chainAccountApply() {
+    if [[ ! -f "${SINGBOX_FRAGMENT_DIR}/01_direct_outbound.json" ]]; then
+        singBoxConfigPath="${SINGBOX_FRAGMENT_DIR}/" ensureDirectOutbound || return 1
+    fi
+    if [[ -f "${XRAY_CONF_DIR}/chain_outbound.json" ]]; then
+        writeXrayChainConfig "${CHAIN_BRIDGE_PORT}" || return 1
+    fi
+    singBoxMergeConfig || return 1
+    reloadCore
+}
+
+# chainAccountSave FILE NEW OLD → 写入新状态并生效；没能生效就写回旧状态再生效一次，不留一半新一半旧的路由
+chainAccountSave() {
+    local file=$1 new=$2 old=$3
+    writeChainInfoAtomic "${file}" "${new}" || return 1
+    chainAccountApply && return 0
+    writeChainInfoAtomic "${file}" "${old}" && chainAccountApply
+    echoContent red " ---> $(t CHAIN_ACCOUNT_APPLY_FAILED)"
+}
+
+# chainAccountForget NAME → 账号删掉时连映射一起删，否则以后同名新建的账号会继承旧出口；调用方随后要 reloadCore
+chainAccountForget() {
+    local file state
+    file=$(chainAccountStateFile) || return 0
+    state=$(chainAccountReadState) || return 1
+    jq -e --arg n "$1" '(.accounts // {}) | has($n)' <<<"${state}" >/dev/null 2>&1 || return 0
+    writeChainInfoAtomic "${file}" "$(jq -c --arg n "$1" 'del(.accounts[$n])' <<<"${state}")" || return 1
+    if [[ -f "${XRAY_CONF_DIR}/chain_outbound.json" ]]; then
+        writeXrayChainConfig "${CHAIN_BRIDGE_PORT}" || return 1
+    fi
+}
+
+# chainAccountAllNames → 本机全部账号名（去掉协议后缀，升序去重）：Xray 与 sing-box 两边按注册表找到的入站文件
+chainAccountAllNames() {
+    local dir id file files=()
+    for dir in "${XRAY_CONF_DIR}/" "${SINGBOX_FRAGMENT_DIR}/"; do
+        [[ -d "${dir}" ]] || continue
+        for id in $(scanInstalledProtocols "${dir}" | tr ',' ' '); do
+            file=$(getProtocolConfigPath "${id}" "${dir}")
+            [[ -f "${file}" ]] && files+=("${file}")
+        done
+    done
+    ((${#files[@]})) || return 0
+    jq -rn '[inputs | .inbounds[]? | (.settings.clients[]?.email, (.users[]? | .name // .username))
+        | select(type == "string" and test("-")) | sub("-[^-]*$"; "")] | unique | .[]' "${files[@]}"
+}
+
+# chainAccountExitLabel VALUE → 出口的显示名
+chainAccountExitLabel() {
+    case "$1" in
+        direct) t CHAIN_ACCOUNT_DIRECT ;;
+        chain_outbound) t CHAIN_ACCOUNT_CHAIN ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
+
+# chainAccountExitMenu → 菜单：给账号指定出口（直连、链路或多链路里的某条），或改回跟随默认
+chainAccountExitMenu() {
+    local file state mode names name dflt i pick exitPick target new
+    local -a nameList exitList
+    if ! file=$(chainAccountStateFile); then
+        echoContent red " ---> $(t CHAIN_ACCOUNT_NOT_ENTRY)"
+        return 1
+    fi
+    state=$(chainAccountReadState) || return 1
+    mode=$(jq -r '.mode // ""' <<<"${state}")
+    # 配链路时还没装 Xray 协议的话，Xray 一侧根本没接进链路，映射对 Xray 账号不起作用
+    if [[ -n "$(scanInstalledProtocols "${XRAY_CONF_DIR}/" 2>/dev/null | tr -d ',')" && ! -f "${XRAY_CONF_DIR}/chain_outbound.json" ]]; then
+        echoContent red " ---> $(t CHAIN_ACCOUNT_XRAY_UNWIRED)"
+        return 1
+    fi
+    if ! names=$(chainAccountAllNames); then
+        echoContent red " ---> $(t CHAIN_ACCOUNT_LIST_FAILED)"
+        return 1
+    fi
+    mapfile -t nameList < <({ printf '%s\n' "${names}"; jq -r '(.accounts // {}) | keys[]' <<<"${state}"; } | grep -v '^$' | sort -u)
+    dflt=$(jq -r 'if .mode == "multi_chain" then (.default_chain // "direct") else (.default_chain // "chain_outbound") end' <<<"${state}")
+
+    echoContent skyBlue "\n$(t CHAIN_ACCOUNT_TITLE)"
+    echoContent red "=============================================================="
+    echoContent yellow "$(t CHAIN_ACCOUNT_DEFAULT_LINE "$(chainAccountExitLabel "${dflt}")")"
+    if [[ "${mode}" != "multi_chain" && "${dflt}" != "direct" ]] && jq -e '.protocol_routing.enabled == true' <<<"${state}" >/dev/null 2>&1; then
+        echoContent yellow "$(t CHAIN_ACCOUNT_PROTOCOL_ROUTING_HINT)"
+    fi
+    echoContent yellow "$(t CHAIN_ACCOUNT_STRICT_HINT)\n"
+    for i in "${!nameList[@]}"; do
+        target=$(jq -r --arg n "${nameList[$i]}" '.accounts[$n]? // empty' <<<"${state}")
+        echoContent yellow "  $((i + 1)). ${nameList[$i]} → $(if [[ -n "${target}" ]]; then chainAccountExitLabel "${target}"; else t CHAIN_ACCOUNT_FOLLOW_DEFAULT; fi)"
+    done
+    echoContent yellow "  0. $(t CHAIN_ACCOUNT_SET_DEFAULT)"
+    read -r -p "$(t PROMPT_SELECT):" pick
+
+    if [[ "${pick}" == "0" ]]; then
+        if [[ "${mode}" == "multi_chain" ]]; then
+            setDefaultChain
+            return $?
+        fi
+        echoContent yellow "  1. $(t CHAIN_ACCOUNT_CHAIN)"
+        echoContent yellow "  2. $(t CHAIN_ACCOUNT_DIRECT)"
+        read -r -p "$(t PROMPT_SELECT):" exitPick
+        case "${exitPick}" in
+            1) target=chain_outbound ;;
+            2) target=direct ;;
+            *) echoContent red " ---> $(t INVALID_SELECTION)"; return 1 ;;
+        esac
+        new=$(jq -c --arg v "${target}" '.default_chain = $v' <<<"${state}") || return 1
+        chainAccountSave "${file}" "${new}" "${state}" || return 1
+        echoContent green " ---> $(t CHAIN_ACCOUNT_DEFAULT_SAVED "$(chainAccountExitLabel "${target}")")"
+        return 0
     fi
 
-    cat <<EOF >"${XRAY_CONF_DIR}/09_routing.json"
-{
-    "routing": {
-        "domainStrategy": "AsIs",
-        "rules": [
-            {
-                "type": "field",
-                "ip": ["127.0.0.0/8", "::1"],
-                "outboundTag": "z_direct_outbound"
-            },
-            {
-                "type": "field",
-                "domain": [
-                    "domain:gstatic.com",
-                    "domain:googleapis.com",
-                    "domain:googleapis.cn"
-                ],
-                "outboundTag": "chain_proxy"
-            },
-            {
-                "type": "field",
-                "network": "tcp,udp",
-                "outboundTag": "chain_proxy"
-            }
-        ]
-    }
-}
-EOF
+    if [[ ! "${pick}" =~ ^[1-9][0-9]*$ ]] || ((pick > ${#nameList[@]})); then
+        echoContent red " ---> $(t INVALID_SELECTION)"
+        return 1
+    fi
+    name=${nameList[$((pick - 1))]}
+    exitList=("" direct)
+    if [[ "${mode}" == "multi_chain" ]]; then
+        mapfile -t -O 2 exitList < <(jq -r '.chains[]?.name' <<<"${state}")
+    else
+        exitList+=(chain_outbound)
+    fi
+    echoContent yellow "\n$(t CHAIN_ACCOUNT_PICK_EXIT "${name}")"
+    echoContent yellow "  1. $(t CHAIN_ACCOUNT_FOLLOW_DEFAULT)"
+    for i in "${!exitList[@]}"; do
+        ((i == 0)) && continue
+        echoContent yellow "  $((i + 1)). $(chainAccountExitLabel "${exitList[$i]}")"
+    done
+    read -r -p "$(t PROMPT_SELECT):" exitPick
+    if [[ ! "${exitPick}" =~ ^[1-9][0-9]*$ ]] || ((exitPick > ${#exitList[@]})); then
+        echoContent red " ---> $(t INVALID_SELECTION)"
+        return 1
+    fi
+    target=${exitList[$((exitPick - 1))]}
+    if [[ -z "${target}" ]]; then
+        new=$(jq -c --arg n "${name}" 'del(.accounts[$n])' <<<"${state}") || return 1
+    else
+        new=$(jq -c --arg n "${name}" --arg v "${target}" '.accounts[$n] = $v' <<<"${state}") || return 1
+    fi
+    if ! new=$(chainAccountAssignPorts "${new}"); then
+        echoContent red " ---> $(t CHAIN_ACCOUNT_NO_BRIDGE_PORT "${CHAIN_BRIDGE_PORT}" "${CHAIN_BRIDGE_PORT_LAST}")"
+        return 1
+    fi
+    chainAccountSave "${file}" "${new}" "${state}" || return 1
+    echoContent green " ---> $(t CHAIN_ACCOUNT_SAVED "${name}" "$(if [[ -n "${target}" ]]; then chainAccountExitLabel "${target}"; else t CHAIN_ACCOUNT_FOLLOW_DEFAULT; fi)")"
 }
 
 # 配置入口节点 - 多跳模式
 # 使用全局变量 chainHops (由 parseChainCode 设置)
 setupChainEntryMultiHop() {
-    local chainBridgePort=31111  # sing-box SOCKS5 桥接端口
+    local chainBridgePort=${CHAIN_BRIDGE_PORT}
 
     # 确保 sing-box 已安装
     if ! ensureSingBoxInstalled; then
@@ -11727,6 +11977,7 @@ setupChainEntryMultiHop() {
 }
 EOF
 )
+    __chainEntryInfo=$(chainAccountCarry "${__chainEntryInfo}") || return 1
     writeChainInfoAtomic "${CHAIN_ENTRY_INFO}" "${__chainEntryInfo}" || return 1
 
     # 合并 sing-box 配置（统一走 singBoxMergeConfig，错误会带上 sing-box 实际报错前 20 行）
@@ -11751,7 +12002,7 @@ EOF
     # ============= Xray 配置 (如果存在) =============
     if [[ "${hasXrayProtocols}" == "true" ]]; then
         echoContent yellow "正在配置 Xray 链式转发..."
-        writeXrayChainConfig "${chainBridgePort}"
+        writeXrayChainConfig "${chainBridgePort}" || return 1
 
         # 重启 Xray
         echoContent yellow "正在重启 Xray..."
@@ -11805,7 +12056,7 @@ setupChainEntry() {
     local exitPort=$2
     local exitKey=$3
     local exitMethod=$4
-    local chainBridgePort=31111  # sing-box SOCKS5 桥接端口
+    local chainBridgePort=${CHAIN_BRIDGE_PORT}
 
     # 确保 sing-box 已安装
     if ! ensureSingBoxInstalled; then
@@ -11885,6 +12136,7 @@ setupChainEntry() {
 }
 EOF
 )
+    __chainEntryInfo=$(chainAccountCarry "${__chainEntryInfo}") || return 1
     writeChainInfoAtomic "${CHAIN_ENTRY_INFO}" "${__chainEntryInfo}" || return 1
 
     # 合并 sing-box 配置（统一走 singBoxMergeConfig，错误会带上 sing-box 实际报错前 20 行）
@@ -11909,7 +12161,7 @@ EOF
     # ============= Xray 配置 (如果存在) =============
     if [[ "${hasXrayProtocols}" == "true" ]]; then
         echoContent yellow "正在配置 Xray 链式转发..."
-        writeXrayChainConfig "${chainBridgePort}"
+        writeXrayChainConfig "${chainBridgePort}" || return 1
 
         # 重启 Xray
         echoContent yellow "正在重启 Xray..."
@@ -12839,6 +13091,10 @@ validateChainName() {
         return 1
     fi
     if [[ ! "${name}" =~ ^[a-zA-Z0-9_]+$ ]]; then
+        return 1
+    fi
+    # direct 是直连出站的 tag，也是按账号选出口里「直连」的写法，用作链路名两处都分不清
+    if [[ "${name}" == "direct" ]]; then
         return 1
     fi
     # 名称长度限制
@@ -13959,7 +14215,7 @@ finalizeMultiChainConfig() {
 
     # 如果有 Xray，创建 SOCKS5 桥接入站
     # sniff/resolve 在 generateMultiChainRouteConfig 路由配置中以 action 形式注入
-    local chainBridgePort=31111
+    local chainBridgePort=${CHAIN_BRIDGE_PORT}
     if [[ "${hasXrayProtocols}" == "true" ]]; then
         writeChainBridgeInbound "${chainBridgePort}"
     fi
@@ -13986,7 +14242,7 @@ finalizeMultiChainConfig() {
 
     # 配置 Xray（如果存在）
     if [[ "${hasXrayProtocols}" == "true" ]]; then
-        configureXrayForMultiChain "${chainBridgePort}"
+        configureXrayForMultiChain "${chainBridgePort}" || return 1
     fi
 
     # 显示配置摘要
@@ -14170,7 +14426,7 @@ configureXrayForMultiChain() {
     local bridgePort=$1
 
     echoContent yellow "$(t CHAIN_CONFIGURING_XRAY)"
-    writeXrayChainConfig "${bridgePort}"
+    writeXrayChainConfig "${bridgePort}" || return 1
 
     # 重启 Xray
     echoContent yellow "$(t CHAIN_RESTARTING_XRAY)"
@@ -14496,6 +14752,14 @@ removeMultiChainOutbound() {
 
     if [[ -z "${selectedChain}" ]]; then
         echoContent red " ---> 无效的选择"
+        return 1
+    fi
+
+    # 还有账号指定它为出口就不删：删了它们只能改走别的出口或直连，那是车主没选过的去向
+    local mappedAccounts
+    mappedAccounts=$(jq -r --arg n "${selectedChain}" '[(.accounts // {}) | to_entries[] | select(.value == $n) | .key] | join(", ")' "${infoFile}") || return 1
+    if [[ -n "${mappedAccounts}" ]]; then
+        echoContent red " ---> $(t CHAIN_ACCOUNT_EXIT_IN_USE "${selectedChain}" "${mappedAccounts}")"
         return 1
     fi
 

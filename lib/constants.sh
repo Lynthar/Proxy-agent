@@ -25,6 +25,10 @@ readonly CHAIN_EXIT_INFO="${SINGBOX_CONF_DIR}/chain_exit_info.json"
 readonly CHAIN_RELAY_INFO="${SINGBOX_CONF_DIR}/chain_relay_info.json"
 readonly CHAIN_ENTRY_INFO="${SINGBOX_CONF_DIR}/chain_entry_info.json"
 readonly CHAIN_MULTI_INFO="${SINGBOX_CONF_DIR}/chain_multi_info.json"
+# 链式入口里 Xray 进 sing-box 的本机 socks 桥。按账号选出口在多链路里另开的桥占 +1 到 LAST，整段对代理用户封掉；
+# 低于 Linux 临时端口段，也不与 randomPort 的 10000-30000 重叠
+readonly CHAIN_BRIDGE_PORT=31111
+readonly CHAIN_BRIDGE_PORT_LAST=31210
 readonly EXTERNAL_NODE_FILE="${SINGBOX_CONF_DIR}/external_node_info.json"
 readonly TLS_DIR="${PROXY_AGENT_DIR}/tls"
 readonly SUBSCRIBE_DIR="${PROXY_AGENT_DIR}/subscribe"

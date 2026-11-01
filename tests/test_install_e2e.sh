@@ -483,6 +483,12 @@ carpoolIntact() {
     assert_equals "${carpoolCron}" "$(crontab -l 2>/dev/null | grep -F 'install.sh CarpoolTick')" "$1：CarpoolTick 的 cron 行还在"
 }
 
+# accountExit KEYS → 经菜单 3 → 8 按账号选出口（KEYS 是 printf 格式的后续输入），打印去色后的输出，退出码随 pasly
+accountExit() {
+    printf '3\n8\n%b' "$1" | V2RAY_LANG=en pasly 2>&1 | sed 's/\x1b\[[0-9;]*m//g'
+    return "${PIPESTATUS[1]}"
+}
+
 # midTransferDown STAT → 起客户端，限速 500 KB/s 下 4 MB，下载期间每 0.5 秒读一次该计数器，打印其中最大的值；下完再关客户端。
 # 只认取样之后 curl 还在跑的值：splice 要到连接关闭才计数，curl 退出后取到的满额证明不了什么；不卡固定时刻，建连慢也不误报
 midTransferDown() {
@@ -598,6 +604,36 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
         assert_equals "yes" "$([[ "${usedAfter}" =~ ^[0-9]+$ && $((usedAfter - usedBytes)) -ge 4000000 ]] && echo yes || echo no)" \
             "经链式的 4 MB 下载记进了 ${E2E_USER} 名下（增加 $((usedAfter - usedBytes)) 字节）"
         tickOut+=$'\n'"${chainTickOut}"
+
+        echo ""
+        echo -e "${YELLOW}=== 菜单 3 → 8：按账号选出口，出口机断了只断指向它的人 ===${NC}"
+        # 把出口机路由成黑洞：走链路的连接立刻失败。先证明拦截生效，下面「直连照样通」才说明没经过出口
+        chainExitIP=${E2E_CHAIN_CODE#*@}
+        chainExitIP=${chainExitIP%%:*}
+        ip route add blackhole "${chainExitIP}/32"
+        assert_equals "no" "$([[ "$(realityProbe 2>/dev/null)" == "204" ]] && echo yes || echo no)" \
+            "出口机断了：没指定出口、默认走链路的 ${E2E_USER} 连不上（拦截生效，也没回落到直连）"
+        acctIdx=$(accountExit 'x\n' | sed -n "s/^ *\([0-9][0-9]*\)\. ${E2E_USER} → .*/\1/p")
+        assert_not_empty "${acctIdx}" "菜单 3 → 8 列出 ${E2E_USER}"
+        acctOut=$(accountExit "${acctIdx}\n2\n")
+        acctRc=$?
+        [[ ${acctRc} -ne 0 ]] && tail -n 20 <<<"${acctOut}"
+        assert_equals "0|direct" "${acctRc}|$(jq -r --arg u "${E2E_USER}" '.accounts[$u]' "${INSTALL_ROOT}/sing-box/conf/chain_entry_info.json" 2>/dev/null)" \
+            "${E2E_USER} 指定直连：菜单退出码 0，映射写进链式状态"
+        assert_equals "204" "$(realityProbe)" "指定直连的 ${E2E_USER} 不经出口机照样上网"
+        accountExit "${acctIdx}\n3\n" >/dev/null
+        assert_equals "no" "$([[ "$(realityProbe 2>/dev/null)" == "204" ]] && echo yes || echo no)" \
+            "指定走链路的 ${E2E_USER} 在出口断了时断开，不回落到直连"
+        accountExit '0\n2\n' >/dev/null
+        accountExit "${acctIdx}\n1\n" >/dev/null
+        assert_equals "z_direct_outbound" "$(jq -r '.routing.rules[-1].outboundTag' "${XRAY_CONF_DIR}/09_routing.json" 2>/dev/null)" \
+            "默认出口改成直连：Xray 兜底规则随之直连"
+        assert_equals "204" "$(realityProbe)" "跟随默认、默认直连的 ${E2E_USER} 照样上网"
+        accountExit '0\n1\n' >/dev/null
+        ip route del blackhole "${chainExitIP}/32"
+        assert_equals "chain_proxy" "$(jq -r '.routing.rules[-1].outboundTag' "${XRAY_CONF_DIR}/09_routing.json" 2>/dev/null)" \
+            "默认出口改回链路"
+        assert_equals "204" "$(realityProbe)" "出口机恢复后，${E2E_USER} 经链路照常上网"
     fi
 
     echo ""
