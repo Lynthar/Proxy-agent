@@ -11537,6 +11537,107 @@ EOF
     echoContent yellow "\n请妥善保管配置码，切勿泄露！"
 }
 
+# writeChainBridgeInbound PORT → sing-box 片段 chain_bridge_inbound.json：Xray 经本机回环 socks 进 sing-box 的桥
+writeChainBridgeInbound() {
+    cat <<EOF >"${SINGBOX_FRAGMENT_DIR}/chain_bridge_inbound.json"
+{
+    "inbounds": [
+        {
+            "type": "socks",
+            "tag": "chain_bridge_in",
+            "listen": "127.0.0.1",
+            "listen_port": $1
+        }
+    ]
+}
+EOF
+}
+
+# writeChainEntryRoute HAS_XRAY → 单链路 / 多跳入口的 chain_route.json，兜底都是 chain_outbound
+# 有桥时先 sniff 再 prefer_ipv4 重解析（出口机可能没有 IPv6）；default_domain_resolver 1.13 起必填
+writeChainEntryRoute() {
+    if [[ "$1" == "true" ]]; then
+        cat <<EOF >"${SINGBOX_FRAGMENT_DIR}/chain_route.json"
+{
+    "route": {
+        "rules": [
+            { "inbound": "chain_bridge_in", "action": "sniff", "timeout": "1s" },
+            { "inbound": "chain_bridge_in", "action": "resolve", "strategy": "prefer_ipv4" },
+            { "inbound": ["chain_bridge_in"], "outbound": "chain_outbound" }
+        ],
+        "final": "chain_outbound",
+        "default_domain_resolver": "google"
+    }
+}
+EOF
+    else
+        cat <<EOF >"${SINGBOX_FRAGMENT_DIR}/chain_route.json"
+{
+    "route": {
+        "final": "chain_outbound",
+        "default_domain_resolver": "google"
+    }
+}
+EOF
+    fi
+}
+
+# writeXrayChainConfig PORT → Xray 侧两件：chain_proxy 出站指向本机桥，09_routing.json 整份换成兜底走 chain_proxy
+# 换之前把原路由存成 .bak.chain，removeChainProxy 从它恢复
+writeXrayChainConfig() {
+    cat <<EOF >"${XRAY_CONF_DIR}/chain_outbound.json"
+{
+    "outbounds": [
+        {
+            "tag": "chain_proxy",
+            "protocol": "socks",
+            "settings": {
+                "servers": [
+                    {
+                        "address": "127.0.0.1",
+                        "port": $1
+                    }
+                ]
+            }
+        }
+    ]
+}
+EOF
+
+    if [[ -f "${XRAY_CONF_DIR}/09_routing.json" ]]; then
+        cp "${XRAY_CONF_DIR}/09_routing.json" "${XRAY_CONF_DIR}/09_routing.json.bak.chain"
+    fi
+
+    cat <<EOF >"${XRAY_CONF_DIR}/09_routing.json"
+{
+    "routing": {
+        "domainStrategy": "AsIs",
+        "rules": [
+            {
+                "type": "field",
+                "ip": ["127.0.0.0/8", "::1"],
+                "outboundTag": "z_direct_outbound"
+            },
+            {
+                "type": "field",
+                "domain": [
+                    "domain:gstatic.com",
+                    "domain:googleapis.com",
+                    "domain:googleapis.cn"
+                ],
+                "outboundTag": "chain_proxy"
+            },
+            {
+                "type": "field",
+                "network": "tcp,udp",
+                "outboundTag": "chain_proxy"
+            }
+        ]
+    }
+}
+EOF
+}
+
 # 配置入口节点 - 多跳模式
 # 使用全局变量 chainHops (由 parseChainCode 设置)
 setupChainEntryMultiHop() {
@@ -11607,47 +11708,10 @@ setupChainEntryMultiHop() {
     fi
     printf '%s\n' "${chainOutboundJson}" > ${SINGBOX_FRAGMENT_DIR}/chain_outbound.json
 
-    # 如果有 Xray 代理协议，创建 SOCKS5 桥接入站
-    # sniff/resolve 通过路由级 action 实现（解决出口机无 IPv6 的问题）
     if [[ "${hasXrayProtocols}" == "true" ]]; then
-        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/chain_bridge_inbound.json
-{
-    "inbounds": [
-        {
-            "type": "socks",
-            "tag": "chain_bridge_in",
-            "listen": "127.0.0.1",
-            "listen_port": ${chainBridgePort}
-        }
-    ]
-}
-EOF
-        # 路由：先 sniff 嗅探域名，再 prefer_ipv4 重解析（替代 inbound 上的 domain_strategy）
-        # default_domain_resolver 见 chainExit 注释，1.13 起必填
-        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/chain_route.json
-{
-    "route": {
-        "rules": [
-            { "inbound": "chain_bridge_in", "action": "sniff", "timeout": "1s" },
-            { "inbound": "chain_bridge_in", "action": "resolve", "strategy": "prefer_ipv4" },
-            { "inbound": ["chain_bridge_in"], "outbound": "chain_outbound" }
-        ],
-        "final": "chain_outbound",
-        "default_domain_resolver": "google"
-    }
-}
-EOF
-    else
-        # 没有 Xray，直接设置 final
-        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/chain_route.json
-{
-    "route": {
-        "final": "chain_outbound",
-        "default_domain_resolver": "google"
-    }
-}
-EOF
+        writeChainBridgeInbound "${chainBridgePort}"
     fi
+    writeChainEntryRoute "${hasXrayProtocols}"
 
     # 保存配置信息（原子写入）
     local __chainEntryInfo
@@ -11687,61 +11751,7 @@ EOF
     # ============= Xray 配置 (如果存在) =============
     if [[ "${hasXrayProtocols}" == "true" ]]; then
         echoContent yellow "正在配置 Xray 链式转发..."
-
-        # 创建 Xray SOCKS5 出站 (指向 sing-box 桥接)
-        cat <<EOF >${XRAY_CONF_DIR}/chain_outbound.json
-{
-    "outbounds": [
-        {
-            "tag": "chain_proxy",
-            "protocol": "socks",
-            "settings": {
-                "servers": [
-                    {
-                        "address": "127.0.0.1",
-                        "port": ${chainBridgePort}
-                    }
-                ]
-            }
-        }
-    ]
-}
-EOF
-
-        # 备份原路由配置
-        if [[ -f "${XRAY_CONF_DIR}/09_routing.json" ]]; then
-            cp ${XRAY_CONF_DIR}/09_routing.json ${XRAY_CONF_DIR}/09_routing.json.bak.chain
-        fi
-
-        # 创建新的路由配置
-        cat <<EOF >${XRAY_CONF_DIR}/09_routing.json
-{
-    "routing": {
-        "domainStrategy": "AsIs",
-        "rules": [
-            {
-                "type": "field",
-                "ip": ["127.0.0.0/8", "::1"],
-                "outboundTag": "z_direct_outbound"
-            },
-            {
-                "type": "field",
-                "domain": [
-                    "domain:gstatic.com",
-                    "domain:googleapis.com",
-                    "domain:googleapis.cn"
-                ],
-                "outboundTag": "chain_proxy"
-            },
-            {
-                "type": "field",
-                "network": "tcp,udp",
-                "outboundTag": "chain_proxy"
-            }
-        ]
-    }
-}
-EOF
+        writeXrayChainConfig "${chainBridgePort}"
 
         # 重启 Xray
         echoContent yellow "正在重启 Xray..."
@@ -11855,47 +11865,10 @@ setupChainEntry() {
     fi
     printf '%s\n' "${_chainOutboundJson}" > ${SINGBOX_FRAGMENT_DIR}/chain_outbound.json
 
-    # 如果有 Xray 代理协议，创建 SOCKS5 桥接入站
-    # sniff/resolve 通过路由级 action 实现（解决出口机无 IPv6 的问题）
     if [[ "${hasXrayProtocols}" == "true" ]]; then
-        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/chain_bridge_inbound.json
-{
-    "inbounds": [
-        {
-            "type": "socks",
-            "tag": "chain_bridge_in",
-            "listen": "127.0.0.1",
-            "listen_port": ${chainBridgePort}
-        }
-    ]
-}
-EOF
-        # 路由：先 sniff 嗅探域名，再 prefer_ipv4 重解析（替代 inbound 上的 domain_strategy）
-        # default_domain_resolver 见 chainExit 注释，1.13 起必填
-        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/chain_route.json
-{
-    "route": {
-        "rules": [
-            { "inbound": "chain_bridge_in", "action": "sniff", "timeout": "1s" },
-            { "inbound": "chain_bridge_in", "action": "resolve", "strategy": "prefer_ipv4" },
-            { "inbound": ["chain_bridge_in"], "outbound": "chain_outbound" }
-        ],
-        "final": "chain_outbound",
-        "default_domain_resolver": "google"
-    }
-}
-EOF
-    else
-        # 没有 Xray，直接设置 final
-        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/chain_route.json
-{
-    "route": {
-        "final": "chain_outbound",
-        "default_domain_resolver": "google"
-    }
-}
-EOF
+        writeChainBridgeInbound "${chainBridgePort}"
     fi
+    writeChainEntryRoute "${hasXrayProtocols}"
 
     # 保存配置信息（原子写入）
     local __chainEntryInfo
@@ -11936,62 +11909,7 @@ EOF
     # ============= Xray 配置 (如果存在) =============
     if [[ "${hasXrayProtocols}" == "true" ]]; then
         echoContent yellow "正在配置 Xray 链式转发..."
-
-        # 创建 Xray SOCKS5 出站 (指向 sing-box 桥接)
-        cat <<EOF >${XRAY_CONF_DIR}/chain_outbound.json
-{
-    "outbounds": [
-        {
-            "tag": "chain_proxy",
-            "protocol": "socks",
-            "settings": {
-                "servers": [
-                    {
-                        "address": "127.0.0.1",
-                        "port": ${chainBridgePort}
-                    }
-                ]
-            }
-        }
-    ]
-}
-EOF
-
-        # 修改 Xray 路由，让流量走链式代理
-        # 备份原路由配置
-        if [[ -f "${XRAY_CONF_DIR}/09_routing.json" ]]; then
-            cp ${XRAY_CONF_DIR}/09_routing.json ${XRAY_CONF_DIR}/09_routing.json.bak.chain
-        fi
-
-        # 创建新的路由配置，默认出站改为 chain_proxy
-        cat <<EOF >${XRAY_CONF_DIR}/09_routing.json
-{
-    "routing": {
-        "domainStrategy": "AsIs",
-        "rules": [
-            {
-                "type": "field",
-                "ip": ["127.0.0.0/8", "::1"],
-                "outboundTag": "z_direct_outbound"
-            },
-            {
-                "type": "field",
-                "domain": [
-                    "domain:gstatic.com",
-                    "domain:googleapis.com",
-                    "domain:googleapis.cn"
-                ],
-                "outboundTag": "chain_proxy"
-            },
-            {
-                "type": "field",
-                "network": "tcp,udp",
-                "outboundTag": "chain_proxy"
-            }
-        ]
-    }
-}
-EOF
+        writeXrayChainConfig "${chainBridgePort}"
 
         # 重启 Xray
         echoContent yellow "正在重启 Xray..."
@@ -14043,18 +13961,7 @@ finalizeMultiChainConfig() {
     # sniff/resolve 在 generateMultiChainRouteConfig 路由配置中以 action 形式注入
     local chainBridgePort=31111
     if [[ "${hasXrayProtocols}" == "true" ]]; then
-        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/chain_bridge_inbound.json
-{
-    "inbounds": [
-        {
-            "type": "socks",
-            "tag": "chain_bridge_in",
-            "listen": "127.0.0.1",
-            "listen_port": ${chainBridgePort}
-        }
-    ]
-}
-EOF
+        writeChainBridgeInbound "${chainBridgePort}"
     fi
 
     # 合并配置
@@ -14263,61 +14170,7 @@ configureXrayForMultiChain() {
     local bridgePort=$1
 
     echoContent yellow "$(t CHAIN_CONFIGURING_XRAY)"
-
-    # 创建 Xray SOCKS5 出站 (指向 sing-box 桥接)
-    cat <<EOF >${XRAY_CONF_DIR}/chain_outbound.json
-{
-    "outbounds": [
-        {
-            "tag": "chain_proxy",
-            "protocol": "socks",
-            "settings": {
-                "servers": [
-                    {
-                        "address": "127.0.0.1",
-                        "port": ${bridgePort}
-                    }
-                ]
-            }
-        }
-    ]
-}
-EOF
-
-    # 备份原路由配置
-    if [[ -f "${XRAY_CONF_DIR}/09_routing.json" ]]; then
-        cp ${XRAY_CONF_DIR}/09_routing.json ${XRAY_CONF_DIR}/09_routing.json.bak.chain
-    fi
-
-    # 创建新的路由配置
-    cat <<EOF >${XRAY_CONF_DIR}/09_routing.json
-{
-    "routing": {
-        "domainStrategy": "AsIs",
-        "rules": [
-            {
-                "type": "field",
-                "ip": ["127.0.0.0/8", "::1"],
-                "outboundTag": "z_direct_outbound"
-            },
-            {
-                "type": "field",
-                "domain": [
-                    "domain:gstatic.com",
-                    "domain:googleapis.com",
-                    "domain:googleapis.cn"
-                ],
-                "outboundTag": "chain_proxy"
-            },
-            {
-                "type": "field",
-                "network": "tcp,udp",
-                "outboundTag": "chain_proxy"
-            }
-        ]
-    }
-}
-EOF
+    writeXrayChainConfig "${bridgePort}"
 
     # 重启 Xray
     echoContent yellow "$(t CHAIN_RESTARTING_XRAY)"
