@@ -1961,7 +1961,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试按账号选出口 ===${NC}"
 
-CA_FN_NAMES="chainAccountStateFile chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountCarry chainAccountApply chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound"
+CA_FN_NAMES="localBlockApiPort ensureXrayLocalBlock localBlockInject chainAccountStateFile chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountCarry chainAccountApply chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound"
 CA_FNS=$(sed -n "$(for _f in ${CA_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_equals "$(wc -w <<<"${CA_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CA_FNS}")" "按账号选出口：每个函数都抽到了"
 CA_ROOT="${MOCK_ROOT}/chainacct.root"
@@ -2006,11 +2006,10 @@ _caOrig=$(cat "${CA_X}/09_routing.json")
 ca_single '{"accounts": {"alice": "direct", "a.b+c": "chain_outbound"}}'
 run_ca 'writeXrayChainConfig 31111' >/dev/null 2>&1
 assert_equals "0" "$?" "Xray 侧（单链路）：写入返回 0"
-assert_equals '["chain_proxy:31111","chain_block:blackhole"]' "$(ca_outs)" "Xray 侧（单链路）：只有默认桥的 chain_proxy，不另开桥"
-assert_equals '["chain_block","z_direct_outbound","chain_proxy","z_direct_outbound","chain_proxy","chain_proxy"]' "$(ca_rules '[.routing.rules[].outboundTag]')" \
-    "Xray 侧（单链路）：封桥端口 → 回环直连 → 按账号 → gstatic 与兜底走链路"
-assert_equals '["31111-31210",["127.0.0.0/8","::1"]]' "$(ca_rules '.routing.rules[0] | [.port, .ip]')" "Xray 侧：代理用户连不到本机的桥端口段（否则谁都能经回环换出口）"
-assert_equals 'regexp:^a\.b\+c-[^-]*$' "$(jq -r '.routing.rules[2].user[0]' "${CA_X}/09_routing.json")" "Xray 侧：账号名里的 . 与 + 转义"
+assert_equals '["chain_proxy:31111"]' "$(ca_outs)" "Xray 侧（单链路）：只有默认桥的 chain_proxy，不另开桥"
+assert_equals '["chain_proxy","z_direct_outbound","chain_proxy","chain_proxy"]' "$(ca_rules '[.routing.rules[].outboundTag]')" \
+    "Xray 侧（单链路）：按账号 → gstatic 与兜底走链路（封本机的规则由启动前的 ensureXrayLocalBlock 补在最前）"
+assert_equals 'regexp:^a\.b\+c-[^-]*$' "$(jq -r '.routing.rules[0].user[0]' "${CA_X}/09_routing.json")" "Xray 侧：账号名里的 . 与 + 转义"
 assert_equals "true" "$(ca_re_hits 'a.b+c-VLESS_WS')" "Xray 侧：正则命中这个账号带协议后缀的 email"
 assert_equals "false" "$(ca_re_hits 'axb+c-VLESS_WS')" "Xray 侧：. 不当通配（axb+c 不命中）"
 assert_equals "false" "$(ca_re_hits 'alice-x-VLESS_WS')" "Xray 侧：alice-x 这个别的账号不命中 alice 的规则"
@@ -2019,20 +2018,20 @@ run_ca 'writeXrayChainConfig 31111' >/dev/null 2>&1
 assert_equals "${_caOrig}" "$(cat "${CA_X}/09_routing.json.bak.chain")" "Xray 侧：再写一次不覆盖备份（否则拆链式时恢复出来的是链式路由）"
 ca_single '{"default_chain": "direct"}'
 run_ca 'writeXrayChainConfig 31111' >/dev/null 2>&1
-assert_equals '["chain_block","z_direct_outbound","z_direct_outbound","z_direct_outbound"]' "$(ca_rules '[.routing.rules[].outboundTag]')" "Xray 侧（单链路默认直连）：gstatic 与兜底都直连"
+assert_equals '["z_direct_outbound","z_direct_outbound"]' "$(ca_rules '[.routing.rules[].outboundTag]')" "Xray 侧（单链路默认直连）：gstatic 与兜底都直连"
 
 # --- Xray 侧：多链路 ---
 ca_reset
 ca_multi '{"accounts": {"alice": "hk", "bob": "us", "carol": "direct"}}'
 run_ca 'writeXrayChainConfig 31111' >/dev/null 2>&1
-assert_equals '["chain_proxy:31111","chain_proxy_hk:31115","chain_proxy_us:31112","chain_block:blackhole"]' "$(ca_outs)" \
+assert_equals '["chain_proxy:31111","chain_proxy_hk:31115","chain_proxy_us:31112"]' "$(ca_outs)" \
     "Xray 侧（多链路）：被引用的链路各开一条桥，端口是链路自己的 bridge_port；jp 没人用不开"
-assert_equals '["chain_block","z_direct_outbound","chain_proxy_hk","chain_proxy_us","z_direct_outbound","chain_proxy","chain_proxy"]' "$(ca_rules '[.routing.rules[].outboundTag]')" \
+assert_equals '["chain_proxy_hk","chain_proxy_us","z_direct_outbound","chain_proxy","chain_proxy"]' "$(ca_rules '[.routing.rules[].outboundTag]')" \
     "Xray 侧（多链路）：指定的人各走各的桥，其余进默认桥由 sing-box 按域名分"
-assert_equals 'regexp:^alice-[^-]*$' "$(ca_rules '.routing.rules[2].user[0]' | jq -r .)" "Xray 侧（多链路）：alice 的规则指向 hk 的桥"
+assert_equals 'regexp:^alice-[^-]*$' "$(ca_rules '.routing.rules[0].user[0]' | jq -r .)" "Xray 侧（多链路）：alice 的规则指向 hk 的桥"
 ca_multi '{"accounts": {"alice": "hk"}}'
 run_ca 'writeXrayChainConfig 31111' >/dev/null 2>&1
-assert_equals '["chain_proxy:31111","chain_proxy_hk:31115","chain_block:blackhole"]' "$(ca_outs)" \
+assert_equals '["chain_proxy:31111","chain_proxy_hk:31115"]' "$(ca_outs)" \
     "Xray 侧（多链路）：bob 不再指定 us 之后 hk 的端口不变（按位置排的话会挪，重启间隙里新旧两个内核会把人送进别的出口）"
 
 # --- 分配桥端口 ---
@@ -2058,13 +2057,11 @@ assert_equals '["chain_acct_in_hk:31115","chain_acct_in_us:31112"]' "$(jq -c '[.
 assert_equals "$(jq -c '[.outbounds[] | select(.tag | startswith("chain_proxy_")) | {(.tag | ltrimstr("chain_proxy_")): .settings.servers[0].port}] | add' "${CA_X}/chain_outbound.json")" \
     "$(jq -c '[.inbounds[] | select(.tag | startswith("chain_acct_in_")) | {(.tag | ltrimstr("chain_acct_in_")): .listen_port}] | add' "${CA_MERGED}")" \
     "注入（多链路）：每条链路的 Xray 出站端口 = sing-box 入站端口"
-assert_equals '{"ip_cidr":["127.0.0.0/8","::1/128"],"port_range":["31111:31210"],"action":"reject"}' "$(jq -c '.route.rules[0]' "${CA_MERGED}")" \
-    "注入：最前面拒掉到桥端口段的连接（sing-box 承载的用户也不能经回环换出口）"
-assert_equals '[["chain_acct_in_hk","chain_acct_in_us"],"sniff"]' "$(jq -c '[.route.rules[1].inbound, .route.rules[1].action]' "${CA_MERGED}")" "注入：新桥先 sniff"
-assert_equals "resolve" "$(jq -r '.route.rules[2].action' "${CA_MERGED}")" "注入：再 prefer_ipv4 重解析"
+assert_equals '[["chain_acct_in_hk","chain_acct_in_us"],"sniff"]' "$(jq -c '[.route.rules[0].inbound, .route.rules[0].action]' "${CA_MERGED}")" "注入：新桥先 sniff"
+assert_equals "resolve" "$(jq -r '.route.rules[1].action' "${CA_MERGED}")" "注入：再 prefer_ipv4 重解析"
 assert_equals '[{"inbound":["chain_acct_in_hk"],"outbound":"hk"},{"inbound":["chain_acct_in_us"],"outbound":"us"},{"auth_user":["alice-singbox_hysteria2"],"outbound":"hk"}]' \
-    "$(jq -c '.route.rules[3:6]' "${CA_MERGED}")" "注入：桥各进各的链路；旁挂 6 的 alice 按全名进 hk；没后缀的 alice 与没指定的 dave 不在里面"
-assert_equals '[{"inbound":"chain_bridge_in","action":"sniff","timeout":"1s"},{"rule_set":["geosite-netflix"],"outbound":"us"}]' "$(jq -c '.route.rules[6:]' "${CA_MERGED}")" \
+    "$(jq -c '.route.rules[2:5]' "${CA_MERGED}")" "注入：桥各进各的链路；旁挂 6 的 alice 按全名进 hk；没后缀的 alice 与没指定的 dave 不在里面"
+assert_equals '[{"inbound":"chain_bridge_in","action":"sniff","timeout":"1s"},{"rule_set":["geosite-netflix"],"outbound":"us"}]' "$(jq -c '.route.rules[5:]' "${CA_MERGED}")" \
     "注入：原有的域名分流排在账号规则之后（被指定的人以映射为终态）"
 assert_equals "direct" "$(jq -r '.route.final' "${CA_MERGED}")" "注入（多链路）：final 不动"
 
@@ -2077,14 +2074,14 @@ jq -n '{inbounds: [
     route: {final: "chain_outbound"}}' >"${CA_MERGED}"
 cp "${CA_MERGED}" "${CA_MERGED}.orig"
 run_ca "chainAccountInject ${CA_MERGED}" >/dev/null 2>&1
-assert_equals '[{"auth_user":["bob-VLESS_Reality_Vision","bob-singbox_naive"],"outbound":"chain_outbound"}]' "$(jq -c '.route.rules[1:]' "${CA_MERGED}")" \
+assert_equals '[{"auth_user":["bob-VLESS_Reality_Vision","bob-singbox_naive"],"outbound":"chain_outbound"}]' "$(jq -c '.route.rules' "${CA_MERGED}")" \
     "注入（sing-box 内核）：bob 在两个协议里的全名都进规则（naive 用 username）"
 assert_equals "direct" "$(jq -r '.route.final' "${CA_MERGED}")" "注入（单链路默认直连）：final 改成 direct"
 assert_equals "0" "$(jq '[.inbounds[] | select(.tag | startswith("chain_acct_in_"))] | length' "${CA_MERGED}")" "注入（sing-box 内核）：没有 Xray 的桥就不开新桥"
 jq -cn '{accounts: {bob: "chain_outbound"}}' >"${CA_ENTRY}"
 cp "${CA_MERGED}.orig" "${CA_MERGED}"
 run_ca "chainAccountInject ${CA_MERGED}" >/dev/null 2>&1
-assert_equals '["bob-VLESS_Reality_Vision","bob-singbox_naive"]' "$(jq -c '.route.rules[1].auth_user' "${CA_MERGED}")" "注入（状态缺 role）：照常读映射，不当成「不是入口」跳过"
+assert_equals '["bob-VLESS_Reality_Vision","bob-singbox_naive"]' "$(jq -c '.route.rules[0].auth_user' "${CA_MERGED}")" "注入（状态缺 role）：照常读映射，不当成「不是入口」跳过"
 
 # --- 没有映射、external_single、坏状态 ---
 ca_reset
@@ -2179,6 +2176,45 @@ assert_equals "jp|31113|chain_proxy_jp:31113" "$(jq -r '.accounts.bob' "${CA_MUL
 : >"${CA_CALLS}"
 printf '0\n' | run_ca 'chainAccountExitMenu' >/dev/null 2>&1
 assert_equals "setDefaultChain" "$(cat "${CA_CALLS}")" "菜单（多链路）：改默认出口交给 setDefaultChain"
+
+# --- 代理用户连不到本机与内网：Xray 启动前补规则、sing-box 合并时注入 ---
+ca_reset
+run_ca 'ensureXrayLocalBlock' >/dev/null 2>&1
+assert_equals "0" "$?" "本机封锁（Xray，没有路由文件、没开拼车）：返回 0"
+assert_equals '[["local-block","31111-31210"],["local-block",true]]' "$(ca_rules '[.routing.rules[] | [.ruleTag, (.port // (.ip | index("127.0.0.0/8") != null))]]')" \
+    "本机封锁（Xray）：没有 09_routing.json 时新建，桥端口段按端口封、回环在 IP 清单里"
+assert_equals "local_block:blackhole local_pass:freedom" "$(jq -r '[.outbounds[] | "\(.tag):\(.protocol)"] | join(" ")' "${CA_X}/local_block_tail_outbound.json")" \
+    "本机封锁（Xray）：黑洞与放行两个出站的文件名带 tail（不带就会被插到最前、z_direct 不在时成了默认出站）"
+printf '%s\n' '{"routing":{"domainStrategy":"AsIs","rules":[{"type":"field","domain":["example.org"],"outboundTag":"IPv6_out"}]}}' >"${CA_X}/09_routing.json"
+printf '%s\n' '{"stats":{},"api":{"tag":"api","listen":"127.0.0.1:23456","services":["StatsService"]}}' >"${CA_X}/12_stats_api.json"
+run_ca 'ensureXrayLocalBlock' >/dev/null 2>&1
+assert_equals '["local-block","local-block",null]' "$(ca_rules '[.routing.rules[].ruleTag]')" "本机封锁（Xray）：两条封锁排在原有规则前面"
+assert_equals "31111-31210,23456|IPv6_out|AsIs" "$(ca_rules '"\(.routing.rules[0].port)|\(.routing.rules[2].outboundTag)|\(.routing.domainStrategy)"' | jq -r .)" \
+    "本机封锁（Xray）：开着拼车时统计 API 端口也按端口封；原有规则与 domainStrategy 不动"
+_caBefore=$(cat "${CA_X}/09_routing.json")
+run_ca 'ensureXrayLocalBlock' >/dev/null 2>&1
+assert_equals "${_caBefore}" "$(cat "${CA_X}/09_routing.json")" "本机封锁（Xray）：再跑一次不重复插、文件不变"
+printf '%s\n' '{"stats":{},"api":{"tag":"api","listen":"127.0.0.1:24000","services":["StatsService"]}}' >"${CA_X}/12_stats_api.json"
+run_ca 'ensureXrayLocalBlock' >/dev/null 2>&1
+assert_equals "31111-31210,24000|3" "$(ca_rules '"\(.routing.rules[0].port)|\(.routing.rules | length)"' | jq -r .)" "本机封锁（Xray）：API 换了端口，旧的封锁换成新的，不留两份"
+jq -n '{inbounds: [{tag: "dokodemo-in-VLESSReality", port: 443, protocol: "dokodemo-door", settings: {address: "127.0.0.1", port: 45987}}, {port: 45987, listen: "127.0.0.1", protocol: "vless"}]}' \
+    >"${CA_X}/07_VLESS_vision_reality_inbounds.json"
+run_ca 'ensureXrayLocalBlock' >/dev/null 2>&1
+assert_equals '["local_pass",["dokodemo-in-VLESSReality"]]|local_block|local_block|4' "$(ca_rules '"\([.routing.rules[0].outboundTag, .routing.rules[0].inboundTag] | tojson)|\(.routing.rules[1].outboundTag)|\(.routing.rules[2].outboundTag)|\(.routing.rules | length)"' | jq -r .)" \
+    "本机封锁（Xray）：dokodemo-door 入站转给 127.0.0.1 写死端口的那一跳先放行（Reality 的 443 就是这样转给 45987 的）"
+printf '%s\n' '{"routing":' >"${CA_X}/09_routing.json"
+assert_contains "$(run_ca 'ensureXrayLocalBlock; echo rc=$?' 2>&1)" "rc=1" "本机封锁（Xray）：路由文件读不懂时返回 1（handleXray 随之不启动）"
+
+ca_reset
+printf '%s\n' '{"stats":{},"api":{"tag":"api","listen":"127.0.0.1:23456","services":["StatsService"]}}' >"${CA_X}/12_stats_api.json"
+printf '%s\n' '{"route":{"rules":[{"inbound":"x","outbound":"direct"}],"final":"direct"}}' >"${CA_MERGED}"
+run_ca "localBlockInject ${CA_MERGED}" >/dev/null 2>&1
+assert_equals '[{"ip_is_private":true,"action":"reject"},{"ip_cidr":["0.0.0.0/8","::ffff:0:0/96"],"action":"reject"},{"port_range":["31111:31210"],"action":"reject"},{"port":[23456],"action":"reject"},{"inbound":"x","outbound":"direct"}]' \
+    "$(jq -c '.route.rules' "${CA_MERGED}")" "本机封锁（sing-box）：私网、0.0.0.0/8 与 IPv4 映射、桥端口段、统计 API 端口排在最前"
+rm -f "${CA_X}/12_stats_api.json"
+printf '%s\n' '{"outbounds":[{"type":"direct","tag":"direct"}]}' >"${CA_MERGED}"
+run_ca "localBlockInject ${CA_MERGED}" >/dev/null 2>&1
+assert_equals "3|null" "$(jq -r '"\(.route.rules | length)|\(.route.final)"' "${CA_MERGED}")" "本机封锁（sing-box）：没开拼车就没有 API 端口那条；原来没有 route 也只加规则、不设 final"
 
 echo ""
 

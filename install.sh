@@ -4195,6 +4195,57 @@ ensureRealityMinClientVer() {
     done
 }
 
+# localBlockApiPort → 拼车统计 API 的端口（12_stats_api.json 的 api.listen），没开拼车时为空
+localBlockApiPort() {
+    local file="${XRAY_CONF_DIR}/12_stats_api.json"
+    [[ -f "${file}" ]] || return 0
+    jq -r '.api.listen // "" | if test(":[0-9]+$") then sub("^.*:"; "") else "" end' "${file}"
+}
+
+# ensureXrayLocalBlock → Xray 启动前把「代理用户不许连本机与内网」放到 09_routing.json 最前（ruleTag local-block，幂等）：
+# 统计 API 端口与桥端口段按端口封（写成域名、DNS rebinding 都绕不过），回环 / 私网 / 链路本地 / 未指定按字面 IP 封。
+# 不封的话成员能经代理连到统计 API 清零自己的计数。09_routing.json 有好几个写入者，所以每次启动前补，不在写入处补
+ensureXrayLocalBlock() {
+    local routing="${XRAY_CONF_DIR}/09_routing.json" outbound="${XRAY_CONF_DIR}/local_block_tail_outbound.json"
+    local outbounds apiPort hops current updated
+    [[ -d "${XRAY_CONF_DIR}" ]] || return 0
+    # 文件名必须带 tail：不带的出站会被插到最前当默认出站，z_direct_outbound 被 WARP / IPv6 全局模式删掉时就是它，全部流量进黑洞
+    outbounds='{"outbounds":[{"tag":"local_block","protocol":"blackhole"},{"tag":"local_pass","protocol":"freedom"}]}'
+    if [[ "$(jq -c . "${outbound}" 2>/dev/null)" != "${outbounds}" ]]; then
+        jsonWriteFile "${outbound}" "${outbounds}" false || return 1
+    fi
+    apiPort=$(localBlockApiPort) || return 1
+    # dokodemo-door 入站（Reality 的 443、附加端口）经路由把连接转给 127.0.0.1 上写死的端口，用户改不了目标：先放行，不然 Reality 全断
+    hops=$(jq -sc '[.[] | .inbounds[]? | select(.protocol == "dokodemo-door") | .tag | select(type == "string")] | unique' "${XRAY_CONF_DIR}"/*.json) || return 1
+    current='{"routing":{"rules":[]}}'
+    if [[ -f "${routing}" ]]; then
+        current=$(cat "${routing}") || return 1
+    fi
+    updated=$(jq --arg ports "${CHAIN_BRIDGE_PORT}-${CHAIN_BRIDGE_PORT_LAST}${apiPort:+,${apiPort}}" --argjson hops "${hops}" '
+        ((if ($hops | length) > 0 then [{type: "field", ruleTag: "local-block", inboundTag: $hops, outboundTag: "local_pass"}] else [] end)
+         + [{type: "field", ruleTag: "local-block", port: $ports, outboundTag: "local_block"},
+         {type: "field", ruleTag: "local-block", outboundTag: "local_block",
+          ip: ["0.0.0.0/8", "10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4",
+               "255.255.255.255/32", "::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8"]}]) as $block
+        | .routing.rules = ($block + [(.routing.rules // [])[] | select(.ruleTag != "local-block")])' <<<"${current}") || return 1
+    [[ "${updated}" == "$(jq . <<<"${current}")" ]] && return 0
+    jsonWriteFile "${routing}" "${updated}" false
+}
+
+# localBlockInject MERGED → sing-box 那半：同一套封锁插到合并结果的路由规则最前。Xray 机上旁挂的 6 / 9 也连得到 Xray 的统计 API，
+# 链式出口收的是入口转来的流量，一样要封；IPv4 映射地址（::ffff:0:0/96）单列，合法客户端不会这样写目标
+localBlockInject() {
+    local merged=$1 apiPort out
+    apiPort=$(localBlockApiPort) || return 1
+    out=$(jq --arg ports "${CHAIN_BRIDGE_PORT}:${CHAIN_BRIDGE_PORT_LAST}" --arg api "${apiPort}" '
+        ([{ip_is_private: true, action: "reject"},
+          {ip_cidr: ["0.0.0.0/8", "::ffff:0:0/96"], action: "reject"},
+          {port_range: [$ports], action: "reject"}]
+         + (if $api == "" then [] else [{port: [($api | tonumber)], action: "reject"}] end)) as $block
+        | .route.rules = ($block + (.route.rules // []))' "${merged}") || return 1
+    jsonWriteFile "${merged}" "${out}" false
+}
+
 # 操作xray
 handleXray() {
     local startResult=0
@@ -4203,6 +4254,10 @@ handleXray() {
         removeLegacyAllowInsecure
         ensureRealityMinClientVer
         ensureCarpoolXray
+        if ! ensureXrayLocalBlock; then
+            echoContent red " ---> $(t XRAY_LOCAL_BLOCK_FAILED "${XRAY_CONF_DIR}/09_routing.json")"
+            exit 1
+        fi
     elif [[ "$1" == "stop" ]]; then
         carpoolCollectBeforeStop
     fi
@@ -5414,6 +5469,12 @@ singBoxMergeConfig() {
 
     if ! chainAccountInject "${tmpFile}"; then
         echoContent red " ---> $(t CHAIN_ACCOUNT_INJECT_FAILED)"
+        rm -f "${tmpFile}"
+        return 1
+    fi
+    # 排在账号规则之后注入，插到最前，所以封锁规则在最前面
+    if ! localBlockInject "${tmpFile}"; then
+        echoContent red " ---> $(t SINGBOX_LOCAL_BLOCK_FAILED)"
         rm -f "${tmpFile}"
         return 1
     fi
@@ -11667,24 +11728,21 @@ chainAccountAssignPorts() {
         end' <<<"$1"
 }
 
-# writeXrayChainConfig PORT → Xray 侧两件：chain_proxy 系列出站指向本机的桥；09_routing.json 整份换成链式路由：
-# 先封掉代理用户到桥端口段的连接（否则谁都能经回环换出口），再按账号映射分（user 正则，. + 转义——Xray 静默丢弃写坏的正则），
-# 其余交给默认出口。原路由只在第一次存成 .bak.chain：之后改映射也调这里，覆盖掉的话 removeChainProxy 就恢复不出原样
+# writeXrayChainConfig PORT → Xray 侧两件：chain_proxy 系列出站指向本机的桥；09_routing.json 整份换成链式路由：先按账号映射分
+# （user 正则，. + 转义——Xray 静默丢弃写坏的正则），其余交给默认出口；封本机与桥端口的规则由 ensureXrayLocalBlock 在启动前补到最前。
+# 原路由只在第一次存成 .bak.chain：之后改映射也调这里，覆盖掉的话 removeChainProxy 就恢复不出原样
 writeXrayChainConfig() {
     local port=$1 state bridges outbounds routing
     state=$(chainAccountReadState) || return 1
     bridges=$(chainAccountBridges "${state}") || return 1
     outbounds=$(jq -n --argjson port "${port}" --argjson bridges "${bridges}" '
         def socksOut($tag; $p): {tag: $tag, protocol: "socks", settings: {servers: [{address: "127.0.0.1", port: $p}]}};
-        {outbounds: ([socksOut("chain_proxy"; $port)] + [$bridges[] | socksOut("chain_proxy_" + .name; .port)]
-            + [{tag: "chain_block", protocol: "blackhole"}])}') || return 1
-    routing=$(jq -n --argjson s "${state}" --arg ports "${CHAIN_BRIDGE_PORT}-${CHAIN_BRIDGE_PORT_LAST}" '
+        {outbounds: ([socksOut("chain_proxy"; $port)] + [$bridges[] | socksOut("chain_proxy_" + .name; .port)])}') || return 1
+    routing=$(jq -n --argjson s "${state}" '
         ($s.mode // "") as $mode
         | (if $mode != "multi_chain" and $s.default_chain == "direct" then "z_direct_outbound" else "chain_proxy" end) as $dflt
         | {routing: {domainStrategy: "AsIs", rules: (
-            [{type: "field", ip: ["127.0.0.0/8", "::1"], port: $ports, outboundTag: "chain_block"},
-             {type: "field", ip: ["127.0.0.0/8", "::1"], outboundTag: "z_direct_outbound"}]
-            + ([($s.accounts // {}) | to_entries[]
+            ([($s.accounts // {}) | to_entries[]
                 | {re: ("regexp:^" + ([.key | explode[] | if . == 46 or . == 43 then [92, .] else [.] end] | add | implode) + "-[^-]*$"),
                    tag: (if .value == "direct" then "z_direct_outbound" elif $mode == "multi_chain" then "chain_proxy_" + .value else "chain_proxy" end)}]
                | group_by(.tag) | map({type: "field", user: map(.re), outboundTag: .[0].tag}))
@@ -11698,15 +11756,15 @@ writeXrayChainConfig() {
     jsonWriteFile "${XRAY_CONF_DIR}/09_routing.json" "${routing}" false
 }
 
-# chainAccountInject MERGED → 把映射写进合并后的 sing-box 配置，规则插在最前：先拒掉到桥端口段的连接，再是多链路被引用的
-# 链路各一条桥（有 Xray 的桥时），再按 users[].name 全名匹配 sing-box 承载的用户（auth_user 只认全名，所以合并时现生成）。
+# chainAccountInject MERGED → 把映射写进合并后的 sing-box 配置，规则插在最前：多链路被引用的链路各一条桥（有 Xray 的桥时），
+# 再按 users[].name 全名匹配 sing-box 承载的用户（auth_user 只认全名，所以合并时现生成）。
 # 单链路 / 多跳 default_chain 为 direct 时 final 改成 direct。返回 1 时合并必须随之失败
 chainAccountInject() {
     local merged=$1 state bridges out
     state=$(chainAccountReadState) || return 1
     [[ "${state}" == "{}" ]] && return 0
     bridges=$(chainAccountBridges "${state}") || return 1
-    out=$(jq --argjson s "${state}" --argjson bridges "${bridges}" --arg ports "${CHAIN_BRIDGE_PORT}:${CHAIN_BRIDGE_PORT_LAST}" '
+    out=$(jq --argjson s "${state}" --argjson bridges "${bridges}" '
         ($s.accounts // {}) as $acc
         | (if ([.inbounds[]? | select(.tag == "chain_bridge_in")] | length) > 0
            then [$bridges[] | {type: "socks", tag: ("chain_acct_in_" + .name), listen: "127.0.0.1", listen_port: .port}]
@@ -11714,8 +11772,7 @@ chainAccountInject() {
         | ($inb | map(.tag)) as $tags
         | ([.inbounds[]? | .users[]? | (.name // .username) | select(type == "string" and test("-"))] | unique
            | map(. as $n | {name: $n, out: $acc[$n | sub("-[^-]*$"; "")]}) | map(select(.out != null))) as $hits
-        | ([{ip_cidr: ["127.0.0.0/8", "::1/128"], port_range: [$ports], action: "reject"}]
-           + (if ($tags | length) > 0
+        | ((if ($tags | length) > 0
               then [{inbound: $tags, action: "sniff", timeout: "1s"}, {inbound: $tags, action: "resolve", strategy: "prefer_ipv4"}]
               else [] end)
            + [$inb[] | {inbound: [.tag], outbound: (.tag | ltrimstr("chain_acct_in_"))}]

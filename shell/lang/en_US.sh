@@ -85,6 +85,8 @@ MSG_PROTOCOLS_INSTALLED="Installed protocols"
 MSG_XRAY_ALLOWINSECURE_STRIPPED="Removed legacy allowInsecure field from socks5_outbound.json (parameter removed since Xray-core v26.2.6)"
 MSG_XRAY_ALLOWINSECURE_STRIP_FAILED="Failed to clean legacy allowInsecure field; if Xray fails to start, check /etc/Proxy-agent/xray/conf/socks5_outbound.json manually"
 MSG_XRAY_REALITY_MIN_CLIENT_VER_SET="Added minClientVer=%s to the Reality inbound (newer Xray-core defaults to 26.3.27 when unset and refuses sing-box/mihomo clients)"
+MSG_XRAY_LOCAL_BLOCK_FAILED="Could not write the rules that keep proxy users off this machine and private networks into %s; Xray is not started (otherwise members could reach the stats API through the proxy)"
+MSG_SINGBOX_LOCAL_BLOCK_FAILED="sing-box config merge failed: the rules that keep proxy users off this machine and private networks could not be written (old config kept)"
 
 # =============================================================================
 # Domain Messages

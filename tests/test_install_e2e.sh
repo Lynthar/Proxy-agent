@@ -399,6 +399,24 @@ realityProbe() {
     printf '%s\n' "${code}"
 }
 assert_equals "204" "$(realityProbe)" "按链接配置的客户端经服务端访问外网返回 204"
+# viaProxyCode CURL_ARGS... → 起一次客户端、经它跑一次 curl（-k，10 秒），打印 HTTP 状态码（连不上是 000），关掉客户端
+viaProxyCode() {
+    local pid code
+    "${clientCmd[@]}" >/tmp/proxy-agent-e2e-client.log 2>&1 &
+    pid=$!
+    sleep 2
+    code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 --proxy socks5h://127.0.0.1:10808 "$@" 2>/dev/null)
+    kill "${pid}" 2>/dev/null
+    wait "${pid}" 2>/dev/null
+    printf '%s\n' "${code}"
+}
+# 代理用户连不到服务端本机：--connect-to 把对伪装站的 HTTPS 请求导到服务端自己的 Reality 端口，没拦就会被转给伪装站、拿到它的响应码
+localControl=$(viaProxyCode "https://${E2E_SNI}/")
+assert_equals "yes" "$([[ "${localControl}" =~ ^[1-5][0-9][0-9]$ ]] && echo yes || echo no)" "对照：经代理请求伪装站拿到响应码 ${localControl}（下面的 000 才说明是被拦下）"
+for localTarget in 127.0.0.1 '[::ffff:127.0.0.1]' 0.0.0.0; do
+    assert_equals "000" "$(viaProxyCode --connect-to "${E2E_SNI}:443:${localTarget}:${linkPort}" "https://${E2E_SNI}/")" \
+        "经代理连服务端本机 ${localTarget}:${linkPort} 被拦下"
+done
 
 # ============================================================================
 # 重入：pasly 认得出已装状态，doctor 全绿
@@ -568,6 +586,14 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
     # 采集带 -reset：取过的计数器要归零，否则每个 tick 都把累计值重加一遍
     assert_equals "0" "$(statsValue "$("${XRAY_BIN}" api statsquery -s "127.0.0.1:${apiPort}" -t 3 -pattern 'user>>>' 2>&1)" "${statName}")" \
         "tick 采集之后该计数器归零"
+    # 经代理够不着统计 API：目标写成 IP、localhost、解析到 127.0.0.1 的域名、IPv4 映射还是 0.0.0.0，都按端口拦下。
+    # 只看响应码：没拦时这个 QueryStats(reset) 返回 200 并清零计数；计数本身不能当判据，cron 里的 tick 也会清零
+    printf '\x00\x00\x00\x00\x0b\x0a\x07user>>>\x10\x01' >/tmp/proxy-agent-e2e-reset.bin
+    for localTarget in 127.0.0.1 localhost localtest.me '[::ffff:127.0.0.1]' 0.0.0.0; do
+        assert_equals "000" "$(viaProxyCode --http2-prior-knowledge -H 'content-type: application/grpc' -H 'te: trailers' \
+            --data-binary @/tmp/proxy-agent-e2e-reset.bin "http://${localTarget}:${apiPort}/xray.app.stats.command.StatsService/QueryStats")" \
+            "经代理连统计 API（${localTarget}:${apiPort}）被拦下，清零请求发不过去"
+    done
 
     chainOut=
     unchainOut=

@@ -85,6 +85,8 @@ MSG_PROTOCOLS_INSTALLED="已安装协议"
 MSG_XRAY_ALLOWINSECURE_STRIPPED="已清理 socks5_outbound.json 中残留的 allowInsecure 字段（Xray-core v26.2.6 起已移除该参数）"
 MSG_XRAY_ALLOWINSECURE_STRIP_FAILED="清理残留 allowInsecure 字段失败，若 Xray 启动失败请手动检查 /etc/Proxy-agent/xray/conf/socks5_outbound.json"
 MSG_XRAY_REALITY_MIN_CLIENT_VER_SET="已为 Reality 入站补上 minClientVer=%s（新版 Xray-core 未写时默认 26.3.27，会拒绝 sing-box/mihomo 客户端）"
+MSG_XRAY_LOCAL_BLOCK_FAILED="没能把「代理用户不许连本机与内网」的规则写进 %s，Xray 不启动（不然成员能经代理连到统计 API）"
+MSG_SINGBOX_LOCAL_BLOCK_FAILED="sing-box 配置合并失败：「代理用户不许连本机与内网」的规则没能写进配置（保留旧配置）"
 
 # =============================================================================
 # 域名消息 - Domain Messages
