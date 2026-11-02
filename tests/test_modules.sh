@@ -446,8 +446,6 @@ _rsIn='{"route":{"rule_set":[{"tag":"a","type":"remote","url":"u","download_deto
 _rsOut=$(echo "${_rsIn}" | jq -c "${_rsFwd}")
 assert_equals '{"route":{"rule_set":[{"tag":"a","type":"remote","url":"u","http_client":"rule_set_http"},{"tag":"b","type":"local","path":"p"}]}}' "${_rsOut}" "rule_set forward migration swaps download_detour for http_client"
 assert_equals '{"route":{"rule_set":[{"tag":"a","type":"remote","url":"u"},{"tag":"b","type":"local","path":"p"}]}}' "$(echo "${_rsOut}" | jq -c "${_rsBack}")" "rule_set backward migration strips http_client for pre-1.14 cores"
-_rsDetour=$(printf '%s\n%s' '{"outbounds":[{"type":"selector","tag":"sel"}]}' '{"outbounds":[{"type":"direct","tag":"01_direct_outbound"},{"type":"direct","tag":"direct"}]}' | jq -r '.outbounds[]? | select(.type == "direct") | .tag' | head -1)
-assert_equals "01_direct_outbound" "${_rsDetour}" "http client detour picks the first direct outbound across fragments"
 
 # geosite 分类清单匹配：名字可带引号也可不带，大小写不敏感，规则里的域名不算分类
 _gsList=$(mktemp)
@@ -600,6 +598,11 @@ EOF
 assert_equals "0" "$(carpoolValidateMembers "${_cpMembers}" ",0,7,12,"; echo $?)" "carpoolValidateMembers: 合法文件通过"
 assert_equals "" "$(carpoolValidateMembers "${_cpMembers}" ",0,7,12,")" "carpoolValidateMembers: 合法文件不打印原因"
 assert_equals "0" "$(carpoolValidateMembers "${_cpMembers}" ",0,7,12," '{"dave":"11111111-1111-1111-1111-111111111111"}'; echo $?)" "carpoolValidateMembers: 别人的 uuid 不同就不算撞车"
+_cpOut=$(carpoolValidateMembers "${_cpMembers}" ",0,7,12," '{}' '[]' '{"alice":"550E8400-E29B-41D4-A716-446655440000"}')
+assert_equals "1" "$?" "校验: 文件里的 uuid 撞上另一成员在 state 里的凭据，返回 1"
+cp_assert_contains "${_cpOut}" "成员 bob-x 的 uuid 正被成员 alice 使用" "校验: 点名两个成员（大小写不同也算撞）"
+assert_equals "0" "$(carpoolValidateMembers "${_cpMembers}" ",0,7,12," '{}' '[]' '{"bob-x":"550e8400-e29b-41d4-a716-446655440000","alice":"11111111-1111-1111-1111-111111111111"}' >/dev/null; echo $?)" "校验: 自己在 state 里的凭据不算撞车"
+assert_equals '{"alice":"u1","bob":""}' "$(carpoolMemberUuids '{"members":{"alice":{"uuid":"u1"},"bob":{}}}')" "carpoolMemberUuids: 取每个成员的 uuid，没有的给空串"
 
 # cp_expect_error JSON 期待子串 说明 [INSTALLED] [FOREIGN]
 cp_expect_error() {
@@ -804,6 +807,9 @@ assert_equals '{"restore":["bob"],"uuid":[{"name":"carol","from":"99999999-9999-
     "carpoolReenableChanges: 记着凭据却不在入站里的要恢复，入站里凭据不同的要改回；还没 UUID 的新成员与外部账号不算"
 assert_equals '{"restore":[],"uuid":[]}' "$(carpoolReenableChanges "${_cpRe}" "{\"alice\": \"${_cpU1}\", \"bob\": \"22222222-2222-2222-2222-222222222222\", \"carol\": \"33333333-3333-3333-3333-333333333333\"}")" \
     "carpoolReenableChanges: 关着时没动过账号就没有改动"
+assert_equals '{"restore":[],"uuid":[]}' \
+    "$(carpoolReenableChanges "$(jq -c '.members.bob.status = "disabled" | .members.bob.reason = "expired" | .members.carol.status = "disabled" | .members.carol.reason = "quota"' <<<"${_cpRe}")" "{\"alice\": \"${_cpU1}\", \"carol\": \"99999999-9999-9999-9999-999999999999\"}")" \
+    "carpoolReenableChanges: 已到期 / 超额停用的成员不进入站，不列成放回或改回"
 assert_equals '["zed"]' "$(carpoolPruneRemoved "$(jq -c '.removing = ["zed","gone"]' <<<"${_cpMerged}")" "${_cpMap}" | jq -c '.removing')" "carpoolPruneRemoved: inbound 里已经没有的名字清掉"
 assert_equals "null" "$(carpoolPruneRemoved "$(jq -c '.removing = ["alice"]' <<<"${_cpMerged}")" "${_cpMap}" | jq -c '.removing')" "carpoolPruneRemoved: 重新加回成员的名字清掉，清空后整个字段删掉"
 
@@ -819,6 +825,13 @@ assert_equals '["zed"]' "$(carpoolDiffMembers "${_cpOld}" "${_cpNorm}" '{"gone":
     "carpoolDiffMembers: 这次要删的成员还在 inbound 里，不再同时列成「未纳入」"
 assert_equals '[]' "$(carpoolDiffMembers "$(jq -c '.resetDay = 1' <<<"${_cpOld}")" "${_cpNorm}" '{}' | jq -c '.resetDay')" "carpoolDiffMembers: resetDay 没变不列"
 assert_equals '[{"from":20,"to":1}]' "$(carpoolDiffMembers "$(jq -c '.resetDay = 20' <<<"${_cpOld}")" "${_cpNorm}" '{}' | jq -c '.resetDay')" "carpoolDiffMembers: resetDay 变了列出前后"
+_cpSame=$(jq -c --argjson n "${_cpNorm}" '.billing = $n.billing | .notify = $n.notify | .plan = $n.plan' <<<"${_cpOld}")
+assert_equals '[]' "$(carpoolDiffMembers "${_cpSame}" "${_cpNorm}" '{}' | jq -c '.settings')" "carpoolDiffMembers: billing / notify / plan 没变不列"
+_cpDiff=$(carpoolDiffMembers "$(jq -c '.billing = "out" | .notify.warnPercent = 50 | .plan.interface = "eth1"' <<<"${_cpSame}")" "${_cpNorm}" '{}')
+assert_equals "[\"billing\",\"notify.warnPercent\",\"plan.interface\"]" "$(jq -c '[.settings[].key]' <<<"${_cpDiff}")" "carpoolDiffMembers: 只改 billing / notify / plan 也列出，按子字段"
+assert_true '! carpoolDiffIsEmpty "${_cpDiff}"' "carpoolDiffIsEmpty: 只改了设置也算差异"
+cp_assert_contains "$(carpoolDiffText "${_cpDiff}")" "设置 notify.warnPercent：50 → 80" "carpoolDiffText: 设置变化写出前后值"
+cp_assert_contains "$(carpoolDiffText "$(jq -c '.notify.digestHour = 8' <<<"${_cpSame}" | { read -r o; carpoolDiffMembers "${o}" "$(jq -c '.notify.digestHour = null' <<<"${_cpNorm}")" '{}'; })")" "设置 notify.digestHour：8 → -" "carpoolDiffText: 关掉（null）显示成 -"
 printf '%s\n' "{\"members\": {\"alice\": {\"uuid\": \"${_cpU2}\"}}}" > "${_cpMembers}"
 assert_equals '["alice"]' "$(carpoolDiffMembers "${_cpOld}" "$(carpoolNormalizeMembers "${_cpMembers}")" '{}' | jq -c '.uuid')" "carpoolDiffMembers: 文件给了不同的 uuid 算换凭据"
 printf '%s\n' '{"members": {"alice": {}}}' > "${_cpMembers}"
@@ -1068,7 +1081,8 @@ cp_assert_contains "${_cpPage}" '本周期自 2026-10-15 · 下次清零 2026-11
 cp_assert_contains "${_cpPage}" '<tr class="disabled"><td>alice</td><td>100 GiB<div class="bar"><i class="hot" style="width:100%"></i></div></td><td>100 GiB</td><td>100%</td><td>2026-12-31</td><td>已停用 · 流量已用尽</td></tr>' "车主页: 停用成员一行"
 cp_assert_contains "${_cpPage}" '<tr class="active"><td>bob-x</td><td>11 B</td><td>不限</td><td>-</td><td>-</td><td>正常</td></tr>' "车主页: 不限额成员一行"
 cp_assert_contains "${_cpPage}" '<li>2026-10-31 11:55 · alice 已停用（流量已用尽）</li>' "车主页: 最近事件"
-cp_assert_contains "${_cpPage}" '下次清零 2026-11-15</p><p>整机本周期 - · 成员合计 107.37 GB · 计费口径：只计出站</p><table>' "车主页: 周期行下面一行整机与成员合计"
+cp_assert_contains "${_cpPage}" '下次清零 2026-11-15</p><p>整机本周期 - · 成员合计 107.37 GB · 计费口径：只计出站</p><p class="muted">整机、套餐' "车主页: 周期行下面一行整机与成员合计"
+cp_assert_contains "${_cpPage}" "1 GiB ≈ 1.074 GB" "车主页: 写明整机按十进制 GB、成员按 GiB"
 _cpPage2=$(carpoolRenderOwnerPage "$(jq -c '.billing = "both" | .plan = {sizeGB: 1000, warnPercent: 85, interface: ""} | .machine = {bootId: "b", ifaces: ["eth0"], last: {}, rx: 100000000000, tx: 150000000000}' <<<"${_cpS}")" "${_cpNorm}" 2026-10-31 now '[]' '')
 cp_assert_contains "${_cpPage2}" '<p>整机本周期 250 GB / 套餐 1000 GB（25%）· 成员合计 214.74 GB · 计费口径：双向（进 + 出）</p>' "车主页: 有套餐与读数时整机一行带百分比"
 cp_assert_contains "${_cpPage2}" '<td>alice</td><td>200 GiB<div class="bar">' "车主页: both 下成员已用列按口径翻倍"

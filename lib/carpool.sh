@@ -129,11 +129,11 @@ carpoolNextPeriodStart() {
 # members.json：校验、归一化、播种
 # ============================================================================
 
-# carpoolValidateMembers FILE INSTALLED [FOREIGN_JSON] [RETIRED_JSON] → 0=合法；否则逐行打印原因（已本地化）并返回 1
+# carpoolValidateMembers FILE INSTALLED [FOREIGN_JSON] [RETIRED_JSON] [MEMBER_UUIDS_JSON] → 0=合法；否则逐行打印原因（已本地化）并返回 1
 # RETIRED_JSON 是 carpoolRetiredNames 的输出：名字第一段撞上其中文件里已没有的人，就是把那人的旧订阅链接交给新成员
-# INSTALLED 形如 ",0,7,"；FOREIGN_JSON 是 inbound 里不归拼车管的账号 {name: uuid}，查 uuid 与订阅键撞车
+# INSTALLED 形如 ",0,7,"；FOREIGN_JSON 是 inbound 里不归拼车管的账号 {name: uuid}；MEMBER_UUIDS_JSON 是 carpoolMemberUuids 的输出
 carpoolValidateMembers() {
-    local file=$1 installed=$2 foreign=${3:-"{}"} retired=${4:-"[]"}
+    local file=$1 installed=$2 foreign=${3:-"{}"} retired=${4:-"[]"} memberUuids=${5:-"{}"}
     if [[ ! -f "${file}" ]]; then
         t CARPOOL_ERR_FILE_MISSING "${file}"
         echo
@@ -147,7 +147,7 @@ carpoolValidateMembers() {
 
     local installedJson raw
     installedJson=$(carpoolInstalledProtocolsJson "${installed}")
-    raw=$(jq -r --argjson installed "${installedJson}" --argjson foreign "${foreign}" --argjson retired "${retired}" \
+    raw=$(jq -r --argjson installed "${installedJson}" --argjson foreign "${foreign}" --argjson retired "${retired}" --argjson memberUuids "${memberUuids}" \
         --argjson allowed "$(carpoolInstalledProtocolsJson "${CARPOOL_PROTOCOLS}")" '
       if type != "object" then "NOT_OBJECT\t" else
         ( keys[] | select(. != "resetDay" and . != "notify" and . != "billing" and . != "plan" and . != "members") | "UNKNOWN_FIELD\t\(.)" ),
@@ -197,8 +197,11 @@ carpoolValidateMembers() {
                           ( [0, 7][] | select(. as $p | ($installed | index($p)) != null and ($v.protocols | index($p)) == null) | "PROTOCOL_REQUIRED\t\($name)\t\(.)" )
                         end
                       else empty end ),
-                    ( if $v.uuid != null and (($v.uuid | type) != "string" or ($v.uuid | test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$") | not)) then "BAD_UUID\t\($name)"
+                    ( [$memberUuids | to_entries[] | select(.key != $name and ($v.uuid | type) == "string"
+                        and ((.value // "") | tostring | ascii_downcase) == ($v.uuid | ascii_downcase)) | .key] as $holders
+                      | if $v.uuid != null and (($v.uuid | type) != "string" or ($v.uuid | test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$") | not)) then "BAD_UUID\t\($name)"
                       elif ($v.uuid | type) == "string" and ([$foreign | to_entries[] | select(.key != $name) | .value] | index($v.uuid)) != null then "UUID_TAKEN\t\($name)"
+                      elif ($holders | length) > 0 then "UUID_TAKEN_MEMBER\t\($name)\t\($holders[0])"
                       else empty end )
                   end )
           end )
@@ -238,6 +241,7 @@ carpoolValidateMembers() {
             PROTOCOL_REQUIRED) t CARPOOL_ERR_PROTOCOL_REQUIRED "${a}" "${b}" ;;
             BAD_UUID) t CARPOOL_ERR_BAD_UUID "${a}" ;;
             UUID_TAKEN) t CARPOOL_ERR_UUID_TAKEN "${a}" ;;
+            UUID_TAKEN_MEMBER) t CARPOOL_ERR_UUID_TAKEN_MEMBER "${a}" "${b}" ;;
             *) printf '%s %s %s' "${code}" "${a}" "${b}" ;;
         esac
         echo
@@ -408,12 +412,18 @@ carpoolMarkRemoved() {
 }
 
 # carpoolReenableChanges MERGED_STATE INBOUND_JSON → 重开拼车时客户端看得见的改动 {restore: [name], uuid: [{name, from, to}]}：
-# restore 是 state 记着凭据、入站里却没有的成员（关闭期间在菜单里删了），uuid 是入站同名账号的凭据将被改回 state 里的。INBOUND_JSON 形如 {name: uuid}
+# restore 是 state 记着凭据、入站里却没有的成员（关闭期间在菜单里删了），uuid 是入站同名账号的凭据将被改回 state 里的。
+# 停用的成员对账时本来就不进入站，不算放回。INBOUND_JSON 形如 {name: uuid}
 carpoolReenableChanges() {
     jq -c --argjson inbound "$2" '
-      [.members | to_entries[] | select(.value.uuid != "")] as $m
+      [.members | to_entries[] | select(.value.uuid != "" and (.value.status // "active") == "active")] as $m
       | {restore: [$m[] | select($inbound[.key] == null) | .key],
          uuid: [$m[] | select($inbound[.key] != null and $inbound[.key] != .value.uuid) | {name: .key, from: $inbound[.key], to: .value.uuid}]}' <<<"$1"
+}
+
+# carpoolMemberUuids STATE → {name: uuid}，state 里每个成员当前的凭据（校验文件里写的 uuid 是否撞上别的成员用）
+carpoolMemberUuids() {
+    jq -c '(.members // {}) | map_values(.uuid // "")' <<<"$1"
 }
 
 # carpoolRetiredNames STATE → 校验订阅键用的名字表：已删除的、待删的与在册成员（在册而文件里没有的就是这次要删的人）
@@ -441,11 +451,12 @@ carpoolForeignAccounts() {
 }
 
 # carpoolDiffMembers OLD_STATE NORMALIZED INBOUND_JSON → 应用前给车主看的差异：
-# {added, removed, protocols:[{name,from,to}], uuid:[name], quota:[{name,from,to}], expire:[{name,from,to}], resetDay:[{from,to}], unmanaged:[name]}
+# {added, removed, protocols:[{name,from,to}], uuid:[name], quota:[{name,from,to}], expire:[{name,from,to}], resetDay:[{from,to}],
+#  settings:[{key,from,to}]（billing 与 notify / plan 的子字段，key 形如 notify.warnPercent）, unmanaged:[name]}
 carpoolDiffMembers() {
     jq -c --argjson members "$2" --argjson inbound "$3" '
       def protos: if type == "array" then sort else . end;
-      .members as $old | $members.members as $new | .resetDay as $oldDay
+      . as $st | .members as $old | $members.members as $new | .resetDay as $oldDay
       | {
           added: [$new | keys_unsorted[] | select($old[.] == null)],
           removed: [$old | keys_unsorted[] | select($new[.] == null)],
@@ -457,6 +468,9 @@ carpoolDiffMembers() {
           expire: [$new | to_entries[] | select($old[.key] != null and $old[.key].expire != .value.expire)
                    | {name: .key, from: $old[.key].expire, to: .value.expire}],
           resetDay: [select($oldDay != $members.resetDay) | {from: $oldDay, to: $members.resetDay}],
+          settings: ([select($st.billing != $members.billing) | {key: "billing", from: $st.billing, to: $members.billing}]
+            + [("notify", "plan") as $sec | ($st[$sec] // {}) as $a | ($members[$sec] // {}) as $b
+               | ($a + $b | keys_unsorted[]) as $k | select($a[$k] != $b[$k]) | {key: "\($sec).\($k)", from: $a[$k], to: $b[$k]}]),
           unmanaged: [$inbound | keys_unsorted[] | select($new[.] == null and $old[.] == null)]
         }' <<<"$1"
 }
@@ -557,7 +571,7 @@ carpoolResetUsageState() {
 
 # carpoolDiffIsEmpty DIFF → 0=除「未纳入」以外没有任何差异
 carpoolDiffIsEmpty() {
-    jq -e '(.added + .removed + .protocols + .uuid + .quota + .expire + .resetDay) | length == 0' <<<"$1" >/dev/null 2>&1
+    jq -e '(.added + .removed + .protocols + .uuid + .quota + .expire + .resetDay + (.settings // [])) | length == 0' <<<"$1" >/dev/null 2>&1
 }
 
 # carpoolDiffNeedsConfirm DIFF → 0=含删除成员或换 UUID，应用前要逐项确认
@@ -584,6 +598,9 @@ carpoolDiffText() {
     while IFS=$'\t' read -r from to; do
         [[ -n "${from}" ]] && t CARPOOL_DIFF_RESET_DAY "${from}" "${to}" && echo
     done < <(jq -r '.resetDay[] | "\(.from)\t\(.to)"' <<<"${d}")
+    while IFS=$'\t' read -r name from to; do
+        [[ -n "${name}" ]] && t CARPOOL_DIFF_SETTING "${name}" "${from}" "${to}" && echo
+    done < <(jq -r 'def v: if . == null then "-" elif type == "string" then . else tojson end; (.settings // [])[] | "\(.key)\t\(.from | v)\t\(.to | v)"' <<<"${d}")
     line=$(jq -r '.unmanaged | join(", ")' <<<"${d}")
     if [[ -n "${line}" ]]; then
         t CARPOOL_DIFF_UNMANAGED "${line}"
@@ -849,7 +866,7 @@ _carpoolPageStrings() {
         --arg evPeriod "$(t CARPOOL_PAGE_EV_PERIOD)" --arg evApplied "$(t CARPOOL_PAGE_EV_APPLIED)" \
         --arg evInvalid "$(t CARPOOL_PAGE_FILE_INVALID)" --arg evCollectFailed "$(t CARPOOL_EVENT_COLLECT_FAILED '%s')" \
         --arg evCollectRecovered "$(t CARPOOL_EVENT_COLLECT_RECOVERED)" --arg evTxFailed "$(t CARPOOL_EVENT_TX_FAILED)" \
-        --arg evPlanWarn "$(t CARPOOL_PAGE_EV_PLAN_WARN)" --arg billing "$(t CARPOOL_PAGE_BILLING)" \
+        --arg evPlanWarn "$(t CARPOOL_PAGE_EV_PLAN_WARN)" --arg billing "$(t CARPOOL_PAGE_BILLING)" --arg unitNote "$(t CARPOOL_UNIT_NOTE)" \
         --arg lang "${CURRENT_LANG:-zh_CN}" \
         '$ARGS.named'
 }
@@ -892,7 +909,7 @@ carpoolRenderOwnerPage() {
       "<!DOCTYPE html><html lang=\"\($L.lang | sub("_"; "-"))\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"robots\" content=\"noindex\"><title>\($m.notify.label | esc)</title><style>\($css)</style></head><body>"
       + "<h1>\($m.notify.label | esc)</h1>"
       + "<p class=\"muted\">\($L.generated | esc) \($now | esc) · \($L.period | esc) \($s.period | esc) · \($L.nextReset | esc) \($nextReset | esc)</p>"
-      + "<p>\($machine | esc)</p>"
+      + "<p>\($machine | esc)</p><p class=\"muted\">\($L.unitNote | esc)</p>"
       + (if $pending != "" then "<p class=\"warn\">\($pending | esc)</p>" else "" end)
       + (if ($s.members | length) == 0 then "<p>\($L.noMembers | esc)</p>" else
           "<table><thead><tr><th>\($L.name | esc)</th><th>\($L.used | esc)</th><th>\($L.quota | esc)</th><th>%</th><th>\($L.expire | esc)</th><th>\($L.status | esc)</th></tr></thead><tbody>"

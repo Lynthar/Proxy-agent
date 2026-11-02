@@ -595,7 +595,6 @@ if ! type t &>/dev/null; then
     MSG_CHAIN_STEP_RULES="步骤 3/3: 设置分流规则"
     MSG_CHAIN_RULES_SELECT="选择此链路的分流规则"
     MSG_CHAIN_RULE_CUSTOM_DOMAIN="自定义域名"
-    MSG_CHAIN_RULE_SET_DEFAULT="设为默认链路"
     MSG_CHAIN_DEFAULT_HINT="提示: 如果不设置默认链路，未匹配规则的流量将从入口节点直连访问"
     MSG_CHAIN_PASTE_CODE="请粘贴出口/中继节点的配置码"
     MSG_CHAIN_CODE_EMPTY="配置码不能为空"
@@ -704,14 +703,6 @@ isValidDomain() {
     local domain="$1"
     # 空值无效
     [[ -z "${domain}" ]] && return 1
-    # 检查是否包含危险字符（命令注入防护）
-    if [[ "${domain}" =~ [\;\|\&\$\`\(\)\{\}\[\]\<\>\!\#\*\?\~\'\"] ]]; then
-        return 1
-    fi
-    # 检查是否包含空格或换行
-    if [[ "${domain}" =~ [[:space:]] ]]; then
-        return 1
-    fi
     # 基本域名格式验证（允许子域名、顶级域名等）
     # 格式: 允许字母、数字、连字符和点，但不能以点或连字符开头/结尾
     if [[ ! "${domain}" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]]; then
@@ -779,19 +770,11 @@ readValidDomain() {
     return 0
 }
 
-# URL/重定向地址验证函数 - 防止命令注入
+# isValidRedirectUrl URL → http(s) 地址白名单。结果原样进 nginx 的 return 302 '…';，引号、分号、空白、$、花括号、反斜杠
+# 都能改写那一行，一个都不放。不用黑名单：方括号字符类里写 \] 会让类提前结束，结果什么都放行
 isValidRedirectUrl() {
-    local url="$1"
-    [[ -z "${url}" ]] && return 1
-    # 检查是否包含危险字符
-    if [[ "${url}" =~ [\;\|\&\$\`\(\)\{\}\[\]\<\>\!\#\*\~\'] ]]; then
-        return 1
-    fi
-    # 必须以 http:// 或 https:// 开头
-    if [[ ! "${url}" =~ ^https?:// ]]; then
-        return 1
-    fi
-    return 0
+    local pattern='^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~%/?=&+,:@-]*)?$'
+    [[ "$1" =~ ${pattern} ]]
 }
 
 # SHA256校验和验证函数
@@ -1368,6 +1351,8 @@ readInstallProtocolType() {
     currentRealityPrivateKey=
     currentRealityPublicKey=
     currentRealityShortId=
+    currentRealityShortId2=
+    realityDestHost=
 
     currentRealityMldsa65Seed=
     currentRealityMldsa65Verify=
@@ -1454,10 +1439,12 @@ readInstallProtocolType() {
                 xrayVLESSRealityPort=$(jq -r .inbounds[0].port "${row}.json")
 
                 realityDomainPort=$(jq -r .inbounds[1].streamSettings.realitySettings.target "${row}.json" | awk -F '[:]' '{print $2}')
+                realityDestHost=$(jq -r '.inbounds[1].streamSettings.realitySettings.target // "" | split(":")[0] | if . == "127.0.0.1" then . else empty end' "${row}.json")
 
                 currentRealityPublicKey=$(jq -r .inbounds[1].streamSettings.realitySettings.publicKey "${row}.json")
                 currentRealityPrivateKey=$(jq -r .inbounds[1].streamSettings.realitySettings.privateKey "${row}.json")
                 currentRealityShortId=$(jq -r .inbounds[1].streamSettings.realitySettings.shortIds[0] "${row}.json")
+                currentRealityShortId2=$(jq -r '.inbounds[1].streamSettings.realitySettings.shortIds[1] // empty' "${row}.json")
 
                 # // empty 兜底：很老的 Vision 配置（mldsa65 特性引入之前生成）没这俩字段，
                 # 不加 // empty 会让 jq -r 输出字面字符串 "null"，再被 initRealityMldsa65
@@ -1472,7 +1459,9 @@ readInstallProtocolType() {
                 singBoxVLESSRealityVisionPort=$(jq -r .inbounds[0].listen_port "${row}.json")
                 singBoxVLESSRealityVisionServerName=$(jq -r .inbounds[0].tls.server_name "${row}.json")
                 realityDomainPort=$(jq -r .inbounds[0].tls.reality.handshake.server_port "${row}.json")
+                realityDestHost=$(jq -r '.inbounds[0].tls.reality.handshake.server // "" | if . == "127.0.0.1" then . else empty end' "${row}.json")
                 currentRealityShortId=$(jq -r '.inbounds[0].tls.reality.short_id[0] // empty' "${row}.json")
+                currentRealityShortId2=$(jq -r '.inbounds[0].tls.reality.short_id[1] // empty' "${row}.json")
 
                 realityServerName=${singBoxVLESSRealityVisionServerName}
                 if [[ -f "${configPath}reality_key" ]]; then
@@ -1660,12 +1649,13 @@ allowPort() {
             fi
         fi
     elif systemctl status firewalld 2>/dev/null | grep -q "active (running)"; then
+        # 不写 --zone：加、查、检查都落在默认区。写死 public 的话，默认区不是 public 的机器上规则全落进没挂网卡的区，一条不生效
         local updateFirewalldStatus=
         if [[ -n "${sourceRange}" && "${sourceRange}" != "0.0.0.0/0" ]]; then
             local richRule="rule family=\"ipv4\" source address=\"${sourceRange}\" port protocol=\"${type}\" port=\"$1\" accept"
             if ! firewall-cmd --permanent --query-rich-rule="${richRule}" >/dev/null 2>&1; then
                 updateFirewalldStatus=true
-                firewall-cmd --permanent --zone=public --add-rich-rule="${richRule}"
+                firewall-cmd --permanent --add-rich-rule="${richRule}"
                 checkFirewalldAllowPort "$1"
             fi
         elif ! firewall-cmd --list-ports --permanent | grep -qw "$1/${type}"; then
@@ -1674,7 +1664,7 @@ allowPort() {
             if echo "${firewallPort}" | grep -q ":"; then
                 firewallPort=$(echo "${firewallPort}" | awk -F ":" '{print $1"-"$2}')
             fi
-            firewall-cmd --zone=public --add-port="${firewallPort}/${type}" --permanent
+            firewall-cmd --add-port="${firewallPort}/${type}" --permanent
             checkFirewalldAllowPort "${firewallPort}"
         fi
 
@@ -1720,6 +1710,26 @@ allowPort() {
         if echo "${updateFirewalldStatus}" | grep -q "true"; then
             netfilter-persistent save
         fi
+    fi
+}
+
+# firewallDefaultDenies → 0 = allowPort 会用的那个防火墙默认拒绝入站，按源放行才真把端口藏起来；
+# 没有在用的防火墙、默认放行、firewalld 默认区 target 是 ACCEPT（trusted）都返回 1。判断顺序必须与 allowPort 一致
+firewallDefaultDenies() {
+    if command -v dpkg >/dev/null 2>&1 && dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+ufw"; then
+        ufw status verbose 2>/dev/null | grep -q "Status: active" || return 1
+        ufw status verbose | grep -qE "Default: (deny|reject) \(incoming\)"
+    elif systemctl status firewalld 2>/dev/null | grep -q "active (running)"; then
+        [[ "$(firewall-cmd --permanent --zone="$(firewall-cmd --get-default-zone)" --get-target 2>/dev/null)" != "ACCEPT" ]]
+    elif rc-update show 2>/dev/null | grep -q ufw; then
+        ufw status verbose 2>/dev/null | grep -q "Status: active" || return 1
+        ufw status verbose | grep -qE "Default: (deny|reject) \(incoming\)"
+    elif command -v nft >/dev/null 2>&1 && systemctl status nftables 2>/dev/null | grep -q "active"; then
+        nft list chain inet filter input 2>/dev/null | grep -q "policy drop"
+    elif command -v dpkg >/dev/null 2>&1 && dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+netfilter-persistent" && systemctl status netfilter-persistent 2>/dev/null | grep -q "active (exited)"; then
+        iptables -S INPUT 2>/dev/null | head -n 1 | grep -qE "^-P INPUT (DROP|REJECT)"
+    else
+        return 1
     fi
 }
 # getPublicIP 由 lib/system-detect.sh 提供（同样的接口：默认 IPv4，
@@ -1769,7 +1779,8 @@ readSingBoxConfig() {
 
 # 读取上次安装的配置
 readLastInstallationConfig() {
-    if [[ -n "${configPath}" ]]; then
+    # 只有链式片段的 sing-box 机也有 configPath，那里没有可复用的协议配置
+    if [[ -n "${configPath}" && "$(scanInstalledProtocols "${configPath}")" != "," ]]; then
         read -r -p "读取到上次安装的配置，是否使用 ？[y/n]:" lastInstallationConfigStatus
         if [[ "${lastInstallationConfigStatus}" == "y" ]]; then
             lastInstallationConfig=true
@@ -1926,7 +1937,7 @@ readConfigHostPathUUID() {
 showInstallStatus() {
     if [[ -n "${coreKind}" ]]; then
         if [[ "${coreKind}" == 1 ]]; then
-            if [[ -n $(pgrep -f "xray/xray") ]]; then
+            if xrayDaemonRunning; then
                 echoContent yellow "\n$(t CORE_CURRENT_RUNNING "Xray-core")"
             else
                 echoContent yellow "\n$(t CORE_CURRENT_STOPPED "Xray-core")"
@@ -1954,16 +1965,40 @@ showInstallStatus() {
     fi
 }
 
-# 清理旧残留
+# chainRefuseCoreSwitch TARGET_CORE → 本机是链式入口时拒绝换内核：入口在两种内核下结构不同，换过去旧内核那半被删，
+# 留下的那半再没有流量进来，链路静默失效。出口 / 中继只在 sing-box 片段里，换内核不受影响
+chainRefuseCoreSwitch() {
+    [[ -n "${coreKind}" && "${coreKind}" != "$1" ]] || return 0
+    [[ -f "${CHAIN_ENTRY_INFO}" || -f "${CHAIN_MULTI_INFO}" ]] || return 0
+    echoContent red " ---> $(t CHAIN_REFUSE_CORE_SWITCH)"
+    exit 1
+}
+
+# 清理旧残留。singBoxProtocolsDel PREV_CORE：Xray 安装只在从 sing-box 内核（PREV_CORE=2）切过来时删它的协议入站，
+# 已是 Xray 内核时旁挂的 6 / 9 与链式出口 / 中继原样留着；删完片段里还有入站（出口、中继）就让 sing-box 接着跑
 cleanUp() {
     if [[ "$1" == "xrayDel" ]]; then
         handleXray stop
         rm -rf ${XRAY_DIR}/*
         rm -f "${nginxConfigPath}http_redirect.conf"
-    elif [[ "$1" == "singBoxDel" ]]; then
+    elif [[ "$1" == "singBoxProtocolsDel" ]]; then
+        local file
+        if [[ "$2" != "2" ]]; then
+            if [[ -f "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" || -f "${SINGBOX_FRAGMENT_DIR}/09_tuic_inbounds.json" ]]; then
+                echoContent yellow " ---> $(t CLEANUP_SIDECAR_KEPT)"
+            fi
+            return 0
+        fi
         handleSingBox stop
-        rm -rf ${SINGBOX_MERGED_CONFIG} >/dev/null 2>&1
-        rm -rf ${SINGBOX_FRAGMENT_DIR}/* >/dev/null 2>&1
+        rm -f "${SINGBOX_MERGED_CONFIG}"
+        for file in "${SINGBOX_FRAGMENT_DIR}"/*_inbounds.json; do
+            if [[ -f "${file}" && -n "$(parseProtocolIdFromFileName "${file}")" ]]; then
+                rm -f "${file}"
+            fi
+        done
+        if singBoxFragmentsHaveInbounds; then
+            handleSingBox start
+        fi
     fi
 }
 # -------------------------------------------------------------
@@ -1998,7 +2033,6 @@ mkdirTools() {
     mkdir -p ${XRAY_DIR}/reality_scan
     mkdir -p ${XRAY_DIR}/tmp
     mkdir -p /etc/systemd/system/
-    mkdir -p /tmp/Proxy-agent-tls/
 
     # WARP配置目录 - 包含私钥
     mkdir -p ${WARP_DIR}
@@ -2016,16 +2050,72 @@ mkdirTools() {
 # 安装工具包
 installTools() {
     echoContent skyBlue "\n$(t PROGRESS_STEP "$1" "${totalProgress}") : $(t PROG_INSTALL_TOOLS)"
+    installBaseTools
+
+    # 检测nginx版本，并提供是否卸载的选项
+    # 个性化安装里一个要证书的协议都没选（7、12 这类 Reality）就不装 nginx 与 acme.sh；全部安装时清单为空，照装
+    if [[ -n "${selectCustomInstallType}" ]] && ! anyProtocolRequiresTLS "${selectCustomInstallType}"; then
+        echoContent green " ---> 检测到无需依赖Nginx的服务，跳过安装"
+    else
+        if ! command -v nginx >/dev/null 2>&1; then
+            echoContent green " ---> 安装nginx"
+            installNginxTools
+        else
+            nginxVersion=$(nginx -v 2>&1)
+            nginxVersion=$(echo "${nginxVersion}" | awk -F "[n][g][i][n][x][/]" '{print $2}' | awk -F "[.]" '{print $2}')
+            if [[ ${nginxVersion} -lt 14 ]]; then
+                read -r -p "读取到当前的Nginx版本过旧（低于1.14），是否卸载后重新安装 ？[y/n]:" unInstallNginxStatus
+                if [[ "${unInstallNginxStatus}" == "y" ]]; then
+                    ${removeType} nginx >/dev/null 2>&1
+                    echoContent yellow " ---> nginx卸载完成"
+                    echoContent green " ---> 安装nginx"
+                    installNginxTools >/dev/null 2>&1
+                else
+                    exit 0
+                fi
+            fi
+        fi
+    fi
+
+    if [[ -n "${selectCustomInstallType}" ]] && ! anyProtocolRequiresTLS "${selectCustomInstallType}"; then
+        echoContent green " ---> 检测到无需依赖证书的服务，跳过安装"
+    else
+        if [[ ! -d "$HOME/.acme.sh" ]] || [[ -d "$HOME/.acme.sh" && -z $(find "$HOME/.acme.sh/acme.sh") ]]; then
+            echoContent green " ---> 安装acme.sh"
+            # acme.sh 把 curl 的响应头写进 HTTP_HEADER 指的文件；不给就自己在 /tmp 建一个、装完不删
+            local acmeHttpHeader=
+            acmeHttpHeader=$(mktemp "${TLS_DIR}/.acme-header.XXXXXX") || acmeHttpHeader=
+            curl -s https://get.acme.sh | HTTP_HEADER="${acmeHttpHeader}" sh >${TLS_DIR}/acme.log 2>&1
+            [[ -n "${acmeHttpHeader}" ]] && rm -f "${acmeHttpHeader}"
+
+            if [[ ! -d "$HOME/.acme.sh" ]] || [[ -z $(find "$HOME/.acme.sh/acme.sh") ]]; then
+                echoContent red "  acme安装失败--->"
+                tail -n 100 ${TLS_DIR}/acme.log
+                echoContent yellow "错误排查:"
+                echoContent red "  1.获取Github文件失败，请等待Github恢复后尝试，恢复进度可查看 [https://www.githubstatus.com/]"
+                echoContent red "  2.acme.sh脚本出现bug，可查看[https://github.com/acmesh-official/acme.sh] issues"
+                echoContent red "  3.如纯IPv6机器，请设置NAT64,可执行下方命令，如果添加下方命令还是不可用，请尝试更换其他NAT64"
+                echoContent skyBlue "  sed -i \"1i\\\nameserver 2a00:1098:2b::1\\\nnameserver 2a00:1098:2c::1\\\nnameserver 2a01:4f8:c2c:123f::1\\\nnameserver 2a01:4f9:c010:3f02::1\" /etc/resolv.conf"
+                exit 1
+            fi
+        fi
+    fi
+
+}
+
+# installBaseTools → 等包管理器空闲、刷新索引、补齐脚本自己要用的命令行工具（jq / wget / curl / tar 等，不含 nginx 与 acme.sh）。
+# 只配链式角色的裸机从没跑过安装流程，也必须先过这里：installSingBox 缺 jq / wget 时会被误报成网络问题
+installBaseTools() {
     # 修复ubuntu个别系统问题
     if [[ "${release}" == "ubuntu" ]]; then
         dpkg --configure -a
     fi
 
-    # 等待 apt/dpkg 结束而不是 kill -9：SIGKILL 会截断 dpkg 事务损坏包数据库，
-    # 且旧写法 pgrep -f "apt" 按整条命令行子串匹配，连 "laptop" 之类无关进程都会被杀
+    # 等 apt/dpkg 跑完而不是 kill -9：SIGKILL 截断 dpkg 事务会损坏包数据库。unattended-upgrades 按命令行认——
+    # 常驻的 unattended-upgrade-shutdown 进程名同样截断成 unattended-upgr，按名字认会等满超时、装机必败
     if [[ "${release}" == "debian" || "${release}" == "ubuntu" ]]; then
         local aptWaited=0
-        while pgrep -x "apt|apt-get|dpkg|aptitude|unattended-upgr" >/dev/null 2>&1; do
+        while pgrep -x "apt|apt-get|dpkg|aptitude" >/dev/null 2>&1 || pgrep -f "(^|/)unattended-upgrade( |$)" >/dev/null 2>&1; do
             if [[ ${aptWaited} -eq 0 ]]; then
                 echoContent yellow " ---> $(t PKG_MANAGER_WAIT)"
             fi
@@ -2159,55 +2249,6 @@ installTools() {
             ${installType} bind-tools >/dev/null 2>&1
         fi
     fi
-
-    # 检测nginx版本，并提供是否卸载的选项
-    if echo "${selectCustomInstallType}" | grep -qwE ",7,|,8,|,7,8,"; then
-        echoContent green " ---> 检测到无需依赖Nginx的服务，跳过安装"
-    else
-        if ! command -v nginx >/dev/null 2>&1; then
-            echoContent green " ---> 安装nginx"
-            installNginxTools
-        else
-            nginxVersion=$(nginx -v 2>&1)
-            nginxVersion=$(echo "${nginxVersion}" | awk -F "[n][g][i][n][x][/]" '{print $2}' | awk -F "[.]" '{print $2}')
-            if [[ ${nginxVersion} -lt 14 ]]; then
-                read -r -p "读取到当前的Nginx版本过旧（低于1.14），是否卸载后重新安装 ？[y/n]:" unInstallNginxStatus
-                if [[ "${unInstallNginxStatus}" == "y" ]]; then
-                    ${removeType} nginx >/dev/null 2>&1
-                    echoContent yellow " ---> nginx卸载完成"
-                    echoContent green " ---> 安装nginx"
-                    installNginxTools >/dev/null 2>&1
-                else
-                    exit 0
-                fi
-            fi
-        fi
-    fi
-
-    # 注意：不再自动安装 semanage（用户应自行处理 SELinux，详见 docs/selinux.md）
-    # 如果 SELinux 导致问题，updateSELinuxHTTPPortT() 函数会在 Nginx 启动失败时尝试修复
-    # 用户也可以手动关闭 SELinux，参考: docs/selinux.md
-
-    if [[ "${selectCustomInstallType}" == ",7," ]]; then
-        echoContent green " ---> 检测到无需依赖证书的服务，跳过安装"
-    else
-        if [[ ! -d "$HOME/.acme.sh" ]] || [[ -d "$HOME/.acme.sh" && -z $(find "$HOME/.acme.sh/acme.sh") ]]; then
-            echoContent green " ---> 安装acme.sh"
-            curl -s https://get.acme.sh | sh >${TLS_DIR}/acme.log 2>&1
-
-            if [[ ! -d "$HOME/.acme.sh" ]] || [[ -z $(find "$HOME/.acme.sh/acme.sh") ]]; then
-                echoContent red "  acme安装失败--->"
-                tail -n 100 ${TLS_DIR}/acme.log
-                echoContent yellow "错误排查:"
-                echoContent red "  1.获取Github文件失败，请等待Github恢复后尝试，恢复进度可查看 [https://www.githubstatus.com/]"
-                echoContent red "  2.acme.sh脚本出现bug，可查看[https://github.com/acmesh-official/acme.sh] issues"
-                echoContent red "  3.如纯IPv6机器，请设置NAT64,可执行下方命令，如果添加下方命令还是不可用，请尝试更换其他NAT64"
-                echoContent skyBlue "  sed -i \"1i\\\nameserver 2a00:1098:2b::1\\\nnameserver 2a00:1098:2c::1\\\nnameserver 2a01:4f8:c2c:123f::1\\\nnameserver 2a01:4f9:c010:3f02::1\" /etc/resolv.conf"
-                exit 1
-            fi
-        fi
-    fi
-
 }
 # 开机启动
 bootStartup() {
@@ -2929,6 +2970,8 @@ portsTakenFor() {
     for net in tcp udp; do
         [[ "${network}" == "both" || "${network}" == "${net}" ]] || continue
         configuredPorts "${dir}" "${net}" "${keep}" "${skip}"
+        # 订阅端口是 nginx 在听，安装流程里 nginx 停着，/proc 看不到它
+        [[ "${net}" == "tcp" ]] && subscribeConfPort
         # 自己的内核可能还在跑旧配置，它占的端口由上一行按配置判；活着的监听只算本脚本配置里没有的
         ours=$(configuredPorts "${XRAY_CONF_DIR}" "${net}"; configuredPorts "${SINGBOX_FRAGMENT_DIR}" "${net}")
         while IFS= read -r port; do
@@ -3152,6 +3195,22 @@ randomPathFunction() {
 }
 # randomNum / randomPort 由 lib/utils.sh 提供（实现完全一致）。
 
+# nginxStaticHasForeignContent → 0=伪装站目录里有不是本脚本、也不是 nginx 软件包放的东西（用户自己的站）。
+# nginx 包自带的欢迎页、错误页与图标不算，否则新装的机器每次都要问
+nginxStaticHasForeignContent() {
+    local f
+    [[ -d "${nginxStaticPath}" ]] || return 1
+    for f in "${nginxStaticPath%/}"/* "${nginxStaticPath%/}"/.[!.]*; do
+        [[ -e "${f}" ]] || continue
+        case "${f##*/}" in
+            50x.html | 404.html | nginx-logo.png | poweredby.png | system_noindex_logo.png | icons) continue ;;
+            index.html) grep -qi 'nginx' "${f}" 2>/dev/null && continue ;;
+        esac
+        return 0
+    done
+    return 1
+}
+
 # Nginx伪装博客
 nginxBlog() {
     if [[ -n "${1:-}" ]]; then
@@ -3218,6 +3277,13 @@ nginxBlog() {
             echoContent green " ---> 添加伪装站点成功 [${selectedTemplate}]"
         fi
     else
+        if nginxStaticHasForeignContent; then
+            read -r -p "$(t NGINX_BLOG_FOREIGN_CONFIRM "${nginxStaticPath}")" nginxBlogInstallStatus
+            if ! isYesInput "${nginxBlogInstallStatus}"; then
+                echoContent yellow " ---> $(t NGINX_BLOG_FOREIGN_KEPT "${nginxStaticPath}")"
+                return 0
+            fi
+        fi
         # 随机选择模板
         randomNum=$(randomNum 0 $((templateCount - 1)))
         local selectedTemplate="${templates[$randomNum]}"
@@ -3474,10 +3540,36 @@ renewalTLS() {
     fi
 }
 
+# labelCoreBinary BIN → SELinux 没禁用时把核心二进制登记成 bin_t 并 restorecon：留在 etc_t 下 systemd 拉起后跑在 init_t，
+# 连本机回环（Reality 的 dokodemo 那一跳）、拨目标站都被拒，bin_t 才跑成第三方服务的常规域 unconfined_service_t。
+# 登记按路径，换版本、全盘 relabel 都照样适用；没有 semanage 又装不上时退回 chcon。只告警不失败
+labelCoreBinary() {
+    local bin=$1
+    command -v getenforce >/dev/null 2>&1 || return 0
+    [[ "$(getenforce 2>/dev/null)" == "Disabled" || -z "$(getenforce 2>/dev/null)" || ! -f "${bin}" ]] && return 0
+    [[ "$(stat -c %C "${bin}" 2>/dev/null)" == *:bin_t:* ]] && return 0
+    if ! command -v semanage >/dev/null 2>&1; then
+        ${installType} policycoreutils-python-utils >/dev/null 2>&1
+    fi
+    if command -v semanage >/dev/null 2>&1; then
+        if { semanage fcontext -a -t bin_t "${bin}" 2>/dev/null || semanage fcontext -m -t bin_t "${bin}"; } && restorecon "${bin}"; then
+            return 0
+        fi
+    elif chcon -t bin_t "${bin}"; then
+        echoContent yellow " ---> $(t SELINUX_LABEL_CHCON_ONLY "${bin}")"
+        return 0
+    fi
+    echoContent yellow " ---> $(t SELINUX_LABEL_FAILED "${bin}")"
+}
+
 # 安装 sing-box
 installSingBox() {
     readInstallType
-    echoContent skyBlue "\n进度  $1/${totalProgress} : 安装sing-box"
+    if [[ -n "${1:-}" ]]; then
+        echoContent skyBlue "\n进度  $1/${totalProgress} : 安装sing-box"
+    else
+        echoContent skyBlue "\n安装sing-box"
+    fi
 
     if [[ ! -f "${SINGBOX_BIN}" ]]; then
 
@@ -3978,7 +4070,7 @@ updateXray() {
 checkGFWStatue() {
     readInstallType
     echoContent skyBlue "\n进度 $1/${totalProgress} : 验证服务启动状态"
-    if [[ "${coreKind}" == "1" ]] && [[ -n $(pgrep -f "xray/xray") ]]; then
+    if [[ "${coreKind}" == "1" ]] && xrayDaemonRunning; then
         echoContent green " ---> 服务启动成功"
     elif [[ "${coreKind}" == "2" ]] && [[ -n $(pgrep -f "sing-box/sing-box") ]]; then
         echoContent green " ---> 服务启动成功"
@@ -4089,6 +4181,7 @@ handleSingBox() {
     ensureAlpineProcps
     local startResult=0
     local mergeResult=0
+    [[ "$1" == "start" ]] && labelCoreBinary "${SINGBOX_BIN}"
 
     if [[ -f "/etc/systemd/system/sing-box.service" ]]; then
         if [[ "$1" == "start" ]]; then
@@ -4179,7 +4272,7 @@ handleSingBox() {
 removeLegacyAllowInsecure() {
     local legacySocks5Outbound="${XRAY_CONF_DIR}/socks5_outbound.json"
     if [[ -f "${legacySocks5Outbound}" ]] && grep -q '"allowInsecure"' "${legacySocks5Outbound}"; then
-        if jsonModifyFile "${legacySocks5Outbound}" 'del(.outbounds[]?.streamSettings.tlsSettings.allowInsecure)'; then
+        if jsonModifyFile "${legacySocks5Outbound}" 'del(.outbounds[]?.streamSettings.tlsSettings.allowInsecure)' false; then
             echoContent yellow " ---> $(t XRAY_ALLOWINSECURE_STRIPPED)"
         else
             echoContent yellow " ---> $(t XRAY_ALLOWINSECURE_STRIP_FAILED)"
@@ -4193,7 +4286,7 @@ ensureRealityMinClientVer() {
     for file in ${XRAY_CONF_DIR}/07_VLESS_vision_reality_inbounds.json ${XRAY_CONF_DIR}/12_VLESS_XHTTP_inbounds.json; do
         [[ -f "${file}" ]] || continue
         if jq -e '[.inbounds[]? | (.streamSettings.realitySettings | type) == "object" and (.streamSettings.realitySettings | has("minClientVer") | not)] | any' "${file}" >/dev/null 2>&1; then
-            if jsonModifyFile "${file}" ".inbounds |= map(if (.streamSettings.realitySettings | type) == \"object\" and (.streamSettings.realitySettings | has(\"minClientVer\") | not) then .streamSettings.realitySettings.minClientVer = \"${REALITY_MIN_CLIENT_VER}\" else . end)"; then
+            if jsonModifyFile "${file}" ".inbounds |= map(if (.streamSettings.realitySettings | type) == \"object\" and (.streamSettings.realitySettings | has(\"minClientVer\") | not) then .streamSettings.realitySettings.minClientVer = \"${REALITY_MIN_CLIENT_VER}\" else . end)" false; then
                 echoContent yellow " ---> $(t XRAY_REALITY_MIN_CLIENT_VER_SET "${REALITY_MIN_CLIENT_VER}")"
             fi
         fi
@@ -4207,7 +4300,7 @@ localBlockApiPort() {
     jq -r '.api.listen // "" | if test(":[0-9]+$") then sub("^.*:"; "") else "" end' "${file}"
 }
 
-# ensureXrayLocalBlock → Xray 启动前把「代理用户不许连本机与内网」放到 09_routing.json 最前（ruleTag local-block，幂等）：
+# ensureXrayLocalBlock → Xray 启动前把「代理用户不许连本机与内网」放到 09_routing.json 最前（幂等）：
 # 统计 API 端口与桥端口段按端口封（写成域名、DNS rebinding 都绕不过），回环 / 私网 / 链路本地 / 未指定按字面 IP 封。
 # 不封的话成员能经代理连到统计 API 清零自己的计数。09_routing.json 有好几个写入者，所以每次启动前补，不在写入处补
 ensureXrayLocalBlock() {
@@ -4231,13 +4324,14 @@ ensureXrayLocalBlock() {
     if [[ -f "${routing}" ]]; then
         current=$(cat "${routing}") || return 1
     fi
+    # ruleTag 各不相同、都以 local-block 开头（按前缀认、整组替换）：Xray 26.9.9 起启动时就查 ruleTag 重复，撞了直接起不来
     updated=$(jq --arg ports "${CHAIN_BRIDGE_PORT}-${CHAIN_BRIDGE_PORT_LAST}${apiPort:+,${apiPort}}" --argjson hops "${hops}" '
-        ((if ($hops | length) > 0 then [{type: "field", ruleTag: "local-block", inboundTag: $hops, outboundTag: "local_pass"}] else [] end)
-         + [{type: "field", ruleTag: "local-block", port: $ports, outboundTag: "local_block"},
-         {type: "field", ruleTag: "local-block", outboundTag: "local_block",
+        ((if ($hops | length) > 0 then [{type: "field", ruleTag: "local-block-pass", inboundTag: $hops, outboundTag: "local_pass"}] else [] end)
+         + [{type: "field", ruleTag: "local-block-port", port: $ports, outboundTag: "local_block"},
+         {type: "field", ruleTag: "local-block-ip", outboundTag: "local_block",
           ip: ["0.0.0.0/8", "10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4",
                "255.255.255.255/32", "::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8"]}]) as $block
-        | .routing.rules = ($block + [(.routing.rules // [])[] | select(.ruleTag != "local-block")])' <<<"${current}") || return 1
+        | .routing.rules = ($block + [(.routing.rules // [])[] | select((.ruleTag // "") | startswith("local-block") | not)])' <<<"${current}") || return 1
     [[ "${updated}" == "$(jq . <<<"${current}")" ]] && return 0
     jsonWriteFile "${routing}" "${updated}" false
 }
@@ -4256,11 +4350,31 @@ localBlockInject() {
     jsonWriteFile "${merged}" "${out}" false
 }
 
+# chainExitSourceInject MERGED → 出口设了只允许入口 IP 时，别的来源连进 chain_inbound 一律 reject，TCP / UDP 都管，不靠防火墙。
+# 中继也有 chain_inbound：中继状态在就不注入。出口状态读不懂让合并失败——跳过等于对所有人放开
+chainExitSourceInject() {
+    local merged=$1 allowed out
+    [[ -f "${CHAIN_EXIT_INFO}" && ! -f "${CHAIN_RELAY_INFO}" ]] || return 0
+    allowed=$(jq -r '.allowed_ip // "" | strings' "${CHAIN_EXIT_INFO}") || return 1
+    [[ -n "${allowed}" ]] || return 0
+    jq -e 'any(.inbounds[]?; .tag == "chain_inbound")' "${merged}" >/dev/null || return 0
+    out=$(jq --arg ip "${allowed}" '.route.rules = [{type: "logical", mode: "and",
+        rules: [{inbound: ["chain_inbound"]}, {source_ip_cidr: [$ip], invert: true}], action: "reject"}] + (.route.rules // [])' "${merged}") || return 1
+    jsonWriteFile "${merged}" "${out}" false
+}
+
+# xrayDaemonRunning → 0=Xray 服务进程在跑。只认服务那条 `run -confdir` 命令行：拼车统计的 `xray api statsquery`、
+# 配置检查的 `xray run -test` 也含 xray/xray，算进来会把它们当成服务——启动被跳过、停止报失败
+xrayDaemonRunning() {
+    [[ -n $(pgrep -f "xray/xray run -confdir") ]]
+}
+
 # 操作xray
 handleXray() {
     local startResult=0
 
     if [[ "$1" == "start" ]]; then
+        labelCoreBinary "${XRAY_BIN}"
         removeLegacyAllowInsecure
         ensureRealityMinClientVer
         ensureCarpoolXray
@@ -4273,15 +4387,15 @@ handleXray() {
     fi
 
     if [[ -n $(find /bin /usr/bin -name "systemctl") ]] && [[ -n $(find /etc/systemd/system/ -name "xray.service") ]]; then
-        if [[ -z $(pgrep -f "xray/xray") ]] && [[ "$1" == "start" ]]; then
+        if ! xrayDaemonRunning && [[ "$1" == "start" ]]; then
             systemctl start xray.service || startResult=$?
-        elif [[ -n $(pgrep -f "xray/xray") ]] && [[ "$1" == "stop" ]]; then
+        elif xrayDaemonRunning && [[ "$1" == "stop" ]]; then
             systemctl stop xray.service
         fi
     elif [[ -f "/etc/init.d/xray" ]]; then
-        if [[ -z $(pgrep -f "xray/xray") ]] && [[ "$1" == "start" ]]; then
+        if ! xrayDaemonRunning && [[ "$1" == "start" ]]; then
             rc-service xray start || startResult=$?
-        elif [[ -n $(pgrep -f "xray/xray") ]] && [[ "$1" == "stop" ]]; then
+        elif xrayDaemonRunning && [[ "$1" == "stop" ]]; then
             rc-service xray stop
         fi
     fi
@@ -4289,7 +4403,7 @@ handleXray() {
     sleep 1.5
 
     if [[ "$1" == "start" ]]; then
-        if [[ -n $(pgrep -f "xray/xray") ]]; then
+        if xrayDaemonRunning; then
             echoContent green " ---> Xray启动成功"
         else
             echoContent red "Xray启动失败 (systemctl 返回码: ${startResult})"
@@ -4304,7 +4418,7 @@ handleXray() {
             exit 1
         fi
     elif [[ "$1" == "stop" ]]; then
-        if [[ -z $(pgrep -f "xray/xray") ]]; then
+        if ! xrayDaemonRunning; then
             echoContent green " ---> Xray关闭成功"
         else
             echoContent red "Xray关闭失败"
@@ -5037,17 +5151,10 @@ singBoxInstalledVersion() {
     ${SINGBOX_BIN} version 2>/dev/null | awk '/^sing-box version/ {print $3; exit}'
 }
 
-# 顶层 http_clients 片段：remote rule_set 的下载通道。detour 取片段里第一个 direct 出站
-# （主安装是 01_direct_outbound，纯链式安装是 direct），一个都没有就走默认出站
+# 顶层 http_clients 片段：remote rule_set 的下载通道，不带 detour 即直连拨号。别加 detour 指向 direct 出站：
+# 指向无拨号参数的 direct 在 1.14 上启动即 FATAL（detour to an empty direct outbound makes no sense），sing-box check 查不出
 ensureSingBoxHttpClient() {
-    local fragmentDir="$1"
-    local detour client
-    detour=$(cat "${fragmentDir}"*.json 2>/dev/null | jq -r '.outbounds[]? | select(.type == "direct") | .tag' 2>/dev/null | head -1)
-    client='{"tag":"rule_set_http"}'
-    if [[ -n "${detour}" ]]; then
-        client=$(jq -cn --arg d "${detour}" '{tag:"rule_set_http",detour:$d}')
-    fi
-    jsonWriteFile "${fragmentDir}02_http_client.json" "{\"http_clients\":[${client}],\"route\":{\"default_http_client\":\"rule_set_http\"}}"
+    jsonWriteFile "${1}02_http_client.json" '{"http_clients":[{"tag":"rule_set_http"}],"route":{"default_http_client":"rule_set_http"}}'
 }
 
 # sing-box 1.14 起 remote rule_set 用 http_client 引用顶层 http_clients（download_detour 与隐式
@@ -5453,8 +5560,9 @@ singBoxMergeConfig() {
 
     normalizeSingBoxRuleSetHttpClient "${fragmentDir}"
 
-    # BusyBox（Alpine）的 mktemp 要求模板以 XXXXXX 结尾，带扩展名即失败
-    if ! tmpFile=$(mktemp /tmp/Proxy-agent-singbox-merge-XXXXXX); then
+    # 建在 config.json 同目录：mv 才是同一文件系统里的原子替换，SELinux 下也不会带着 /tmp 的 user_tmp_t 标签过去。
+    # 不能放进片段目录（merge 会把它当片段读）；BusyBox 的 mktemp 要求模板以 XXXXXX 结尾
+    if ! tmpFile=$(mktemp "${SINGBOX_CONF_DIR}/.config.json.XXXXXX"); then
         echoContent red " ---> sing-box 配置合并失败：无法创建临时文件"
         return 1
     fi
@@ -5479,6 +5587,11 @@ singBoxMergeConfig() {
 
     if ! chainAccountInject "${tmpFile}"; then
         echoContent red " ---> $(t CHAIN_ACCOUNT_INJECT_FAILED)"
+        rm -f "${tmpFile}"
+        return 1
+    fi
+    if ! chainExitSourceInject "${tmpFile}"; then
+        echoContent red " ---> $(t CHAIN_EXIT_SOURCE_INJECT_FAILED "${CHAIN_EXIT_INFO}")"
         rm -f "${tmpFile}"
         return 1
     fi
@@ -5745,6 +5858,7 @@ EOF
     fi
     # VLESS_Reality_XHTTP_TLS
     if echo "${selectCustomInstallType}" | grep -q ",12," || [[ "$1" == "all" ]]; then
+        echoContent skyBlue "\n================== $(t CONFIG_PROTOCOL_TITLE "VLESS+Reality+XHTTP") ==================\n"
         initXrayXHTTPort "${portKeep}" "${portSkip}" ${portExtra:+"${portExtra}"}
         initRealityClientServersName
         initRealityKey
@@ -5767,7 +5881,7 @@ EOF
 		"security": "reality",
 		"realitySettings": {
             "show": false,
-            "target": "${realityServerName}:${realityDomainPort}",
+            "target": "${realityDestHost:-${realityServerName}}:${realityDomainPort}",
             "xver": 0,
             "serverNames": [
                 "${realityServerName}"
@@ -5917,7 +6031,7 @@ EOF
         "security": "reality",
         "realitySettings": {
           "show": false,
-          "target": "${realityServerName}:${realityDomainPort}",
+          "target": "${realityDestHost:-${realityServerName}}:${realityDomainPort}",
           "xver": 0,
           "serverNames": [
             "${realityServerName}"
@@ -6221,7 +6335,7 @@ EOF
         "reality": {
             "enabled": true,
             "handshake":{
-                "server": "${realityServerName}",
+                "server": "${realityDestHost:-${realityServerName}}",
                 "server_port":${realityDomainPort}
             },
             "private_key": "${realityPrivateKey}",
@@ -6852,7 +6966,7 @@ EOF
         echoContent yellow " ---> 二维码 vmess(VMess+HTTPUpgrade+TLS)"
 
         cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/default/${user}"
-   vmess://${qrCodeBase64Default}
+vmess://${qrCodeBase64Default}
 EOF
         cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/clashMeta/${user}"
   - name: "${email}"
@@ -7354,6 +7468,9 @@ updateNginxBlog() {
         fi
         if [[ "${redirectStatus}" == "2" ]]; then
             removeNginx302
+            # 只改文件不重载的话线上照旧 302，直到下次重启 nginx
+            handleNginx stop
+            handleNginx start
             echoContent green " ---> 移除302重定向成功"
             exit 0
         fi
@@ -7607,10 +7724,13 @@ unInstall() {
 
     removeOwnCronEntries
     rm -rf ${PROXY_AGENT_DIR}
+    # 旧版本建过、从没用过的空目录
+    rm -rf /tmp/Proxy-agent-tls
     rm -rf "${nginxConfigPath}alone.conf"
     rm -rf "${nginxConfigPath}checkPortOpen.conf" >/dev/null 2>&1
     rm -rf "${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf" >/dev/null 2>&1
     rm -f "${nginxConfigPath}http_redirect.conf"
+    rm -f "${nginxConfigPath}reality_dest.conf"
 
     unInstallSubscribe
 
@@ -7665,36 +7785,51 @@ customUUID() {
     fi
 }
 
-# 自定义email
+# 自定义email：不合法、重复或订阅键撞车就重问；重问时读不到输入（不在终端）才退出，不拿随机名顶替明确给过的名字
 customUserEmail() {
-    read -r -p "请输入合法的email，[回车]随机email:" currentCustomEmail
-    echo
-    if [[ -z "${currentCustomEmail}" ]]; then
-        currentCustomEmail="${currentCustomUUID}"
-        echoContent yellow "email: ${currentCustomEmail}\n"
-    else
+    local checkEmail emailCheckFile subKeyClash usersFilter retried=
+    while true; do
+        if ! read -r -p "请输入合法的email，[回车]随机email:" currentCustomEmail && [[ -n "${retried}" ]]; then
+            exit 1
+        fi
+        echo
+        if [[ -z "${currentCustomEmail}" ]]; then
+            currentCustomEmail="${currentCustomUUID}"
+            echoContent yellow "email: ${currentCustomEmail}\n"
+            return 0
+        fi
+        retried=1
         # 格式校验：只允许字母数字与 . _ @ + -，长度 1-64
         # 此值下游会嵌入 JSON 字符串（user.email/user.name）并经 jq 过滤器处理；
         # 禁用 " \ 空白与 shell/jq 元字符可阻断注入与 JSON 破坏
         if ! [[ "${currentCustomEmail}" =~ ^[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}$ ]]; then
             echoContent red " ---> email 格式非法，仅允许字母数字及 . _ @ + -，长度 1-64"
-            exit 1
+            continue
         fi
         # 存量条目形如 "<base>-<协议后缀>"，按 base 精确比对（兼容无后缀的历史条目）。
         # Xray 字段是 email 不是 name；同 inbound 内 email 重复会让 Xray 拒绝启动
-        local checkEmail=
-        local emailCheckFile="${frontingType:-${frontingTypeReality}}"
+        checkEmail=
+        emailCheckFile="${frontingType:-${frontingTypeReality}}"
         if [[ "${coreKind}" == "1" ]]; then
             checkEmail=$(jq -r --arg currentEmail "$currentCustomEmail" '(.inbounds[0].settings.clients // .inbounds[1].settings.clients)[]? | (.email // .name) as $e | select($e == $currentEmail or ($e | sub("-[^-]*$"; "")) == $currentEmail) | $e' ${configPath}${emailCheckFile}.json 2>/dev/null)
         elif [[ "${coreKind}" == "2" ]]; then
             checkEmail=$(jq -r --arg currentEmail "$currentCustomEmail" '.inbounds[0].users[]? | (.name // .username) as $e | select($e == $currentEmail or ($e | sub("-[^-]*$"; "")) == $currentEmail) | $e' ${configPath}${emailCheckFile}.json 2>/dev/null)
         fi
-
         if [[ -n "${checkEmail}" ]]; then
             echoContent red " ---> email不可重复"
-            exit 1
+            continue
         fi
-    fi
+        # 订阅文件按名字的第一个 - 段分（与拼车同一规则）：第一段相同的两个账号共用一份订阅、互相看得到对方的凭据
+        usersFilter='(.inbounds[0].settings.clients // .inbounds[1].settings.clients)[]? | (.email // .name)'
+        [[ "${coreKind}" == "2" ]] && usersFilter='.inbounds[0].users[]? | (.name // .username)'
+        subKeyClash=$(jq -r --arg k "${currentCustomEmail%%-*}" "[${usersFilter} | sub(\"-[^-]*\$\"; \"\") | select(split(\"-\")[0] == \$k)] | first // empty" \
+            "${configPath}${emailCheckFile}.json" 2>/dev/null)
+        if [[ -n "${subKeyClash}" ]]; then
+            echoContent red " ---> $(t ACCOUNT_SUB_KEY_TAKEN "${currentCustomEmail}" "${subKeyClash}")"
+            continue
+        fi
+        return 0
+    done
 }
 
 # 把一次账户变更（add UUID EMAIL / delName KEY / set FILE）按协议注册表应用到全部已装协议；KEY 是去掉协议后缀的
@@ -8051,7 +8186,7 @@ carpoolReconcile() {
 # carpoolCollect STATE → 向 StatsService 取一次增量（-reset）累加进 state 并输出；Xray 没在跑原样输出；查询失败返回 1
 carpoolCollect() {
     local apiPort raw sums
-    if [[ -z $(pgrep -f "xray/xray") ]]; then
+    if ! xrayDaemonRunning; then
         printf '%s\n' "$1"
         return 0
     fi
@@ -8082,7 +8217,7 @@ carpoolCollectBeforeStop() {
     local state newState
     state=$(carpoolReadState) || return 0
     [[ "$(jq -r '.enabled' <<<"${state}")" == "true" ]] || return 0
-    [[ -n $(pgrep -f "xray/xray") ]] || return 0
+    xrayDaemonRunning || return 0
     carpoolLock || return 0
     state=$(carpoolReadState)
     if newState=$(carpoolCollect "${state}"); then
@@ -8267,7 +8402,7 @@ carpoolTick() {
     if map=$(carpoolCurrentClientsMap); then
         state=$(carpoolPruneRemoved "${state}" "${map}")
     fi
-    if errors=$(carpoolValidateMembers "${CARPOOL_MEMBERS_FILE}" "${installed}" "$(carpoolForeignAccounts "${state}" "${map:-"{}"}")" "$(carpoolRetiredNames "${state}")"); then
+    if errors=$(carpoolValidateMembers "${CARPOOL_MEMBERS_FILE}" "${installed}" "$(carpoolForeignAccounts "${state}" "${map:-"{}"}")" "$(carpoolRetiredNames "${state}")" "$(carpoolMemberUuids "${state}")"); then
         normalized=$(carpoolNormalizeMembers "${CARPOOL_MEMBERS_FILE}")
         state=$(carpoolSyncLimits "${state}" "${normalized}")
     else
@@ -8413,8 +8548,20 @@ carpoolConfirmReenable() {
     done
 }
 
+# carpoolApiReady PORT → 0=统计 API 片段写着这个端口、且本机已在监听。start 钩子失败时 Xray 照样起来，
+# 不核对就会报「已开启」而一笔流量都采不到
+carpoolApiReady() {
+    local i
+    [[ "$(jq -r '.api.listen // empty' "${XRAY_CONF_DIR}/12_stats_api.json" 2>/dev/null)" == "127.0.0.1:$1" ]] || return 1
+    for i in 1 2 3; do
+        portListed "$1" "$(listeningPorts tcp)" && return 0
+        sleep 1
+    done
+    return 1
+}
+
 carpoolEnable() {
-    local installed map accounts seed fileMembers errors normalized state oldState= retired='[]' today apiPort rc
+    local installed map accounts seed fileMembers errors normalized state oldState= retired='[]' memberUuids='{}' today apiPort rc
     if carpoolEnabled; then
         echoContent yellow " ---> $(t CARPOOL_ALREADY_ENABLED)"
         return 0
@@ -8435,8 +8582,9 @@ carpoolEnable() {
     fileMembers=$(jq -c '{members: (.members // {})}' "${CARPOOL_MEMBERS_FILE}" 2>/dev/null) || fileMembers='{"members": {}}'
     if oldState=$(carpoolReadState); then
         retired=$(carpoolRetiredNames "${oldState}")
+        memberUuids=$(carpoolMemberUuids "${oldState}")
     fi
-    if ! errors=$(carpoolValidateMembers "${CARPOOL_MEMBERS_FILE}" "${installed}" "$(carpoolForeignAccounts "${fileMembers}" "${map}")" "${retired}"); then
+    if ! errors=$(carpoolValidateMembers "${CARPOOL_MEMBERS_FILE}" "${installed}" "$(carpoolForeignAccounts "${fileMembers}" "${map}")" "${retired}" "${memberUuids}"); then
         echoContent red " ---> $(t CARPOOL_MEMBERS_INVALID "${CARPOOL_MEMBERS_FILE}")"
         echo "${errors}"
         return 1
@@ -8476,6 +8624,17 @@ carpoolEnable() {
     fi
     carpoolUnlock
     reloadCore
+    apiPort=$(jq -r '.apiPort' <<<"${state}")
+    if ! carpoolApiReady "${apiPort}"; then
+        if carpoolLock; then
+            state=$(carpoolReadState) && carpoolWriteState "$(jq -c '.enabled = false' <<<"${state}")"
+            carpoolUnlock
+        fi
+        carpoolRemoveCron
+        reloadCore
+        echoContent red " ---> $(t CARPOOL_API_NOT_READY "${XRAY_CONF_DIR}/12_stats_api.json" "${apiPort}")"
+        return 1
+    fi
     carpoolTick
     echoContent green " ---> $(t CARPOOL_ENABLED)"
     echoContent yellow " ---> $(t CARPOOL_ENABLED_HINT "${CARPOOL_MEMBERS_FILE}")"
@@ -8555,7 +8714,7 @@ carpoolApply() {
     map=$(carpoolCurrentClientsMap) || return 1
     fileMembers=$(jq -c '{members: (.members // {})}' "${CARPOOL_MEMBERS_FILE}" 2>/dev/null) || fileMembers='{"members": {}}'
     state=$(carpoolReadState) || return 1
-    if ! errors=$(carpoolValidateMembers "${CARPOOL_MEMBERS_FILE}" "${installed}" "$(carpoolForeignAccounts "${fileMembers}" "${map}")" "$(carpoolRetiredNames "${state}")"); then
+    if ! errors=$(carpoolValidateMembers "${CARPOOL_MEMBERS_FILE}" "${installed}" "$(carpoolForeignAccounts "${fileMembers}" "${map}")" "$(carpoolRetiredNames "${state}")" "$(carpoolMemberUuids "${state}")"); then
         echoContent red " ---> $(t CARPOOL_MEMBERS_INVALID "${CARPOOL_MEMBERS_FILE}")"
         echo "${errors}"
         return 1
@@ -8662,7 +8821,8 @@ carpoolShowUsage() {
     fi
     echoContent skyBlue "\n$(jq -r '.notify.label' <<<"${state}") · $(if [[ "$(jq -r '.enabled' <<<"${state}")" == "true" ]]; then t CARPOOL_USAGE_STATE_ON; else t CARPOOL_USAGE_STATE_OFF; fi)"
     echoContent yellow " ---> $(t CARPOOL_PAGE_PERIOD) $(jq -r '.period' <<<"${state}") · $(t CARPOOL_PAGE_NEXT_RESET) $(carpoolNextPeriodStart "$(date +%F)" "$(jq -r '.resetDay' <<<"${state}")") · $(t CARPOOL_USAGE_LAST_TICK) $(jq -r '.lastTick | if . == "" then "-" else . end' <<<"${state}")"
-    echoContent yellow " ---> $(carpoolMachineSummary "${state}") · $(t CARPOOL_USAGE_IFACES "$(jq -r '(.machine.ifaces // []) | if length == 0 then "-" else join(", ") end' <<<"${state}")")\n"
+    echoContent yellow " ---> $(carpoolMachineSummary "${state}") · $(t CARPOOL_USAGE_IFACES "$(jq -r '(.machine.ifaces // []) | if length == 0 then "-" else join(", ") end' <<<"${state}")")"
+    echoContent yellow " ---> $(t CARPOOL_UNIT_NOTE)\n"
     printf '%-24s %-12s %-12s %-12s %s\n' "$(t CARPOOL_PAGE_NAME)" "$(t CARPOOL_PAGE_USED)" "$(t CARPOOL_PAGE_QUOTA)" "$(t CARPOOL_PAGE_EXPIRE)" "$(t CARPOOL_PAGE_STATUS)"
     while IFS=$'\t' read -r n u q e st; do
         [[ -n "${n}" ]] && printf '%-24s %-12s %-12s %-12s %s\n' "${n}" "${u}" "${q}" "${e}" "${st}"
@@ -8732,7 +8892,7 @@ carpoolPendingText() {
     installed=$(scanInstalledProtocols "${XRAY_CONF_DIR}")
     map=$(carpoolCurrentClientsMap) || return 0
     fileMembers=$(jq -c '{members: (.members // {})}' "${CARPOOL_MEMBERS_FILE}" 2>/dev/null) || fileMembers='{"members": {}}'
-    if ! carpoolValidateMembers "${CARPOOL_MEMBERS_FILE}" "${installed}" "$(carpoolForeignAccounts "${fileMembers}" "${map}")" "$(carpoolRetiredNames "$1")" >/dev/null; then
+    if ! carpoolValidateMembers "${CARPOOL_MEMBERS_FILE}" "${installed}" "$(carpoolForeignAccounts "${fileMembers}" "${map}")" "$(carpoolRetiredNames "$1")" "$(carpoolMemberUuids "$1")" >/dev/null; then
         t CARPOOL_PAGE_FILE_INVALID
         echo
         return 0
@@ -9280,7 +9440,7 @@ rollbackScript() {
                 # 在覆盖前先把"当前配置"快照到本次回退创建的备份目录里，让回退本身可逆
                 local preRestoreSnapshot="${backupPath}/pre_rollback_config"
                 if backupConfigSnapshot "${preRestoreSnapshot}" 2>/dev/null; then
-                    echoContent green " ---> $(t SCRIPT_ROLLBACK_CONFIG_SAVED): ${preRestoreSnapshot}"
+                    echoContent green " ---> $(t SCRIPT_ROLLBACK_CONFIG_SAVED "${preRestoreSnapshot}")"
                 fi
 
                 # 释放服务对配置文件的句柄
@@ -9295,7 +9455,11 @@ rollbackScript() {
                     fi
                     # 回滚重启前必须 merge 一次，且不能吞错：旧片段对新二进制可能 schema 不兼容，
                     # 吞掉会让 reloadCore 启动到无配置状态。失败时从 pre_rollback_config 恢复。
-                    if [[ -f "${installDir}/sing-box/sing-box" ]]; then
+                    # 快照里 sing-box 片段是空的而 Xray 有入站：sing-box 那半没东西可合并，零片段合并必败、会把整个回退撤销
+                    if [[ -f "${installDir}/sing-box/sing-box" ]] && ! compgen -G "${SINGBOX_FRAGMENT_DIR}/*.json" >/dev/null \
+                        && compgen -G "${XRAY_CONF_DIR}/*_inbounds.json" >/dev/null; then
+                        echoContent yellow " ---> $(t SCRIPT_ROLLBACK_SINGBOX_EMPTY)"
+                    elif [[ -f "${installDir}/sing-box/sing-box" ]]; then
                         if ! singBoxMergeConfig; then
                             echoContent red " ---> $(t SCRIPT_ROLLBACK_CONFIG_FAILED)"
                             if [[ -d "${preRestoreSnapshot}" ]]; then
@@ -9496,7 +9660,6 @@ updateV2RayAgent() {
         if type compareVersions &>/dev/null; then
             if ! compareVersions "${SCRIPT_VERSION}" "${latestVersion}"; then
                 echoContent green " ---> 当前已是最新版本 (${SCRIPT_VERSION})"
-                echoContent yellow " ---> 如需强制更新，请使用手动命令"
                 read -r -p "是否继续更新? [y/N]: " forceUpdate
                 if [[ "${forceUpdate}" != "y" && "${forceUpdate}" != "Y" ]]; then
                     menu
@@ -10004,9 +10167,16 @@ checkLog() {
 
 # 脚本快捷方式
 aliasInstall() {
-
-    if [[ -f "$HOME/install.sh" ]] && [[ -d "${PROXY_AGENT_DIR}" ]] && grep -Eq "作者[:：]Lynthar|Proxy-agent" "$HOME/install.sh"; then
-        mv "$HOME/install.sh" ${PROXY_AGENT_DIR}/install.sh
+    # 从哪儿跑的就从哪儿装（curl 下到 $HOME、git clone 的目录都算）：漏装的话没有 pasly、安装根里没有脚本，
+    # cron 的 RenewTLS 却照样指向安装根，证书到期前静默续不上。从安装根自己跑（pasly）时什么都不做
+    local src="${_SCRIPT_DIR}/install.sh"
+    [[ -f "${src}" && -d "${PROXY_AGENT_DIR}" ]] || return 0
+    [[ "$(cd "${_SCRIPT_DIR}" && pwd -P)" == "$(cd "${PROXY_AGENT_DIR}" && pwd -P)" ]] && return 0
+    if grep -Eq "作者[:：]Lynthar|Proxy-agent" "${src}"; then
+        if ! cp -f "${src}" "${PROXY_AGENT_DIR}/install.sh" || ! chmod 700 "${PROXY_AGENT_DIR}/install.sh"; then
+            echoContent red " ---> $(t INSTALL_STAGE_FAIL "install.sh")"
+            exit 1
+        fi
 
         # 复制 VERSION 文件（如果存在于脚本目录）
         if [[ -f "${_SCRIPT_DIR}/VERSION" ]]; then
@@ -10041,8 +10211,6 @@ aliasInstall() {
                 chmod 700 /usr/bin/pasly
                 paslyType=true
             fi
-
-            rm -rf "$HOME/install.sh"
         elif [[ -d "/usr/sbin" ]]; then
             rm -f "/usr/sbin/vasma"
             if [[ ! -f "/usr/sbin/pasly" ]]; then
@@ -10050,7 +10218,10 @@ aliasInstall() {
                 chmod 700 /usr/sbin/pasly
                 paslyType=true
             fi
-            rm -rf "$HOME/install.sh"
+        fi
+        # curl 一行命令下到 $HOME 的那份装完就删（原先的行为）；clone 下来的仓库里的文件不动
+        if [[ "$(cd "${_SCRIPT_DIR}" && pwd -P)" == "$(cd "${HOME}" && pwd -P)" ]]; then
+            rm -f "${src}"
         fi
         if [[ "${paslyType}" == "true" ]]; then
             echoContent green "快捷方式创建成功，可执行[pasly]重新打开脚本"
@@ -10090,10 +10261,7 @@ ipv6Routing() {
         exit 0
     elif [[ "${ipv6Status}" == "2" ]]; then
         echoContent red "=============================================================="
-        echoContent yellow "# 注意事项\n"
-        echoContent yellow "# 注意事项"
-        echoContent yellow "# 使用提示：请参考 docs 目录中的分流与策略说明 \n"
-
+        echoContent yellow "录入示例:netflix,openai\n"
         read -r -p "请按照上面示例录入域名:" domainList
         if [[ "${coreKind}" == "1" ]]; then
             addXrayRouting IPv6_out outboundTag "${domainList}"
@@ -10520,8 +10688,7 @@ warpRoutingReg() {
     elif [[ "${warpStatus}" == "2" ]]; then
         echoContent yellow "# 注意事项"
         echoContent yellow "# 支持sing-box、Xray-core"
-        echoContent yellow "# 使用提示：请参考 docs 目录中的分流与策略说明 \n"
-
+        echoContent yellow "录入示例:netflix,openai\n"
         read -r -p "请按照上面示例录入域名:" domainList
         addWireGuardRoute "${type}" outboundTag "${domainList}"
         echoContent green " ---> 添加完毕"
@@ -10705,6 +10872,7 @@ chainProxyWizard() {
 ensureSingBoxInstalled() {
     if [[ ! -f "${SINGBOX_BIN}" ]]; then
         echoContent yellow "\n检测到 sing-box 未安装，正在安装..."
+        installBaseTools
         installSingBox
         if [[ ! -f "${SINGBOX_BIN}" ]]; then
             echoContent red " ---> sing-box 安装失败"
@@ -11073,11 +11241,16 @@ EOF
 EOF
 )
     writeChainInfoAtomic "${CHAIN_EXIT_INFO}" "${__chainExitInfo}" || return 1
+    # 中继状态还在的话 chainExitSourceInject 不注入来源限制（分不清哪份是覆盖前留下的）
+    rm -f "${CHAIN_RELAY_INFO}"
 
     # 开放防火墙端口
     if [[ -n "${allowedIP}" ]]; then
         allowPort "${chainPort}" "tcp" "${allowedIP}/32"
-        echoContent green " ---> 已开放端口 ${chainPort} (仅允许 ${allowedIP})"
+        echoContent green " ---> $(t CHAIN_EXIT_SOURCE_LIMITED "${chainPort}" "${allowedIP}")"
+        if ! firewallDefaultDenies; then
+            echoContent yellow " ---> $(t CHAIN_EXIT_PORT_VISIBLE "${chainPort}")"
+        fi
     else
         allowPort "${chainPort}" "tcp"
         echoContent green " ---> 已开放端口 ${chainPort}"
@@ -11488,6 +11661,43 @@ setupChainEntryManual() {
     setupChainEntry "${chainExitIP}" "${chainExitPort}" "${chainExitKey}" "${chainExitMethod}"
 }
 
+# chainHopOutbounds HOPS [TAG HOP_PREFIX] → 多跳出站片段：第 i 跳经第 i-1 跳拨出，最后一跳叫 TAG（默认 chain_outbound），
+# 前面的叫 HOP_PREFIX+i（默认 chain_hop_）；HOPS 为空时失败。不能用 direct 出站加 detour 当别名：
+# sing-box 1.12 起拒绝（`detour` is not supported in direct context），整份配置合并失败
+chainHopOutbounds() {
+    jq -n --argjson hops "$1" --arg last "${2:-chain_outbound}" --arg prefix "${3:-chain_hop_}" '
+        ($hops | length) as $n
+        | if $n == 0 then error("no hops") else
+            {outbounds: [$hops | to_entries[] | .key as $i | .value as $h
+                | {
+                    type: "shadowsocks",
+                    tag: (if $i == $n - 1 then $last else $prefix + (($i + 1) | tostring) end),
+                    server: $h.ip,
+                    server_port: $h.port,
+                    method: $h.method,
+                    password: $h.key,
+                    multiplex: {enabled: true, protocol: "h2mux", max_connections: 4, min_streams: 4}
+                } + (if $i > 0 then {detour: ($prefix + ($i | tostring))} else {} end)]}
+        end'
+}
+
+# chainRelayRouteJson DOWNSTREAM_HOPS → 中继的 chain_route.json。入口把后面各跳嵌套着拨，发往下一跳本身的连接是入口包好的内层：
+# 原样直连给下一跳；再套进下游链会多一层封装，下一跳还得回连自己的公网口（只放行中继或云上不支持回环时链路就断）
+chainRelayRouteJson() {
+    jq -n --argjson hops "$1" '
+        $hops[0] as $next
+        | (if ($next.ip | test("^[0-9.]+$") or test(":")) then {ip_cidr: [$next.ip]} else {domain: [$next.ip]} end) as $dest
+        | {route: {
+            rules: [
+                ({inbound: ["chain_inbound"]} + $dest + {port: [$next.port], outbound: "direct"}),
+                {inbound: "chain_inbound", action: "sniff", timeout: "1s"},
+                {inbound: ["chain_inbound"], outbound: "chain_outbound"}
+            ],
+            final: "direct",
+            default_domain_resolver: "google"
+        }}'
+}
+
 # 配置中继节点 (Relay)
 # 中继节点同时作为上游的"出口"（接收流量）和下游的"入口"（转发流量）
 setupChainRelay() {
@@ -11591,57 +11801,18 @@ setupChainRelay() {
 }
 EOF
 
-    # 出站配置（detour chain）：chainHops 直接 --argjson 传给 jq，由 jq 转义各字段——
-    # heredoc 拼接会被配置码里的 " 和 \ 破坏 JSON。
     local chainOutboundJson
-    if ! chainOutboundJson=$(jq -n --argjson hops "${chainHops}" '
-        {
-            outbounds: (
-                ($hops | to_entries | map(
-                    .key as $i |
-                    .value as $h |
-                    ({
-                        type: "shadowsocks",
-                        tag: ("chain_hop_" + (($i + 1) | tostring)),
-                        server: $h.ip,
-                        server_port: $h.port,
-                        method: $h.method,
-                        password: $h.key,
-                        multiplex: {
-                            enabled: true,
-                            protocol: "h2mux",
-                            max_connections: 4,
-                            min_streams: 4
-                        }
-                    } + (if $i > 0 then {detour: ("chain_hop_" + ($i | tostring))} else {} end))
-                ))
-                + [{
-                    type: "direct",
-                    tag: "chain_outbound",
-                    detour: ("chain_hop_" + (($hops | length) | tostring))
-                }]
-            )
-        }') || [[ -z "${chainOutboundJson}" ]]; then
+    if ! chainOutboundJson=$(chainHopOutbounds "${chainHops}") || [[ -z "${chainOutboundJson}" ]]; then
         echoContent red " ---> 链式出站配置生成失败"
         return 1
     fi
     printf '%s\n' "${chainOutboundJson}" > ${SINGBOX_FRAGMENT_DIR}/chain_outbound.json
 
-    # 创建路由配置
-    # sing-box 1.11+ 路由级 sniff（中继节点不重解析，沿用上游已嗅探到的域名）
-    # default_domain_resolver 见 chainExit 注释，1.13 起必填
-    cat <<EOF >${SINGBOX_FRAGMENT_DIR}/chain_route.json
-{
-    "route": {
-        "rules": [
-            { "inbound": "chain_inbound", "action": "sniff", "timeout": "1s" },
-            { "inbound": ["chain_inbound"], "outbound": "chain_outbound" }
-        ],
-        "final": "direct",
-        "default_domain_resolver": "google"
-    }
-}
-EOF
+    local relayRouteJson
+    if ! relayRouteJson=$(chainRelayRouteJson "${chainHops}") || ! jsonWriteFile "${SINGBOX_FRAGMENT_DIR}/chain_route.json" "${relayRouteJson}" false; then
+        echoContent red " ---> 链式路由配置生成失败"
+        return 1
+    fi
 
     # 构建新的 hops 数组 (本机 + 下游所有节点)
     local newHops
@@ -11666,6 +11837,7 @@ EOF
 EOF
 )
     writeChainInfoAtomic "${CHAIN_RELAY_INFO}" "${__chainRelayInfo}" || return 1
+    rm -f "${CHAIN_EXIT_INFO}"
 
     # 开放防火墙端口
     allowPort "${chainPort}" "tcp"
@@ -11830,22 +12002,23 @@ chainAccountAssignPorts() {
 }
 
 # writeXrayChainConfig PORT → Xray 侧两件：chain_proxy 系列出站指向本机的桥；09_routing.json 整份换成链式路由：先按账号映射分
-# （user 正则，. + 转义——Xray 静默丢弃写坏的正则），其余交给默认出口；封本机与桥端口的规则由 ensureXrayLocalBlock 在启动前补到最前。
+# （user 正则，. + 转义——Xray 静默丢弃写坏的正则），其余交给默认出口；写完当场补上封本机的规则，不等下次启动（被 systemd 拉起时没有那一步）。
 # 原路由只在第一次存成 .bak.chain：之后改映射也调这里，覆盖掉的话 removeChainProxy 就恢复不出原样
 writeXrayChainConfig() {
     local port=$1 state bridges outbounds routing
     state=$(chainAccountReadState) || return 1
     bridges=$(chainAccountBridges "${state}") || return 1
+    # 直连走链式自己的 chain_direct：WARP / IPv6 全局会删掉 z_direct_outbound，指向它的账号就全断。它不能排第一，Xray 把第一个出站当默认
     outbounds=$(jq -n --argjson port "${port}" --argjson bridges "${bridges}" '
         def socksOut($tag; $p): {tag: $tag, protocol: "socks", settings: {servers: [{address: "127.0.0.1", port: $p}]}};
-        {outbounds: ([socksOut("chain_proxy"; $port)] + [$bridges[] | socksOut("chain_proxy_" + .name; .port)])}') || return 1
+        {outbounds: ([socksOut("chain_proxy"; $port)] + [$bridges[] | socksOut("chain_proxy_" + .name; .port)] + [{tag: "chain_direct", protocol: "freedom"}])}') || return 1
     routing=$(jq -n --argjson s "${state}" '
         ($s.mode // "") as $mode
-        | (if $mode != "multi_chain" and $s.default_chain == "direct" then "z_direct_outbound" else "chain_proxy" end) as $dflt
+        | (if $mode != "multi_chain" and $s.default_chain == "direct" then "chain_direct" else "chain_proxy" end) as $dflt
         | {routing: {domainStrategy: "AsIs", rules: (
             ([($s.accounts // {}) | to_entries[]
                 | {re: ("regexp:^" + ([.key | explode[] | if . == 46 or . == 43 then [92, .] else [.] end] | add | implode) + "-[^-]*$"),
-                   tag: (if .value == "direct" then "z_direct_outbound" elif $mode == "multi_chain" then "chain_proxy_" + .value else "chain_proxy" end)}]
+                   tag: (if .value == "direct" then "chain_direct" elif $mode == "multi_chain" then "chain_proxy_" + .value else "chain_proxy" end)}]
                | group_by(.tag) | map({type: "field", user: map(.re), outboundTag: .[0].tag}))
             + [{type: "field", domain: ["domain:gstatic.com", "domain:googleapis.com", "domain:googleapis.cn"], outboundTag: $dflt},
                {type: "field", network: "tcp,udp", outboundTag: $dflt}])}}') || return 1
@@ -11854,7 +12027,8 @@ writeXrayChainConfig() {
         cp "${XRAY_CONF_DIR}/09_routing.json" "${XRAY_CONF_DIR}/09_routing.json.bak.chain" || return 1
     fi
     jsonWriteFile "${XRAY_CONF_DIR}/chain_outbound.json" "${outbounds}" false || return 1
-    jsonWriteFile "${XRAY_CONF_DIR}/09_routing.json" "${routing}" false
+    jsonWriteFile "${XRAY_CONF_DIR}/09_routing.json" "${routing}" false || return 1
+    ensureXrayLocalBlock
 }
 
 # chainAccountInject MERGED → 把映射写进合并后的 sing-box 配置，规则插在最前：多链路被引用的链路各一条桥（有 Xray 的桥时），
@@ -11865,6 +12039,7 @@ chainAccountInject() {
     state=$(chainAccountReadState) || return 1
     [[ "${state}" == "{}" ]] && return 0
     bridges=$(chainAccountBridges "${state}") || return 1
+    # IPv6 全局会删掉 01_direct_outbound，而直连的账号与 final 都指向 direct：缺了就补一个，否则 sing-box 因找不到出站起不来
     out=$(jq --argjson s "${state}" --argjson bridges "${bridges}" '
         ($s.accounts // {}) as $acc
         | (if ([.inbounds[]? | select(.tag == "chain_bridge_in")] | length) > 0
@@ -11881,6 +12056,7 @@ chainAccountInject() {
         | .inbounds = ((.inbounds // []) + $inb)
         | .route.rules = ($pre + (.route.rules // []))
         | (if ($s.mode // "") != "multi_chain" and $s.default_chain == "direct" then .route.final = "direct" else . end)
+        | (if any(.outbounds[]?; .tag == "direct") then . else .outbounds = ((.outbounds // []) + [{type: "direct", tag: "direct"}]) end)
     ' "${merged}") || return 1
     jsonWriteFile "${merged}" "${out}" false
 }
@@ -11974,12 +12150,18 @@ chainAccountExitMenu() {
         echoContent red " ---> $(t CHAIN_ACCOUNT_LIST_FAILED)"
         return 1
     fi
-    mapfile -t nameList < <({ printf '%s\n' "${names}"; jq -r '(.accounts // {}) | keys[]' <<<"${state}"; } | grep -v '^$' | sort -u)
+    # 拼车停用中的成员不在入站里、chainAccountAllNames 看不到，恢复后照样按映射走，所以从拼车状态里补上
+    mapfile -t nameList < <({ printf '%s\n' "${names}"; jq -r '(.accounts // {}) | keys[]' <<<"${state}"
+        carpoolReadState 2>/dev/null | jq -r 'select(.enabled == true) | .members | keys[]'; } | grep -v '^$' | sort -u)
     dflt=$(jq -r 'if .mode == "multi_chain" then (.default_chain // "direct") else (.default_chain // "chain_outbound") end' <<<"${state}")
 
     echoContent skyBlue "\n$(t CHAIN_ACCOUNT_TITLE)"
     echoContent red "=============================================================="
-    echoContent yellow "$(t CHAIN_ACCOUNT_DEFAULT_LINE "$(chainAccountExitLabel "${dflt}")")"
+    if [[ "${mode}" == "multi_chain" ]]; then
+        echoContent yellow "$(t CHAIN_ACCOUNT_DEFAULT_LINE_MULTI "$(chainAccountExitLabel "${dflt}")")"
+    else
+        echoContent yellow "$(t CHAIN_ACCOUNT_DEFAULT_LINE "$(chainAccountExitLabel "${dflt}")")"
+    fi
     if [[ "${mode}" != "multi_chain" && "${dflt}" != "direct" ]] && jq -e '.protocol_routing.enabled == true' <<<"${state}" >/dev/null 2>&1; then
         echoContent yellow "$(t CHAIN_ACCOUNT_PROTOCOL_ROUTING_HINT)"
     fi
@@ -12051,6 +12233,14 @@ chainAccountExitMenu() {
 setupChainEntryMultiHop() {
     local chainBridgePort=${CHAIN_BRIDGE_PORT}
 
+    # 多链路状态在的时候写单链路会留下两套入口状态，与多链路那边拒绝单链路对称
+    if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
+        echoContent yellow "$(t CHAIN_MULTI_EXISTS)"
+        echoContent yellow "$(t CHAIN_MULTI_UNINSTALL_HINT)"
+        echoContent yellow "$(t CHAIN_MENU_PATH)"
+        return 1
+    fi
+
     # 确保 sing-box 已安装
     if ! ensureSingBoxInstalled; then
         return 1
@@ -12079,38 +12269,8 @@ setupChainEntryMultiHop() {
 
     # ============= sing-box 配置 =============
 
-    # 创建多跳出站配置 (detour chain)
-    # chainHops 是 parseChainCode 输出的合法 JSON 数组，直接 --argjson 传给 jq -n，
-    # jq 自动 escape 各字段；用户配置码里含 " 或 \ 的特殊字符不会破坏 JSON。
     local chainOutboundJson
-    if ! chainOutboundJson=$(jq -n --argjson hops "${chainHops}" '
-        {
-            outbounds: (
-                ($hops | to_entries | map(
-                    .key as $i |
-                    .value as $h |
-                    ({
-                        type: "shadowsocks",
-                        tag: ("chain_hop_" + (($i + 1) | tostring)),
-                        server: $h.ip,
-                        server_port: $h.port,
-                        method: $h.method,
-                        password: $h.key,
-                        multiplex: {
-                            enabled: true,
-                            protocol: "h2mux",
-                            max_connections: 4,
-                            min_streams: 4
-                        }
-                    } + (if $i > 0 then {detour: ("chain_hop_" + ($i | tostring))} else {} end))
-                ))
-                + [{
-                    type: "direct",
-                    tag: "chain_outbound",
-                    detour: ("chain_hop_" + (($hops | length) | tostring))
-                }]
-            )
-        }') || [[ -z "${chainOutboundJson}" ]]; then
+    if ! chainOutboundJson=$(chainHopOutbounds "${chainHops}") || [[ -z "${chainOutboundJson}" ]]; then
         echoContent red " ---> 链式出站配置生成失败"
         return 1
     fi
@@ -12168,7 +12328,7 @@ EOF
         handleXray start
 
         sleep 1
-        if pgrep -f "xray/xray" >/dev/null 2>&1; then
+        if xrayDaemonRunning; then
             echoContent green " ---> Xray 重启成功，链式转发已启用"
         else
             echoContent red " ---> Xray 重启失败"
@@ -12215,6 +12375,14 @@ setupChainEntry() {
     local exitKey=$3
     local exitMethod=$4
     local chainBridgePort=${CHAIN_BRIDGE_PORT}
+
+    # 多链路状态在的时候写单链路会留下两套入口状态，与多链路那边拒绝单链路对称
+    if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
+        echoContent yellow "$(t CHAIN_MULTI_EXISTS)"
+        echoContent yellow "$(t CHAIN_MULTI_UNINSTALL_HINT)"
+        echoContent yellow "$(t CHAIN_MENU_PATH)"
+        return 1
+    fi
 
     # 确保 sing-box 已安装
     if ! ensureSingBoxInstalled; then
@@ -12327,7 +12495,7 @@ EOF
         handleXray start
 
         sleep 1
-        if pgrep -f "xray/xray" >/dev/null 2>&1; then
+        if xrayDaemonRunning; then
             echoContent green " ---> Xray 重启成功，链式转发已启用"
         else
             echoContent red " ---> Xray 重启失败"
@@ -12704,7 +12872,14 @@ updateChainKey() {
     echoContent yellow "\n更新链式代理密钥"
 
     if [[ -f "${CHAIN_EXIT_INFO}" ]]; then
-        # 出口节点
+        # 出口节点：旧密钥一换就失效，接在上面的入口立刻断，先问
+        local answer
+        echoContent yellow " ---> $(t CHAIN_KEY_UPDATE_WARN)"
+        read -r -p "$(t CHAIN_KEY_UPDATE_CONFIRM)" answer
+        if ! isYesInput "${answer}"; then
+            echoContent yellow " ---> $(t CANCELLED)"
+            return 0
+        fi
         local port method
         port=$(jq -r '.port' ${CHAIN_EXIT_INFO})
         method=$(jq -r '.method' ${CHAIN_EXIT_INFO})
@@ -12870,9 +13045,13 @@ removeChainProxy() {
         local chainCount
         chainCount=$(jq -r '.chains | length' ${CHAIN_MULTI_INFO} 2>/dev/null || echo "0")
         echoContent yellow "\n检测到多链路分流模式，共 ${chainCount} 条链路"
-    elif [[ -f "${CHAIN_ENTRY_INFO}" ]] || \
-         [[ -f "${CHAIN_EXIT_INFO}" ]] || \
-         [[ -f "${CHAIN_RELAY_INFO}" ]]; then
+    elif [[ -f "${CHAIN_RELAY_INFO}" ]]; then
+        isSingleChain=true
+        echoContent yellow "\n$(t CHAIN_REMOVE_ROLE_RELAY)"
+    elif [[ -f "${CHAIN_EXIT_INFO}" ]]; then
+        isSingleChain=true
+        echoContent yellow "\n$(t CHAIN_REMOVE_ROLE_EXIT)"
+    elif [[ -f "${CHAIN_ENTRY_INFO}" ]]; then
         isSingleChain=true
         echoContent yellow "\n检测到单链路模式"
     else
@@ -13360,7 +13539,7 @@ setupMultiChainEntry() {
 
         case "${existingChoice}" in
             1)
-                addSingleChainOutbound
+                multiChainAddChain
                 return $?
                 ;;
             2)
@@ -13530,7 +13709,7 @@ EOF
         chainName=$(generateNextChainName)
 
         # 添加链路
-        if addChainToConfig "${chainName}" "${chainExitIP}" "${chainExitPort}" "${chainExitKey}" "${chainExitMethod}"; then
+        if addChainToConfig "${chainName}" "${chainExitIP}" "${chainExitPort}" "${chainExitKey}" "${chainExitMethod}" false "${chainHops}"; then
             echoContent green " ---> $(t CHAIN_ADDED): [${chainName}] (${chainExitIP}:${chainExitPort})"
             ((chainIndex++))
         fi
@@ -13649,107 +13828,29 @@ addExternalNodeAsChain() {
         return 1
     fi
 
-    # 步骤3: 设置分流规则 (复用现有逻辑)
+    # 步骤3: 设置分流规则
     echoContent yellow "\n$(t CHAIN_STEP_RULES)"
     echoContent yellow "$(t CHAIN_RULES_HINT):\n"
-    echoContent yellow "1.$(t CHAIN_RULE_LATER)"
-    echoContent yellow "2.$(t CHAIN_RULE_PRESET)"
-    echoContent yellow "  a) $(t CHAIN_PRESET_STREAMING)"
-    echoContent yellow "  b) $(t CHAIN_PRESET_AI)"
-    echoContent yellow "  c) $(t CHAIN_PRESET_SOCIAL)"
-    echoContent yellow "  d) $(t CHAIN_PRESET_DEV)"
-    echoContent yellow "  e) $(t CHAIN_PRESET_GAMING)"
-    echoContent yellow "  f) $(t CHAIN_PRESET_GOOGLE)"
-    echoContent yellow "  g) $(t CHAIN_PRESET_MICROSOFT)"
-    echoContent yellow "  h) $(t CHAIN_PRESET_APPLE)"
-    echoContent yellow "3.$(t CHAIN_RULE_CUSTOM)"
-    echoContent yellow "4.$(t CHAIN_RULE_DEFAULT)"
-
-    read -r -p "$(t PROMPT_SELECT): " ruleChoice
-
-    local ruleType=""
-    local ruleName=""
-    local customDomains=""
-    local isDefault="false"
-
-    case "${ruleChoice}" in
-        1)
-            ruleType="none"
-            ;;
-        2a|2A)
-            ruleType="preset"
-            ruleName="streaming"
-            ;;
-        2b|2B)
-            ruleType="preset"
-            ruleName="ai"
-            ;;
-        2c|2C)
-            ruleType="preset"
-            ruleName="social"
-            ;;
-        2d|2D)
-            ruleType="preset"
-            ruleName="developer"
-            ;;
-        2e|2E)
-            ruleType="preset"
-            ruleName="gaming"
-            ;;
-        2f|2F)
-            ruleType="preset"
-            ruleName="google"
-            ;;
-        2g|2G)
-            ruleType="preset"
-            ruleName="microsoft"
-            ;;
-        2h|2H)
-            ruleType="preset"
-            ruleName="apple"
-            ;;
-        3)
-            ruleType="custom"
-            echoContent yellow "$(t CHAIN_CUSTOM_DOMAIN_HINT):"
-            read -r -p "$(t DOMAIN): " customDomains
-            if [[ -z "${customDomains}" ]]; then
-                ruleType="none"
-            fi
-            ;;
-        4)
-            ruleType="default"
-            isDefault="true"
-            ;;
-        *)
-            ruleType="none"
-            ;;
-    esac
+    echoContent skyBlue "$(t CHAIN_DEFAULT_HINT)\n"
+    chainReadRule later || return 1
+    local isDefault=false
+    [[ "${chainRuleType}" == "default" ]] && isDefault=true
 
     # 添加外部节点链路到配置
     if ! addExternalChainToConfig "${chainName}" "${selectedNodeId}" "${isDefault}"; then
         return 1
     fi
+    case "${chainRuleType}" in
+        preset | custom | ip_cidr | geoip) addRuleToConfig "${chainRuleType}" "${chainRuleValue}" "${chainName}" ;;
+    esac
 
-    # 添加规则
-    if [[ "${ruleType}" == "preset" ]]; then
-        addRuleToConfig "preset" "${ruleName}" "${chainName}"
-        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
-        echoContent green "   $(t EXT_NODE): ${nodeName} (${nodeType})"
-        echoContent green "   $(t RULES): $(getPresetDisplayName "${ruleName}")"
-    elif [[ "${ruleType}" == "custom" ]]; then
-        addRuleToConfig "custom" "${customDomains}" "${chainName}"
-        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
-        echoContent green "   $(t EXT_NODE): ${nodeName} (${nodeType})"
-        echoContent green "   $(t RULES): $(t CUSTOM_DOMAIN)"
-    elif [[ "${ruleType}" == "default" ]]; then
+    if [[ "${isDefault}" == "true" ]]; then
         echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}] ($(t DEFAULT_CHAIN))"
-        echoContent green "   $(t EXT_NODE): ${nodeName} (${nodeType})"
-        echoContent green "   $(t RULES): $(t ALL_UNMATCHED)"
     else
         echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
-        echoContent green "   $(t EXT_NODE): ${nodeName} (${nodeType})"
-        echoContent green "   $(t RULES): $(t PENDING_CONFIG)"
     fi
+    echoContent green "   $(t EXT_NODE): ${nodeName} (${nodeType})"
+    echoContent green "   $(t RULES): $(chainRuleLabel "${chainRuleType}" "${chainRuleValue}")"
 
     return 0
 }
@@ -13876,162 +13977,28 @@ addSingleChainOutbound() {
     # 步骤3: 设置分流规则
     echoContent yellow "\n$(t CHAIN_STEP_RULES)"
     echoContent yellow "$(t CHAIN_RULES_SELECT):\n"
-    echoContent yellow "1.$(t CHAIN_RULE_LATER)"
-    echoContent yellow "2.$(t CHAIN_RULE_PRESET)"
-    echoContent yellow "  a) $(t CHAIN_PRESET_STREAMING)"
-    echoContent yellow "  b) $(t CHAIN_PRESET_AI)"
-    echoContent yellow "  c) $(t CHAIN_PRESET_SOCIAL)"
-    echoContent yellow "  d) $(t CHAIN_PRESET_DEV)"
-    echoContent yellow "  e) $(t CHAIN_PRESET_GAMING)"
-    echoContent yellow "  f) $(t CHAIN_PRESET_GOOGLE)"
-    echoContent yellow "  g) $(t CHAIN_PRESET_MICROSOFT)"
-    echoContent yellow "  h) $(t CHAIN_PRESET_APPLE)"
-    echoContent yellow "3.$(t CHAIN_RULE_CUSTOM_DOMAIN)"
-    echoContent yellow "4.$(t CHAIN_RULE_IP_CIDR)"
-    echoContent yellow "5.$(t CHAIN_RULE_GEOIP)"
-    echoContent yellow "6.$(t CHAIN_RULE_SET_DEFAULT)"
-    echoContent yellow ""
-    echoContent skyBlue "$(t CHAIN_DEFAULT_HINT)"
-
-    read -r -p "$(t PROMPT_SELECT): " ruleChoice
-
-    local ruleType=""
-    local ruleName=""
-    local customDomains=""
-    local customIpCidrs=""
-    local isDefault="false"
-
-    case "${ruleChoice}" in
-        1)
-            ruleType="none"
-            ;;
-        2a|2A)
-            ruleType="preset"
-            ruleName="streaming"
-            ;;
-        2b|2B)
-            ruleType="preset"
-            ruleName="ai"
-            ;;
-        2c|2C)
-            ruleType="preset"
-            ruleName="social"
-            ;;
-        2d|2D)
-            ruleType="preset"
-            ruleName="developer"
-            ;;
-        2e|2E)
-            ruleType="preset"
-            ruleName="gaming"
-            ;;
-        2f|2F)
-            ruleType="preset"
-            ruleName="google"
-            ;;
-        2g|2G)
-            ruleType="preset"
-            ruleName="microsoft"
-            ;;
-        2h|2H)
-            ruleType="preset"
-            ruleName="apple"
-            ;;
-        3)
-            ruleType="custom"
-            echoContent yellow "$(t CHAIN_DOMAIN_HINT):"
-            read -r -p "$(t CHAIN_DOMAIN): " customDomains
-            if [[ -z "${customDomains}" ]]; then
-                ruleType="none"
-            fi
-            ;;
-        4)
-            ruleType="ip_cidr"
-            echoContent yellow "$(t CHAIN_IP_CIDR_HINT):"
-            echoContent yellow "$(t CHAIN_IP_CIDR_EXAMPLE)"
-            read -r -p "$(t IP_CIDR): " customIpCidrs
-            if [[ -z "${customIpCidrs}" ]]; then
-                ruleType="none"
-            elif ! validateIpCidrs "${customIpCidrs}"; then
-                echoContent red " ---> $(t CHAIN_IP_CIDR_INVALID)"
-                return 1
-            fi
-            ;;
-        5)
-            ruleType="geoip"
-            echoContent yellow "\n$(t CHAIN_GEOIP_SELECT):\n"
-            echoContent yellow "1.$(t CHAIN_GEOIP_CN) (geoip-cn)"
-            echoContent yellow "2.$(t CHAIN_GEOIP_US) (geoip-us)"
-            echoContent yellow "3.$(t CHAIN_GEOIP_JP) (geoip-jp)"
-            echoContent yellow "4.$(t CHAIN_GEOIP_HK) (geoip-hk)"
-            echoContent yellow "5.$(t CHAIN_GEOIP_TW) (geoip-tw)"
-            echoContent yellow "6.$(t CHAIN_GEOIP_SG) (geoip-sg)"
-            echoContent yellow "7.$(t CHAIN_GEOIP_PRIVATE) (geoip-private)"
-            echoContent yellow "8.$(t CHAIN_GEOIP_CUSTOM)"
-            read -r -p "$(t PROMPT_SELECT): " geoipChoice
-
-            case "${geoipChoice}" in
-                1) ruleName="cn" ;;
-                2) ruleName="us" ;;
-                3) ruleName="jp" ;;
-                4) ruleName="hk" ;;
-                5) ruleName="tw" ;;
-                6) ruleName="sg" ;;
-                7) ruleName="private" ;;
-                8)
-                    echoContent yellow "$(t CHAIN_GEOIP_CUSTOM_HINT):"
-                    read -r -p "GeoIP: " ruleName
-                    ;;
-                *)
-                    echoContent red " ---> $(t INVALID_SELECTION)"
-                    return 1
-                    ;;
-            esac
-            ;;
-        6)
-            ruleType="default"
-            isDefault="true"
-            ;;
-        *)
-            ruleType="none"
-            ;;
-    esac
+    echoContent skyBlue "$(t CHAIN_DEFAULT_HINT)\n"
+    chainReadRule later || return 1
+    local isDefault=false
+    [[ "${chainRuleType}" == "default" ]] && isDefault=true
 
     # 添加链路到配置
-    if ! addChainToConfig "${chainName}" "${chainExitIP}" "${chainExitPort}" "${chainExitKey}" "${chainExitMethod}" "${isDefault}"; then
+    if ! addChainToConfig "${chainName}" "${chainExitIP}" "${chainExitPort}" "${chainExitKey}" "${chainExitMethod}" "${isDefault}" "${chainHops}"; then
         return 1
     fi
+    case "${chainRuleType}" in
+        preset | custom | ip_cidr | geoip) addRuleToConfig "${chainRuleType}" "${chainRuleValue}" "${chainName}" ;;
+    esac
+    local chainTarget
+    chainTarget=$(jq -r '[.[] | "\(.ip):\(.port)"] | join(" → ")' <<<"${chainHops}")
 
-    # 添加规则
-    if [[ "${ruleType}" == "preset" ]]; then
-        addRuleToConfig "preset" "${ruleName}" "${chainName}"
-        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
-        echoContent green "   $(t CHAIN_TARGET): ${chainExitIP}:${chainExitPort}"
-        echoContent green "   $(t RULES): $(getPresetDisplayName "${ruleName}")"
-    elif [[ "${ruleType}" == "custom" ]]; then
-        addRuleToConfig "custom" "${customDomains}" "${chainName}"
-        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
-        echoContent green "   $(t CHAIN_TARGET): ${chainExitIP}:${chainExitPort}"
-        echoContent green "   $(t RULES): $(t CUSTOM_DOMAIN)"
-    elif [[ "${ruleType}" == "ip_cidr" ]]; then
-        addRuleToConfig "ip_cidr" "${customIpCidrs}" "${chainName}"
-        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
-        echoContent green "   $(t CHAIN_TARGET): ${chainExitIP}:${chainExitPort}"
-        echoContent green "   $(t RULES): IP CIDR"
-    elif [[ "${ruleType}" == "geoip" ]]; then
-        addRuleToConfig "geoip" "${ruleName}" "${chainName}"
-        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
-        echoContent green "   $(t CHAIN_TARGET): ${chainExitIP}:${chainExitPort}"
-        echoContent green "   $(t RULES): geoip-${ruleName}"
-    elif [[ "${ruleType}" == "default" ]]; then
+    if [[ "${isDefault}" == "true" ]]; then
         echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}] ($(t DEFAULT_CHAIN))"
-        echoContent green "   $(t CHAIN_TARGET): ${chainExitIP}:${chainExitPort}"
-        echoContent green "   $(t RULES): $(t ALL_UNMATCHED)"
     else
         echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
-        echoContent green "   $(t CHAIN_TARGET): ${chainExitIP}:${chainExitPort}"
-        echoContent green "   $(t RULES): $(t PENDING_CONFIG)"
     fi
+    echoContent green "   $(t CHAIN_TARGET): ${chainTarget}"
+    echoContent green "   $(t RULES): $(chainRuleLabel "${chainRuleType}" "${chainRuleValue}")"
 
     return 0
 }
@@ -14044,8 +14011,22 @@ addChainToConfig() {
     local key=$4
     local method=$5
     local isDefault=${6:-false}
+    local hops=${7:-}
 
     local infoFile="${CHAIN_MULTI_INFO}"
+
+    # 中继给的多跳码要经中继嵌套着拨（中继把发往下一跳的连接直连过去），只拨出口会静默绕过中继。
+    # 前面各跳的 tag 带 -，链路名不许有 -，撞不上别的链路
+    if [[ -z "${hops}" ]]; then
+        hops=$(jq -n --arg ip "${ip}" --argjson port "${port}" --arg key "${key}" --arg method "${method}" \
+            '[{ip: $ip, port: $port, key: $key, method: $method}]') || return 1
+    fi
+    local outFile="${SINGBOX_FRAGMENT_DIR}/chain_outbound_${name}.json"
+    local outboundJson
+    if ! outboundJson=$(chainHopOutbounds "${hops}" "${name}" "${name}-hop-") || [[ -z "${outboundJson}" ]]; then
+        echoContent red " ---> 链路出站配置生成失败: ${name}"
+        return 1
+    fi
 
     # 添加到 chains 数组
     local tmpFile
@@ -14077,34 +14058,6 @@ addChainToConfig() {
         mv "${tmpFile}" "${infoFile}"
     fi
 
-    # 生成链路出站：用 jq -n + --arg/--argjson 而非 heredoc——ip / method / key 可能含 " 或 \。
-    local outFile="${SINGBOX_FRAGMENT_DIR}/chain_outbound_${name}.json"
-    local outboundJson
-    if ! outboundJson=$(jq -n \
-            --arg name "${name}" \
-            --arg ip "${ip}" \
-            --argjson port "${port}" \
-            --arg method "${method}" \
-            --arg key "${key}" \
-            '{
-                outbounds: [{
-                    type: "shadowsocks",
-                    tag: $name,
-                    server: $ip,
-                    server_port: $port,
-                    method: $method,
-                    password: $key,
-                    multiplex: {
-                        enabled: true,
-                        protocol: "h2mux",
-                        max_connections: 4,
-                        min_streams: 4
-                    }
-                }]
-            }') || [[ -z "${outboundJson}" ]]; then
-        echoContent red " ---> 链路出站配置生成失败: ${name}"
-        return 1
-    fi
     printf '%s\n' "${outboundJson}" > "${outFile}"
 
     return 0
@@ -14131,6 +14084,141 @@ addRuleToConfig() {
        }]' "${infoFile}" > "${tmpFile}"
 
     mv "${tmpFile}" "${infoFile}"
+}
+
+# chainReadRule [later] → 交互选一条分流规则，结果放在 chainRuleType（none / preset / custom / ip_cidr / geoip / default）与 chainRuleValue。
+# 传 later 时第一项是「稍后统一配置」。输错或留空就重问，不静默落成没有规则——那样流量全走默认出口、看不出配错了。读不到输入返回 1
+chainReadRule() {
+    local later=$1 base=0 choice sub value
+    chainRuleType=
+    chainRuleValue=
+    [[ -n "${later}" ]] && base=1
+    while true; do
+        [[ -n "${later}" ]] && echoContent yellow "1.$(t CHAIN_RULE_LATER)"
+        echoContent yellow "$((base + 1)).$(t CHAIN_RULE_PRESET)"
+        echoContent yellow "$((base + 2)).$(t CHAIN_RULE_CUSTOM_DOMAIN)"
+        echoContent yellow "$((base + 3)).$(t CHAIN_RULE_IP_CIDR)"
+        echoContent yellow "$((base + 4)).$(t CHAIN_RULE_GEOIP)"
+        echoContent yellow "$((base + 5)).$(t CHAIN_RULE_DEFAULT)"
+        read -r -p "$(t PROMPT_SELECT): " choice || return 1
+        if [[ "${choice}" =~ ^[0-9]{1,3}$ ]]; then
+            choice=$((10#${choice}))
+        else
+            choice=-1
+        fi
+        value=
+        case $((choice - base)) in
+            0)
+                if [[ -n "${later}" ]]; then
+                    chainRuleType=none
+                    return 0
+                fi
+                ;;
+            1)
+                echoContent yellow "\n$(t CHAIN_RULE_PRESET):\n"
+                echoContent yellow "1.$(t CHAIN_PRESET_STREAMING)"
+                echoContent yellow "2.$(t CHAIN_PRESET_AI)"
+                echoContent yellow "3.$(t CHAIN_PRESET_SOCIAL)"
+                echoContent yellow "4.$(t CHAIN_PRESET_DEV)"
+                echoContent yellow "5.$(t CHAIN_PRESET_GAMING)"
+                echoContent yellow "6.$(t CHAIN_PRESET_GOOGLE)"
+                echoContent yellow "7.$(t CHAIN_PRESET_MICROSOFT)"
+                echoContent yellow "8.$(t CHAIN_PRESET_APPLE)"
+                read -r -p "$(t PROMPT_SELECT): " sub || return 1
+                case "${sub}" in
+                    1) value=streaming ;;
+                    2) value=ai ;;
+                    3) value=social ;;
+                    4) value=developer ;;
+                    5) value=gaming ;;
+                    6) value=google ;;
+                    7) value=microsoft ;;
+                    8) value=apple ;;
+                esac
+                if [[ -n "${value}" ]]; then
+                    chainRuleType=preset
+                    chainRuleValue=${value}
+                    return 0
+                fi
+                ;;
+            2)
+                echoContent yellow "$(t CHAIN_DOMAIN_HINT):"
+                read -r -p "$(t CHAIN_DOMAIN): " value || return 1
+                if [[ -n "${value}" ]]; then
+                    chainRuleType=custom
+                    chainRuleValue=${value}
+                    return 0
+                fi
+                echoContent red " ---> $(t CHAIN_DOMAIN_EMPTY)"
+                continue
+                ;;
+            3)
+                echoContent yellow "$(t CHAIN_IP_CIDR_HINT):"
+                echoContent yellow "$(t CHAIN_IP_CIDR_EXAMPLE)"
+                read -r -p "$(t IP_CIDR): " value || return 1
+                if [[ -z "${value}" ]]; then
+                    echoContent red " ---> $(t IP_CIDR_EMPTY)"
+                    continue
+                fi
+                if ! validateIpCidrs "${value}"; then
+                    echoContent red " ---> $(t CHAIN_IP_CIDR_INVALID)"
+                    continue
+                fi
+                chainRuleType=ip_cidr
+                chainRuleValue=${value}
+                return 0
+                ;;
+            4)
+                echoContent yellow "\n$(t CHAIN_GEOIP_SELECT):\n"
+                echoContent yellow "1.$(t CHAIN_GEOIP_CN) (geoip-cn)"
+                echoContent yellow "2.$(t CHAIN_GEOIP_US) (geoip-us)"
+                echoContent yellow "3.$(t CHAIN_GEOIP_JP) (geoip-jp)"
+                echoContent yellow "4.$(t CHAIN_GEOIP_HK) (geoip-hk)"
+                echoContent yellow "5.$(t CHAIN_GEOIP_TW) (geoip-tw)"
+                echoContent yellow "6.$(t CHAIN_GEOIP_SG) (geoip-sg)"
+                echoContent yellow "7.$(t CHAIN_GEOIP_PRIVATE) (geoip-private)"
+                echoContent yellow "8.$(t CHAIN_GEOIP_CUSTOM)"
+                read -r -p "$(t PROMPT_SELECT): " sub || return 1
+                case "${sub}" in
+                    1) value=cn ;;
+                    2) value=us ;;
+                    3) value=jp ;;
+                    4) value=hk ;;
+                    5) value=tw ;;
+                    6) value=sg ;;
+                    7) value=private ;;
+                    8)
+                        echoContent yellow "$(t CHAIN_GEOIP_CUSTOM_HINT):"
+                        read -r -p "GeoIP: " value || return 1
+                        value=$(tr '[:upper:]' '[:lower:]' <<<"${value}")
+                        ;;
+                esac
+                # 代码拼进规则集的 tag 与下载地址，只收字母数字和 - _
+                if [[ "${value}" =~ ^[a-z0-9_-]{1,32}$ ]]; then
+                    chainRuleType=geoip
+                    chainRuleValue=${value}
+                    return 0
+                fi
+                ;;
+            5)
+                chainRuleType=default
+                return 0
+                ;;
+        esac
+        echoContent red " ---> $(t INVALID_SELECTION)"
+    done
+}
+
+# chainRuleLabel TYPE VALUE → 一条分流规则的显示名（TYPE 同 chainRuleType）
+chainRuleLabel() {
+    case "$1" in
+        preset) getPresetDisplayName "$2" ;;
+        custom) t CUSTOM_DOMAIN ;;
+        ip_cidr) echo "IP CIDR" ;;
+        geoip) echo "geoip-$2" ;;
+        default) t ALL_UNMATCHED ;;
+        *) t PENDING_CONFIG ;;
+    esac
 }
 
 # 配置多链路分流规则
@@ -14177,112 +14265,26 @@ configureMultiChainRules() {
     fi
 
     echoContent yellow "\n$(t CHAIN_RULE_FOR) [${selectedChain}] $(t CHAIN_RULE_TYPE_SELECT):\n"
-    echoContent yellow "1.$(t CHAIN_RULE_PRESET)"
-    echoContent yellow "2.$(t CHAIN_RULE_CUSTOM_DOMAIN)"
-    echoContent yellow "3.$(t CHAIN_RULE_IP_CIDR)"
-    echoContent yellow "4.$(t CHAIN_RULE_GEOIP)"
-    echoContent yellow "5.$(t CHAIN_RULE_SET_DEFAULT)"
+    chainReadRule || return 1
 
-    read -r -p "$(t PROMPT_SELECT): " ruleTypeChoice
-
-    case "${ruleTypeChoice}" in
-        1)
-            echoContent yellow "\n$(t CHAIN_RULE_PRESET):\n"
-            echoContent yellow "1.$(t CHAIN_PRESET_STREAMING)"
-            echoContent yellow "2.$(t CHAIN_PRESET_AI)"
-            echoContent yellow "3.$(t CHAIN_PRESET_SOCIAL)"
-            echoContent yellow "4.$(t CHAIN_PRESET_DEV)"
-            echoContent yellow "5.$(t CHAIN_PRESET_GAMING)"
-            echoContent yellow "6.$(t CHAIN_PRESET_GOOGLE)"
-            echoContent yellow "7.$(t CHAIN_PRESET_MICROSOFT)"
-            echoContent yellow "8.$(t CHAIN_PRESET_APPLE)"
-
-            read -r -p "$(t PROMPT_SELECT): " presetChoice
-
-            local presetName
-            case "${presetChoice}" in
-                1) presetName="streaming" ;;
-                2) presetName="ai" ;;
-                3) presetName="social" ;;
-                4) presetName="developer" ;;
-                5) presetName="gaming" ;;
-                6) presetName="google" ;;
-                7) presetName="microsoft" ;;
-                8) presetName="apple" ;;
-                *)
-                    echoContent red " ---> $(t INVALID_SELECTION)"
-                    return 1
-                    ;;
-            esac
-
-            addRuleToConfig "preset" "${presetName}" "${selectedChain}"
-            echoContent green " ---> $(t CHAIN_RULE_ADDED): $(getPresetDisplayName "${presetName}") → ${selectedChain}"
+    case "${chainRuleType}" in
+        preset)
+            addRuleToConfig "preset" "${chainRuleValue}" "${selectedChain}"
+            echoContent green " ---> $(t CHAIN_RULE_ADDED): $(chainRuleLabel "${chainRuleType}" "${chainRuleValue}") → ${selectedChain}"
             ;;
-        2)
-            echoContent yellow "$(t CHAIN_DOMAIN_HINT):"
-            read -r -p "$(t CHAIN_DOMAIN): " customDomains
-
-            if [[ -z "${customDomains}" ]]; then
-                echoContent red " ---> $(t CHAIN_DOMAIN_EMPTY)"
-                return 1
-            fi
-
-            addRuleToConfig "custom" "${customDomains}" "${selectedChain}"
+        custom)
+            addRuleToConfig "custom" "${chainRuleValue}" "${selectedChain}"
             echoContent green " ---> $(t CHAIN_CUSTOM_RULE_ADDED) → ${selectedChain}"
             ;;
-        3)
-            echoContent yellow "$(t CHAIN_IP_CIDR_HINT):"
-            echoContent yellow "$(t CHAIN_IP_CIDR_EXAMPLE)"
-            read -r -p "$(t IP_CIDR): " customIpCidrs
-
-            if [[ -z "${customIpCidrs}" ]]; then
-                echoContent red " ---> $(t IP_CIDR_EMPTY)"
-                return 1
-            fi
-
-            if ! validateIpCidrs "${customIpCidrs}"; then
-                echoContent red " ---> $(t CHAIN_IP_CIDR_INVALID)"
-                return 1
-            fi
-
-            addRuleToConfig "ip_cidr" "${customIpCidrs}" "${selectedChain}"
+        ip_cidr)
+            addRuleToConfig "ip_cidr" "${chainRuleValue}" "${selectedChain}"
             echoContent green " ---> $(t CHAIN_IP_CIDR_RULE_ADDED) → ${selectedChain}"
             ;;
-        4)
-            echoContent yellow "\n$(t CHAIN_GEOIP_SELECT):\n"
-            echoContent yellow "1.$(t CHAIN_GEOIP_CN) (geoip-cn)"
-            echoContent yellow "2.$(t CHAIN_GEOIP_US) (geoip-us)"
-            echoContent yellow "3.$(t CHAIN_GEOIP_JP) (geoip-jp)"
-            echoContent yellow "4.$(t CHAIN_GEOIP_HK) (geoip-hk)"
-            echoContent yellow "5.$(t CHAIN_GEOIP_TW) (geoip-tw)"
-            echoContent yellow "6.$(t CHAIN_GEOIP_SG) (geoip-sg)"
-            echoContent yellow "7.$(t CHAIN_GEOIP_PRIVATE) (geoip-private)"
-            echoContent yellow "8.$(t CHAIN_GEOIP_CUSTOM)"
-            read -r -p "$(t PROMPT_SELECT): " geoipChoice
-
-            local geoipName
-            case "${geoipChoice}" in
-                1) geoipName="cn" ;;
-                2) geoipName="us" ;;
-                3) geoipName="jp" ;;
-                4) geoipName="hk" ;;
-                5) geoipName="tw" ;;
-                6) geoipName="sg" ;;
-                7) geoipName="private" ;;
-                8)
-                    echoContent yellow "$(t CHAIN_GEOIP_CUSTOM_HINT):"
-                    read -r -p "GeoIP: " geoipName
-                    ;;
-                *)
-                    echoContent red " ---> $(t INVALID_SELECTION)"
-                    return 1
-                    ;;
-            esac
-
-            addRuleToConfig "geoip" "${geoipName}" "${selectedChain}"
-            echoContent green " ---> $(t CHAIN_GEOIP_RULE_ADDED): geoip-${geoipName} → ${selectedChain}"
+        geoip)
+            addRuleToConfig "geoip" "${chainRuleValue}" "${selectedChain}"
+            echoContent green " ---> $(t CHAIN_GEOIP_RULE_ADDED): $(chainRuleLabel "${chainRuleType}" "${chainRuleValue}") → ${selectedChain}"
             ;;
-        5)
+        default)
             local tmpFile
             tmpFile=$(mktemp)
             chmod 600 "${tmpFile}"
@@ -14298,10 +14300,6 @@ configureMultiChainRules() {
             mv "${tmpFile}" "${infoFile}"
 
             echoContent green " ---> $(t CHAIN_SET_DEFAULT_SUCCESS "${selectedChain}")"
-            ;;
-        *)
-            echoContent red " ---> $(t INVALID_SELECTION)"
-            return 1
             ;;
     esac
 
@@ -14592,7 +14590,7 @@ configureXrayForMultiChain() {
     handleXray start
 
     sleep 1
-    if pgrep -f "xray/xray" >/dev/null 2>&1; then
+    if xrayDaemonRunning; then
         echoContent green " ---> $(t CHAIN_XRAY_RESTART_SUCCESS)"
     else
         echoContent red " ---> $(t CHAIN_XRAY_RESTART_FAILED)"
@@ -14641,11 +14639,7 @@ showMultiChainSummary() {
             ruleType=$(echo "${firstRule}" | cut -d: -f1)
             ruleValue=$(echo "${firstRule}" | cut -d: -f2-)
 
-            if [[ "${ruleType}" == "preset" ]]; then
-                ruleDesc=$(getPresetDisplayName "${ruleValue}")
-            elif [[ "${ruleType}" == "custom" ]]; then
-                ruleDesc="$(t CHAIN_RULE_CUSTOM_DOMAIN)"
-            fi
+            ruleDesc=$(chainRuleLabel "${ruleType}" "${ruleValue}")
         fi
 
         if [[ "${isDefault}" == "true" ]]; then
@@ -14818,6 +14812,32 @@ showMultiChainStatus() {
     return 0
 }
 
+# multiChainAddChain → 往已有多链路里加一条：加完出站要重建路由、合并、重载，只加出站的话新链路的分流规则一直不生效
+multiChainAddChain() {
+    local addType
+    echoContent yellow "$(t CHAIN_ADD_TYPE_SELECT):\n"
+    echoContent yellow "1.$(t CHAIN_ADD_BY_CODE)"
+    echoContent yellow "2.$(t CHAIN_ADD_BY_EXTERNAL)"
+    echoContent yellow "0.$(t CANCEL)"
+    read -r -p "$(t PROMPT_SELECT): " addType
+    case "${addType}" in
+        1) addSingleChainOutbound || return 1 ;;
+        2) addExternalNodeAsChain || return 1 ;;
+        0 | "") return 0 ;;
+        *)
+            echoContent red " ---> $(t INVALID_SELECTION)"
+            return 1
+            ;;
+    esac
+    generateMultiChainRouteConfig
+    if ! singBoxMergeConfig; then
+        echoContent red " ---> 配置合并失败，链路未生效"
+        return 1
+    fi
+    reloadCore
+    echoContent green " ---> 配置已更新"
+}
+
 # 多链路高级管理菜单
 multiChainAdvancedMenu() {
     echoContent skyBlue "\n多链路高级管理"
@@ -14833,16 +14853,7 @@ multiChainAdvancedMenu() {
 
     case ${selectType} in
     1)
-        addSingleChainOutbound
-        if [[ $? -eq 0 ]]; then
-            generateMultiChainRouteConfig
-            if singBoxMergeConfig; then
-                reloadCore
-                echoContent green " ---> 配置已更新"
-            else
-                echoContent red " ---> 配置合并失败，链路未生效"
-            fi
-        fi
+        multiChainAddChain
         ;;
     2)
         removeMultiChainOutbound
@@ -15379,6 +15390,15 @@ _ssBase64Decode() {
     printf '%s' "${s}" | base64 -d 2>/dev/null
 }
 
+# _ssPercentDecode S → 百分号解码；只收 SS userinfo 会用到的字符（方法名、base64、%XX），别的原样返回——反斜杠会被 %b 当转义
+_ssPercentDecode() {
+    if [[ "$1" =~ ^[A-Za-z0-9%+/=._~:-]*$ ]]; then
+        printf '%b' "${1//%/\\x}"
+    else
+        printf '%s' "$1"
+    fi
+}
+
 # 解析 SS 链接
 parseSSLink() {
     local link="$1"
@@ -15417,15 +15437,17 @@ parseSSLink() {
     local method=""
     local password=""
 
-    # 尝试 base64 解码（兼容 url-safe）
+    # SIP022（2022-blake3-*）的 userinfo 不做 base64，是百分号编码的 method:password；base64 字母表里没有 : 和 %，
+    # 带这两个字符的先按明文解码，不然 base64 解出乱码，或者 %2F 原样进了密码，认证必然失败
     local decodedUser
-    decodedUser=$(_ssBase64Decode "${userInfo}")
+    if [[ "${userInfo}" == *":"* || "${userInfo}" == *"%"* ]]; then
+        decodedUser=$(_ssPercentDecode "${userInfo}")
+    else
+        decodedUser=$(_ssBase64Decode "${userInfo}")
+    fi
     if [[ -n "${decodedUser}" && "${decodedUser}" == *":"* ]]; then
         method="${decodedUser%%:*}"
         password="${decodedUser#*:}"
-    elif [[ "${userInfo}" == *":"* ]]; then
-        method="${userInfo%%:*}"
-        password="${userInfo#*:}"
     else
         echo ""
         return 1
@@ -15632,7 +15654,8 @@ addExternalNodeByLink() {
     echoContent yellow "  $(t EXT_PORT): $(echo "${nodeJson}" | jq -r '.server_port')"
     echoContent yellow "  $(t EXT_NAME): $(echo "${nodeJson}" | jq -r '.name')"
 
-    read -r -p "\n$(t EXT_CONFIRM_ADD)? [y/n]: " confirmAdd
+    echo
+    read -r -p "$(t EXT_CONFIRM_ADD)? [y/n]: " confirmAdd
     if [[ "${confirmAdd}" != "y" && "${confirmAdd}" != "Y" ]]; then
         echoContent yellow " ---> $(t CANCEL)"
         return 0
@@ -15963,11 +15986,34 @@ testExternalNodeConnection() {
 
     echoContent yellow "\n$(t EXT_TESTING): ${nodeName} (${server}:${port})"
 
-    # TCP 连通性测试
-    if timeout 5 bash -c "echo >/dev/tcp/${server}/${port}" 2>/dev/null; then
-        echoContent green " ---> $(t EXT_TCP_SUCCESS)"
-    else
+    if ! timeout 5 bash -c "echo >/dev/tcp/${server}/${port}" 2>/dev/null; then
         echoContent red " ---> $(t EXT_TCP_FAILED)"
+        return 1
+    fi
+    echoContent green " ---> $(t EXT_TCP_SUCCESS)"
+
+    # 端口通不等于能用：密码或加密方式错了照样通。经这个节点真取一次出口 IP，不起常驻进程、不占端口
+    if [[ ! -x "${SINGBOX_BIN}" ]]; then
+        echoContent yellow " ---> $(t EXT_PROBE_NO_SINGBOX)"
+        return 0
+    fi
+    local outbound probeConf outIP
+    if ! outbound=$(generateExternalOutboundConfig "$(jq -r '.id' <<<"${node}")" probe) || [[ -z "${outbound}" ]] \
+        || ! probeConf=$(mktemp); then
+        echoContent red " ---> $(t EXT_CONFIG_FAILED)"
+        return 1
+    fi
+    chmod 600 "${probeConf}"
+    jq -n --argjson ob "${outbound}" '{log: {level: "error"}, dns: {servers: [{type: "local", tag: "local"}]},
+        outbounds: [$ob], route: {default_domain_resolver: "local"}}' >"${probeConf}"
+    # tools fetch 只要拿到响应就退出 0（不看状态码），握手或认证失败才非零；没有超时，靠 timeout 兜住
+    outIP=$(timeout 15 "${SINGBOX_BIN}" tools fetch -c "${probeConf}" -o probe https://api.ipify.org 2>/dev/null)
+    local rc=$?
+    rm -f "${probeConf}"
+    if [[ ${rc} -eq 0 && "${outIP}" =~ ^[0-9a-fA-F.:]+$ ]]; then
+        echoContent green " ---> $(t EXT_PROBE_OK "${outIP}")"
+    else
+        echoContent red " ---> $(t EXT_PROBE_FAILED)"
     fi
 }
 
@@ -16153,6 +16199,25 @@ singBoxFragmentsHaveInbounds() {
     [[ "${count}" -gt 0 ]]
 }
 
+# singBoxAutostart on|off → sing-box 开机自启跟着它该不该跑：旁挂停了还自启，重启后会起一个空 sing-box；
+# 再配链式时 ensureSingBoxInstalled 见服务文件已在就不再 enable，所以开的那头也在这里补
+singBoxAutostart() {
+    if [[ -f "/etc/systemd/system/sing-box.service" ]]; then
+        if [[ "$1" == "on" ]]; then
+            systemctl is-enabled --quiet sing-box.service 2>/dev/null || systemctl enable sing-box.service >/dev/null 2>&1
+        elif systemctl is-enabled --quiet sing-box.service 2>/dev/null; then
+            systemctl disable sing-box.service >/dev/null 2>&1
+        fi
+    elif [[ -f "/etc/init.d/sing-box" ]]; then
+        if [[ "$1" == "on" ]]; then
+            rc-update add sing-box default >/dev/null 2>&1
+        else
+            rc-update del sing-box default >/dev/null 2>&1
+        fi
+    fi
+    return 0
+}
+
 reloadCore() {
     readInstallType
 
@@ -16160,12 +16225,16 @@ reloadCore() {
         handleXray stop
         handleXray start
     fi
-    # Xray 内核上 sing-box 是旁挂：片段里还有入站就跟着重启，一个都不剩就停掉——链式拆掉后不能留一条通到出口的桥
+    # Xray 内核上 sing-box 是旁挂：片段里还有入站就跟着重启，一个都不剩就停掉并关掉自启——链式拆掉后不能留一条通到出口的桥
     if echo "${currentInstallProtocolType}" | grep -q ",20," || [[ "${coreKind}" == "2" || -n "${singBoxConfigPath}" ]] || singBoxFragmentsHaveInbounds; then
         handleSingBox stop
         handleSingBox start
-    elif [[ "${coreKind}" == "1" && -n $(pgrep -x "sing-box") ]]; then
-        handleSingBox stop
+        singBoxAutostart on
+    elif [[ "${coreKind}" == "1" ]]; then
+        if [[ -n $(pgrep -x "sing-box") ]]; then
+            handleSingBox stop
+        fi
+        singBoxAutostart off
     fi
 }
 
@@ -16179,8 +16248,6 @@ dnsRouting() {
     fi
     echoContent skyBlue "\n功能 1/${totalProgress} : DNS分流"
     echoContent red "\n=============================================================="
-    echoContent yellow "# 注意事项"
-    echoContent yellow "# 使用提示：请参考 docs 目录中的分流与策略说明 \n"
 
     echoContent yellow "1.添加"
     echoContent yellow "2.卸载"
@@ -16207,7 +16274,6 @@ sniRouting() {
     echoContent skyBlue "\n功能 1/${totalProgress} : SNI反向代理分流"
     echoContent red "\n=============================================================="
     echoContent yellow "# 注意事项"
-    echoContent yellow "# 使用提示：请参考 docs 目录中的分流与策略说明 \n"
     echoContent yellow "# sing-box 侧只能填具体域名，不支持规则集。\n"
 
     echoContent yellow "1.添加"
@@ -16556,8 +16622,8 @@ customSingBoxInstall() {
             echoContent yellow " ---> 走 CDN 时端口要选 CDN 会转发的，Cloudflare 的 HTTPS 只转发 443、2053、2083、2087、2096、8443\n"
         fi
 
+        chainRefuseCoreSwitch 2
         readLastInstallationConfig
-        unInstallSubscribe
         totalProgress=9
         installTools 1
         # 申请tls
@@ -16577,6 +16643,7 @@ customSingBoxInstall() {
         handleNginx stop
         handleNginx start
         # 生成账号
+        refreshSubscribeAfterInstall
         checkGFWStatue 8
         showAccounts 9
     else
@@ -16587,7 +16654,7 @@ customSingBoxInstall() {
 # Xray-core个性化安装
 customXrayInstall() {
     echoContent skyBlue "\n========================个性化安装============================"
-    echoContent yellow "VLESS前置，默认安装0，无域名安装Reality只选择7即可"
+    echoContent yellow "VLESS前置：选了 1 / 3 / 4 会自动带上 0；无域名只装 Reality 选 7 或 7,12"
     echoContent yellow "0.VLESS+TLS_Vision+TCP[推荐]"
     echoContent yellow "1.VLESS+TLS+WS[仅CDN推荐]"
     echoContent yellow "$(t INSTALL_ITEM_VMESS_WS)"
@@ -16605,14 +16672,12 @@ customXrayInstall() {
         exit 1
     fi
 
-    if [[ "${selectCustomInstallType}" == "7" ]]; then
-        selectCustomInstallType=",${selectCustomInstallType},"
-    else
-        if ! echo "${selectCustomInstallType}" | grep -q "0,"; then
-            selectCustomInstallType=",0,${selectCustomInstallType},"
-        else
-            selectCustomInstallType=",${selectCustomInstallType},"
-        fi
+    selectCustomInstallType=",${selectCustomInstallType},"
+    # 1 / 3 / 4 是 0 的 TLS 回落，没选 0 就补上；12 也要 0 或 7 当前置（readInstallType 与账号管理只认它们）。
+    # 7、7,12 不补：补了 0 就要域名和证书，无域名的机器装不上
+    if [[ ("${selectCustomInstallType}" =~ ,(1|3|4), || ("${selectCustomInstallType}" == *",12,"* && "${selectCustomInstallType}" != *",7,"*)) \
+        && "${selectCustomInstallType}" != *",0,"* ]]; then
+        selectCustomInstallType=",0${selectCustomInstallType}"
     fi
 
     if [[ "${selectCustomInstallType:0:1}" != "," ]]; then
@@ -16625,19 +16690,20 @@ customXrayInstall() {
             echoContent yellow " ---> 走 CDN 时端口要选 CDN 会转发的，Cloudflare 的 HTTPS 只转发 443、2053、2083、2087、2096、8443\n"
         fi
 
+        chainRefuseCoreSwitch 1
+        local previousCoreKind=${coreKind}
         readLastInstallationConfig
-        unInstallSubscribe
         totalProgress=12
         installTools 1
         if [[ -n "${btDomain}" ]]; then
             echoContent skyBlue "\n进度  3/${totalProgress} : 检测到宝塔面板/1Panel，跳过申请TLS步骤"
             handleXray stop
-            if [[ "${selectCustomInstallType}" != ",7," ]]; then
+            if anyProtocolRequiresTLS "${selectCustomInstallType}"; then
                 customPortFunction
             fi
         else
             # 申请tls
-            if [[ "${selectCustomInstallType}" != ",7," ]]; then
+            if anyProtocolRequiresTLS "${selectCustomInstallType}"; then
                 initTLSNginxConfig 2
                 handleXray stop
                 installTLS 3
@@ -16656,7 +16722,7 @@ customXrayInstall() {
         else
             nginxBlog 6
         fi
-        if [[ "${selectCustomInstallType}" != ",7," ]]; then
+        if anyProtocolRequiresTLS "${selectCustomInstallType}"; then
             updateRedirectNginxConf
             handleNginx start
         fi
@@ -16665,14 +16731,15 @@ customXrayInstall() {
         installXray 7 false || { echoContent red "\n ---> Xray-core 安装失败，已中止安装流程"; exit 1; }
         installXrayService 8
         initXrayConfig custom 9
-        cleanUp singBoxDel
-        if [[ "${selectCustomInstallType}" != ",7," ]]; then
+        cleanUp singBoxProtocolsDel "${previousCoreKind}"
+        if anyProtocolRequiresTLS "${selectCustomInstallType}"; then
             installCronTLS 10
         fi
 
         handleXray stop
         handleXray start
         # 生成账号
+        refreshSubscribeAfterInstall
         checkGFWStatue 11
         showAccounts 12
     else
@@ -16714,29 +16781,31 @@ selectCoreInstall() {
 
 # 一键无域名 Reality 安装：仅安装 VLESS+Reality+Vision (协议 7)，跳过域名/TLS 申请
 installXrayRealityOnly() {
+    chainRefuseCoreSwitch 1
+    local previousCoreKind=${coreKind}
     selectCoreType=1
     selectCustomInstallType=",7,"
     readLastInstallationConfig
-    unInstallSubscribe
     totalProgress=6
     installTools 1
     handleNginx stop
     installXray 2 false || { echoContent red "\n ---> Xray-core 安装失败，已中止安装流程"; exit 1; }
     installXrayService 3
     initXrayConfig custom 4
-    cleanUp singBoxDel
+    cleanUp singBoxProtocolsDel "${previousCoreKind}"
     handleXray stop
     handleXray start
+    refreshSubscribeAfterInstall
     checkGFWStatue 5
     showAccounts 6
 }
 
 installSingBoxRealityOnly() {
     carpoolRefuseIfEnabled
+    chainRefuseCoreSwitch 2
     selectCoreType=2
     selectCustomInstallType=",7,"
     readLastInstallationConfig
-    unInstallSubscribe
     totalProgress=6
     installTools 1
     installSingBox 2 || { echoContent red "\n ---> sing-box 安装失败，已中止安装流程"; exit 1; }
@@ -16745,6 +16814,7 @@ installSingBoxRealityOnly() {
     cleanUp xrayDel
     handleSingBox stop
     handleSingBox start
+    refreshSubscribeAfterInstall
     checkGFWStatue 5
     showAccounts 6
 }
@@ -16768,8 +16838,9 @@ selectRealityCoreInstall() {
 
 # xray-core 安装
 xrayCoreInstall() {
+    chainRefuseCoreSwitch 1
+    local previousCoreKind=${coreKind}
     readLastInstallationConfig
-    unInstallSubscribe
     selectCustomInstallType=
     totalProgress=12
     installTools 2
@@ -16791,7 +16862,7 @@ xrayCoreInstall() {
     installXray 6 false || { echoContent red "\n ---> Xray-core 安装失败，已中止安装流程"; exit 1; }
     installXrayService 7
     initXrayConfig all 8
-    cleanUp singBoxDel
+    cleanUp singBoxProtocolsDel "${previousCoreKind}"
     installCronTLS 9
     if [[ -n "${btDomain}" ]]; then
         echoContent skyBlue "\n进度  11/${totalProgress} : 检测到宝塔面板/1Panel，跳过伪装网站"
@@ -16805,14 +16876,15 @@ xrayCoreInstall() {
 
     handleNginx start
     # 生成账号
+    refreshSubscribeAfterInstall
     checkGFWStatue 11
     showAccounts 12
 }
 
 # sing-box 全部安装
 singBoxInstall() {
+    chainRefuseCoreSwitch 2
     readLastInstallationConfig
-    unInstallSubscribe
     selectCustomInstallType=
     totalProgress=8
     installTools 2
@@ -16841,6 +16913,7 @@ singBoxInstall() {
     handleSingBox start
     handleNginx stop
     handleNginx start
+    refreshSubscribeAfterInstall
     # 生成账号
     showAccounts 9
 }
@@ -16930,11 +17003,6 @@ manageAccount() {
 # 安装订阅
 installSubscribe() {
     readNginxSubscribe
-    local nginxSubscribeListen=
-    local nginxSubscribeSSL=
-    local serverName=
-    local SSLType=
-    local listenIPv6=
     if [[ -z "${subscribePort}" ]]; then
 
         nginxVersion=$(nginx -v 2>&1)
@@ -16957,31 +17025,8 @@ installSubscribe() {
         echoContent yellow " ---> 开始配置订阅的伪装站点\n"
         nginxBlog
         echo
-        local httpSubscribeStatus=
-        local subscribeServerName=
-
-        # 确定订阅使用的域名
-        if [[ -n "${currentHost}" ]]; then
-            subscribeServerName="${currentHost}"
-        elif [[ -n "${domain}" ]]; then
-            subscribeServerName="${domain}"
-        fi
-
-        # 检查是否有可用的TLS证书（实际检查文件是否存在）
-        local tlsCertExists=false
-        if [[ -n "${subscribeServerName}" ]] && \
-           [[ -f "${TLS_DIR}/${subscribeServerName}.crt" ]] && \
-           [[ -f "${TLS_DIR}/${subscribeServerName}.key" ]]; then
-            tlsCertExists=true
-        fi
-
-        # 如果没有TLS证书，使用HTTP订阅
-        if [[ "${tlsCertExists}" != "true" ]]; then
-            httpSubscribeStatus=true
-        fi
-
-        if [[ "${httpSubscribeStatus}" == "true" ]]; then
-
+        local subscribeServerName="${currentHost:-${domain}}"
+        if [[ -z "${subscribeServerName}" || ! -f "${TLS_DIR}/${subscribeServerName}.crt" || ! -f "${TLS_DIR}/${subscribeServerName}.key" ]]; then
             echoContent yellow "未发现tls证书，使用无加密订阅，可能被运营商拦截，请注意风险。"
             echo
             read -r -p "是否使用http订阅[y/n]？" addNginxSubscribeStatus
@@ -16990,32 +17035,48 @@ installSubscribe() {
                 echoContent yellow " ---> 退出安装"
                 exit
             fi
-        else
-            SSLType="ssl"
-            serverName="server_name ${subscribeServerName};"
-            nginxSubscribeSSL="ssl_certificate ${TLS_DIR}/${subscribeServerName}.crt;ssl_certificate_key ${TLS_DIR}/${subscribeServerName}.key;"
         fi
-        if [[ -n "$(curl --connect-timeout 2 -s -6 https://www.cloudflare.com/cdn-cgi/trace | grep "ip" | cut -d "=" -f 2)" ]]; then
-            listenIPv6="listen [::]:${result[-1]} ${SSLType};"
-        fi
-        # 不带 SNI 或 SNI 不对的握手直接拒，按 IP 扫的拿不到域名证书（与 0 的 rejectUnknownSni 一致）；
-        # ssl_reject_handshake 从 nginx 1.19.4 起才有，旧版写进去 nginx -t 不过、整个 nginx 起不来
-        local rejectUnknownSniBlock= rejectListen="listen ${result[-1]} ssl default_server;"
-        if [[ "${SSLType}" == "ssl" ]] && versionGreaterOrEqual "$(sed -n 's|.*nginx/\([0-9][0-9.]*\).*|\1|p' <<<"${nginxVersion}")" 1.19.4; then
-            if [[ -n "${listenIPv6}" ]]; then
-                rejectListen+="listen [::]:${result[-1]} ssl default_server;"
-            fi
-            rejectUnknownSniBlock=$(printf 'server {\n    %s\n    ssl_reject_handshake on;\n}' "${rejectListen}")
-        fi
-        if echo "${nginxVersion}" | grep -q "1.25" && [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $3}') -gt 0 ]] || [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $2}') -gt 25 ]]; then
-            nginxSubscribeListen="listen ${result[-1]} ${SSLType} so_keepalive=on;http2 on;${listenIPv6}"
-        else
-            nginxSubscribeListen="listen ${result[-1]} ${SSLType} so_keepalive=on;${listenIPv6}"
-        fi
+        renderSubscribeConf "${result[-1]}" "${subscribeServerName}"
+        bootStartup nginx
+        handleNginx stop
+        handleNginx start
+    fi
+    if [[ -z $(pgrep -x "nginx") ]]; then
+        handleNginx start
+    fi
+}
 
-        # 订阅文件名一律是 32 位十六进制 md5，location 只收这种名字：$2 里没有 / 和 .，alias 拼不出目录外的路径。
-        # 正则带花括号，必须加引号，否则 nginx 当成块的开头；readNginxSubscribe 取第一行 listen，主 server 块要排在最前
-        cat <<EOF >${nginxConfigPath}subscribe.conf
+# renderSubscribeConf PORT SERVER_NAME → 不交互地写 subscribe.conf：有 SERVER_NAME 的证书就是 https，没有就是 http。
+# 端口与 http / https 是只问一次的设置，这份文件从设置渲染：安装流程收尾按原端口重写，域名换了跟着换
+renderSubscribeConf() {
+    local port=$1 subscribeServerName=$2 SSLType= serverName= nginxSubscribeSSL= listenIPv6= nginxSubscribeListen
+    nginxVersion=$(nginx -v 2>&1)
+    if [[ -n "${subscribeServerName}" && -f "${TLS_DIR}/${subscribeServerName}.crt" && -f "${TLS_DIR}/${subscribeServerName}.key" ]]; then
+        SSLType="ssl"
+        serverName="server_name ${subscribeServerName};"
+        nginxSubscribeSSL="ssl_certificate ${TLS_DIR}/${subscribeServerName}.crt;ssl_certificate_key ${TLS_DIR}/${subscribeServerName}.key;"
+    fi
+    if [[ -n "$(curl --connect-timeout 2 -s -6 https://www.cloudflare.com/cdn-cgi/trace | grep "ip" | cut -d "=" -f 2)" ]]; then
+        listenIPv6="listen [::]:${port} ${SSLType};"
+    fi
+    # 不带 SNI 或 SNI 不对的握手直接拒，按 IP 扫的拿不到域名证书（与 0 的 rejectUnknownSni 一致）；
+    # ssl_reject_handshake 从 nginx 1.19.4 起才有，旧版写进去 nginx -t 不过、整个 nginx 起不来
+    local rejectUnknownSniBlock= rejectListen="listen ${port} ssl default_server;"
+    if [[ "${SSLType}" == "ssl" ]] && versionGreaterOrEqual "$(sed -n 's|.*nginx/\([0-9][0-9.]*\).*|\1|p' <<<"${nginxVersion}")" 1.19.4; then
+        if [[ -n "${listenIPv6}" ]]; then
+            rejectListen+="listen [::]:${port} ssl default_server;"
+        fi
+        rejectUnknownSniBlock=$(printf 'server {\n    %s\n    ssl_reject_handshake on;\n}' "${rejectListen}")
+    fi
+    if echo "${nginxVersion}" | grep -q "1.25" && [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $3}') -gt 0 ]] || [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $2}') -gt 25 ]]; then
+        nginxSubscribeListen="listen ${port} ${SSLType} so_keepalive=on;http2 on;${listenIPv6}"
+    else
+        nginxSubscribeListen="listen ${port} ${SSLType} so_keepalive=on;${listenIPv6}"
+    fi
+
+    # 订阅文件名一律是 32 位十六进制 md5，location 只收这种名字：$2 里没有 / 和 .，alias 拼不出目录外的路径。正则带花括号，
+    # 必须加引号，否则 nginx 当成块的开头；readNginxSubscribe 取第一行 listen、靠 sing-box 这个词认文件，主 server 块要排在最前
+    cat <<EOF >${nginxConfigPath}subscribe.conf
 server {
     ${nginxSubscribeListen}
     ${serverName}
@@ -17038,13 +17099,62 @@ server {
 }
 ${rejectUnknownSniBlock}
 EOF
-        bootStartup nginx
-        handleNginx stop
-        handleNginx start
+}
+
+# renderRealityLocalDest DOMAIN → reality_dest.conf：Reality 目标选本机域名时转交来的连接由它应答（该域名证书 + 伪装站），
+# 只听回环、要能 TLS 1.3 与 h2。没有这个域名的证书就不写，返回 1
+renderRealityLocalDest() {
+    local domainName=$1 h2Listen= h2Line=
+    [[ -n "${nginxConfigPath}" && -f "${TLS_DIR}/${domainName}.crt" && -f "${TLS_DIR}/${domainName}.key" ]] || return 1
+    nginxVersion=$(nginx -v 2>&1)
+    if versionGreaterOrEqual "$(sed -n 's|.*nginx/\([0-9][0-9.]*\).*|\1|p' <<<"${nginxVersion}")" 1.25.1; then
+        h2Line="http2 on;"
+    else
+        h2Listen=" http2"
     fi
-    if [[ -z $(pgrep -x "nginx") ]]; then
-        handleNginx start
+    cat <<EOF >"${nginxConfigPath}reality_dest.conf"
+server {
+    listen 127.0.0.1:${REALITY_LOCAL_DEST_PORT} ssl${h2Listen};
+    ${h2Line}
+    server_name ${domainName};
+    ssl_certificate ${TLS_DIR}/${domainName}.crt;
+    ssl_certificate_key ${TLS_DIR}/${domainName}.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    server_tokens off;
+    root ${nginxStaticPath};
+    location / {
+    }
+}
+EOF
+}
+
+# subscribeConfPort → 已装订阅的端口（subscribe.conf 第一行 listen），没装输出空
+subscribeConfPort() {
+    [[ -n "${nginxConfigPath}" && -f "${nginxConfigPath}subscribe.conf" ]] || return 0
+    grep -m1 "listen" "${nginxConfigPath}subscribe.conf" | awk '{print $2}' | grep -E '^[0-9]+$'
+}
+
+# refreshSubscribeAfterInstall → 安装流程收尾：订阅装过就按原端口重写配置（域名换了跟着换，拼车页面的 location 补回去），
+# 再用原 salt 静默重建订阅文件，订阅地址不变、内容换成这次装出来的账号。原来是 https、这次没有该域名的证书就不降级，文件不动
+refreshSubscribeAfterInstall() {
+    local port serverNameValue hadPage=
+    port=$(subscribeConfPort)
+    [[ -n "${port}" ]] && command -v nginx >/dev/null 2>&1 || return 0
+    readInstallType
+    readInstallProtocolType
+    readConfigHostPathUUID
+    serverNameValue=${domain:-${currentHost}}
+    if ! grep -m1 "listen" "${nginxConfigPath}subscribe.conf" | grep -q " ssl" \
+        || [[ -n "${serverNameValue}" && -f "${TLS_DIR}/${serverNameValue}.crt" && -f "${TLS_DIR}/${serverNameValue}.key" ]]; then
+        grep -q '# carpool-page-begin' "${nginxConfigPath}subscribe.conf" && hadPage=1
+        renderSubscribeConf "${port}" "${serverNameValue}"
+        [[ -n "${hadPage}" ]] && carpoolEnsureNginxLocation on
     fi
+    bootStartup nginx
+    handleNginx stop
+    handleNginx start
+    # 与拼车恢复成员时同一条静默重建：订阅端口读不出来（域名对不上）就跳过，不会掉进交互
+    carpoolRefreshSubscribe
 }
 # 卸载订阅
 unInstallSubscribe() {
@@ -17840,7 +17950,13 @@ initRealityKey() {
 }
 
 # 生成随机 Reality shortIds
+# 密钥沿用上次的就连 shortId 一起沿用：重新随机后客户端手里的旧链接 sid 对不上，握手全被 reset
 initRealityShortIds() {
+    if [[ -z "${realityShortId1}" && -n "${currentRealityShortId}" && "${currentRealityShortId}" != "null" \
+        && -n "${realityPublicKey}" && "${realityPublicKey}" == "${currentRealityPublicKey}" ]]; then
+        realityShortId1=${currentRealityShortId}
+        realityShortId2=${currentRealityShortId2:-$(openssl rand -hex 8)}
+    fi
     if [[ -z "${realityShortId1}" ]]; then
         realityShortId1=$(openssl rand -hex 8)
         realityShortId2=$(openssl rand -hex 8)
@@ -17915,30 +18031,17 @@ initRealityClientServersName() {
     fi
 
     if [[ -z "${realityServerName}" ]]; then
+        realityDestHost=
         if [[ -n "${domain}" ]]; then
             echo
             read -r -p "是否使用 ${domain} 此域名作为Reality目标域名 ？[y/n]:" realityServerNameCurrentDomainStatus
             if [[ "${realityServerNameCurrentDomainStatus}" == "y" ]]; then
-                realityServerName="${domain}"
-                if [[ "${selectCoreType}" == "1" ]]; then
-                    if [[ -z "${subscribePort}" ]]; then
-                        echo
-                        installSubscribe
-                        readNginxSubscribe
-                        realityDomainPort="${subscribePort}"
-                    else
-                        realityDomainPort="${subscribePort}"
-                    fi
-                fi
-                if [[ "${selectCoreType}" == "2" ]]; then
-                    if [[ -z "${subscribePort}" ]]; then
-                        echo
-                        installSubscribe
-                        readNginxSubscribe
-                        realityDomainPort="${subscribePort}"
-                    else
-                        realityDomainPort="${subscribePort}"
-                    fi
+                if renderRealityLocalDest "${domain}"; then
+                    realityServerName="${domain}"
+                    realityDestHost=127.0.0.1
+                    realityDomainPort=${REALITY_LOCAL_DEST_PORT}
+                else
+                    echoContent yellow " ---> $(t REALITY_LOCAL_DEST_NO_CERT "${domain}")"
                 fi
             fi
         fi
@@ -18015,7 +18118,14 @@ manageReality() {
     fi
 
     reloadCore
-    subscribe false
+    # 没配过订阅的（菜单 19 装的 Reality）不拖进订阅初始化：那里答 n 就退出，开好的端口和下载的站点文件都留着
+    readNginxSubscribe
+    if [[ -n "${subscribePort}" ]]; then
+        subscribe false
+    else
+        totalProgress=1
+        showAccounts 1
+    fi
 }
 
 # 安装reality scanner
@@ -18377,21 +18487,16 @@ _doctorCheckCore() {
         return
     fi
 
-    # pgrep 形式必须与主体一致：Xray 用 -f "xray/xray"，sing-box 用 -x sing-box。
-    # 换成自创的统一形式会跟 handle* 在边缘场景下背离。
-    local coreName binaryPath serviceName pgrepFlag pgrepArg
+    # 判活与 handle* 同一口径：Xray 用 xrayDaemonRunning，sing-box 用 pgrep -x sing-box
+    local coreName binaryPath serviceName running=
     if [[ "${coreKind}" == "1" ]]; then
         coreName="Xray-core"
         binaryPath="${XRAY_BIN}"
         serviceName="xray"
-        pgrepFlag="-f"
-        pgrepArg="xray/xray"
     else
         coreName="sing-box"
         binaryPath="${SINGBOX_BIN}"
         serviceName="sing-box"
-        pgrepFlag="-x"
-        pgrepArg="sing-box"
     fi
     _doctorRow "$(t DOCTOR_CHECK_CORE_KIND)" pass "${coreName}"
 
@@ -18429,7 +18534,12 @@ _doctorCheckCore() {
         _doctorRow "$(t DOCTOR_CHECK_SERVICE)" warn "service unit not found"
     fi
 
-    if pgrep "${pgrepFlag}" "${pgrepArg}" >/dev/null 2>&1; then
+    if [[ "${coreKind}" == "1" ]]; then
+        xrayDaemonRunning && running=1
+    elif pgrep -x sing-box >/dev/null 2>&1; then
+        running=1
+    fi
+    if [[ -n "${running}" ]]; then
         _doctorRow "$(t DOCTOR_CHECK_PROCESS)" pass "running"
     else
         _doctorRow "$(t DOCTOR_CHECK_PROCESS)" warn "not running"
@@ -18534,8 +18644,15 @@ _doctorCheckCert() {
 
     if [[ "${needsCert}" == "0" ]]; then
         if [[ -z "${currentInstallProtocolType//,/}" ]]; then
-            _doctorRow "$(t DOCTOR_CHECK_CERT_EXPIRY)" skip "$(t DOCTOR_DETAIL_NO_CORE)"
-            _doctorRow "$(t DOCTOR_CHECK_CERT_MATCH)" skip "$(t DOCTOR_DETAIL_NO_CORE)"
+            # 只跑链式角色的 sing-box 机器没有协议入站，但核心是装着的
+            local why
+            if [[ -n "${coreKind}" ]] || { [[ -f "${SINGBOX_BIN}" ]] && compgen -G "${SINGBOX_FRAGMENT_DIR}/*.json" >/dev/null; }; then
+                why=$(t DOCTOR_DETAIL_NO_TLS_PROTOCOL)
+            else
+                why=$(t DOCTOR_DETAIL_NO_CORE)
+            fi
+            _doctorRow "$(t DOCTOR_CHECK_CERT_EXPIRY)" skip "${why}"
+            _doctorRow "$(t DOCTOR_CHECK_CERT_MATCH)" skip "${why}"
         else
             _doctorRow "$(t DOCTOR_CHECK_CERT_EXPIRY)" skip "$(t DOCTOR_DETAIL_REALITY_ONLY)"
             _doctorRow "$(t DOCTOR_CHECK_CERT_MATCH)" skip "$(t DOCTOR_DETAIL_REALITY_ONLY)"

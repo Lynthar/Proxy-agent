@@ -753,7 +753,7 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
             "指定走链路的 ${E2E_USER} 在出口断了时断开，不回落到直连"
         accountExit '0\n2\n' >/dev/null
         accountExit "${acctIdx}\n1\n" >/dev/null
-        assert_equals "z_direct_outbound" "$(jq -r '.routing.rules[-1].outboundTag' "${XRAY_CONF_DIR}/09_routing.json" 2>/dev/null)" \
+        assert_equals "chain_direct" "$(jq -r '.routing.rules[-1].outboundTag' "${XRAY_CONF_DIR}/09_routing.json" 2>/dev/null)" \
             "默认出口改成直连：Xray 兜底规则随之直连"
         assert_equals "204" "$(realityProbe)" "跟随默认、默认直连的 ${E2E_USER} 照样上网"
         accountExit '0\n1\n' >/dev/null

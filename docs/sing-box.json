@@ -6,8 +6,7 @@
   },
   "http_clients": [
     {
-      "tag": "rule_set_http",
-      "detour": "direct"
+      "tag": "rule_set_http"
     }
   ],
   "experimental": {

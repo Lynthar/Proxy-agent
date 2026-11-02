@@ -64,9 +64,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: install jq and openssl
+      - name: install jq, openssl and procps
         run: |
-          apt-get update && apt-get install -y --no-install-recommends jq openssl
+          apt-get update && apt-get install -y --no-install-recommends jq openssl procps
           jq --version
 
       - name: module unit tests

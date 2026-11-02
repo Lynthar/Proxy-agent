@@ -61,6 +61,9 @@ readonly SINGBOX_MIN_VERSION="1.12.0"
 # 发的 sing-box/clash 订阅（sing-box 系客户端报 1.8.1、mihomo 报 1.8.2）；只用 Xray 客户端、
 # 想跟随 Xray 收紧策略的用户可手动改成 26.3.27
 readonly REALITY_MIN_CLIENT_VER="1.8.0"
+# Reality 目标选本机域名时转交连接的落点：nginx 只在回环上听、用这个域名的证书。不指订阅端口（订阅一改一删 Reality 就断），
+# 也不经公网 IP 回连自己（云上的 1:1 NAT 常常不回环）。避开端口池、链式桥与拼车 API 段、nginx 的 31300 / 31302 回落
+readonly REALITY_LOCAL_DEST_PORT=31305
 
 # Xray-core 默认钉在官方 sing-box 客户端还能完成 REALITY 握手的最后一个稳定版：26.9.8 起服务端要求
 # ClientHello 带 X25519MLKEM768 份额，sing-box 会剥掉它（SagerNet/sing-box#4520），脚本自己发的
