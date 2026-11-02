@@ -8858,18 +8858,26 @@ carpoolReloadNginx() {
     handleNginx start
 }
 
+# carpoolInsertPageBlock SRC DEST → SRC 加上页面的 location 块（插在 location / 之前）写进 DEST。
+# 块经临时文件喂给 awk：BSD awk 的 -v 不吃多行串
+carpoolInsertPageBlock() {
+    local blockFile rc=0
+    blockFile=$(mktemp "${CARPOOL_DIR}/.nginx.XXXXXX") || return 1
+    carpoolNginxLocationBlock "${CARPOOL_PAGE_DIR}" >"${blockFile}"
+    awk -v f="${blockFile}" '/^    location \/ \{/ && !done { while ((getline line < f) > 0) print line; close(f); done = 1 } { print }' "$1" >"$2" || rc=1
+    rm -f "${blockFile}"
+    return "${rc}"
+}
+
 # carpoolEnsureNginxLocation on|off → subscribe.conf 里加 / 删页面的 location 块（按标记判重）；
-# 改完过 nginx -t，不过就还原，不动订阅现有 location 的形状。块经临时文件喂给 awk：BSD awk 的 -v 不吃多行串
+# 改完过 nginx -t，不过就还原，不动订阅现有 location 的形状
 carpoolEnsureNginxLocation() {
-    local conf="${nginxConfigPath}subscribe.conf" has= blockFile
+    local conf="${nginxConfigPath}subscribe.conf" has=
     [[ -f "${conf}" ]] || return 0
     grep -q '# carpool-page-begin' "${conf}" && has=1
     if [[ "$1" == "on" && -z "${has}" ]]; then
-        blockFile=$(mktemp "${CARPOOL_DIR}/.nginx.XXXXXX") || return 1
-        carpoolNginxLocationBlock "${CARPOOL_PAGE_DIR}" >"${blockFile}"
         cp -f "${conf}" "${conf}.carpool.bak"
-        awk -v f="${blockFile}" '/^    location \/ \{/ && !done { while ((getline line < f) > 0) print line; close(f); done = 1 } { print }' "${conf}.carpool.bak" >"${conf}" || { mv -f "${conf}.carpool.bak" "${conf}"; rm -f "${blockFile}"; return 1; }
-        rm -f "${blockFile}"
+        carpoolInsertPageBlock "${conf}.carpool.bak" "${conf}" || { mv -f "${conf}.carpool.bak" "${conf}"; return 1; }
     elif [[ "$1" == "off" && -n "${has}" ]]; then
         cp -f "${conf}" "${conf}.carpool.bak"
         sed '/# carpool-page-begin/,/# carpool-page-end/d' "${conf}.carpool.bak" >"${conf}" || { mv -f "${conf}.carpool.bak" "${conf}"; return 1; }
@@ -17060,13 +17068,19 @@ renderSubscribeConf() {
         listenIPv6="listen [::]:${port} ${SSLType};"
     fi
     # 不带 SNI 或 SNI 不对的握手直接拒，按 IP 扫的拿不到域名证书（与 0 的 rejectUnknownSni 一致）；
-    # ssl_reject_handshake 从 nginx 1.19.4 起才有，旧版写进去 nginx -t 不过、整个 nginx 起不来
-    local rejectUnknownSniBlock= rejectListen="listen ${port} ssl default_server;"
+    # ssl_reject_handshake 从 nginx 1.19.4 起才有，旧版写进去 nginx -t 不过、整个 nginx 起不来。
+    # 同端口别的配置已有 default_server 时不加：两个 default_server 让 nginx 拒载
+    local rejectUnknownSniBlock= rejectListen="listen ${port} ssl default_server;" otherDefault=
     if [[ "${SSLType}" == "ssl" ]] && versionGreaterOrEqual "$(sed -n 's|.*nginx/\([0-9][0-9.]*\).*|\1|p' <<<"${nginxVersion}")" 1.19.4; then
-        if [[ -n "${listenIPv6}" ]]; then
-            rejectListen+="listen [::]:${port} ssl default_server;"
+        otherDefault=$(nginxDefaultServerFile "${port}" "${nginxConfigPath}subscribe.conf")
+        if [[ -n "${otherDefault}" ]]; then
+            echoContent yellow " ---> $(t SUBSCRIBE_DEFAULT_SERVER_TAKEN "${port}" "${otherDefault}")"
+        else
+            if [[ -n "${listenIPv6}" ]]; then
+                rejectListen+="listen [::]:${port} ssl default_server;"
+            fi
+            rejectUnknownSniBlock=$(printf 'server {\n    %s\n    ssl_reject_handshake on;\n}' "${rejectListen}")
         fi
-        rejectUnknownSniBlock=$(printf 'server {\n    %s\n    ssl_reject_handshake on;\n}' "${rejectListen}")
     fi
     if echo "${nginxVersion}" | grep -q "1.25" && [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $3}') -gt 0 ]] || [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $2}') -gt 25 ]]; then
         nginxSubscribeListen="listen ${port} ${SSLType} so_keepalive=on;http2 on;${listenIPv6}"
@@ -17076,7 +17090,19 @@ renderSubscribeConf() {
 
     # 订阅文件名一律是 32 位十六进制 md5，location 只收这种名字：$2 里没有 / 和 .，alias 拼不出目录外的路径。正则带花括号，
     # 必须加引号，否则 nginx 当成块的开头；readNginxSubscribe 取第一行 listen、靠 sing-box 这个词认文件，主 server 块要排在最前
+    # 通用地址按 UA 给格式：规则锚定开头（Hiddify / NekoBox / Karing 的 UA 带着别家的名字），map 求值会冲掉 $1，文件名用命名捕获
     cat <<EOF >${nginxConfigPath}subscribe.conf
+# proxy-agent subscribe.conf r${SUBSCRIBE_CONF_REVISION}
+map \$http_user_agent \$paSubFormat {
+    default                            default;
+    "~*^karing/"                       sing-box;
+    "~*^hiddifynext"                   sing-box;
+    "~*^(?:nekobox|throne)/"           default;
+    "~^SF[AIMT]\b"                     sing-box;
+    "~*^clash\.meta/"                  clashMeta;
+    "~*^(?:clash|mihomo|flclash|stash)" clashMetaProfiles;
+    "~*sing-?box"                      sing-box;
+}
 server {
     ${nginxSubscribeListen}
     ${serverName}
@@ -17090,8 +17116,16 @@ server {
     client_max_body_size 100m;
     server_tokens off;
     root ${nginxStaticPath};
+    location ~ "^/s/(?<paSubKey>[0-9a-f]{32})\$" {
+        default_type 'text/plain; charset=utf-8';
+        add_header Profile-Update-Interval 12 always;
+        add_header Vary User-Agent always;
+        root ${SUBSCRIBE_DIR};
+        try_files /\$paSubFormat/\$paSubKey /default/\$paSubKey =404;
+    }
     location ~ "^/s/(clashMeta|default|clashMetaProfiles|sing-box|sing-box_profiles)/([0-9a-f]{32})\$" {
         default_type 'text/plain; charset=utf-8';
+        add_header Profile-Update-Interval 12 always;
         alias ${SUBSCRIBE_DIR}/\$1/\$2;
     }
     location / {
@@ -17099,6 +17133,51 @@ server {
 }
 ${rejectUnknownSniBlock}
 EOF
+}
+
+# nginxDefaultServerFile PORT SELF → 别的 nginx 配置在 PORT 的通配地址上声明了 default_server 就输出那个文件，没有输出空。
+# 读 nginx -T 的全量配置，SELF 这份不算；nginx -T 失败时输出空
+nginxDefaultServerFile() {
+    nginx -T 2>/dev/null | awk -v port="$1" -v self="$2" '
+        /^# configuration file / { file = $4; sub(/:$/, "", file); next }
+        file == self { next }
+        {
+            sub(/#.*/, "")
+            n = split($0, parts, ";")
+            for (i = 1; i <= n; i++) {
+                if (split(parts[i], w, " ") < 2 || w[1] != "listen" || parts[i] !~ /[ \t]default_server([ \t]|$)/) continue
+                if (w[2] == port || w[2] == "*:" port || w[2] == "0.0.0.0:" port || w[2] == "[::]:" port) { print file; exit }
+            }
+        }'
+}
+
+# ensureSubscribeConfCurrent → subscribe.conf 第一行不是当前模板修订号（旧版脚本写的）就按原端口、原域名重写，
+# 拼车页面块补回；nginx -t 不过就逐字还原。原来是 https、证书已不在的不动（重写会降成 http）
+ensureSubscribeConfCurrent() {
+    local conf="${nginxConfigPath}subscribe.conf" port serverNameValue hadPage=
+    [[ -n "${nginxConfigPath}" && -f "${conf}" ]] && command -v nginx >/dev/null 2>&1 || return 0
+    [[ "$(head -1 "${conf}")" == "# proxy-agent subscribe.conf r${SUBSCRIBE_CONF_REVISION}" ]] && return 0
+    port=$(subscribeConfPort)
+    [[ -n "${port}" ]] || return 0
+    serverNameValue=$(grep -m1 'server_name' "${conf}" | awk '{print $2}' | tr -d ';')
+    if grep -m1 "listen" "${conf}" | grep -q " ssl" && [[ ! -f "${TLS_DIR}/${serverNameValue}.crt" || ! -f "${TLS_DIR}/${serverNameValue}.key" ]]; then
+        return 0
+    fi
+    grep -q '# carpool-page-begin' "${conf}" && hadPage=1
+    cp -f "${conf}" "${conf}.upgrade.bak" || return 0
+    renderSubscribeConf "${port}" "${serverNameValue}"
+    if [[ -n "${hadPage}" ]] && carpoolInsertPageBlock "${conf}" "${conf}.new"; then
+        mv -f "${conf}.new" "${conf}"
+    fi
+    rm -f "${conf}.new"
+    if nginx -t >/dev/null 2>&1; then
+        rm -f "${conf}.upgrade.bak"
+        carpoolReloadNginx
+        echoContent green " ---> $(t SUBSCRIBE_CONF_UPGRADED)"
+    else
+        mv -f "${conf}.upgrade.bak" "${conf}"
+        echoContent yellow " ---> $(t SUBSCRIBE_CONF_UPGRADE_FAILED "${conf}")"
+    fi
 }
 
 # renderRealityLocalDest DOMAIN → reality_dest.conf：Reality 目标选本机域名时转交来的连接由它应答（该域名证书 + 伪装站），
@@ -17730,8 +17809,14 @@ subscribe() {
                 fi
                 # 三种格式的文件不管打不打印都要重建：上面已经删光了 clashMeta，只建 default 会让所有人的 Clash 订阅 404
                 if [[ -z "${showStatus}" ]]; then
-                    echoContent skyBlue "\n----------默认订阅----------\n"
+                    echoContent skyBlue "\n----------$(t SUBSCRIBE_UNIVERSAL_TITLE)----------\n"
                     echoContent green "email:${email}\n"
+                    echoContent yellow "url:${subscribeType}://${currentDomain}/s/${emailMd5}\n"
+                    echoContent yellow "$(t SUBSCRIBE_UNIVERSAL_HINT)\n"
+                    if [[ "${release}" != "alpine" ]]; then
+                        echo "${subscribeType}://${currentDomain}/s/${emailMd5}" | qrencode -s 10 -m 1 -t UTF8
+                    fi
+                    echoContent skyBlue "\n----------默认订阅----------\n"
                     echoContent yellow "url:${subscribeType}://${currentDomain}/s/default/${emailMd5}\n"
                     echoContent yellow "在线二维码:https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${subscribeType}://${currentDomain}/s/default/${emailMd5}\n"
                     if [[ "${release}" != "alpine" ]]; then
@@ -18753,6 +18838,8 @@ menu() {
     cd "$HOME" || exit
     if isDryRun; then
         echoContent yellow "\n$(t DRY_RUN_BANNER)"
+    else
+        ensureSubscribeConfCurrent
     fi
     echoContent red "\n=============================================================="
     echoContent green "$(t MENU_AUTHOR): Lynthar"

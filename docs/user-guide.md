@@ -176,6 +176,18 @@ pasly
 
 订阅链接可以导入支持订阅的客户端（如 Clash、V2rayN 等），实现一键配置。
 
+每个账号先列一条**通用订阅**，再列默认（分享链接）、Clash、sing-box 三种格式各自的地址。通用订阅看客户端给格式，一般只发这一条就够：
+
+| 客户端 | 拿到的格式 |
+|---|---|
+| Clash Verge Rev、Clash Party（原 Mihomo Party）、Clash Meta for Android、FlClash、Stash | Clash 配置 |
+| sing-box 官方客户端（SFA / SFI / SFM / SFT）、Hiddify、Karing | sing-box 配置 |
+| v2rayN、v2rayNG、NekoBox、Shadowrocket 及其他 | 分享链接 |
+
+客户端是按 User-Agent 认的，改过 UA 的可能被认错；导入失败时改用对应格式的地址。Stash 拿到的是给 mihomo 生成的 Clash 配置，没有实测过。
+
+订阅响应带 `Profile-Update-Interval: 12`。Clash Verge Rev、Clash Party、Clash Meta for Android、Hiddify 导入时把自动更新间隔设成 12 小时，其中 Clash Party 与 Hiddify 之后每次更新都会重新采用；FlClash、v2rayN、v2rayNG 和 sing-box 官方客户端不看这个头，按各自的设置更新。Clash 配置里的节点另由 proxy-provider 每小时刷新一次。
+
 ---
 
 ## 用户管理
@@ -862,6 +874,16 @@ pasly doctor
 ## 升级与迁移提示
 
 下面是从旧版本升级时**可能注意到**的行为变化。这里只列出真正会让用户看到不同/需要动手的项；其它修复对最终用户透明，不必关心。
+
+### 订阅：更新后第一次打开菜单会重写订阅配置
+
+**适用对象**：装了订阅的用户。
+
+**现象**：更新脚本后第一次运行 `pasly`，菜单前多一行「订阅配置已按新版模板重写，订阅地址不变」。
+
+**原因**：通用订阅地址和 `Profile-Update-Interval` 头（见[查看订阅链接](#查看订阅链接)）都写在订阅的 nginx 配置里，旧版本生成的配置没有它们。脚本按原端口、原域名重写一次，拼车页面那一段一并补回；`nginx -t` 不通过就原样还原并提示。原来是 https、证书已经不在的不动。
+
+**要不要处理**：不用。手改过 `subscribe.conf` 的，改动会被覆盖（重装时同样会覆盖）。
 
 ### Xray-core：「升级」会装回 v26.3.27
 

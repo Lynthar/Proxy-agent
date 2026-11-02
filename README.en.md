@@ -16,7 +16,8 @@ and an exit chained into multiple hops; one machine can host several chains with
 traffic split across them, or pin each account to an exit (direct or a given
 chain); and existing third-party SS / Trojan / SOCKS5 nodes can be plugged in as
 exits. The rest covers a masquerade site, certificate
-issuance, subscription files, WARP routing, self-update and version rollback.
+issuance, subscriptions (one address that serves each client its own format), WARP routing,
+self-update and version rollback.
 Bilingual.
 
 ## Install

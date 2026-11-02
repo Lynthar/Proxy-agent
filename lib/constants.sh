@@ -37,6 +37,8 @@ readonly TLS_DIR="${PROXY_AGENT_DIR}/tls"
 readonly SUBSCRIBE_DIR="${PROXY_AGENT_DIR}/subscribe"
 readonly SUBSCRIBE_LOCAL_DIR="${PROXY_AGENT_DIR}/subscribe_local"
 readonly SUBSCRIBE_REMOTE_DIR="${PROXY_AGENT_DIR}/subscribe_remote"
+# subscribe.conf 第一行记的模板修订号：renderSubscribeConf 的输出一改就加一，旧号的机器进菜单时按原端口与域名重写
+readonly SUBSCRIBE_CONF_REVISION=2
 readonly WARP_DIR="${PROXY_AGENT_DIR}/warp"
 readonly GEOSITE_LIST_FILE="${PROXY_AGENT_DIR}/geosite/dlc.dat_plain.yml"
 # 拼车状态住安装根下的 carpool/，不能进 xray/conf：-confdir 会把目录里所有 .json 当配置读

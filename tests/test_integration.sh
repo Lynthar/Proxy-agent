@@ -1383,7 +1383,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试拼车钩子与 tick ===${NC}"
 
-CP_FN_NAMES="applyAccountChangeAllProtocols readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled xrayDaemonRunning carpoolCurrentClientsMap ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolGuardAccountMenu carpoolCheckPrerequisites carpoolPickApiPort carpoolApiReady carpoolAllAccounts carpoolFillUuids carpoolRemoveCron carpoolRemoveSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable carpoolHasTty carpoolApply carpoolResetUsage carpoolShowUsage carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMenu addUser removeUser cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountStateFile chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget"
+CP_FN_NAMES="applyAccountChangeAllProtocols readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled xrayDaemonRunning carpoolCurrentClientsMap ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolGuardAccountMenu carpoolCheckPrerequisites carpoolPickApiPort carpoolApiReady carpoolAllAccounts carpoolFillUuids carpoolRemoveCron carpoolRemoveSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable carpoolHasTty carpoolApply carpoolResetUsage carpoolShowUsage carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolInsertPageBlock carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMenu addUser removeUser cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountStateFile chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget"
 CP_FNS=$(sed -n "$(for _f in ${CP_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_not_empty "${CP_FNS}" "拼车：抽到 install.sh 原文"
 assert_equals "$(wc -w <<<"${CP_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CP_FNS}")" "拼车：每个函数都抽到了（抽不到说明函数体里出现了顶格的 }）"
@@ -2966,6 +2966,7 @@ run_custom_port() (
     eval "${PORT_FN}"
     eval "${PICK_PORT_FNS}"
     listeningPorts() { :; }
+    subscribeConfPort() { :; }
     eval "${CUSTOM_PORT_FN}"
     currentPort="$1" lastInstallationConfig="$2" customPort= btDomain= port=
     customPortFunction <<<"$3" >/dev/null
@@ -3374,18 +3375,19 @@ SUB_ROOT="${MOCK_ROOT}/subscribe-conf"
 SUB_CONF="${SUB_ROOT}/nginx/subscribe.conf"
 SUB_HEX=0123456789abcdef0123456789abcdef
 
-# $1 nginx -v 报的版本（none = 还没装，装上后报 1.27.3），$2 cert|nocert，$3 v6|v4；输出读回的「端口|协议」。
-# nocert 按 IP 装（Reality-only），没有 currentHost
+# $1 nginx -v 报的版本（none = 还没装，装上后报 1.27.3），$2 cert|nocert，$3 v6|v4，$4 可选：nginx -T 输出的文件；
+# 输出读回的「端口|协议」。nocert 按 IP 装（Reality-only），没有 currentHost
 run_sub() {
     rm -rf "${SUB_ROOT}"; mkdir -p "${SUB_ROOT}/nginx" "${SUB_ROOT}/tls"
     local host=
     if [[ "$2" == "cert" ]]; then host=example.com; : >"${SUB_ROOT}/tls/example.com.crt"; : >"${SUB_ROOT}/tls/example.com.key"; fi
-    printf 'y\ny\n' | env SUB_HOST="${host}" SUB_ROOT="${SUB_ROOT}" SUB_FN="${SUB_FN}" SUB_NGINX="$1" SUB_V6="$3" bash -c '
-        source lib/utils.sh
-        TLS_DIR="${SUB_ROOT}/tls"; SUBSCRIBE_DIR="${SUB_ROOT}/subscribe"; nginxConfigPath="${SUB_ROOT}/nginx/"
+    printf 'y\ny\n' | env PROXY_AGENT_DIR="${SUB_ROOT}" V2RAY_LANG=zh_CN SUB_HOST="${host}" SUB_ROOT="${SUB_ROOT}" SUB_FN="${SUB_FN}" SUB_NGINX="$1" SUB_V6="$3" SUB_T="${4:-}" bash -c '
+        source lib/i18n.sh; source lib/constants.sh; source lib/utils.sh
+        nginxConfigPath="${SUB_ROOT}/nginx/"
         nginxStaticPath=/usr/share/nginx/html; currentHost="${SUB_HOST}"
         echoContent() { :; }
         nginx() {
+            if [[ "$1" == "-T" && -n "${SUB_T}" ]]; then cat "${SUB_T}"; return 0; fi
             [[ "$1" == "-v" ]] || return 0
             if [[ "${SUB_NGINX}" != none || -f "${SUB_ROOT}/installed" ]]; then
                 echo "nginx version: nginx/${SUB_NGINX/none/1.27.3}" >&2
@@ -3402,10 +3404,10 @@ run_sub() {
         readNginxSubscribe
         printf "%s|%s\n" "${subscribePort}" "${subscribeType}"'
 }
-# 订阅 location 的正则（去掉 nginx 的引号）对 $1 是否命中
+# 订阅 location 的正则（去掉 nginx 的引号与命名捕获）对 $1 是否命中，任一 location 命中即算
 sub_location_matches() {
     local re
-    re=$(sed -n 's/^    location ~ "\(\^\/s\/.*\$\)" {$/\1/p' "${SUB_CONF}")
+    re=$(sed -n 's/^    location ~ "\(\^\/s\/.*\$\)" {$/\1/p' "${SUB_CONF}" | sed 's/(?<[A-Za-z]*>/(/g')
     [[ -n "${re}" ]] && grep -qE "${re}" <<<"$1"
 }
 
@@ -3431,6 +3433,115 @@ assert_equals "0" "$(grep -c 'ssl_reject_handshake' "${SUB_CONF}")" "installSubs
 assert_equals "23456|https" "$(run_sub none cert v4)" "installSubscribe：先装 nginx 再配订阅"
 assert_equals "1" "$(grep -c 'ssl_reject_handshake on;' "${SUB_CONF}")" "installSubscribe：按装完后的 nginx 版本判，不用装之前的 not found"
 assert_contains "$(grep -m1 listen "${SUB_CONF}")" "http2 on;" "installSubscribe：装完后的 nginx ≥ 1.25.1 时开 http2"
+
+# --- 通用订阅地址与更新间隔（G / F）---
+run_sub 1.27.3 cert v4 >/dev/null
+assert_contains "$(head -1 "${SUB_CONF}")" "# proxy-agent subscribe.conf r" "订阅渲染：第一行是模板修订号（旧号的机器进菜单时按原设置重写）"
+sub_location_matches "/s/${SUB_HEX}"; assert_equals "0" "$?" "通用订阅：/s/<32 位十六进制> 命中"
+sub_location_matches "/s/${SUB_HEX}x"; assert_equals "1" "$?" "通用订阅：33 位不命中"
+assert_equals "2|1" "$(grep -c 'add_header Profile-Update-Interval 12 always;' "${SUB_CONF}")|$(grep -c 'add_header Vary User-Agent always;' "${SUB_CONF}")" \
+    "订阅响应：两种地址都带更新间隔（整数小时），通用地址带 Vary: User-Agent"
+assert_contains "$(cat "${SUB_CONF}")" 'try_files /$paSubFormat/$paSubKey /default/$paSubKey =404;' \
+    "通用订阅：文件名用命名捕获（map 求值会冲掉 \$1），选中的格式没有文件时退回默认订阅"
+
+# sub_ua_format UA → 按 subscribe.conf 里 map 的规则自上而下第一个命中给出的格式
+sub_ua_format() {
+    perl -e '
+        my ($ua, $conf) = @ARGV; my ($in, $dflt) = (0, "");
+        open my $fh, "<", $conf or die;
+        while (<$fh>) {
+            if (/^map \$http_user_agent/) { $in = 1; next }
+            last if $in && /^\}/;
+            next unless $in;
+            if (/^\s*default\s+(\S+);/) { $dflt = $1; next }
+            if (/^\s*"~(\*?)(.*)"\s+(\S+);/) { my ($re, $fmt) = ($1 ? qr/$2/i : qr/$2/, $3); if ($ua =~ $re) { print "$fmt\n"; exit } }
+        }
+        print "$dflt\n";' "$1" "${SUB_CONF}"
+}
+while IFS='|' read -r _ua _want; do
+    assert_equals "${_want}" "$(sub_ua_format "${_ua}")" "通用订阅：${_ua:-空 UA} → ${_want}"
+done <<'UAS'
+clash-verge/v2.5.10|clashMetaProfiles
+mihomo.party/v2.0.4 (clash.meta)|clashMetaProfiles
+ClashMetaForAndroid/2.11.18.Meta|clashMetaProfiles
+FlClash/v0.8.90 clash-verge Platform/android|clashMetaProfiles
+clash.meta/v1.19.15|clashMeta
+SFA (sing-box 1.12.0; language zh_CN)|sing-box
+SFI/1.8.0 (Build 1; sing-box 1.8.0; language en_US)|sing-box
+HiddifyNext/2.5.7 (android) like ClashMeta v2ray sing-box|sing-box
+NekoBox/Android/1.3.9 (Prefer ClashMeta Format)|default
+Karing/1.2.25 platform/windows mihomo/1.19.28 clash-verge sing-box 1.14.0|sing-box
+v2rayN/7.10.5|default
+Shadowrocket/2070 CFNetwork/1568 Darwin/24.0.0|default
+|default
+UAS
+
+# --- 同端口别的配置已有 default_server：不加拒握手块 ---
+_subT="${MOCK_ROOT}/subscribe-nginx-T.txt"
+printf '# configuration file /etc/nginx/conf.d/site.conf:\nserver {\n    listen 23456 ssl default_server; # site\n}\n' >"${_subT}"
+assert_equals "23456|https" "$(run_sub 1.27.3 cert v4 "${_subT}")" "订阅渲染（同端口已有 default_server）：照常装上"
+assert_equals "0" "$(grep -c 'default_server\|ssl_reject_handshake' "${SUB_CONF}")" \
+    "订阅渲染：同端口别的配置已有 default_server 时不加拒握手块（两个 default_server 让 nginx 拒载）"
+printf '# configuration file %s/nginx/subscribe.conf:\nserver {\n    listen 23456 ssl default_server;\n}\n# configuration file /etc/nginx/conf.d/site.conf:\nserver { listen 127.0.0.1:23456 default_server; listen 8443 default_server; }\n' "${SUB_ROOT}" >"${_subT}"
+run_sub 1.27.3 cert v4 "${_subT}" >/dev/null
+assert_equals "1" "$(grep -c 'ssl_reject_handshake on;' "${SUB_CONF}")" \
+    "订阅渲染：自己那份、别的地址或别的端口上的 default_server 不算冲突，拒握手块照加"
+rm -f "${_subT}"
+
+# --- 旧模板的 subscribe.conf：进菜单时按原端口、原域名重写 ---
+UPG_ROOT="${MOCK_ROOT}/subscribe-upgrade"
+UPG_CONF="${UPG_ROOT}/nginx/subscribe.conf"
+UPG_FN=$(awk '/^installSubscribe\(\) \{/{f=1} /^unInstallSubscribe\(\) \{/{f=0} f' install.sh; sed -n '/^carpoolReloadNginx() {/,/^}/p;/^carpoolInsertPageBlock() {/,/^}/p' install.sh)
+# upg_ensure [nginx -t 的返回码] → 以 UPG_ROOT 为安装根跑 ensureSubscribeConfCurrent，nginx 调用记进 calls；输出它打印的内容
+upg_ensure() {
+    : >"${UPG_ROOT}/calls"
+    env PROXY_AGENT_DIR="${UPG_ROOT}" UPG_FN="${UPG_FN}" UPG_T_RC="${1:-0}" V2RAY_LANG=zh_CN bash -c '
+        source lib/i18n.sh; source lib/constants.sh; source lib/utils.sh; source lib/carpool.sh
+        eval "${UPG_FN}"
+        nginx() {
+            echo "nginx $*" >>"${PROXY_AGENT_DIR}/calls"
+            [[ "$1" == "-v" ]] && echo "nginx version: nginx/1.27.3" >&2
+            [[ "$1" == "-t" ]] && return "${UPG_T_RC}"
+            return 0
+        }
+        pgrep() { echo 1; }; curl() { return 0; }
+        nginxConfigPath="${PROXY_AGENT_DIR}/nginx/"; nginxStaticPath=/var/www/html
+        ensureSubscribeConfCurrent' 2>&1
+}
+# run_upg 旧 conf 的 listen 后缀（"" 是 http，ssl 是 https） [nginx -t 的返回码] [cert 时放上域名证书] → 从旧模板的 conf 起跑 upg_ensure
+run_upg() {
+    rm -rf "${UPG_ROOT}"; mkdir -p "${UPG_ROOT}/nginx" "${UPG_ROOT}/tls" "${UPG_ROOT}/carpool"
+    [[ "$3" == cert ]] && : >"${UPG_ROOT}/tls/sub.example.org.crt" && : >"${UPG_ROOT}/tls/sub.example.org.key"
+    printf 'server {\n    listen 50188 %s so_keepalive=on;\n    %s\n    root /var/www/html;\n    location ~ "^/s/(clashMeta|default|clashMetaProfiles|sing-box|sing-box_profiles)/([0-9a-f]{32})$" {\n        alias /x/$1/$2;\n    }\n    location / {\n    }\n}\n' \
+        "$1" "$([[ "$1" == ssl ]] && echo 'server_name sub.example.org;')" >"${UPG_CONF}"
+    upg_ensure "$2"
+}
+_upgOut=$(run_upg "")
+assert_contains "$(head -1 "${UPG_CONF}")" "# proxy-agent subscribe.conf r" "订阅升级：旧模板重写成当前修订号"
+assert_contains "$(grep -m1 listen "${UPG_CONF}")" "listen 50188 " "订阅升级：端口不变"
+assert_equals "0" "$(grep -c 'listen 50188 ssl' "${UPG_CONF}")" "订阅升级：原来是 http 的仍是 http"
+assert_equals "1|1" "$(grep -c '^nginx -t$' "${UPG_ROOT}/calls")|$(grep -c '^nginx -s reload$' "${UPG_ROOT}/calls")" "订阅升级：nginx -t 过了才 reload"
+assert_contains "${_upgOut}" "订阅地址不变" "订阅升级：告诉车主重写了、地址没变"
+_upgBefore=$(cat "${UPG_CONF}")
+_upgOut=$(upg_ensure)
+assert_equals "|${_upgBefore}" "$(cat "${UPG_ROOT}/calls")${_upgOut}|$(cat "${UPG_CONF}")" "订阅升级：已经是当前模板就什么都不做"
+
+run_upg "" >/dev/null
+sed -i.bak '1s/.*/# proxy-agent subscribe.conf r1/' "${UPG_CONF}" && rm -f "${UPG_CONF}.bak"
+awk '/^    location \/ \{/ && !d { print "    # carpool-page-begin"; print "    location = /old {}"; print "    # carpool-page-end"; d = 1 } { print }' "${UPG_CONF}" >"${UPG_CONF}.new" && mv "${UPG_CONF}.new" "${UPG_CONF}"
+upg_ensure >/dev/null
+assert_equals "1" "$(grep -c '# carpool-page-begin' "${UPG_CONF}")" "订阅升级：拼车页面块补回、只有一份"
+assert_equals "yes" "$(awk '/carpool-page-end/{e=NR} /^    location \/ \{/{l=NR} END{print (e && l && e < l) ? "yes" : "no"}' "${UPG_CONF}")" "订阅升级：页面块在 location / 之前"
+assert_equals "0" "$(grep -c 'location = /old' "${UPG_CONF}")" "订阅升级：页面块是按当前模板重新生成的"
+
+run_upg "" 1 >/dev/null
+assert_equals "server {|0" "$(head -1 "${UPG_CONF}")|$(grep -c paSubFormat "${UPG_CONF}")" "订阅升级（nginx -t 不过）：还原成旧配置"
+assert_equals "0" "$(grep -c 'nginx -s reload' "${UPG_ROOT}/calls")" "订阅升级（nginx -t 不过）：不 reload"
+
+run_upg ssl >/dev/null
+assert_contains "$(head -1 "${UPG_CONF}")" "server {" "订阅升级：https 订阅的证书不在了就不动（重写会降成 http）"
+run_upg ssl 0 cert >/dev/null
+assert_equals "server_name sub.example.org;|yes" "$(grep -m1 -o 'server_name [^ ]*' "${UPG_CONF}")|$(grep -m1 listen "${UPG_CONF}" | grep -q 'listen 50188 ssl' && echo yes)" "订阅升级：https 订阅重写后仍是 https、域名不变"
 
 echo ""
 
