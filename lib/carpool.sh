@@ -103,6 +103,30 @@ carpoolIsValidDate() {
     [[ ${d} -le $(carpoolDaysInMonth "${y}" "${m}") ]]
 }
 
+# carpoolAddDays DATE N → DATE 之后第 N 天（YYYY-MM-DD）。按 UTC 日历算，不受本机时区与夏令时影响
+carpoolAddDays() {
+    jq -rn --arg d "$1" --argjson n "$2" '($d + "T00:00:00Z" | fromdateiso8601) + $n * 86400 | strftime("%Y-%m-%d")'
+}
+
+# carpoolExpireFromInput INPUT CURRENT TODAY → 成员管理里输入的到期日：YYYY-MM-DD 原样；+N（1–3650）从 CURRENT 往后加 N 天，
+# CURRENT 为空或已过期就从 TODAY 算；空输入输出空（不限期）。认不出的输入返回 1
+carpoolExpireFromInput() {
+    local base=$3 n
+    if [[ -z "$1" ]]; then
+        echo
+        return 0
+    fi
+    if [[ "$1" =~ ^\+([0-9]{1,4})$ ]]; then
+        n=$((10#${BASH_REMATCH[1]}))
+        ((n >= 1 && n <= 3650)) || return 1
+        [[ -n "$2" && ! "$2" < "$3" ]] && base=$2
+        carpoolAddDays "${base}" "${n}"
+        return
+    fi
+    carpoolIsValidDate "$1" || return 1
+    printf '%s\n' "$1"
+}
+
 # carpoolPeriodStart TODAY RESETDAY → 当前周期起始日：本月的 RESETDAY，今天的日小于它则取上月的
 carpoolPeriodStart() {
     local y m d r=$2

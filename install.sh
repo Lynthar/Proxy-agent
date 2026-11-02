@@ -7952,7 +7952,7 @@ applyAccountChangeAllProtocols() {
 
 # 添加用户
 addUser() {
-    if carpoolGuardAccountMenu; then return; fi
+    if carpoolGuardAccountMenu add; then return; fi
     read -r -p "请输入要添加的用户数量:" userNum
     echo
     if [[ -z ${userNum} || ${userNum} -le 0 ]]; then
@@ -7984,7 +7984,7 @@ addUser() {
 }
 # 移除用户
 removeUser() {
-    if carpoolGuardAccountMenu; then return; fi
+    if carpoolGuardAccountMenu remove; then return; fi
     local userConfigType= delUserKey=
     if [[ -n "${frontingType}" ]]; then
         userConfigType="${frontingType}"
@@ -8440,10 +8440,15 @@ carpoolRefuseIfEnabled() {
     exit 1
 }
 
-# carpoolGuardAccountMenu → 拼车开着时 addUser / removeUser 交给配置文件；拦住了返回 0
+# carpoolGuardAccountMenu add|remove → 拼车开着时 addUser / removeUser 转到成员管理的加成员 / 移除成员；拦住了返回 0
 carpoolGuardAccountMenu() {
     carpoolEnabled || return 1
-    echoContent yellow " ---> $(t CARPOOL_ACCOUNTS_MANAGED "${CARPOOL_MEMBERS_FILE}")"
+    echoContent yellow " ---> $(t CARPOOL_ACCOUNTS_MANAGED)"
+    if [[ "$1" == "remove" ]]; then
+        carpoolMemberEdit remove
+    else
+        carpoolMemberAdd
+    fi
     manageAccount 1
     return 0
 }
@@ -9108,6 +9113,223 @@ carpoolPageMenu() {
     esac
 }
 
+# carpoolMembersClean → 0=members.json 过得了校验、也没有没应用的改动。成员管理只在这时动文件：
+# 否则车主手改了一半的东西会跟着菜单这一项一起应用
+carpoolMembersClean() {
+    local state pending
+    state=$(carpoolReadState) || return 1
+    pending=$(carpoolPendingText "${state}")
+    [[ -z "${pending}" ]] && return 0
+    echoContent yellow " ---> ${pending}"
+    echoContent yellow " ---> $(t CARPOOL_MEMBER_PENDING_HINT)"
+    return 1
+}
+
+# carpoolMembersEditApply FILTER [JQ_ARGS...] → 用 jq 改 members.json 再走 carpoolApply；没应用成（校验不过、车主取消、失败）
+# 就把文件逐字改回，不留一份和 state 对不上的文件。0=已应用
+carpoolMembersEditApply() {
+    local filter=$1 backup="${CARPOOL_DIR}/.members.menu.bak" new
+    shift
+    cp -f "${CARPOOL_MEMBERS_FILE}" "${backup}" || return 1
+    if ! new=$(jq "$@" "${filter}" "${CARPOOL_MEMBERS_FILE}") || ! jsonWriteFile "${CARPOOL_MEMBERS_FILE}" "${new}" false; then
+        rm -f "${backup}"
+        return 1
+    fi
+    carpoolApply
+    if [[ -n "$(carpoolPendingText "$(carpoolReadState)")" ]]; then
+        cp -f "${backup}" "${CARPOOL_MEMBERS_FILE}"
+        rm -f "${backup}"
+        echoContent yellow " ---> $(t CARPOOL_MEMBER_REVERTED)"
+        return 1
+    fi
+    rm -f "${backup}"
+}
+
+# carpoolPickMember → 列出 members.json 里的成员让车主选，名字放在 carpoolPicked；没有成员或输错返回 1
+carpoolPickMember() {
+    local names=() i pick
+    mapfile -t names < <(jq -r '.members | keys_unsorted[]' "${CARPOOL_MEMBERS_FILE}")
+    if ((${#names[@]} == 0)); then
+        echoContent yellow " ---> $(t CARPOOL_MEMBER_NONE)"
+        return 1
+    fi
+    for i in "${!names[@]}"; do
+        echoContent yellow "$((i + 1)).$(jq -r --arg n "${names[i]}" --arg u "$(t CARPOOL_UNLIMITED)" '.members[$n] as $m
+            | "\($n) · \(if ($m.quotaGiB // 0) > 0 then "\($m.quotaGiB) GiB" else $u end) · \(if ($m.expire // "") == "" then "-" else $m.expire end)"
+              + " · \($m.protocols // "all" | if type == "array" then map(tostring) | join(",") else tostring end)"' "${CARPOOL_MEMBERS_FILE}")"
+    done
+    read -r -p "$(t CARPOOL_MEMBER_PICK)" pick
+    if [[ ! "${pick}" =~ ^[0-9]{1,4}$ ]] || ((10#${pick} < 1 || 10#${pick} > ${#names[@]})); then
+        echoContent red " ---> $(t CARPOOL_MENU_BAD_CHOICE)"
+        return 1
+    fi
+    carpoolPicked=${names[10#${pick} - 1]}
+}
+
+# carpoolAsk quota|expire|protocols PROMPT [CURRENT_EXPIRE] → 读一项成员设置，输错就重问，结果放在 carpoolAnswer：
+# quota 是整数 GiB，expire 是日期，protocols 是 JSON（"all" 或编号数组）。直接回车返回 2（取消还是取默认由调用方定），读不到输入返回 1
+carpoolAsk() {
+    local input
+    while true; do
+        read -r -p "$2" input || return 1
+        [[ -z "${input}" ]] && return 2
+        case "$1" in
+            quota)
+                if [[ "${input}" =~ ^[0-9]{1,9}$ ]]; then
+                    carpoolAnswer=$((10#${input}))
+                    return 0
+                fi
+                echoContent red " ---> $(t CARPOOL_MEMBER_QUOTA_BAD)"
+                ;;
+            expire)
+                if carpoolAnswer=$(carpoolExpireFromInput "${input}" "${3:-}" "$(date +%F)") && [[ -n "${carpoolAnswer}" ]]; then
+                    return 0
+                fi
+                echoContent red " ---> $(t CARPOOL_MEMBER_EXPIRE_BAD)"
+                ;;
+            protocols)
+                if [[ "${input,,}" == "all" ]]; then
+                    carpoolAnswer='"all"'
+                    return 0
+                fi
+                if [[ "${input}" =~ ^[0-9]{1,2}([[:space:],]+[0-9]{1,2})*$ ]]; then
+                    carpoolAnswer=$(jq -cn --arg s "${input}" '[$s | splits("[\\s,]+") | select(. != "") | tonumber] | unique')
+                    return 0
+                fi
+                echoContent red " ---> $(t CARPOOL_MEMBER_PROTOCOLS_BAD)"
+                ;;
+        esac
+    done
+}
+
+# carpoolShowProtocolChoices → 列出成员可选的协议（本机装了、拼车能计量的）
+carpoolShowProtocolChoices() {
+    local id
+    echoContent yellow "$(t CARPOOL_MEMBER_PROTOCOLS_LIST)"
+    for id in $(carpoolInstalledProtocolsJson "$(scanInstalledProtocols "${XRAY_CONF_DIR}")" | jq -r '.[]'); do
+        echoContent yellow "  ${id}: $(getProtocolDisplayName "${id}")"
+    done
+}
+
+# carpoolShowMemberLinks NAME → 打印这个成员的通用订阅地址，页面开着时再打印成员页；没装订阅就指到「查看账号」
+carpoolShowMemberLinks() {
+    local base md5 state key
+    if ! base=$(carpoolPageUrlBase) || ! md5=$(carpoolSubscribeMd5 "$1"); then
+        echoContent yellow " ---> $(t CARPOOL_MEMBER_NO_SUB "$1")"
+        return 0
+    fi
+    echoContent green " ---> $(t CARPOOL_MEMBER_SUB_LINK "$1" "${base%carpool/}${md5}")"
+    state=$(carpoolReadState) || return 0
+    if [[ "$(jq -r '.pageEnabled' <<<"${state}")" == "true" ]] && key=$(carpoolMemberPageKey "$(jq -r '.pageToken' <<<"${state}")" "$1"); then
+        echoContent green " ---> $(t CARPOOL_MEMBER_PAGE_LINK "$1" "${base}${key}")"
+    fi
+}
+
+# carpoolMemberAdd → 加成员：名字、每周期额度、到期、协议；UUID 留给应用时生成，应用成功后打印他的订阅与成员页地址
+carpoolMemberAdd() {
+    local name quota expire protocols rc
+    carpoolMembersClean || return 1
+    while true; do
+        read -r -p "$(t CARPOOL_MEMBER_NAME_PROMPT)" name || return 1
+        if [[ -z "${name}" ]]; then
+            echoContent yellow " ---> $(t CARPOOL_CANCELLED)"
+            return 0
+        fi
+        if ! carpoolIsValidMemberName "${name}"; then
+            echoContent red " ---> $(t CARPOOL_MEMBER_NAME_BAD)"
+        elif jq -e --arg n "${name}" '.members | has($n)' "${CARPOOL_MEMBERS_FILE}" >/dev/null 2>&1; then
+            echoContent red " ---> $(t CARPOOL_MEMBER_NAME_EXISTS "${name}")"
+        else
+            break
+        fi
+    done
+    carpoolAsk quota "$(t CARPOOL_MEMBER_QUOTA_PROMPT)"
+    rc=$?
+    case ${rc} in 0) quota=${carpoolAnswer} ;; 2) quota=0 ;; *) return 1 ;; esac
+    carpoolAsk expire "$(t CARPOOL_MEMBER_EXPIRE_PROMPT)"
+    rc=$?
+    case ${rc} in 0) expire=${carpoolAnswer} ;; 2) expire= ;; *) return 1 ;; esac
+    carpoolShowProtocolChoices
+    carpoolAsk protocols "$(t CARPOOL_MEMBER_PROTOCOLS_ADD_PROMPT)"
+    rc=$?
+    case ${rc} in 0) protocols=${carpoolAnswer} ;; 2) protocols='"all"' ;; *) return 1 ;; esac
+    carpoolMembersEditApply '.members[$n] = {quotaGiB: $q, expire: $e, protocols: $p}' \
+        --arg n "${name}" --argjson q "${quota}" --arg e "${expire}" --argjson p "${protocols}" || return 1
+    carpoolShowMemberLinks "${name}"
+}
+
+# carpoolMemberEdit renew|quota|protocols|uuid|remove → 选一个成员改一项，删人与换 UUID 的逐项确认在 carpoolApply 里
+carpoolMemberEdit() {
+    local name current rc u
+    carpoolMembersClean || return 1
+    carpoolPickMember || return 1
+    name=${carpoolPicked}
+    case "$1" in
+        renew)
+            current=$(jq -r --arg n "${name}" '.members[$n].expire // ""' "${CARPOOL_MEMBERS_FILE}")
+            carpoolAsk expire "$(t CARPOOL_MEMBER_RENEW_PROMPT "${current:-$(t CARPOOL_UNLIMITED)}")" "${current}"
+            rc=$?
+            ;;
+        quota)
+            current=$(jq -r --arg n "${name}" '.members[$n].quotaGiB // 0' "${CARPOOL_MEMBERS_FILE}")
+            carpoolAsk quota "$(t CARPOOL_MEMBER_QUOTA_EDIT_PROMPT "${current}")"
+            rc=$?
+            ;;
+        protocols)
+            carpoolShowProtocolChoices
+            carpoolAsk protocols "$(t CARPOOL_MEMBER_PROTOCOLS_EDIT_PROMPT)"
+            rc=$?
+            ;;
+        *) rc=0 ;;
+    esac
+    if ((rc == 2)); then
+        echoContent yellow " ---> $(t CARPOOL_CANCELLED)"
+        return 0
+    fi
+    ((rc == 0)) || return 1
+    case "$1" in
+        renew) carpoolMembersEditApply '.members[$n].expire = $e' --arg n "${name}" --arg e "${carpoolAnswer}" ;;
+        quota) carpoolMembersEditApply '.members[$n].quotaGiB = $q' --arg n "${name}" --argjson q "${carpoolAnswer}" ;;
+        protocols) carpoolMembersEditApply '.members[$n].protocols = $p' --arg n "${name}" --argjson p "${carpoolAnswer}" ;;
+        remove) carpoolMembersEditApply 'del(.members[$n])' --arg n "${name}" ;;
+        uuid)
+            u=$(${XRAY_BIN} uuid 2>/dev/null)
+            if ! carpoolIsValidUUID "${u}"; then
+                echoContent red " ---> $(t CARPOOL_UUID_GEN_FAILED)"
+                return 1
+            fi
+            carpoolMembersEditApply '.members[$n].uuid = $u' --arg n "${name}" --arg u "${u}" || return 1
+            # 新凭据已在 state 里，文件里不留（与开启时播种的文件一样）；文件里没有 uuid 时应用沿用 state 的
+            jsonWriteFile "${CARPOOL_MEMBERS_FILE}" "$(jq --arg n "${name}" 'del(.members[$n].uuid)' "${CARPOOL_MEMBERS_FILE}")" false
+            echoContent green " ---> $(t CARPOOL_MEMBER_UUID_DONE "${name}")"
+            ;;
+    esac
+}
+
+# carpoolMemberMenu → 拼车管理 → 成员管理；每项只改 members.json，再走与「应用配置文件」同一条路
+carpoolMemberMenu() {
+    local choice
+    echoContent skyBlue "\n$(t CARPOOL_MENU_MEMBERS)"
+    echoContent skyBlue "=============================================================="
+    echoContent yellow "1.$(t CARPOOL_MEMBER_ADD)"
+    echoContent yellow "2.$(t CARPOOL_MEMBER_RENEW)"
+    echoContent yellow "3.$(t CARPOOL_MEMBER_QUOTA)"
+    echoContent yellow "4.$(t CARPOOL_MEMBER_PROTOCOLS)"
+    echoContent yellow "5.$(t CARPOOL_MEMBER_UUID)"
+    echoContent yellow "6.$(t CARPOOL_MEMBER_REMOVE)"
+    echoContent skyBlue "=============================================================="
+    read -r -p "$(t CARPOOL_MENU_PROMPT)" choice
+    case "${choice}" in
+        1) carpoolMemberAdd ;;
+        2) carpoolMemberEdit renew ;;
+        3) carpoolMemberEdit quota ;;
+        4) carpoolMemberEdit protocols ;;
+        5) carpoolMemberEdit uuid ;;
+        6) carpoolMemberEdit remove ;;
+        *) echoContent red " ---> $(t CARPOOL_MENU_BAD_CHOICE)" ;;
+    esac
+}
+
 # carpoolMenu → 账号管理 → 拼车管理
 carpoolMenu() {
     local choice
@@ -9122,6 +9344,9 @@ carpoolMenu() {
         echoContent yellow "4.$(t CARPOOL_MENU_ENABLE)"
     fi
     echoContent yellow "5.$(t CARPOOL_MENU_PAGE)"
+    if carpoolEnabled; then
+        echoContent yellow "6.$(t CARPOOL_MENU_MEMBERS)"
+    fi
     echoContent skyBlue "=============================================================="
     read -r -p "$(t CARPOOL_MENU_PROMPT)" choice
     case "${choice}" in
@@ -9130,6 +9355,7 @@ carpoolMenu() {
         3) carpoolResetUsage ;;
         4) if carpoolEnabled; then carpoolDisable; else carpoolEnable; fi ;;
         5) carpoolPageMenu ;;
+        6) if carpoolEnabled; then carpoolMemberMenu; else echoContent red " ---> $(t CARPOOL_MENU_BAD_CHOICE)"; fi ;;
         *) echoContent red " ---> $(t CARPOOL_MENU_BAD_CHOICE)" ;;
     esac
 }

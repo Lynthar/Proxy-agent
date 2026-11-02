@@ -1383,7 +1383,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试拼车钩子与 tick ===${NC}"
 
-CP_FN_NAMES="applyAccountChangeAllProtocols readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled xrayDaemonRunning carpoolCurrentClientsMap ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolGuardAccountMenu carpoolCheckPrerequisites carpoolPickApiPort carpoolApiReady carpoolAllAccounts carpoolFillUuids carpoolRemoveCron carpoolRemoveSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable carpoolHasTty carpoolApply carpoolResetUsage carpoolShowUsage carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolInsertPageBlock carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMenu addUser removeUser cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountStateFile chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget"
+CP_FN_NAMES="applyAccountChangeAllProtocols readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled xrayDaemonRunning carpoolCurrentClientsMap ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolGuardAccountMenu carpoolCheckPrerequisites carpoolPickApiPort carpoolApiReady carpoolAllAccounts carpoolFillUuids carpoolRemoveCron carpoolRemoveSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable carpoolHasTty carpoolApply carpoolResetUsage carpoolShowUsage carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolInsertPageBlock carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMembersClean carpoolMembersEditApply carpoolPickMember carpoolAsk carpoolShowProtocolChoices carpoolShowMemberLinks carpoolMemberAdd carpoolMemberEdit carpoolMemberMenu carpoolMenu addUser removeUser cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountStateFile chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget"
 CP_FNS=$(sed -n "$(for _f in ${CP_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_not_empty "${CP_FNS}" "拼车：抽到 install.sh 原文"
 assert_equals "$(wc -w <<<"${CP_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CP_FNS}")" "拼车：每个函数都抽到了（抽不到说明函数体里出现了顶格的 }）"
@@ -2005,15 +2005,86 @@ assert_equals '["zed","alice","bob"]' "$(cp_emails 02_VLESS_TCP_inbounds.json '.
 
 # --- 守卫与拦截 ---
 cp_reset_tree
-_out=$(run_cp 'read() { echo READ-CALLED; }; addUser; removeUser' 2>&1 </dev/null)
-assert_equals "2" "$(grep -c '拼车开启期间账号由' <<<"${_out}")" "守卫：拼车开着时 addUser / removeUser 都提示由配置文件管理"
-assert_equals "2" "$(grep -c '^MENU 1$' <<<"${_out}")" "守卫：拦住后回账号菜单"
-assert_equals "0" "$(grep -c 'READ-CALLED' <<<"${_out}")" "守卫：没有走到交互"
-_out=$(run_cp 'manageAccount() { echo "MENU $*"; return 1; }; read() { echo READ-CALLED; }; addUser; removeUser' 2>&1 </dev/null)
+_out=$(run_cp 'carpoolMemberAdd() { echo MEMBER-ADD; }; carpoolMemberEdit() { echo "MEMBER-EDIT $1"; }; read() { echo READ-CALLED; }; addUser; removeUser' 2>&1 </dev/null)
+assert_equals "2" "$(grep -c '账号改由拼车的成员管理维护' <<<"${_out}")" "守卫：拼车开着时 addUser / removeUser 都说明改由成员管理维护"
+assert_equals "1|1" "$(grep -c '^MEMBER-ADD$' <<<"${_out}")|$(grep -c '^MEMBER-EDIT remove$' <<<"${_out}")" "守卫：加人转到加成员、删人转到移除成员"
+assert_equals "2" "$(grep -c '^MENU 1$' <<<"${_out}")" "守卫：做完回账号菜单"
+assert_equals "0" "$(grep -c 'READ-CALLED' <<<"${_out}")" "守卫：没有走到手动增删的交互"
+_out=$(run_cp 'carpoolMemberAdd() { :; }; carpoolMemberEdit() { :; }; manageAccount() { echo "MENU $*"; return 1; }; read() { echo READ-CALLED; }; addUser; removeUser' 2>&1 </dev/null)
 assert_equals "0" "$(grep -c 'READ-CALLED' <<<"${_out}")" "守卫：回到的账号菜单以非零结束（比如输错选项）也不落进手动增删"
 jq '.enabled = false' "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/s.tmp" && mv "${CP_ROOT}/carpool/s.tmp" "${CP_ROOT}/carpool/state.json"
 _out=$(run_cp 'read() { echo READ-CALLED; userNum=0; }; addUser' 2>&1 </dev/null)
 assert_equals "1" "$(grep -c 'READ-CALLED' <<<"${_out}")" "守卫：关着时 addUser 照常进入交互"
+# --- 成员管理菜单：每项只改 members.json 再走应用；没应用成就把文件改回 ---
+cp_members() { jq -c "$1" "${CP_ROOT}/carpool/members.json"; }
+cp_days_later() { jq -rn --arg d "$(date +%F)" --argjson n "$1" '($d + "T00:00:00Z" | fromdateiso8601) + $n * 86400 | strftime("%Y-%m-%d")'; }
+cp_reset_tree
+_out=$(printf 'carol\n10\n+30\n\n' | CP_SUBPORT=12345 run_cp 'carpoolMemberAdd; echo "rc=$?"' 2>&1)
+assert_contains "${_out}" "rc=0" "成员管理（加成员）：返回 0"
+assert_equals "{\"quotaGiB\":10,\"expire\":\"$(cp_days_later 30)\",\"protocols\":\"all\"}" "$(cp_members '.members.carol')" \
+    "成员管理（加成员）：写进 members.json，+30 从今天算，回车是全部协议"
+assert_equals "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa|active|$((10 * GiB))" "$(cp_state '"\(.members.carol.uuid)|\(.members.carol.status)|\(.members.carol.quotaBytes)"')" \
+    "成员管理（加成员）：应用后 state 里有他，UUID 当场生成"
+assert_equals '["zed","alice","bob","carol"]' "$(cp_emails 02_VLESS_TCP_inbounds.json '.inbounds[0].settings.clients')" "成员管理（加成员）：进了协议文件"
+assert_equals "1" "$(grep -cE 'carol 的订阅地址：https://example\.com:12345/s/[0-9a-f]{32}' <<<"${_out}")" "成员管理（加成员）：打印他的通用订阅地址"
+assert_equals "null" "$(cp_members '.members.carol.uuid')" "成员管理（加成员）：文件里不留 UUID"
+
+cp_reset_tree
+_cpBefore=$(cat "${CP_ROOT}/carpool/members.json")
+_out=$(printf 'bad name\nalice\n\n' | run_cp 'carpoolMemberAdd; echo "rc=$?"' 2>&1)
+assert_equals "1|1|1" "$(grep -c '名字要以字母或数字开头' <<<"${_out}")|$(grep -c '已经有成员 alice' <<<"${_out}")|$(grep -c '已取消' <<<"${_out}")" \
+    "成员管理（加成员）：名字不合法、已存在都重问，回车取消"
+assert_equals "${_cpBefore}" "$(cat "${CP_ROOT}/carpool/members.json")" "成员管理（加成员，取消）：文件不动"
+
+jq '.retiredNames = ["dave"]' "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/s.tmp" && mv "${CP_ROOT}/carpool/s.tmp" "${CP_ROOT}/carpool/state.json"
+_out=$(printf 'dave-x\n\n\n\n' | run_cp 'carpoolMemberAdd; echo "rc=$?"' 2>&1)
+assert_contains "${_out}" "rc=1" "成员管理（加成员，撞上已删成员的订阅键）：返回 1"
+assert_contains "${_out}" "已改回原样" "成员管理（加成员，校验不过）：说明文件已改回"
+assert_equals "${_cpBefore}" "$(cat "${CP_ROOT}/carpool/members.json")" "成员管理（加成员，校验不过）：members.json 逐字改回"
+
+cp_reset_tree
+printf '1\n+30\n' | run_cp 'carpoolMemberEdit renew' >/dev/null 2>&1
+assert_equals "$(cp_days_later 30)|$(cp_days_later 30)" "$(cp_members '.members.alice.expire' | tr -d '"')|$(cp_state '.members.alice.expire')" "成员管理（续期）：不限期的从今天算，文件与 state 都改"
+printf '1\n+5\n' | run_cp 'carpoolMemberEdit renew' >/dev/null 2>&1
+assert_equals "$(cp_days_later 35)" "$(cp_state '.members.alice.expire')" "成员管理（续期）：没过期的从原到期日往后加"
+printf '2\n20\n' | run_cp 'carpoolMemberEdit quota' >/dev/null 2>&1
+assert_equals "20|$((20 * GiB))" "$(cp_members '.members.bob.quotaGiB')|$(cp_state '.members.bob.quotaBytes')" "成员管理（改额度）：文件与 state 都改"
+printf '1\n0, 7\n' | run_cp 'carpoolMemberEdit protocols' >/dev/null 2>&1
+assert_equals '[0,7]|[0,7]' "$(cp_members '.members.alice.protocols')|$(cp_state '.members.alice.protocols | tojson')" "成员管理（改协议）：逗号或空格分隔都认"
+_cpBefore=$(cat "${CP_ROOT}/carpool/members.json")
+_out=$(printf '1\n7\n' | run_cp 'carpoolMemberEdit protocols; echo "rc=$?"' 2>&1)
+assert_equals "rc=1|${_cpBefore}" "$(grep -o 'rc=[0-9]' <<<"${_out}")|$(cat "${CP_ROOT}/carpool/members.json")" "成员管理（改协议）：漏了必选的 0 时应用被拒，文件改回"
+_out=$(printf '1\n\n' | run_cp 'carpoolMemberEdit quota; echo "rc=$?"' 2>&1)
+assert_equals "rc=0|${_cpBefore}" "$(grep -o 'rc=[0-9]' <<<"${_out}")|$(cat "${CP_ROOT}/carpool/members.json")" "成员管理（改额度）：回车取消，什么都不改"
+
+_cpOldUuid=$(cp_state '.members.alice.uuid')
+_out=$(printf '1\nn\n' | run_cp 'carpoolHasTty() { return 0; }; carpoolMemberEdit uuid; echo "rc=$?"' 2>&1)
+assert_equals "${_cpOldUuid}|null" "$(cp_state '.members.alice.uuid')|$(cp_members '.members.alice.uuid')" "成员管理（换 UUID，答 n）：凭据不变，文件改回"
+_out=$(printf '1\ny\n' | run_cp 'carpoolHasTty() { return 0; }; carpoolMemberEdit uuid; echo "rc=$?"' 2>&1)
+assert_equals "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa|null" "$(cp_state '.members.alice.uuid')|$(cp_members '.members.alice.uuid')" \
+    "成员管理（换 UUID）：确认后 state 换成新凭据，文件里不留"
+assert_contains "${_out}" "订阅地址不变" "成员管理（换 UUID）：告诉车主订阅地址不变"
+_out=$(run_cp 'carpoolApply; echo "rc=$?"' 2>&1 </dev/null)
+assert_contains "${_out}" "没有" "成员管理（换 UUID）：之后文件与 state 没有差异"
+
+_out=$(printf '2\nn\n' | run_cp 'carpoolHasTty() { return 0; }; carpoolMemberEdit remove' 2>&1)
+assert_equals "true|true" "$(cp_members '.members | has("bob")')|$(cp_state '.members | has("bob")')" "成员管理（移除，答 n）：人还在、文件改回"
+printf '2\ny\n' | run_cp 'carpoolHasTty() { return 0; }; carpoolMemberEdit remove' >/dev/null 2>&1
+assert_equals "false|false|[\"zed\",\"alice\"]" "$(cp_members '.members | has("bob")')|$(cp_state '.members | has("bob")')|$(cp_emails 02_VLESS_TCP_inbounds.json '.inbounds[0].settings.clients')" \
+    "成员管理（移除）：确认后文件、state、协议文件里都没了"
+
+cp_reset_tree
+jq '.members.alice.quotaGiB = 7' "${CP_ROOT}/carpool/members.json" >"${CP_ROOT}/carpool/m.tmp" && mv "${CP_ROOT}/carpool/m.tmp" "${CP_ROOT}/carpool/members.json"
+_cpBefore=$(cat "${CP_ROOT}/carpool/members.json")
+_out=$(printf 'carol\n\n\n\n' | run_cp 'carpoolMemberAdd; echo "rc=$?"' 2>&1)
+assert_contains "${_out}" "还没应用的改动" "成员管理：文件里有没应用的改动时先让车主处理"
+assert_equals "rc=1|${_cpBefore}" "$(grep -o 'rc=[0-9]' <<<"${_out}")|$(cat "${CP_ROOT}/carpool/members.json")" "成员管理：这时不动文件"
+
+cp_reset_tree
+assert_contains "$(printf '0\n' | run_cp 'carpoolMenu' 2>&1)" "6.成员管理" "拼车菜单：开着时有成员管理"
+jq '.enabled = false' "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/s.tmp" && mv "${CP_ROOT}/carpool/s.tmp" "${CP_ROOT}/carpool/state.json"
+assert_equals "0" "$(printf '0\n' | run_cp 'carpoolMenu' 2>&1 | grep -c '成员管理')" "拼车菜单：关着时没有成员管理"
+
 cp_reset_tree
 _out=$(run_cp 'carpoolRefuseIfEnabled; echo "rc=$?"' 2>&1)
 assert_contains "${_out}" "拼车开着时不能切换内核或安装 Hysteria2 / TUIC" "拦截：开着时拒绝"

@@ -135,7 +135,7 @@ The generators still perform port, firewall, and destination checks; invoke them
 
 - **It isn't a panel.** A TTY menu, no web UI, no API. Per-user traffic,
   expiry and quotas exist only through carpool on the Xray core: the owner
-  edits a JSON file to manage members, and members get a read-only page.
+  manages members from the menu or a JSON file, and members get a read-only page.
 - **Three gRPC variants are deprecated**: Trojan gRPC, VLESS gRPC and VLESS
   vision gRPC are still in the registry but marked deprecated. Don't build new
   deployments on them.
