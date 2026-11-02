@@ -1232,7 +1232,7 @@ DOTTED_ROOT="${MOCK_ROOT}/dotted.root"
 mkdir -p "${DOTTED_ROOT}/xray/conf" && : >"${DOTTED_ROOT}/xray/xray"
 printf '%s\n' '{"inbounds":[{"port":443,"settings":{"clients":[{"id":"a1","email":"alice"}]}}]}' \
     >"${DOTTED_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
-DOTTED_FNS=$(sed -n '/^readInstallType() {/,/^}/p;/^readInstallProtocolType() {/,/^}/p;/^initXrayClients() {/,/^}/p;/^applyAccountChangeAllProtocols() {/,/^}/p' install.sh)
+DOTTED_FNS=$(sed -n '/^readInstallType() {/,/^}/p;/^readInstallProtocolType() {/,/^}/p;/^initXrayClients() {/,/^}/p;/^applyAccountChangeAllProtocols() {/,/^}/p;/^xrayConfigTest() {/,/^}/p' install.sh)
 env PROXY_AGENT_DIR="${DOTTED_ROOT}" DOTTED_FNS="${DOTTED_FNS}" bash -c '
     source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh
     eval "${DOTTED_FNS}"
@@ -1383,7 +1383,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试拼车钩子与 tick ===${NC}"
 
-CP_FN_NAMES="applyAccountChangeAllProtocols readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled xrayDaemonRunning carpoolCurrentClientsMap ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolGuardAccountMenu carpoolCheckPrerequisites carpoolPickApiPort carpoolApiReady carpoolAllAccounts carpoolFillUuids carpoolRemoveCron carpoolRemoveSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable carpoolHasTty carpoolApply carpoolResetUsage carpoolShowUsage carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolInsertPageBlock carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMembersClean carpoolMembersEditApply carpoolPickMember carpoolAsk carpoolShowProtocolChoices carpoolShowMemberLinks carpoolMemberAdd carpoolMemberEdit carpoolMemberMenu carpoolMenu addUser removeUser cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountStateFile chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget"
+CP_FN_NAMES="applyAccountChangeAllProtocols xrayConfigTest readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled xrayDaemonRunning carpoolCurrentClientsMap ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolGuardAccountMenu carpoolCheckPrerequisites carpoolPickApiPort carpoolApiReady carpoolAllAccounts carpoolFillUuids carpoolRemoveCron carpoolRemoveSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable carpoolHasTty carpoolApply carpoolResetUsage carpoolShowUsage carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolInsertPageBlock carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMembersClean carpoolMembersEditApply carpoolPickMember carpoolAsk carpoolShowProtocolChoices carpoolShowMemberLinks carpoolMemberAdd carpoolMemberEdit carpoolMemberMenu carpoolMenu addUser removeUser cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountStateFile chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget"
 CP_FNS=$(sed -n "$(for _f in ${CP_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_not_empty "${CP_FNS}" "拼车：抽到 install.sh 原文"
 assert_equals "$(wc -w <<<"${CP_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CP_FNS}")" "拼车：每个函数都抽到了（抽不到说明函数体里出现了顶格的 }）"
@@ -2450,7 +2450,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试按账号选出口 ===${NC}"
 
-CA_FN_NAMES="localBlockApiPort ensureXrayLocalBlock localBlockInject chainAccountStateFile chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountCarry chainAccountApply chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testExternalNodeConnection generateExternalOutboundConfig getExternalNodeById initExternalNodeFile"
+CA_FN_NAMES="localBlockApiPort ensureXrayLocalBlock localBlockInject chainAccountStateFile chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountCarry chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testExternalNodeConnection generateExternalOutboundConfig getExternalNodeById initExternalNodeFile"
 CA_FNS=$(sed -n "$(for _f in ${CA_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_equals "$(wc -w <<<"${CA_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CA_FNS}")" "按账号选出口：每个函数都抽到了"
 CA_ROOT="${MOCK_ROOT}/chainacct.root"
@@ -2461,13 +2461,15 @@ CA_ENTRY="${CA_ROOT}/sing-box/conf/chain_entry_info.json"
 CA_MULTI="${CA_ROOT}/sing-box/conf/chain_multi_info.json"
 CA_MERGED="${MOCK_ROOT}/chainacct_merged.json"
 
-# run_ca CMD → 以 CA_ROOT 为安装根跑 CMD；合并与重载桩掉（调用记进 CA_CALLS，CA_MERGE_RC 让合并失败）
+# run_ca CMD → 以 CA_ROOT 为安装根跑 CMD；合并与重载桩掉（调用记进 CA_CALLS，CA_MERGE_RC 让合并失败，
+# XRAY_TEST_FAIL=once 让装了的 xray 桩第一次 -test 不过，CA_LISTEN 是本机正在听的 TCP 端口）
 run_ca() (
-    env PROXY_AGENT_DIR="${CA_ROOT}" CA_FNS="${CA_FNS}" CA_CALLS="${CA_CALLS}" CA_MERGE_RC="${CA_MERGE_RC:-0}" V2RAY_LANG=zh_CN bash -c '
+    env PROXY_AGENT_DIR="${CA_ROOT}" CA_FNS="${CA_FNS}" CA_CALLS="${CA_CALLS}" CA_MERGE_RC="${CA_MERGE_RC:-0}" XRAY_TEST_FAIL="${XRAY_TEST_FAIL:-}" CA_LISTEN="${CA_LISTEN:-}" V2RAY_LANG=zh_CN bash -c '
         source lib/i18n.sh; source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh
         eval "${CA_FNS}"
         singBoxMergeConfig() { echo merge >>"${CA_CALLS}"; return "${CA_MERGE_RC}"; }
         reloadCore() { echo reloadCore >>"${CA_CALLS}"; }
+        listeningPorts() { [[ "$1" == tcp ]] && printf "%s\n" ${CA_LISTEN}; }
         setDefaultChain() { echo setDefaultChain >>"${CA_CALLS}"; }
         generateMultiChainRouteConfig() { echo routeConfig >>"${CA_CALLS}"; }
         ensureDirectOutbound() { echo "{\"outbounds\":[{\"type\":\"direct\",\"tag\":\"direct\"}]}" >"${singBoxConfigPath}01_direct_outbound.json"; }
@@ -2534,6 +2536,9 @@ assert_equals '["chain_proxy:31111","chain_proxy_hk:31115","chain_direct:freedom
 assert_equals '["us=31112","hk=31113","jp=null"]' \
     "$(run_ca "chainAccountAssignPorts '$(jq -cn '{mode: "multi_chain", accounts: {alice: "hk", bob: "us"}, chains: [{name: "us", bridge_port: 31112}, {name: "hk"}, {name: "jp"}]}')'" 2>/dev/null | jq -c '[.chains[] | "\(.name)=\(.bridge_port)"]')" \
     "分配：新被引用的 hk 拿最小的空端口，已有的 us 不动，没人用的 jp 不分"
+assert_equals '["us=31112","hk=31115","jp=null"]' \
+    "$(CA_LISTEN="22 31113 31114" run_ca "chainAccountAssignPorts '$(jq -cn '{mode: "multi_chain", accounts: {alice: "hk", bob: "us"}, chains: [{name: "us", bridge_port: 31112}, {name: "hk"}, {name: "jp"}]}')'" 2>/dev/null | jq -c '[.chains[] | "\(.name)=\(.bridge_port)"]')" \
+    "分配：本机已有进程在听的 31113、31114 跳过（sing-box 绑不上会直接退出，回滚到不了）"
 _caFull=$(jq -cn '{mode: "multi_chain", accounts: {alice: "new"}, chains: ([range(31112; 31211)] | to_entries | map({name: "c\(.key)", bridge_port: .value}) + [{name: "new"}])}')
 assert_contains "$(run_ca "chainAccountAssignPorts '${_caFull}'; echo rc=\$?" 2>&1)" "rc=5" "分配：31112-31210 全占满时报错，不越界"
 assert_equals '{"accounts":{"a":"chain_outbound"}}' "$(run_ca "chainAccountAssignPorts '{\"accounts\":{\"a\":\"chain_outbound\"}}'" 2>/dev/null)" "分配：单链路 / 多跳原样返回"
@@ -2751,6 +2756,28 @@ _caBefore=$(cat "${CA_ENTRY}")
 _out=$(printf '2\n2\n' | CA_MERGE_RC=1 run_ca 'chainAccountExitMenu; echo rc=$?' 2>&1)
 assert_contains "${_out}" "改回原样" "菜单（合并失败）：提示没生效"
 assert_equals "${_caBefore}" "$(cat "${CA_ENTRY}")" "菜单（合并失败）：状态写回原样"
+cat >"${CA_ROOT}/xray/xray" <<'EOF'
+#!/usr/bin/env bash
+case "$1 $2" in
+    "help run") echo "  -test" ;;
+    "run -test") echo xraytest >>"${CA_CALLS}"
+        if [[ "${XRAY_TEST_FAIL}" == once && "$(grep -c xraytest "${CA_CALLS}")" == 1 ]]; then echo "unknown outbound tag"; exit 1; fi ;;
+esac
+EOF
+chmod +x "${CA_ROOT}/xray/xray"
+: >"${CA_CALLS}"
+_caRules=$(ca_chain_rules '.')
+_out=$(printf '2\n2\n' | XRAY_TEST_FAIL=once run_ca 'chainAccountExitMenu; echo rc=$?' 2>&1)
+assert_contains "${_out}" "unknown outbound tag" "菜单（Xray -test 不过）：打出 -test 的原因"
+assert_contains "${_out}" "改回原样" "菜单（Xray -test 不过）：提示没生效"
+assert_equals "${_caBefore}|${_caRules}" "$(cat "${CA_ENTRY}")|$(ca_chain_rules '.')" "菜单（Xray -test 不过）：状态与 Xray 路由都写回原样"
+assert_equals "xraytest xraytest merge reloadCore" "$(paste -sd ' ' - <"${CA_CALLS}")" \
+    "菜单（Xray -test 不过）：坏配置不合并不重载，写回的旧配置过了 -test 才重载"
+: >"${CA_CALLS}"
+printf '2\n2\n' | run_ca 'chainAccountExitMenu' >/dev/null 2>&1
+assert_equals "direct|xraytest merge reloadCore" "$(jq -r '.accounts.bob' "${CA_ENTRY}")|$(paste -sd ' ' - <"${CA_CALLS}")" \
+    "菜单（装了 Xray）：先 -test 再合并、重载"
+rm -f "${CA_ROOT}/xray/xray"
 assert_contains "$(printf '9\n' | run_ca 'chainAccountExitMenu; echo rc=$?' 2>&1)" "rc=1" "菜单：越界的编号拒绝"
 ca_single '{"protocol_routing": {"enabled": true}}'
 assert_contains "$(printf '9\n' | run_ca 'chainAccountExitMenu' 2>&1)" "已开启按协议分流" "菜单（开着按协议分流）：说明没指定的账号只有选中的协议走链路"

@@ -7832,6 +7832,15 @@ customUserEmail() {
     done
 }
 
+# xrayConfigTest → 用 `xray run -test` 校验整个 confdir（无副作用），不过时打出前 20 行原因并返回 1；没装 Xray 或它不认 -test 时放行
+xrayConfigTest() {
+    local out
+    [[ -f "${XRAY_BIN}" ]] && ${XRAY_BIN} help run 2>/dev/null | grep -q -- "-test" || return 0
+    out=$(${XRAY_BIN} run -test -confdir "${XRAY_CONF_DIR}" 2>&1) && return 0
+    head -20 <<<"${out}"
+    return 1
+}
+
 # 把一次账户变更（add UUID EMAIL / delName KEY / set FILE）按协议注册表应用到全部已装协议；KEY 是去掉协议后缀的
 # 账户名，按名删是因为各协议文件的用户顺序不保证一致；set 的 FILE 是 {"<协议ID>": [clients…]}，只写里面有的协议，
 # 空数组合法（能否启动由内核校验兜底）。全程 jsonTx 事务：任一文件写失败即整体回滚；落盘后、reload 前过内核级校验。
@@ -7931,13 +7940,10 @@ applyAccountChangeAllProtocols() {
 
     # 提交前内核级校验，失败即回滚。先 xray（-test 无副作用）后 sing-box（merge 会写 config.json，
     # 但 handleSingBox start 每次重新 merge，回滚后的下一次启动会覆盖掉它）
-    if [[ -n "${touchedXray}" && "${coreKind}" == "1" && -f "${XRAY_BIN}" ]] &&
-        ${XRAY_BIN} help run 2>/dev/null | grep -q -- "-test"; then
-        if ! ${XRAY_BIN} run -test -confdir ${XRAY_CONF_DIR} >/dev/null 2>&1; then
-            echoContent red " ---> $(t ACCOUNT_TX_VALIDATE_FAILED)"
-            jsonTxRollback
-            return 1
-        fi
+    if [[ -n "${touchedXray}" && "${coreKind}" == "1" ]] && ! xrayConfigTest; then
+        echoContent red " ---> $(t ACCOUNT_TX_VALIDATE_FAILED)"
+        jsonTxRollback
+        return 1
     fi
     if [[ -n "${touchedSingBox}" && -f "${SINGBOX_BIN}" ]]; then
         if ! singBoxMergeConfig; then
@@ -12224,13 +12230,15 @@ chainAccountBridges() {
 }
 
 # chainAccountAssignPorts STATE → 给多链路里新被引用、还没有 bridge_port 的链路分一个空着的桥端口；分过的链路在就一直留着。
-# 端口跟着链路不跟着排序：重载时两个内核先后重启，旧 sing-box 与新 Xray 端口对不上时只会连不上，不会进到别的出口
+# 端口跟着链路不跟着排序：重载时两个内核先后重启，旧 sing-box 与新 Xray 端口对不上时只会连不上，不会进到别的出口。
+# 本机已有进程在听的端口也跳过：sing-box 绑不上是 exit 1，chainAccountSave 的回滚到不了
 chainAccountAssignPorts() {
-    jq -c --argjson base "${CHAIN_BRIDGE_PORT}" --argjson last "${CHAIN_BRIDGE_PORT_LAST}" '
+    jq -c --argjson base "${CHAIN_BRIDGE_PORT}" --argjson last "${CHAIN_BRIDGE_PORT_LAST}" \
+        --argjson busy "$(listeningPorts tcp | jq -sc .)" '
         if .mode != "multi_chain" then . else
             ([(.accounts // {})[] | select(. != "direct")] | unique) as $refs
             | reduce (.chains | to_entries[] | select((.value.name as $n | $refs | index($n)) and .value.bridge_port == null) | .key) as $i (.;
-                (([range($base + 1; $last + 1)] - [.chains[].bridge_port | select(. != null)]) | first) as $p
+                (([range($base + 1; $last + 1)] - [.chains[].bridge_port | select(. != null)] - $busy) | first) as $p
                 | if $p == null then error("no free bridge port") else .chains[$i].bridge_port = $p end)
         end' <<<"$1"
 }
@@ -12308,13 +12316,15 @@ chainAccountCarry() {
     jq -c --argjson old "${old}" '. + $old' <<<"$1"
 }
 
-# chainAccountApply → 映射或默认出口改过之后：Xray 侧（有的话）重写，sing-box 重新合并（注入在合并里），再重载内核
+# chainAccountApply → 映射或默认出口改过之后：Xray 侧（有的话）重写并过 -test，sing-box 重新合并（注入在合并里，合并自带 check），
+# 两边都过了才重载内核。重载里起不来是 exit 1，到不了调用方的回滚，所以配置错误必须在重载之前返回 1
 chainAccountApply() {
     if [[ ! -f "${SINGBOX_FRAGMENT_DIR}/01_direct_outbound.json" ]]; then
         singBoxConfigPath="${SINGBOX_FRAGMENT_DIR}/" ensureDirectOutbound || return 1
     fi
     if [[ -f "${XRAY_CONF_DIR}/chain_outbound.json" ]]; then
         writeXrayChainConfig "${CHAIN_BRIDGE_PORT}" || return 1
+        xrayConfigTest || return 1
     fi
     singBoxMergeConfig || return 1
     reloadCore
