@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run.sh alpine|debian [xray|singbox] [xray|singbox] | chain [xray|singbox] — 在一次性容器里跑 tests/test_install_e2e.sh（真装机）。
+# run.sh alpine|debian [xray|singbox] [xray|singbox] | chain [xray|singbox] | domain | release OLD_TAG — 在一次性容器里跑真装机测试（domain 跑 test_install_domain_e2e.sh，release 验已发布的 Release，其余跑 test_install_e2e.sh）。
 # 第二参是服务端内核（默认 xray），第三参是握手用的客户端内核（默认同服务端；singbox 对 xray 是交叉腿）。
 # alpine 用 OpenRC；debian 先把 systemd 当 PID 1 起来再 exec 进去。chain 是两台 Debian：入口 Xray 开拼车接链式，出口内核取第二参
 set -euo pipefail
@@ -40,6 +40,22 @@ debian)
     trap 'docker stop -t 2 "${cid}" >/dev/null' EXIT
     docker exec -e "E2E_CORE=${E2E_CORE}" -e "E2E_CLIENT=${E2E_CLIENT}" "${cid}" bash /src/tests/test_install_e2e.sh
     ;;
+domain)
+    # 带域名的那条：Debian + systemd，证书由测试 CA 签，域名走 sslip.io
+    cid=$(startDebian)
+    trap 'docker stop -t 2 "${cid}" >/dev/null' EXIT
+    docker exec "${cid}" bash /src/tests/test_install_domain_e2e.sh
+    ;;
+release)
+    # 发版之后验已发布的 Release：README 那一行、从第二参（上一版 tag）自更新再回滚，各起一个新容器
+    rc=0
+    for stage in readme update; do
+        cid=$(startDebian)
+        docker exec "${cid}" bash /src/tests/e2e/release-smoke.sh "${2:?run.sh release OLD_TAG}" "${stage}" || rc=1
+        docker stop -t 2 "${cid}" >/dev/null
+    done
+    exit "${rc}"
+    ;;
 chain)
     net="proxy-agent-e2e-chain-$$"
     exitCid=
@@ -77,7 +93,7 @@ chain)
     exit "${rc}"
     ;;
 *)
-    echo "usage: $0 alpine|debian [xray|singbox] [xray|singbox] | chain [xray|singbox]" >&2
+    echo "usage: $0 alpine|debian [xray|singbox] [xray|singbox] | chain [xray|singbox] | domain | release OLD_TAG" >&2
     exit 2
     ;;
 esac

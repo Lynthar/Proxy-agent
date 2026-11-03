@@ -646,13 +646,13 @@ if ! type t &>/dev/null; then
     MSG_CHAIN_DEFAULT_OUTBOUND="默认出站"
     MSG_CHAIN_DEFAULT_OUTBOUND_DIRECT="默认出站: 直连 (未匹配规则的流量直连访问)"
     MSG_CHAIN_TEST_MULTI_TITLE="测试多链路连通性"
-    MSG_CHAIN_TEST_LATENCY="延迟"
-    MSG_CHAIN_TEST_CONN_FAIL="连接失败"
+    MSG_CHAIN_TEST_PROBE_OK="经链路取到出口 IP %s，耗时 %sms"
+    MSG_CHAIN_TEST_CONN_FAIL="经这条链路访问外网失败"
     MSG_CHAIN_TEST_COMPLETE="测试完成: %s 通过, %s 失败"
     MSG_CHAIN_TEST_CHECK_HINT="请检查失败链路的:"
     MSG_CHAIN_TEST_CHECK_1="1. 出口节点防火墙是否开放端口"
     MSG_CHAIN_TEST_CHECK_2="2. 出口节点 sing-box 是否运行"
-    MSG_CHAIN_TEST_CHECK_3="3. IP地址和端口是否正确"
+    MSG_CHAIN_TEST_CHECK_3="3. IP、端口与密钥是否正确（出口重装过要重新导入配置码），出口是否只放行了别的入口"
     MSG_CHAIN_STATUS_RUNNING="运行中"
     MSG_CHAIN_STATUS_STOPPED="未运行"
     MSG_CHAIN_STATUS_TITLE="链式代理状态"
@@ -1640,13 +1640,13 @@ allowPort() {
     # 如果防火墙启动状态则添加相应的开放端口
     if command -v dpkg >/dev/null 2>&1 && dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+ufw"; then
         if ufw status | grep -q "Status: active"; then
+            # 不先 grep 查重（ufw 自己跳过已有的同一条）：443/tcp 是 8443/tcp 的子串，按子串查会把没放行的端口当成已放行
             if [[ -n "${sourceRange}" && "${sourceRange}" != "0.0.0.0/0" ]]; then
                 sudo ufw allow from "${sourceRange}" to any port "$1" proto "${type}"
-                checkUFWAllowPort "$1"
-            elif ! ufw status | grep -q "$1/${type}"; then
+            else
                 sudo ufw allow "$1/${type}"
-                checkUFWAllowPort "$1"
             fi
+            checkUFWAllowPort "$1" "${type}"
         fi
     elif systemctl status firewalld 2>/dev/null | grep -q "active (running)"; then
         # 不写 --zone：加、查、检查都落在默认区。写死 public 的话，默认区不是 public 的机器上规则全落进没挂网卡的区，一条不生效
@@ -1673,12 +1673,10 @@ allowPort() {
         fi
     elif rc-update show 2>/dev/null | grep -q ufw; then
         if ufw status | grep -q "Status: active"; then
-            if ! ufw status | grep -q "$1/${type}"; then
-                sudo ufw allow "$1/${type}"
-                checkUFWAllowPort "$1"
-            fi
+            sudo ufw allow "$1/${type}"
+            checkUFWAllowPort "$1" "${type}"
         fi
-    elif command -v nft >/dev/null 2>&1 && systemctl status nftables 2>/dev/null | grep -q "active"; then
+    elif command -v nft >/dev/null 2>&1 && systemctl is-active --quiet nftables 2>/dev/null; then
         if nft list chain inet filter input >/dev/null 2>&1; then
             local nftComment="allow $1/${type}(Proxy-agent)"
             local nftSourceRange="${sourceRange:-0.0.0.0/0}"
@@ -1687,7 +1685,8 @@ allowPort() {
             nftRules=$(nft list chain inet filter input)
             if ! echo "${nftRules}" | grep -q "${nftComment}" || ! echo "${nftRules}" | grep -q "${nftSourceRange}"; then
                 updateNftablesStatus=true
-                nft add rule inet filter input ip saddr "${nftSourceRange}" ${type} dport "$1" counter accept comment "${nftComment}"
+                # nft 的端口区间写 a-b，不认 iptables 的 a:b
+                nft add rule inet filter input ip saddr "${nftSourceRange}" ${type} dport "${1/:/-}" counter accept comment "${nftComment}"
             fi
 
             if echo "${updateNftablesStatus}" | grep -q "true"; then
@@ -1702,7 +1701,7 @@ allowPort() {
                 updateFirewalldStatus=true
                 iptables -I INPUT -p ${type} -s "${sourceRange}" --dport "$1" -m comment --comment "allow $1/${type}(Proxy-agent)" -j ACCEPT
             fi
-        elif ! iptables -L | grep -q "$1/${type}(Proxy-agent)"; then
+        elif ! iptables -C INPUT -p ${type} --dport "$1" -m comment --comment "allow $1/${type}(Proxy-agent)" -j ACCEPT 2>/dev/null; then
             updateFirewalldStatus=true
             iptables -I INPUT -p ${type} --dport "$1" -m comment --comment "allow $1/${type}(Proxy-agent)" -j ACCEPT
         fi
@@ -1724,7 +1723,7 @@ firewallDefaultDenies() {
     elif rc-update show 2>/dev/null | grep -q ufw; then
         ufw status verbose 2>/dev/null | grep -q "Status: active" || return 1
         ufw status verbose | grep -qE "Default: (deny|reject) \(incoming\)"
-    elif command -v nft >/dev/null 2>&1 && systemctl status nftables 2>/dev/null | grep -q "active"; then
+    elif command -v nft >/dev/null 2>&1 && systemctl is-active --quiet nftables 2>/dev/null; then
         nft list chain inet filter input 2>/dev/null | grep -q "policy drop"
     elif command -v dpkg >/dev/null 2>&1 && dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+netfilter-persistent" && systemctl status netfilter-persistent 2>/dev/null | grep -q "active (exited)"; then
         iptables -S INPUT 2>/dev/null | head -n 1 | grep -qE "^-P INPUT (DROP|REJECT)"
@@ -1735,9 +1734,9 @@ firewallDefaultDenies() {
 # getPublicIP 由 lib/system-detect.sh 提供（同样的接口：默认 IPv4，
 # 第一参数可指定 4/6；保留 currentHost==Reality serverName 时短路返回 currentHost）。
 
-# 输出ufw端口开放状态
+# checkUFWAllowPort PORT TYPE → 按「端口/协议」整列比对 ufw status 的第一列；子串比对会把 8443/tcp 当成 443/tcp
 checkUFWAllowPort() {
-    if ufw status | grep -q "$1"; then
+    if ufw status | awk -v rule="$1/$2" '$1 == rule {found = 1} END {exit !found}'; then
         echoContent green " ---> $1端口开放成功"
     else
         echoContent red " ---> $1端口开放失败"
@@ -1807,16 +1806,19 @@ unInstallSingBox() {
 
     readInstallType
 
-    if [[ -n "${singBoxConfigPath}" ]]; then
+    # 片段里还有入站（链式的桥、出口）也得留：singBoxConfigPath 只看 6 / 9，按它删会把链式的片段、状态文件连同二进制一起删掉
+    if [[ -n "${singBoxConfigPath}" ]] || singBoxFragmentsHaveInbounds; then
         echoContent yellow " ---> 检测到有其他配置，保留sing-box核心"
         handleSingBox stop
         handleSingBox start
     else
         handleSingBox stop
+        singBoxAutostart off
         rm /etc/systemd/system/sing-box.service
         rm -rf ${SINGBOX_DIR}/*
         echoContent green " ---> sing-box 卸载完成"
     fi
+    refreshSubscribeAfterInstall
 }
 
 # 检查文件目录以及path路径
@@ -1979,6 +1981,15 @@ chainRefuseCoreSwitch() {
 cleanUp() {
     if [[ "$1" == "xrayDel" ]]; then
         handleXray stop
+        # 服务单元连同自启一起撤：留着的话每次开机都去拉一个已删掉的二进制
+        if [[ "${release}" == "alpine" ]]; then
+            rc-update del xray default >/dev/null 2>&1
+            rm -f /etc/init.d/xray
+        elif [[ -f /etc/systemd/system/xray.service ]]; then
+            systemctl disable xray.service >/dev/null 2>&1
+            rm -f /etc/systemd/system/xray.service
+            systemctl daemon-reload >/dev/null 2>&1
+        fi
         rm -rf ${XRAY_DIR}/*
         rm -f "${nginxConfigPath}http_redirect.conf"
     elif [[ "$1" == "singBoxProtocolsDel" ]]; then
@@ -2159,7 +2170,8 @@ installBaseTools() {
         ${installType} wget >/dev/null 2>&1
     fi
 
-    if ! command -v netfilter-persistent >/dev/null 2>&1; then
+    # 装了 ufw 就不装 iptables-persistent：两包互斥，apt -y 会直接卸掉 ufw，用户的默认拒绝随之失效、整机全开
+    if ! command -v netfilter-persistent >/dev/null 2>&1 && ! dpkg-query -W -f '${Status}' ufw 2>/dev/null | grep -q 'ok installed'; then
         if [[ "${release}" == "debian" || "${release}" == "ubuntu" ]]; then
             echoContent green " ---> $(t INSTALL_TOOL "iptables")"
             echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | sudo debconf-set-selections
@@ -3371,7 +3383,9 @@ ensureAlpineProcps() {
 handleNginx() {
     ensureAlpineProcps
 
-    if ! echo "${selectCustomInstallType}" | grep -qwE ",7,|,8,|,7,8," && [[ -z $(pgrep -x "nginx") ]] && [[ "$1" == "start" ]]; then
+    # 只装 Reality 的安装流程不起 nginx（没有伪装站要它）；订阅这类确实要它的地方传 force
+    if { [[ "$2" == "force" ]] || ! echo "${selectCustomInstallType}" | grep -qwE ",7,|,8,|,7,8,"; } && [[ -z $(pgrep -x "nginx") ]] && [[ "$1" == "start" ]]; then
+        labelNginxPorts
         if [[ "${release}" == "alpine" ]]; then
             rc-service nginx start 2>${PROXY_AGENT_DIR}/nginx_error.log
         else
@@ -3538,6 +3552,21 @@ renewalTLS() {
     else
         echoContent red " ---> 未安装"
     fi
+}
+
+# labelNginxPorts → SELinux 没禁用时把 nginx 各 listen 端口登记成 http_port_t。不登记的话回到 Enforcing（含重启）后
+# 订阅口、31300 这类端口绑不上，整个 nginx 起不来。只增不删；没有 semanage 就不管（labelCoreBinary 会去装它）
+labelNginxPorts() {
+    local httpPorts port
+    command -v getenforce >/dev/null 2>&1 && command -v semanage >/dev/null 2>&1 || return 0
+    [[ "$(getenforce 2>/dev/null)" == "Disabled" || -z "$(getenforce 2>/dev/null)" ]] && return 0
+    httpPorts=$(semanage port -l 2>/dev/null | awk '$1 == "http_port_t" && $2 == "tcp" {$1 = $2 = ""; print}' | tr -d ' ' | tr ',' '\n')
+    for port in $(grep -hoE '^[[:space:]]*listen[[:space:]]+(\[[^]]*\]:|[0-9.]+:)?[0-9]+' "${nginxConfigPath}"*.conf 2>/dev/null | grep -oE '[0-9]+$' | sort -un); do
+        grep -qx "${port}" <<<"${httpPorts}" && continue
+        if ! semanage port -a -t http_port_t -p tcp "${port}" 2>/dev/null && ! semanage port -m -t http_port_t -p tcp "${port}" 2>/dev/null; then
+            echoContent yellow " ---> $(t SELINUX_NGINX_PORT_FAILED "${port}")"
+        fi
+    done
 }
 
 # labelCoreBinary BIN → SELinux 没禁用时把核心二进制登记成 bin_t 并 restorecon：留在 etc_t 下 systemd 拉起后跑在 init_t，
@@ -4363,6 +4392,21 @@ chainExitSourceInject() {
     jsonWriteFile "${merged}" "${out}" false
 }
 
+# globalEgressChainNotice → IPv6 / WARP 全局的确认前提一句：链式出口 / 中继上经链路转来的流量走链式路由里显式的 direct，不走全局出口
+globalEgressChainNotice() {
+    [[ -f "${CHAIN_EXIT_INFO}" || -f "${CHAIN_RELAY_INFO}" ]] || return 0
+    echoContent yellow "$(t GLOBAL_EGRESS_CHAIN_NOTICE)\n"
+}
+
+# directOutboundInject MERGED → final 或规则指向 direct、却没有这个出站时补一个：IPv6 / WARP 全局会删掉 01_direct_outbound，
+# 链式出口、中继、入口的直连都指向它，缺了 sing-box 起不来（check 查不出）。没人指向时不补，免得没有出站时补成默认出口
+directOutboundInject() {
+    local merged=$1 out
+    out=$(jq 'if (any(.outbounds[]?; .tag == "direct") | not) and (.route.final == "direct" or any(.route.rules[]?; .outbound == "direct"))
+        then .outbounds = ((.outbounds // []) + [{type: "direct", tag: "direct"}]) else . end' "${merged}") || return 1
+    jsonWriteFile "${merged}" "${out}" false
+}
+
 # xrayDaemonRunning → 0=Xray 服务进程在跑。只认服务那条 `run -confdir` 命令行：拼车统计的 `xray api statsquery`、
 # 配置检查的 `xray run -test` 也含 xray/xray，算进来会把它们当成服务——启动被跳过、停止报失败
 xrayDaemonRunning() {
@@ -4377,7 +4421,13 @@ handleXray() {
         labelCoreBinary "${XRAY_BIN}"
         removeLegacyAllowInsecure
         ensureRealityMinClientVer
+        ensureCorePortTargets || echoContent yellow " ---> $(t CORE_PORT_TARGET_FAILED)"
         ensureCarpoolXray
+        # 链式入口的路由每次启动前写回：重装的模板、WARP / IPv6 全局都会整份换掉 09_routing.json，指定了出口的人就静默走本机直连
+        if [[ -f "${XRAY_CONF_DIR}/chain_outbound.json" ]] && ! writeXrayChainConfig "${CHAIN_BRIDGE_PORT}"; then
+            echoContent red " ---> $(t XRAY_CHAIN_ROUTING_FAILED "${XRAY_CONF_DIR}/09_routing.json")"
+            exit 1
+        fi
         if ! ensureXrayLocalBlock; then
             echoContent red " ---> $(t XRAY_LOCAL_BLOCK_FAILED "${XRAY_CONF_DIR}/09_routing.json")"
             exit 1
@@ -4740,6 +4790,9 @@ initSS2022Config() {
         readValidPort "端口:" ss2022Port "RANDOM" 10000 30000 || exit 1
         echoContent green "\n ---> 端口: ${ss2022Port}"
     fi
+    # TCP、UDP 都监听，两个都要放行：漏了防火墙直接拒连
+    allowPort "${ss2022Port}"
+    allowPort "${ss2022Port}" udp
 
     # 选择加密方式
     if [[ -z "${ss2022Method}" ]]; then
@@ -4846,10 +4899,13 @@ addPortHopping() {
                 fi
             else
                 iptables -t nat -A PREROUTING -p udp --dport "${portStart}:${portEnd}" -m comment --comment "Proxy-agent_${type}_portHopping" -j DNAT --to-destination ":${targetPort}"
-                sudo netfilter-persistent save
                 if ! iptables-save | grep -q "Proxy-agent_${type}_portHopping"; then
                     echoContent red " ---> 端口跳跃添加失败"
                     exit 1
+                fi
+                # 没有 netfilter-persistent（装了 ufw 的机器不装它）规则只活到重启，要明说，不能只报成功
+                if ! command -v netfilter-persistent >/dev/null 2>&1 || ! netfilter-persistent save >/dev/null 2>&1; then
+                    echoContent yellow " ---> $(t PORT_HOPPING_NOT_PERSISTENT)"
                 fi
             fi
             allowPort "${portStart}:${portEnd}" udp
@@ -4908,7 +4964,7 @@ deletePortHoppingRules() {
             while read -r line; do
                 iptables -t nat -D PREROUTING "${line}"
             done <<<"${hoppingLines}"
-            sudo netfilter-persistent save
+            command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1
         fi
     fi
 }
@@ -4916,8 +4972,8 @@ deletePortHoppingRules() {
 # 端口跳跃菜单
 portHoppingMenu() {
     local type=$1
-    # 判断iptables是否存在
-    if ! find /usr/bin /usr/sbin | grep -q -w iptables; then
+    # 不能用 find | grep -q：grep 命中即退出，find 吃到 SIGPIPE，pipefail 下整条管道算失败，有 iptables 也常被判成没有
+    if ! command -v iptables >/dev/null 2>&1; then
         echoContent red " ---> 无法识别iptables工具，无法使用端口跳跃，退出安装"
         exit 1
     fi
@@ -4944,10 +5000,13 @@ portHoppingMenu() {
     echoContent yellow "2.删除端口跳跃"
     echoContent yellow "3.查看端口跳跃"
     read -r -p "请选择:" selectPortHoppingStatus
+    # 加、删之后按原 salt 重建订阅：跳跃区间写在订阅里，不重建的话客户端拿到的还是旧端口
     if [[ "${selectPortHoppingStatus}" == "1" ]]; then
         addPortHopping "${type}" "${targetPort}"
+        carpoolRefreshSubscribe
     elif [[ "${selectPortHoppingStatus}" == "2" ]]; then
         deletePortHoppingRules "${type}" "${portHoppingStart}" "${portHoppingEnd}" "${targetPort}"
+        carpoolRefreshSubscribe
         echoContent green " ---> 删除成功"
     elif [[ "${selectPortHoppingStatus}" == "3" ]]; then
         if [[ -n "${portHoppingStart}" && -n "${portHoppingEnd}" ]]; then
@@ -5477,6 +5536,8 @@ singBoxTuicInstall() {
     initSingBoxConfig custom 2 true
     installSingBoxService 3
     reloadCore
+    # 订阅装过就按原 salt 重建：不然新装的协议进不了用户手里的订阅，要等下次手动「查看订阅」
+    refreshSubscribeAfterInstall
     showAccounts 4
 }
 
@@ -5494,6 +5555,8 @@ singBoxHysteria2Install() {
     initSingBoxConfig custom 2 true
     installSingBoxService 3
     reloadCore
+    # 订阅装过就按原 salt 重建：不然新装的协议进不了用户手里的订阅，要等下次手动「查看订阅」
+    refreshSubscribeAfterInstall
     showAccounts 4
 }
 
@@ -5592,6 +5655,11 @@ singBoxMergeConfig() {
     fi
     if ! chainExitSourceInject "${tmpFile}"; then
         echoContent red " ---> $(t CHAIN_EXIT_SOURCE_INJECT_FAILED "${CHAIN_EXIT_INFO}")"
+        rm -f "${tmpFile}"
+        return 1
+    fi
+    if ! directOutboundInject "${tmpFile}"; then
+        echoContent red " ---> $(t SINGBOX_DIRECT_INJECT_FAILED)"
         rm -f "${tmpFile}"
         return 1
     fi
@@ -6687,7 +6755,8 @@ EOF
       headers:
         Host: ${currentHost}
 EOF
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vmess\",\"server\":\"${add}\",\"server_port\":${port},\"uuid\":\"${id}\",\"alter_id\":0,\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"packet_encoding\":\"packetaddr\",\"transport\":{\"type\":\"ws\",\"path\":\"${path}\",\"max_early_data\":2048,\"early_data_header_name\":\"Sec-WebSocket-Protocol\"}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
+        # xudp 两种服务端都认；packetaddr 只有 sing-box 认，Xray 上 UDP 全丢
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vmess\",\"server\":\"${add}\",\"server_port\":${port},\"uuid\":\"${id}\",\"alter_id\":0,\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"packet_encoding\":\"xudp\",\"transport\":{\"type\":\"ws\",\"path\":\"${path}\",\"max_early_data\":2048,\"early_data_header_name\":\"Sec-WebSocket-Protocol\"}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
 
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
@@ -6776,7 +6845,13 @@ EOF
 trojan://${id}@${currentHost}:${port}?peer=${currentHost}&fp=chrome&sni=${currentHost}&alpn=http/1.1#${email}_Trojan
 EOF
 
-        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/clashMeta/${user}"
+        # Xray 的 443 把 ALPN 为 h2 的连接回落给 nginx，mihomo 带 TLS 指纹时不理会 alpn、总报 h2：进了 Clash 订阅也连不上，
+        # 所以只在 sing-box 内核（Trojan 自带 TLS、没有回落）上进订阅，Xray 上打印一段去掉指纹的配置供测试
+        if [[ "${coreKind}" == "1" ]]; then
+            echoContent yellow " ---> $(t ACCOUNT_TROJAN_CLASH_TEST_ONLY)"
+            echoContent green "  - name: \"${email}\"\n    type: trojan\n    server: ${currentHost}\n    port: ${port}\n    password: ${id}\n    udp: true\n    sni: ${currentHost}\n    alpn:\n      - http/1.1\n"
+        else
+            cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/clashMeta/${user}"
   - name: "${email}"
     type: trojan
     server: ${currentHost}
@@ -6786,6 +6861,7 @@ EOF
     udp: true
     sni: ${currentHost}
 EOF
+        fi
         singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"trojan\",\"server\":\"${currentHost}\",\"server_port\":${port},\"password\":\"${id}\",\"tls\":{\"alpn\":[\"http/1.1\"],\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
@@ -6797,10 +6873,13 @@ EOF
         local clashMetaPortContent="port: ${port}"
         local multiPort=
         local multiPortEncode
+        local singBoxPorts=
         if echo "${port}" | grep -q "-"; then
             clashMetaPortContent="ports: ${port}"
             multiPort="mport=${port}&"
             multiPortEncode="mport%3D${port}%26"
+            # sing-box 的区间写 a:b；不写 server_ports 的话 sing-box 系客户端只连固定端口，开了跳跃也不跳
+            singBoxPorts=",\"server_ports\":[\"${port/-/:}\"]"
         fi
 
         # 构建obfs参数（密码按上下文做编码，避免特殊字符破坏 URL/JSON）
@@ -6842,7 +6921,13 @@ EOF
 hysteria2://${id}@${currentHost}:${singBoxHysteria2Port}?${multiPort}${obfsUrlParam}peer=${currentHost}&insecure=0&sni=${currentHost}&alpn=h3#${email}
 EOF
         echoContent yellow " ---> v2rayN(hysteria+TLS)"
-        echo "{\"server\": \"${currentHost}:${port}\",\"socks5\": { \"listen\": \"127.0.0.1:7798\", \"timeout\": 300},\"auth\":\"${id}\",\"tls\":{\"sni\":\"${currentHost}\"}}" | jq
+        # 官方客户端格式：混淆按类型再嵌一层；少了它，开着混淆的服务端一个包都不认
+        jq -n --arg server "${currentHost}:${port}" --arg auth "${id}" --arg sni "${currentHost}" \
+            --arg obfsType "${hysteria2ObfsPassword:+${hysteria2ObfsType:-salamander}}" --arg obfsPw "${hysteria2ObfsPassword}" \
+            --arg up "${hysteria2ClientUploadSpeed}" --arg down "${hysteria2ClientDownloadSpeed}" \
+            '{server: $server, socks5: {listen: "127.0.0.1:7798", timeout: 300}, auth: $auth, tls: {sni: $sni}}
+            + (if $obfsType == "" then {} else {obfs: {type: $obfsType, ($obfsType): {password: $obfsPw}}} end)
+            + (if $down == "" then {} else {bandwidth: {up: "\($up) mbps", down: "\($down) mbps"}} end)'
 
         cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/clashMeta/${user}"
   - name: "${email}"
@@ -6857,7 +6942,7 @@ ${clashMetaBandwidth}
 ${clashMetaObfs}
 EOF
 
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"hysteria2\",\"server\":\"${currentHost}\",\"server_port\":${singBoxHysteria2Port}${singBoxBandwidth},\"password\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"alpn\":[\"h3\"]}${singBoxObfs}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"hysteria2\",\"server\":\"${currentHost}\",\"server_port\":${singBoxHysteria2Port}${singBoxPorts}${singBoxBandwidth},\"password\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"alpn\":[\"h3\"]}${singBoxObfs}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
         echoContent yellow " ---> 二维码 Hysteria2(TLS)"
@@ -6936,9 +7021,8 @@ EOF
     alpn:
      - h3
     congestion-controller: ${tuicAlgorithm}
-    disable-sni: true
     reduce-rtt: true
-    sni: ${email}
+    sni: ${currentHost}
 EOF
 
         singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\": \"tuic\",\"server\": \"${currentHost}\",\"server_port\": ${port},\"uuid\": \"${tuicUUID}\",\"password\": \"${tuicPassword}\",\"congestion_control\": \"${tuicAlgorithm}\",\"tls\": {\"enabled\": true,\"server_name\": \"${currentHost}\",\"alpn\": [\"h3\"]}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
@@ -7526,6 +7610,34 @@ updateNginxBlog() {
     fi
 }
 
+# corePortTarget → 菜单 12 的附加端口该转去的本机端口：装了 0 是它的前置端口（1 / 3 / 4 都从它回落），只装 Reality 是 Reality 对外那一端；都没有返回 1
+corePortTarget() {
+    local file
+    for file in "${XRAY_CONF_DIR}/02_VLESS_TCP_inbounds.json" "${XRAY_CONF_DIR}/07_VLESS_vision_reality_inbounds.json"; do
+        [[ -f "${file}" ]] && jq -er '.inbounds[0].port | numbers' "${file}" 2>/dev/null && return 0
+    done
+    return 1
+}
+
+# ensureCorePortTargets → Xray 启动前把附加端口改指当前的主端口（Hysteria2 那份指 Hysteria2 的端口），内容相同不写：
+# 它们记的是添加那一刻的端口，菜单 5 或重装换了主端口后就静默转进没人听的端口。自己就是目标端口的不动，免得转回自己
+ensureCorePortTargets() {
+    local file target hy want out
+    target=$(corePortTarget) || return 0
+    hy=$(jq -er '.inbounds[0].listen_port | numbers' "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" 2>/dev/null)
+    for file in "${XRAY_CONF_DIR}"/02_dokodemodoor_inbounds_*.json; do
+        [[ -f "${file}" ]] || continue
+        want=${target}
+        if [[ "${file##*/}" == 02_dokodemodoor_inbounds_hysteria_* ]]; then
+            [[ -n "${hy}" ]] || continue
+            want=${hy}
+        fi
+        jq -e --argjson p "${want}" '.inbounds[0].settings.port == $p or .inbounds[0].port == $p' "${file}" >/dev/null 2>&1 && continue
+        out=$(jq --argjson p "${want}" '.inbounds[0].settings.port = $p' "${file}") || return 1
+        jsonWriteFile "${file}" "${out}" false || return 1
+    done
+}
+
 # 删掉一个附加端口的全部 dokodemo-door 片段。只删这三个精确文件名：通配 "*${port}*"
 # 会让端口 2 命中 02_VLESS_TCP / 12_VLESS_XHTTP，紧随的 reloadCore 就把协议停了；
 # 默认端口那份带 _default 后缀，漏掉它就是菜单里永远删不掉的那一条。
@@ -7607,10 +7719,8 @@ addCorePort() {
                 allowPort "${port}"
                 allowPort "${port}" "udp"
 
-                local settingsPort=443
-                if [[ -n "${customPort}" ]]; then
-                    settingsPort=${customPort}
-                fi
+                local settingsPort
+                settingsPort=$(corePortTarget) || settingsPort=443
 
                 if [[ -n ${hysteriaFileName} ]]; then
                     cat <<EOF >"${hysteriaFileName}"
@@ -7696,7 +7806,7 @@ unInstall() {
     fi
     carpoolXrayServiceEnv off
     if [[ "${release}" == "alpine" ]]; then
-        if [[ "${coreKind}" == "1" ]]; then
+        if [[ "${coreKind}" == "1" || -f /etc/init.d/xray ]]; then
             handleXray stop
             rc-update del xray default
             rm -rf /etc/init.d/xray
@@ -7710,16 +7820,21 @@ unInstall() {
             echoContent green " ---> 删除sing-box开机自启完成"
         fi
     else
-        if [[ "${coreKind}" == "1" ]]; then
+        # 先 disable 再删单元文件：只删文件会在 multi-user.target.wants 里留下悬空的自启链接。
+        # 看单元文件而不只看 coreKind：旧版从 Xray 换到 sing-box 时没撤 xray.service
+        if [[ "${coreKind}" == "1" || -f /etc/systemd/system/xray.service ]]; then
             handleXray stop
+            systemctl disable xray.service >/dev/null 2>&1
             rm -rf /etc/systemd/system/xray.service
             echoContent green " ---> 删除Xray开机自启完成"
         fi
         if [[ "${coreKind}" == "2" || -n "${singBoxConfigPath}" || -f /etc/systemd/system/sing-box.service ]]; then
             handleSingBox stop
+            systemctl disable sing-box.service >/dev/null 2>&1
             rm -rf /etc/systemd/system/sing-box.service
             echoContent green " ---> 删除sing-box开机自启完成"
         fi
+        systemctl daemon-reload >/dev/null 2>&1
     fi
 
     removeOwnCronEntries
@@ -8101,11 +8216,14 @@ ensureCarpoolCron() {
     } | crontab - || echoContent yellow " ---> $(t CARPOOL_CRON_FAILED)"
 }
 
-# carpoolXrayServiceEnv on|off → Xray 服务带不带 XRAY_BUF_SPLICE=disable；systemd 写 drop-in（有改动才 daemon-reload），OpenRC 写 conf.d。
-# 拼车开着必须带：Vision 下行走 splice 时要到连接关闭才计入用户统计，重载时在途的整段丢。须在 Xray 启动前调
+# carpoolXrayServiceEnv on|off → Xray 服务带不带 XRAY_BUF_SPLICE=disable 与停止钩子；systemd 写 drop-in（有改动才 daemon-reload），OpenRC 写 conf.d。
+# 拼车开着必须带：Vision 下行走 splice 时要到连接关闭才计入用户统计，重载时在途的整段丢；
+# 关机、重启不经 handleXray，停止钩子不挂上，上次 tick 之后的计数随进程丢。须在 Xray 启动前调
 carpoolXrayServiceEnv() {
     local dropIn=/etc/systemd/system/xray.service.d/carpool.conf confD=/etc/conf.d/xray
-    local unit=$'[Service]\nEnvironment=XRAY_BUF_SPLICE=disable' line='export XRAY_BUF_SPLICE=disable'
+    local hook="PROXY_AGENT_DIR=${PROXY_AGENT_DIR} /bin/bash ${PROXY_AGENT_DIR}/install.sh CarpoolCollect"
+    local unit=$'[Service]\nEnvironment=XRAY_BUF_SPLICE=disable\nExecStop=-/usr/bin/env '"${hook}"
+    local line='export XRAY_BUF_SPLICE=disable' stopPre="stop_pre() { ${hook}; }" kept want
     if [[ -f /etc/systemd/system/xray.service ]]; then
         if [[ "$1" == "on" && "$(cat "${dropIn}" 2>/dev/null)" != "${unit}" ]]; then
             if ! { mkdir -p "${dropIn%/*}" && printf '%s\n' "${unit}" >"${dropIn}"; }; then
@@ -8120,14 +8238,16 @@ carpoolXrayServiceEnv() {
         fi
         systemctl daemon-reload
     elif [[ -f /etc/init.d/xray ]]; then
-        if [[ "$1" == "on" ]] && ! grep -qxF "${line}" "${confD}" 2>/dev/null; then
-            if ! printf '%s\n' "${line}" >>"${confD}"; then
-                echoContent red " ---> $(t CARPOOL_ENSURE_WRITE_FAILED "${confD}")"
-                return 1
-            fi
-        elif [[ "$1" == "off" ]] && grep -qxF "${line}" "${confD}" 2>/dev/null; then
-            sed -i "/^${line}\$/d" "${confD}"
-            [[ -s "${confD}" ]] || rm -f "${confD}"
+        # 车主自己写在 conf.d 里的行原样留着；init 脚本不定义 stop_pre，openrc-run 先读 conf.d，这里定义的就是停止前钩子
+        kept=$(grep -vxF -e "${line}" -e "${stopPre}" "${confD}" 2>/dev/null)
+        want=${kept}
+        [[ "$1" == "on" ]] && want=${kept:+${kept}$'\n'}${line}$'\n'${stopPre}
+        [[ "${want}" == "$(cat "${confD}" 2>/dev/null)" ]] && return 0
+        if [[ -z "${want}" ]]; then
+            rm -f "${confD}"
+        elif ! printf '%s\n' "${want}" >"${confD}"; then
+            echoContent red " ---> $(t CARPOOL_ENSURE_WRITE_FAILED "${confD}")"
+            return 1
         fi
     fi
 }
@@ -8218,7 +8338,16 @@ carpoolMachineSample() {
     jq -cn --arg b "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" --argjson c "${counters}" '{bootId: $b, counters: $c}'
 }
 
-# carpoolCollectBeforeStop → handleXray stop 的钩子：拼车开着且 Xray 在跑就先把内存里的计数收进 state（否则随进程丢）
+# carpoolMachineStep STATE → 按 plan.interface（空就取默认路由的网卡）读一次网卡计数、累加进 .machine，输出新 state；读不到网卡返回 1
+carpoolMachineStep() {
+    local sample machine
+    sample=$(carpoolMachineSample "$(jq -r '.plan.interface // ""' <<<"$1")") || return 1
+    machine=$(carpoolMachineAdvance "$(jq -c '.machine // {}' <<<"$1")" "${sample}") || return 1
+    jq -c --argjson m "${machine}" '.machine = $m' <<<"$1"
+}
+
+# carpoolCollectBeforeStop → 停 Xray 前的钩子（handleXray stop，与服务单元的停止钩子 CarpoolCollect）：拼车开着且 Xray 在跑就把内存里的计数
+# 收进 state，整机网卡也记一次（重启后从 0 起），否则上次 tick 之后的都丢。只写 state 不判定：判定可能要重载，停机途中不能重载
 carpoolCollectBeforeStop() {
     local state newState
     state=$(carpoolReadState) || return 0
@@ -8226,9 +8355,9 @@ carpoolCollectBeforeStop() {
     xrayDaemonRunning || return 0
     carpoolLock || return 0
     state=$(carpoolReadState)
-    if newState=$(carpoolCollect "${state}"); then
-        carpoolWriteState "${newState}"
-    fi
+    newState=$(carpoolCollect "${state}") && state=${newState}
+    newState=$(carpoolMachineStep "${state}") && state=${newState}
+    carpoolWriteState "${state}"
     carpoolUnlock
 }
 
@@ -8403,7 +8532,7 @@ carpoolTick() {
         state=$(jq -c '.collectFailures += 1' <<<"${state}")
         echoContent yellow " ---> ${now} $(t CARPOOL_TICK_COLLECT_FAILED "$(jq -r '.collectFailures' <<<"${state}")")"
     fi
-    local membersOk=true fileId notices extra iface sample machine map
+    local membersOk=true fileId notices extra iface map
     installed=$(scanInstalledProtocols "${XRAY_CONF_DIR}")
     if map=$(carpoolCurrentClientsMap); then
         state=$(carpoolPruneRemoved "${state}" "${map}")
@@ -8418,8 +8547,8 @@ carpoolTick() {
     fi
     # 整机读网卡，不看 Xray 在不在跑；网卡按刚同步的 plan.interface 取
     iface=$(jq -r '.plan.interface // ""' <<<"${state}")
-    if sample=$(carpoolMachineSample "${iface}") && machine=$(carpoolMachineAdvance "$(jq -c '.machine // {}' <<<"${state}")" "${sample}"); then
-        state=$(jq -c --argjson m "${machine}" '.machine = $m' <<<"${state}")
+    if newState=$(carpoolMachineStep "${state}"); then
+        state=${newState}
     elif [[ -n "${iface}" ]]; then
         echoContent yellow " ---> ${now} $(t CARPOOL_TICK_NO_IFACE "${iface}")"
     else
@@ -10523,6 +10652,7 @@ ipv6Routing() {
         echoContent yellow "# 注意事项\n"
         echoContent yellow "1.会删除所有设置的分流规则"
         echoContent yellow "2.会删除IPv6之外的所有出站规则\n"
+        globalEgressChainNotice
         read -r -p "是否确认设置？[y/n]:" IPv6OutStatus
 
         if [[ "${IPv6OutStatus}" == "y" ]]; then
@@ -10939,6 +11069,7 @@ warpRoutingReg() {
         echoContent yellow "# 注意事项\n"
         echoContent yellow "1.会删除所有设置的分流规则"
         echoContent yellow "2.会删除除WARP[第三方]之外的所有出站规则\n"
+        globalEgressChainNotice
         read -r -p "是否确认设置？[y/n]:" warpOutStatus
 
         if [[ "${warpOutStatus}" == "y" ]]; then
@@ -12244,10 +12375,10 @@ chainAccountAssignPorts() {
 }
 
 # writeXrayChainConfig PORT → Xray 侧两件：chain_proxy 系列出站指向本机的桥；09_routing.json 整份换成链式路由：先按账号映射分
-# （user 正则，. + 转义——Xray 静默丢弃写坏的正则），其余交给默认出口；写完当场补上封本机的规则，不等下次启动（被 systemd 拉起时没有那一步）。
-# 原路由只在第一次存成 .bak.chain：之后改映射也调这里，覆盖掉的话 removeChainProxy 就恢复不出原样
+# （user 正则，. + 转义——Xray 静默丢弃写坏的正则），其余交给默认出口；没变就不写，写了当场补封本机的规则（被 systemd 拉起时没有那一步）。
+# 原路由只在第一次被换掉时存成 .bak.chain：改映射、每次启动 Xray 都调这里，覆盖掉的话 removeChainProxy 就恢复不出原样
 writeXrayChainConfig() {
-    local port=$1 state bridges outbounds routing
+    local port=$1 state bridges outbounds routing current
     state=$(chainAccountReadState) || return 1
     bridges=$(chainAccountBridges "${state}") || return 1
     # 直连走链式自己的 chain_direct：WARP / IPv6 全局会删掉 z_direct_outbound，指向它的账号就全断。它不能排第一，Xray 把第一个出站当默认
@@ -12265,11 +12396,17 @@ writeXrayChainConfig() {
             + [{type: "field", domain: ["domain:gstatic.com", "domain:googleapis.com", "domain:googleapis.cn"], outboundTag: $dflt},
                {type: "field", network: "tcp,udp", outboundTag: $dflt}])}}') || return 1
 
-    if [[ -f "${XRAY_CONF_DIR}/09_routing.json" && ! -f "${XRAY_CONF_DIR}/09_routing.json.bak.chain" ]]; then
-        cp "${XRAY_CONF_DIR}/09_routing.json" "${XRAY_CONF_DIR}/09_routing.json.bak.chain" || return 1
+    if [[ "$(jq -cS . "${XRAY_CONF_DIR}/chain_outbound.json" 2>/dev/null)" != "$(jq -cS . <<<"${outbounds}")" ]]; then
+        jsonWriteFile "${XRAY_CONF_DIR}/chain_outbound.json" "${outbounds}" false || return 1
     fi
-    jsonWriteFile "${XRAY_CONF_DIR}/chain_outbound.json" "${outbounds}" false || return 1
-    jsonWriteFile "${XRAY_CONF_DIR}/09_routing.json" "${routing}" false || return 1
+    # local-block 组是 ensureXrayLocalBlock 补的，不算链式路由，比较时去掉
+    current=$(jq -cS '.routing.rules |= map(select((.ruleTag // "") | startswith("local-block") | not))' "${XRAY_CONF_DIR}/09_routing.json" 2>/dev/null)
+    if [[ "${current}" != "$(jq -cS . <<<"${routing}")" ]]; then
+        if [[ -f "${XRAY_CONF_DIR}/09_routing.json" && ! -f "${XRAY_CONF_DIR}/09_routing.json.bak.chain" ]]; then
+            cp "${XRAY_CONF_DIR}/09_routing.json" "${XRAY_CONF_DIR}/09_routing.json.bak.chain" || return 1
+        fi
+        jsonWriteFile "${XRAY_CONF_DIR}/09_routing.json" "${routing}" false || return 1
+    fi
     ensureXrayLocalBlock
 }
 
@@ -12281,7 +12418,6 @@ chainAccountInject() {
     state=$(chainAccountReadState) || return 1
     [[ "${state}" == "{}" ]] && return 0
     bridges=$(chainAccountBridges "${state}") || return 1
-    # IPv6 全局会删掉 01_direct_outbound，而直连的账号与 final 都指向 direct：缺了就补一个，否则 sing-box 因找不到出站起不来
     out=$(jq --argjson s "${state}" --argjson bridges "${bridges}" '
         ($s.accounts // {}) as $acc
         | (if ([.inbounds[]? | select(.tag == "chain_bridge_in")] | length) > 0
@@ -12298,7 +12434,6 @@ chainAccountInject() {
         | .inbounds = ((.inbounds // []) + $inb)
         | .route.rules = ($pre + (.route.rules // []))
         | (if ($s.mode // "") != "multi_chain" and $s.default_chain == "direct" then .route.final = "direct" else . end)
-        | (if any(.outbounds[]?; .tag == "direct") then . else .outbounds = ((.outbounds // []) + [{type: "direct", tag: "direct"}]) end)
     ' "${merged}") || return 1
     jsonWriteFile "${merged}" "${out}" false
 }
@@ -14938,24 +15073,21 @@ testMultiChainConnection() {
         ip=$(echo "${chain}" | jq -r '.ip')
         port=$(echo "${chain}" | jq -r '.port')
 
-        # 后台执行测试
+        # 端口通不等于链路通：密钥不对、出口限源、经中继的链路照样连得上出口端口。按链路自己的出站真取一次出口 IP，不碰在跑的 sing-box
         (
-            local result="fail"
-            local latency="N/A"
-
-            # TCP 连接测试
-            if _chainTCPProbe "${ip}" "${port}" 5; then
-                result="pass"
-
-                # 测量延迟
-                local startTime endTime
+            local result="fail" took="" outIP="" probeConf="${tmpDir}/probe_${index}.json" startTime
+            if jq '{log: {level: "error"}, dns: {servers: [{type: "local", tag: "local"}]},
+                    outbounds: [.outbounds[] | del(.domain_resolver)], route: {default_domain_resolver: "local"}}' \
+                "${SINGBOX_FRAGMENT_DIR}/chain_outbound_${name}.json" >"${probeConf}" 2>/dev/null; then
                 startTime=$(date +%s%N)
-                _chainTCPProbe "${ip}" "${port}" 3
-                endTime=$(date +%s%N)
-                latency=$(( (endTime - startTime) / 1000000 ))
+                # tools fetch 只要拿到响应就退出 0，握手或认证失败才非零；没有超时，靠 timeout 兜住
+                if outIP=$(timeout 15 "${SINGBOX_BIN}" tools fetch -c "${probeConf}" -o "${name}" https://api.ipify.org 2>/dev/null) \
+                    && [[ "${outIP}" =~ ^[0-9a-fA-F.:]+$ ]]; then
+                    result="pass"
+                    took=$(( ($(date +%s%N) - startTime) / 1000000 ))
+                fi
             fi
-
-            echo "${name}|${ip}:${port}|${result}|${latency}" > "${tmpDir}/result_${index}"
+            echo "${name}|${ip}:${port}|${result}|${took}|${outIP}" > "${tmpDir}/result_${index}"
         ) &
 
         pids="${pids} $!"
@@ -14973,16 +15105,11 @@ testMultiChainConnection() {
 
     for resultFile in "${tmpDir}"/result_*; do
         if [[ -f "${resultFile}" ]]; then
-            local result
-            result=$(cat "${resultFile}")
-            local name target status latency
-            name=$(echo "${result}" | cut -d'|' -f1)
-            target=$(echo "${result}" | cut -d'|' -f2)
-            status=$(echo "${result}" | cut -d'|' -f3)
-            latency=$(echo "${result}" | cut -d'|' -f4)
+            local name target status took outIP
+            IFS='|' read -r name target status took outIP <"${resultFile}"
 
             if [[ "${status}" == "pass" ]]; then
-                echoContent green "  ✅ ${name} (${target}) - $(t CHAIN_TEST_LATENCY): ${latency}ms"
+                echoContent green "  ✅ ${name} (${target}) - $(t CHAIN_TEST_PROBE_OK "${outIP}" "${took}")"
                 ((passCount++))
             else
                 echoContent red "  ❌ ${name} (${target}) - $(t CHAIN_TEST_CONN_FAIL)"
@@ -16319,8 +16446,13 @@ externalNodeMenu() {
 
 # ======================= 外部节点功能结束 =======================
 
-# 分流工具
+# 分流工具。Xray 链式入口上拒绝：链式路由最后一条兜底接住所有流量，这里追加的规则排在它后面永远不命中，
+# 下次启动还被写回的链式路由冲掉，菜单却报成功。sing-box 的分流片段排在链式路由前面，照常生效
 routingToolsMenu() {
+    if [[ "${coreKind}" == "1" && -f "${XRAY_CONF_DIR}/chain_outbound.json" ]]; then
+        echoContent red " ---> $(t ROUTING_TOOLS_CHAIN_ENTRY_REFUSED)"
+        exit 1
+    fi
     echoContent skyBlue "\n功能 1/${totalProgress} : 分流工具"
     echoContent red "\n=============================================================="
     echoContent yellow "# 注意事项"
@@ -16827,6 +16959,45 @@ validateCustomInstallTokens() {
     return 0
 }
 
+# syncSidecarTlsDomain → Xray 带域名重装后，旁挂 sing-box 的 6 / 9 换成这次域名的证书：它们的片段不在 Xray 重装的重写范围里，
+# 换了域名还留着旧证书，客户端按订阅里的新域名校验必失败
+syncSidecarTlsDomain() {
+    local f content
+    [[ -n "${domain}" && -f "${TLS_DIR}/${domain}.crt" && -f "${TLS_DIR}/${domain}.key" ]] || return 0
+    for f in "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" "${SINGBOX_FRAGMENT_DIR}/09_tuic_inbounds.json"; do
+        [[ -f "${f}" ]] || continue
+        content=$(jq --arg d "${domain}" --arg crt "${TLS_DIR}/${domain}.crt" --arg key "${TLS_DIR}/${domain}.key" \
+            '.inbounds |= map(if .tls then .tls.server_name = $d | .tls.certificate_path = $crt | .tls.key_path = $key else . end)' "${f}") &&
+            jsonWriteFile "${f}" "${content}" false
+    done
+}
+
+# installAbortArm / installAbortDisarm 夹住带域名安装里「已经停了服务、还没写新配置」那一段：中间不论怎么退出
+# （端口自检不过、证书没签下来、输错），都把起步时在跑的 Xray / sing-box / nginx 按磁盘上的旧配置拉回来，不然整机断着
+installAbortArm() {
+    installAbortRunning=
+    xrayDaemonRunning && installAbortRunning+=" xray"
+    [[ -n $(pgrep -x sing-box) ]] && installAbortRunning+=" singbox"
+    [[ -n $(pgrep -x nginx) ]] && installAbortRunning+=" nginx"
+    trap installAbortRestore EXIT
+}
+
+installAbortDisarm() {
+    installAbortRunning=
+    trap - EXIT
+}
+
+installAbortRestore() {
+    local service
+    for service in ${installAbortRunning}; do
+        case "${service}" in
+            xray) handleXray start ;;
+            singbox) handleSingBox start ;;
+            nginx) handleNginx start force ;;
+        esac
+    done
+}
+
 # sing-box 个性化安装
 customSingBoxInstall() {
     echoContent skyBlue "\n========================个性化安装============================"
@@ -16869,6 +17040,7 @@ customSingBoxInstall() {
         chainRefuseCoreSwitch 2
         readLastInstallationConfig
         totalProgress=9
+        installAbortArm
         installTools 1
         # 申请tls
         if anyProtocolRequiresTLS "${selectCustomInstallType}"; then
@@ -16879,6 +17051,7 @@ customSingBoxInstall() {
 
         installSingBox 4 || { echoContent red "\n ---> sing-box 安装失败，已中止安装流程"; exit 1; }
         installSingBoxService 5
+        installAbortDisarm
         initSingBoxConfig custom 6
         cleanUp xrayDel
         installCronTLS 7
@@ -16938,6 +17111,7 @@ customXrayInstall() {
         local previousCoreKind=${coreKind}
         readLastInstallationConfig
         totalProgress=12
+        installAbortArm
         installTools 1
         if [[ -n "${btDomain}" ]]; then
             echoContent skyBlue "\n进度  3/${totalProgress} : 检测到宝塔面板/1Panel，跳过申请TLS步骤"
@@ -16974,14 +17148,16 @@ customXrayInstall() {
         # 安装Xray
         installXray 7 false || { echoContent red "\n ---> Xray-core 安装失败，已中止安装流程"; exit 1; }
         installXrayService 8
+        installAbortDisarm
         initXrayConfig custom 9
         cleanUp singBoxProtocolsDel "${previousCoreKind}"
+        syncSidecarTlsDomain
         if anyProtocolRequiresTLS "${selectCustomInstallType}"; then
             installCronTLS 10
         fi
 
-        handleXray stop
-        handleXray start
+        # 端口自检停过旁挂的 sing-box（链式、6 / 9），重启要连它一起按片段拉回来，只起 Xray 会让它一直停着
+        reloadCore
         # 生成账号
         refreshSubscribeAfterInstall
         checkGFWStatue 11
@@ -17023,9 +17199,39 @@ selectCoreInstall() {
     esac
 }
 
+# realityQuickDropped TARGET_CORE → 一键 Reality 装完会删掉的已装协议 ID，每行一个：它按「只装 7」重配目标内核，
+# 换内核时另一个内核的协议入站整份删；Xray 机旁挂的 6 / 9 在 Xray 这条路上留着。7 原地重配，不算删
+realityQuickDropped() {
+    local xray sing
+    xray=$(scanInstalledProtocols "${XRAY_CONF_DIR}/" 2>/dev/null)
+    sing=$(scanInstalledProtocols "${SINGBOX_FRAGMENT_DIR}/" 2>/dev/null)
+    if [[ "$1" == "1" ]]; then
+        [[ "${coreKind}" == "2" ]] || sing=
+    fi
+    tr ',' '\n' <<<"${xray}${sing}" | grep -vx -e '' -e 7 | sort -nu
+}
+
+# realityQuickConfirm TARGET_CORE → 会删掉别的协议时先列出来、要 y 才继续，答别的就退出：
+# 在已有全套协议的机器上跑一键 Reality，其余协议连同订阅里的节点一起没了，以前不打招呼
+realityQuickConfirm() {
+    local dropped names= id answer
+    dropped=$(realityQuickDropped "$1")
+    [[ -n "${dropped}" ]] || return 0
+    while IFS= read -r id; do
+        names+="${names:+, }$(getProtocolDisplayName "${id}")"
+    done <<<"${dropped}"
+    echoContent yellow " ---> $(t REALITY_QUICK_DROPS "${names}")"
+    read -r -p "$(t REALITY_QUICK_CONFIRM)" answer
+    if [[ "${answer}" != "y" ]]; then
+        echoContent green " ---> $(t REALITY_QUICK_ABORTED)"
+        exit 0
+    fi
+}
+
 # 一键无域名 Reality 安装：仅安装 VLESS+Reality+Vision (协议 7)，跳过域名/TLS 申请
 installXrayRealityOnly() {
     chainRefuseCoreSwitch 1
+    realityQuickConfirm 1
     local previousCoreKind=${coreKind}
     selectCoreType=1
     selectCustomInstallType=",7,"
@@ -17047,6 +17253,7 @@ installXrayRealityOnly() {
 installSingBoxRealityOnly() {
     carpoolRefuseIfEnabled
     chainRefuseCoreSwitch 2
+    realityQuickConfirm 2
     selectCoreType=2
     selectCustomInstallType=",7,"
     readLastInstallationConfig
@@ -17087,6 +17294,7 @@ xrayCoreInstall() {
     readLastInstallationConfig
     selectCustomInstallType=
     totalProgress=12
+    installAbortArm
     installTools 2
     if [[ -n "${btDomain}" ]]; then
         echoContent skyBlue "\n进度  3/${totalProgress} : 检测到宝塔面板/1Panel，跳过申请TLS步骤"
@@ -17105,8 +17313,10 @@ xrayCoreInstall() {
     # 安装Xray
     installXray 6 false || { echoContent red "\n ---> Xray-core 安装失败，已中止安装流程"; exit 1; }
     installXrayService 7
+    installAbortDisarm
     initXrayConfig all 8
     cleanUp singBoxProtocolsDel "${previousCoreKind}"
+    syncSidecarTlsDomain
     installCronTLS 9
     if [[ -n "${btDomain}" ]]; then
         echoContent skyBlue "\n进度  11/${totalProgress} : 检测到宝塔面板/1Panel，跳过伪装网站"
@@ -17114,9 +17324,8 @@ xrayCoreInstall() {
         nginxBlog 10
     fi
     updateRedirectNginxConf
-    handleXray stop
-    sleep 2
-    handleXray start
+    # 端口自检停过旁挂的 sing-box（链式、6 / 9），重启要连它一起按片段拉回来，只起 Xray 会让它一直停着
+    reloadCore
 
     handleNginx start
     # 生成账号
@@ -17131,6 +17340,7 @@ singBoxInstall() {
     readLastInstallationConfig
     selectCustomInstallType=
     totalProgress=8
+    installAbortArm
     installTools 2
 
     if [[ -n "${btDomain}" ]]; then
@@ -17148,6 +17358,7 @@ singBoxInstall() {
 
     installSingBox 5 || { echoContent red "\n ---> sing-box 安装失败，已中止安装流程"; exit 1; }
     installSingBoxService 6
+    installAbortDisarm
     initSingBoxConfig all 7
 
     cleanUp xrayDel
@@ -17467,7 +17678,7 @@ refreshSubscribeAfterInstall() {
     fi
     bootStartup nginx
     handleNginx stop
-    handleNginx start
+    handleNginx start force
     # 与拼车恢复成员时同一条静默重建：订阅端口读不出来（域名对不上）就跳过，不会掉进交互
     carpoolRefreshSubscribe
 }
@@ -18240,7 +18451,6 @@ initRealityKey() {
             realityX25519Key=$(${SINGBOX_BIN} generate reality-keypair)
             realityPrivateKey=$(echo "${realityX25519Key}" | head -1 | awk '{print $2}')
             realityPublicKey=$(echo "${realityX25519Key}" | tail -n 1 | awk '{print $2}')
-            echo "publicKey:${realityPublicKey}" >${SINGBOX_FRAGMENT_DIR}/reality_key
         else
             # 二进制预检：缺失会让下方 x25519 输出为空，私钥为空又会触发本函数自递归 → 死循环
             if [[ ! -f "${XRAY_BIN}" ]]; then
@@ -18267,6 +18477,10 @@ initRealityKey() {
                 echoContent green "\n publicKey:${realityPublicKey}"
             fi
         fi
+    fi
+    # sing-box 入站只存私钥，订阅读的公钥在这个文件里：沿用旧密钥（含从 Xray 切过来）也得写，不然发出去的 public_key 是空的
+    if [[ "${selectCoreType}" == "2" || "${coreKind}" == "2" ]]; then
+        echo "publicKey:${realityPublicKey}" >"${SINGBOX_FRAGMENT_DIR}/reality_key"
     fi
 }
 
@@ -18319,12 +18533,14 @@ initRealityMldsa65() {
         echoContent green " 目标域名不支持X25519MLKEM768，忽略ML-DSA-65。"
     fi
 }
-# checkRealityDest DOMAIN：目标域名挂在 Cloudflare 代理后面时，Reality 会把 VPS 变成别人的
-# 免费中转，命中要用户二次确认；探测失败（无网/超时）按未命中放行
+# realityDestBehindCloudflare DOMAIN → 0 = 目标挂在 Cloudflare 代理后面：Reality 会把 VPS 变成别人的免费中转。探测失败（无网/超时）按没挂
+realityDestBehindCloudflare() {
+    curl -s --connect-timeout 5 --max-time 10 "https://$1/cdn-cgi/trace" 2>/dev/null | grep -q "visit_scheme=https"
+}
+
+# checkRealityDest DOMAIN：用户自己输的目标挂在 Cloudflare 代理后面时要二次确认
 checkRealityDest() {
-    local traceResult
-    traceResult=$(curl -s --connect-timeout 5 --max-time 10 "https://$1/cdn-cgi/trace" 2>/dev/null | grep "visit_scheme=https")
-    if [[ -n "${traceResult}" ]]; then
+    if realityDestBehindCloudflare "$1"; then
         echoContent red "\n ---> $(t REALITY_CF_WARNING)\n"
         read -r -p "$(t PROMPT_CONTINUE):" setRealityDestStatus
         if ! isYesInput "${setRealityDestStatus}"; then
@@ -18336,8 +18552,10 @@ checkRealityDest() {
 
 # 初始化客户端可用的ServersName
 initRealityClientServersName() {
-    # Reality 默认 serverName 候选列表（不含 Apple/MS 系——它们 TLS 握手行为变化、Reality 伪装失败率高）
-    local realityDestDomainList="download-installer.cdn.mozilla.net,addons.mozilla.org,s0.awsstatic.com,d1.awsstatic.com,images-na.ssl-images-amazon.com,m.media-amazon.com,player.live-video.net,one-piece.com,lol.secure.dyn.riotcdn.net,www.lovelive-anime.jp,academy.nvidia.com,dl.google.com,www.google-analytics.com,www.caltech.edu,www.calstatela.edu,www.suny.edu,www.suffolk.edu,www.python.org,vuejs-jp.org,vuejs.org,zh-hk.vuejs.org,react.dev,www.java.com,www.oracle.com,www.mysql.com,www.mongodb.com,redis.io,cname.vercel-dns.com,vercel-dns.com,www.swift.com,www.cisco.com,www.asus.com,www.samsung.com,www.amd.com,www.umcg.nl,www.fom-international.com,www.u-can.co.jp,github.io"
+    # Reality 默认 serverName 候选列表。不含 Apple/MS 系：TLS 握手行为变化、Reality 伪装失败率高；不含挂在 Cloudflare 代理后面的站（见 checkRealityDest）；
+    # 不含 AWS CloudFront 与 Akamai 托管的站（按服务器上解析到的 IP 归属判）：已有工具能比对它们的 TLS 栈，认出拿它们当目标的 Reality
+    local realityDestDomainList="download-installer.cdn.mozilla.net,addons.mozilla.org,dl.google.com,www.google-analytics.com,www.python.org,vuejs-jp.org,vuejs.org,zh-hk.vuejs.org,react.dev,cname.vercel-dns.com,vercel-dns.com,www.fom-international.com,github.io"
+    local realityDestRandom=
     if [[ -n "${realityServerName}" && -z "${lastInstallationConfig}" ]]; then
         if echo ${realityDestDomainList} | grep -q "${realityServerName}"; then
             read -r -p "读取到上次安装设置的Reality域名，是否使用？[y/n]:" realityServerNameStatus
@@ -18374,12 +18592,16 @@ initRealityClientServersName() {
             echoContent yellow "录入示例:addons.mozilla.org:443\n"
             read -r -p "请输入目标域名，[回车]随机域名，默认端口443:" realityServerName
             if [[ -z "${realityServerName}" ]]; then
-                # 动态计算域名列表数量，避免硬编码
-                local domainCount
-                domainCount=$(echo "${realityDestDomainList}" | awk -F',' '{print NF}')
-                local randomIndex
-                randomIndex=$(randomNum 1 "${domainCount}")
-                realityServerName=$(echo "${realityDestDomainList}" | awk -F ',' -v idx="${randomIndex}" '{print $idx}')
+                # 随机挑的不问用户：按乱序取第一个没挂在 Cloudflare 后面的。问了而用户回车，安装会在服务已停时退出
+                local candidate
+                while read -r candidate; do
+                    [[ -z "${realityServerName}" ]] && realityServerName=${candidate}
+                    if ! realityDestBehindCloudflare "${candidate}"; then
+                        realityServerName=${candidate}
+                        realityDestRandom=1
+                        break
+                    fi
+                done < <(tr ',' '\n' <<<"${realityDestDomainList}" | awk -v seed="${RANDOM}" 'BEGIN {srand(seed)} {print rand() "\t" $0}' | sort -n | cut -f2-)
             else
                 # 验证用户输入的域名（可能包含端口，先提取域名部分验证）
                 local realityDomainCheck="${realityServerName%%:*}"
@@ -18395,7 +18617,7 @@ initRealityClientServersName() {
         fi
     fi
 
-    checkRealityDest "${realityServerName}"
+    [[ -z "${realityDestRandom}" ]] && checkRealityDest "${realityServerName}"
     echoContent yellow "\n ---> 客户端可用域名: ${realityServerName}:${realityDomainPort}\n"
 }
 # initXrayRealityPort KEEP SKIP [EXTRA...] → 选 7 的对外端口写进 realityPort，参数同 portsTakenFor
@@ -19218,13 +19440,18 @@ case "${1:-}" in
         doctor
         exit $?
         ;;
+    # 服务单元的停止钩子：关机途中网络可能已断，不能等下面的更新检查超时
+    CarpoolCollect)
+        carpoolCollectBeforeStop
+        exit 0
+        ;;
     --dry-run|-n)
         export DRY_RUN=1
         shift
         ;;
 esac
 
-# root 权限校验：doctor 子命令上面已 exit（只读诊断允许非 root），其余路径（含 --dry-run）
+# root 权限校验：doctor（只读诊断允许非 root）与 CarpoolCollect 上面已 exit，其余路径（含 --dry-run）
 # 都会落到这里。脚本随后大量写 /etc、systemd、防火墙，非 root 必然中途失败，这里统一拦截。
 checkRoot
 

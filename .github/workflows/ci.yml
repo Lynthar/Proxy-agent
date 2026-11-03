@@ -196,3 +196,15 @@ jobs:
         # Two Debian containers on one docker network. Fails unless the exit really forwarded
         # the traffic and carpool survives the chain going up and down.
         run: bash tests/e2e/run.sh chain xray
+
+  domain-e2e:
+    name: full install on a domain, every node through the emitted subscription
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xray full install, sidecar, aborted and domain-changing reinstalls, carpool pages, sing-box switch, uninstall
+        # One Debian container whose public address sits on lo and whose names resolve through
+        # sslip.io; the certificate comes from a CA the test creates and is placed as a custom
+        # certificate, so ACME issuance is not exercised here. Needs IPv4 egress and public DNS.
+        run: bash tests/e2e/run.sh domain

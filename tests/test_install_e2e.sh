@@ -3,57 +3,7 @@
 # 用内核自检、真实 Reality 握手（客户端由 E2E_CLIENT 选，默认同内核）、pasly 重入与 doctor 验收；Xray 内核再开拼车、
 # 走一遍真实计量、增删成员、回滚、到期停用与关闭恢复（chain 腿另在中间接上、拆掉链式），最后卸载。跑法见 tests/e2e/run.sh
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-assert_equals() {
-    local expected="$1"
-    local actual="$2"
-    local message="$3"
-
-    if [[ "${expected}" == "${actual}" ]]; then
-        echo -e "${GREEN}✓${NC} ${message}"
-        ((TESTS_PASSED++))
-    else
-        echo -e "${RED}✗${NC} ${message}"
-        echo -e "  Expected: ${expected}"
-        echo -e "  Actual: ${actual}"
-        ((TESTS_FAILED++))
-    fi
-}
-
-assert_contains() {
-    local haystack="$1"
-    local needle="$2"
-    local message="$3"
-
-    if [[ "${haystack}" == *"${needle}"* ]]; then
-        echo -e "${GREEN}✓${NC} ${message}"
-        ((TESTS_PASSED++))
-    else
-        echo -e "${RED}✗${NC} ${message}"
-        echo -e "  String '${needle}' not found in output"
-        ((TESTS_FAILED++))
-    fi
-}
-
-assert_not_empty() {
-    local value="$1"
-    local message="$2"
-
-    if [[ -n "${value}" ]]; then
-        echo -e "${GREEN}✓${NC} ${message}"
-        ((TESTS_PASSED++))
-    else
-        echo -e "${RED}✗${NC} ${message} (value is empty)"
-        ((TESTS_FAILED++))
-    fi
-}
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/e2e/assert.sh"
 
 # ============================================================================
 # 前置：只在容器里以 root 跑——安装会写 /etc、起服务、改 crontab，最后 rm -rf 安装根
@@ -468,12 +418,14 @@ listenAddrs() {
         /proc/net/tcp /proc/net/tcp6 2>/dev/null
 }
 
-# runCarpoolTick CRON_LINE → 把 crontab 那一行原样执行一次，打印它这次追加进日志的内容，返回它的退出码。
-# 环境照 Debian cron 交给任务的给（实测 PATH=/usr/bin:/bin）；Alpine 的 crond 继承 OpenRC，比这宽
+# runCarpoolTick CRON_LINE [AT] → 把 crontab 那一行原样执行一次，打印它这次追加进日志的内容，返回它的退出码。
+# 环境照 Debian cron 交给任务的给（实测 PATH=/usr/bin:/bin）；Alpine 的 crond 继承 OpenRC，比这宽。
+# 给了 AT（YYYY-MM-DD HH:MM:SS）就经 faketime 让这次 tick 从那一刻起走表；Xray 是静态 Go 程序，统计 API 不受影响
 runCarpoolTick() {
-    local log="${INSTALL_ROOT}/crontab_carpool.log" before=0 rc
+    local log="${INSTALL_ROOT}/crontab_carpool.log" before=0 rc fake=()
     [[ -f "${log}" ]] && before=$(wc -l <"${log}")
-    env -i HOME=/root PATH=/usr/bin:/bin SHELL=/bin/sh /bin/sh -c "$(cut -d' ' -f6- <<<"$1")"
+    [[ -n "${2:-}" ]] && fake=(faketime -f "@$2")
+    env -i HOME=/root PATH=/usr/bin:/bin SHELL=/bin/sh "${fake[@]}" /bin/sh -c "$(cut -d' ' -f6- <<<"$1")"
     rc=$?
     tail -n +"$((before + 1))" "${log}" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g'
     return "${rc}"
@@ -602,6 +554,23 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
     # 采集带 -reset：取过的计数器要归零，否则每个 tick 都把累计值重加一遍
     assert_equals "0" "$(statsValue "$("${XRAY_BIN}" api statsquery -s "127.0.0.1:${apiPort}" -t 3 -pattern 'user>>>' 2>&1)" "${statName}")" \
         "tick 采集之后该计数器归零"
+    # 关机、重启不经脚本：服务管理器直接停 Xray 时，服务单元的停止钩子也得先把内存里的计数收进 state
+    assert_equals "204" "$(realityProbe)" "直接停服务之前再走一次流量"
+    usedBefore=$(memberUsed "${E2E_USER}")
+    if [[ "${SERVICE_MANAGER}" == "systemd" ]]; then
+        systemctl stop xray.service
+    else
+        rc-service xray stop >/dev/null 2>&1
+    fi
+    usedAfter=$(memberUsed "${E2E_USER}")
+    assert_equals "yes" "$([[ "${usedAfter}" =~ ^[0-9]+$ && "${usedAfter}" -gt "${usedBefore}" ]] && echo yes || echo no)" \
+        "不经脚本直接停 Xray（${SERVICE_MANAGER}）：停止钩子把这次流量记进 state（${usedBefore} → ${usedAfter} 字节）"
+    if [[ "${SERVICE_MANAGER}" == "systemd" ]]; then
+        systemctl start xray.service
+    else
+        rc-service xray start >/dev/null 2>&1
+    fi
+    sleep 1.5
     # 经代理够不着统计 API：目标写成 IP、localhost、解析到 127.0.0.1 的域名、IPv4 映射还是 0.0.0.0，都按端口拦下。
     # 只看响应码：没拦时这个 QueryStats(reset) 返回 200 并清零计数；计数本身不能当判据，cron 里的 tick 也会清零
     printf '\x00\x00\x00\x00\x0b\x0a\x07user>>>\x10\x01' >/tmp/proxy-agent-e2e-reset.bin
@@ -763,6 +732,45 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
         assert_equals "204" "$(realityProbe)" "出口机恢复后，${E2E_USER} 经链路照常上网"
     fi
 
+    rolloverOut=
+    if command -v apt-get >/dev/null 2>&1; then
+        echo ""
+        echo -e "${YELLOW}=== 拼车：超额停用 → 到下一个重置日的 tick 清零、恢复 ===${NC}"
+        apt-get install -y -qq faketime >/dev/null 2>&1
+        assert_not_empty "$(command -v faketime || true)" "装上 faketime（只给这一次 tick 换日期）"
+        printf '%s\n' "$(jq --arg u "${E2E_USER}" '.members[$u].quotaGiB = 1' "${carpoolDir}/members.json")" >"${carpoolDir}/members.json"
+        # 一个周期的用量测试里跑不出来：拿 state 的同一把锁，把已用量记成 1.5 GiB（cron 里的 tick 不会写到一半）
+        flock "${carpoolDir}/.lock" bash -c 'jq --arg u "$1" ".members[\$u].downBytes += 1610612736" "$2" >"$2.e2e" && cat "$2.e2e" >"$2" && rm -f "$2.e2e"' \
+            _ "${E2E_USER}" "${carpoolDir}/state.json"
+        quotaOut=$(runCarpoolTick "${carpoolCron}")
+        assert_equals "0|disabled quota" "$?|$(jq -r --arg u "${E2E_USER}" '.members[$u] | "\(.status) \(.reason)"' "${carpoolDir}/state.json" 2>/dev/null)" \
+            "超过 1 GiB 配额：tick 退出码 0，${E2E_USER} 判为超额停用"
+        assert_equals "no" "$([[ "$(realityProbe 2>/dev/null)" == "204" ]] && echo yes || echo no)" "超额停用后原链接连不上"
+        nextReset=$(source "${INSTALL_ROOT}/lib/carpool.sh" >/dev/null 2>&1
+            carpoolNextPeriodStart "$(date +%F)" "$(jq -r '.resetDay' "${carpoolDir}/state.json")")
+        rolloverOut=$(runCarpoolTick "${carpoolCron}" "${nextReset} 00:10:00")
+        rolloverRc=$?
+        [[ ${rolloverRc} -ne 0 ]] && echo "${rolloverOut}"
+        carpoolState=$(cat "${carpoolDir}/state.json" 2>/dev/null)
+        assert_equals "0|${nextReset}" "${rolloverRc}|$(jq -r '.period' <<<"${carpoolState}" 2>/dev/null)" \
+            "到了下一个重置日 ${nextReset}：tick 退出码 0，周期起点换到这一天"
+        assert_equals "active|0" "$(jq -r --arg u "${E2E_USER}" '.members[$u] | "\(.status)|\(.upBytes + .downBytes)"' <<<"${carpoolState}" 2>/dev/null)" \
+            "新周期里 ${E2E_USER} 用量清零、超额停用自动恢复"
+        assert_equals "1" "$(jq --arg id "${E2E_UUID}" '[.inbounds[1].settings.clients[]? | select(.id == $id)] | length' "${realityConf}" 2>/dev/null)" \
+            "${E2E_USER} 放回了 Reality 入站"
+        assert_equals "204" "$(realityProbe)" "恢复后原链接重新连得上"
+        # 回到真实日期：起点按真实日期算回来（起点前移只改起点、不清零），刚才那段流量照记，成员不受影响
+        usedBeforeReal=$(memberUsed "${E2E_USER}")
+        realStart=$(source "${INSTALL_ROOT}/lib/carpool.sh" >/dev/null 2>&1
+            carpoolPeriodStart "$(date +%F)" "$(jq -r '.resetDay' "${carpoolDir}/state.json")")
+        afterOut=$(runCarpoolTick "${carpoolCron}")
+        assert_equals "0|${realStart}|active|yes" "$?|$(jq -r --arg u "${E2E_USER}" '"\(.period)|\(.members[$u].status)"' "${carpoolDir}/state.json" 2>/dev/null)|$(
+            [[ "$(memberUsed "${E2E_USER}")" -ge "${usedBeforeReal:-0}" ]] && echo yes || echo no)" \
+            "回到真实日期的 tick：周期起点算回 ${realStart}，不再清零，${E2E_USER} 仍可用"
+        printf '%s\n' "$(jq --arg u "${E2E_USER}" '.members[$u].quotaGiB = 0' "${carpoolDir}/members.json")" >"${carpoolDir}/members.json"
+        rolloverOut+=$'\n'"${quotaOut}"$'\n'"${afterOut}"
+    fi
+
     echo ""
     echo -e "${YELLOW}=== 拼车：到期日改到过去 → tick 停用 → 原链接连不上 ===${NC}"
     expiredMembers=$(jq --arg u "${E2E_USER}" '.members[$u].expire = "2020-01-01"' "${carpoolDir}/members.json")
@@ -825,7 +833,7 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
     assert_equals "yes" "$([[ -s "${carpoolDir}/members.json" ]] && echo yes || echo no)" "members.json 保留"
     assert_equals "204" "$(realityProbe)" "恢复后原链接重新连得上（客户端配置没动过）"
 
-    noisyLines=$(grep -E 'command not found|No such file or directory' <<<"${carpoolOut}"$'\n'"${tickOut}"$'\n'"${addOut}"$'\n'"${refuseOut}"$'\n'"${removeOut}"$'\n'"${backupOut}"$'\n'"${rollbackOut}"$'\n'"${expireOut}"$'\n'"${chainOut}"$'\n'"${unchainOut}"$'\n'"${disableOut}" || true)
+    noisyLines=$(grep -E 'command not found|No such file or directory' <<<"${carpoolOut}"$'\n'"${tickOut}"$'\n'"${addOut}"$'\n'"${refuseOut}"$'\n'"${removeOut}"$'\n'"${backupOut}"$'\n'"${rollbackOut}"$'\n'"${expireOut}"$'\n'"${rolloverOut}"$'\n'"${chainOut}"$'\n'"${unchainOut}"$'\n'"${disableOut}" || true)
     if [[ -n "${noisyLines}" ]]; then
         echo "${noisyLines}"
     fi
@@ -858,22 +866,4 @@ assert_equals "" "$(pgrep -f "${CORE_BIN}" || true)" "${CORE_SERVICE} 进程已�
 assert_equals "no" "$(timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/${E2E_PORT}" 2>/dev/null && echo yes || echo no)" "127.0.0.1:${E2E_PORT} 不再监听"
 assert_equals "" "$(crontab -l 2>/dev/null | grep -F "${INSTALL_ROOT}/install.sh" || true)" "crontab 里不再有指向已删 install.sh 的定时任务"
 
-# ============================================================================
-# 测试结果汇总
-# ============================================================================
-
-echo ""
-echo "=============================================="
-echo -e "${YELLOW}测试结果汇总${NC}"
-echo "=============================================="
-echo -e "通过: ${GREEN}${TESTS_PASSED}${NC}"
-echo -e "失败: ${RED}${TESTS_FAILED}${NC}"
-echo ""
-
-if [[ ${TESTS_FAILED} -eq 0 ]]; then
-    echo -e "${GREEN}真装机端到端测试全部通过！${NC}"
-    exit 0
-else
-    echo -e "${RED}有 ${TESTS_FAILED} 个测试失败！完整安装输出在 ${E2E_LOG}${NC}"
-    exit 1
-fi
+e2eSummary "真装机端到端测试" "${E2E_LOG}"

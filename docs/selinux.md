@@ -31,9 +31,9 @@ sestatus
 sudo setenforce 0
 ```
 
-重启后 SELinux 回到 Enforcing。脚本在 SELinux 没禁用时会把 Xray / sing-box 两个二进制登记成 `bin_t`（需要 `semanage`，没有时自动装 `policycoreutils-python-utils`，装不上就退回 `chcon`），所以重启后代理本身照常工作；但 `pasly` 菜单和定时任务（证书续期、拼车统计）在 Enforcing 下一启动就退出，证书会到期续不上。长期用请选方案 2，或者每次重启后再执行一次 `setenforce 0`。
+重启后 SELinux 回到 Enforcing。脚本在 SELinux 没禁用时会把 Xray / sing-box 两个二进制登记成 `bin_t`（需要 `semanage`，没有时自动装 `policycoreutils-python-utils`，装不上就退回 `chcon`），并把 nginx 监听的端口（订阅口、伪装站与回落用的本机端口等）登记成 `http_port_t`，所以重启后代理本身照常工作；但 `pasly` 菜单和定时任务（证书续期、拼车统计）在 Enforcing 下一启动就退出，证书会到期续不上。长期用请选方案 2，或者每次重启后再执行一次 `setenforce 0`。
 
-After a reboot SELinux is back to Enforcing. While SELinux is not disabled the script registers the Xray / sing-box binaries as `bin_t` (via `semanage`, installing `policycoreutils-python-utils` if missing, falling back to `chcon`), so the proxies themselves keep working after a reboot; but the `pasly` menu and the cron jobs (certificate renewal, carpool metering) exit at startup under Enforcing, and certificates will expire unrenewed. For long-term use pick Option 2, or run `setenforce 0` again after every reboot.
+After a reboot SELinux is back to Enforcing. While SELinux is not disabled the script registers the Xray / sing-box binaries as `bin_t` (via `semanage`, installing `policycoreutils-python-utils` if missing, falling back to `chcon`) and the ports nginx listens on (the subscription port, the fake site and the local fallback ports) as `http_port_t`, so the proxies themselves keep working after a reboot; but the `pasly` menu and the cron jobs (certificate renewal, carpool metering) exit at startup under Enforcing, and certificates will expire unrenewed. For long-term use pick Option 2, or run `setenforce 0` again after every reboot.
 
 ### 方案 2: 永久禁用 / Option 2: Permanent Disable
 
