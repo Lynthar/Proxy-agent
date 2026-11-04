@@ -4152,6 +4152,26 @@ phType=$(env PH_FN="${PH_FN}" PATH="${AP_DIR}/bin:${PATH}" bash -c '
     printf "x\n3\n" | portHoppingMenu hysteria2' 2>&1 | paste -sd' ' -)
 assert_equals "hysteria2 hysteria2" "${phType}" "端口跳跃菜单：选错重来时协议类型不丢"
 
+# --- doctor 查时钟：容差最小的 SS2022 是 30 秒，两台机器各偏一半就到头，15 秒起告警；只告警，取不到对时源就跳过 ---
+CK_FN=$(sed -n '/^_doctorCheckClock() {/,/^}/p' install.sh)
+# run_ck TRACE_TS LOCAL_TS IN_CONTAINER → 桩掉 curl / date / systemd-detect-virt，打印 状态 明细键 差值
+run_ck() {
+    env CK_FN="${CK_FN}" TS="$1" NOW="$2" CT="${3:-}" bash -c '
+        eval "${CK_FN}"
+        t() { echo "$*"; }
+        _doctorRow() { echo "$2 $3"; }
+        curl() { [[ -n "${TS}" ]] || return 7; printf "fl=1\nts=%s.000\nip=1.2.3.4\n" "${TS}"; }
+        date() { echo "${NOW}"; }
+        systemd-detect-virt() { [[ -n "${CT}" ]]; }
+        _doctorCheckClock' 2>&1
+}
+assert_equals "pass DOCTOR_DETAIL_CLOCK_OK 14" "$(run_ck 1000 1014)" "时钟：快 14 秒不告警"
+assert_equals "pass DOCTOR_DETAIL_CLOCK_OK 14" "$(run_ck 1014 1000)" "时钟：慢 14 秒不告警"
+assert_equals "warn DOCTOR_DETAIL_CLOCK_DRIFT 15" "$(run_ck 1000 1015)" "时钟：差 15 秒告警"
+assert_equals "warn DOCTOR_DETAIL_CLOCK_DRIFT 300" "$(run_ck 1300 1000)" "时钟：慢的方向一样告警"
+assert_equals "warn DOCTOR_DETAIL_CLOCK_DRIFT_CONTAINER 300" "$(run_ck 1000 1300 yes)" "时钟：容器里提示去宿主机校"
+assert_equals "skip unreachable / timeout" "$(run_ck "" 1000)" "时钟：取不到对时源就跳过，不告警"
+
 # --- 已有证书也要对得上私钥：不查的话写完配置内核才起不来，那时服务已停 ---
 IT_FN=$(sed -n '/^installTLS() {/,/^}/p' install.sh)
 IT_DIR="${MOCK_ROOT}/installtls"

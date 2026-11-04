@@ -19246,6 +19246,30 @@ _doctorCheckNetwork() {
     else
         _doctorRow "$(t DOCTOR_CHECK_GITHUB)" warn "unreachable / timeout"
     fi
+
+    _doctorCheckClock
+}
+
+# _doctorCheckClock → 本机时钟与 Cloudflare 的差。容差最小的是 SS2022 的 30 秒（链式桥也用它），两台机器各偏一半就到头，所以 15 秒起告警。
+# 只告警不动系统：校时服务是用户自己的，容器里也校不了
+_doctorCheckClock() {
+    local remoteTs drift
+    remoteTs=$(curl --max-time 5 -fsS https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^ts=\([0-9]*\).*/\1/p')
+    if [[ -z "${remoteTs}" ]]; then
+        _doctorRow "$(t DOCTOR_CHECK_CLOCK)" skip "unreachable / timeout"
+        return 0
+    fi
+    drift=$(($(date +%s) - remoteTs))
+    if ((drift < 0)); then
+        drift=$((-drift))
+    fi
+    if ((drift < 15)); then
+        _doctorRow "$(t DOCTOR_CHECK_CLOCK)" pass "$(t DOCTOR_DETAIL_CLOCK_OK "${drift}")"
+    elif systemd-detect-virt -cq 2>/dev/null; then
+        _doctorRow "$(t DOCTOR_CHECK_CLOCK)" warn "$(t DOCTOR_DETAIL_CLOCK_DRIFT_CONTAINER "${drift}")"
+    else
+        _doctorRow "$(t DOCTOR_CHECK_CLOCK)" warn "$(t DOCTOR_DETAIL_CLOCK_DRIFT "${drift}")"
+    fi
 }
 
 _doctorCheckCert() {
