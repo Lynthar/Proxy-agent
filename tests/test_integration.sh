@@ -4147,8 +4147,8 @@ run_ap() {
         }
         ufw() {
             if [[ "$1" == status ]]; then
-                echo "Status: active"
-                sed "s/$/ ALLOW Anywhere/" "${AP_DIR}/rules"
+                # 一次写完：分两次写时 grep -q 可能先退出，SIGPIPE 被忽略的环境里 sed 的报错会混进断言
+                printf "Status: active\n%s\n" "$(sed "s/$/ ALLOW Anywhere/" "${AP_DIR}/rules")"
             else
                 echo "ufw $*"
                 echo "$2" >>"${AP_DIR}/rules"
