@@ -3156,23 +3156,27 @@ echo ""
 
 echo -e "${YELLOW}=== 测试 updateGeoSite 失败语义 ===${NC}"
 
-GEO_FN=$(sed -n '/^updateGeoSite() {/,/^}/p' install.sh)
+GEO_FN=$(sed -n '/^fetchGeoFiles() {/,/^}/p;/^updateGeoSite() {/,/^}/p' install.sh)
 assert_not_empty "${GEO_FN}" "updateGeoSite：抽到函数原文"
 GEO_DIR="${MOCK_ROOT}/geo/xray/"
 mkdir -p "${GEO_DIR}conf"
 
-# 子 shell 里跑：桩掉 GitHub API、wget 与内核重载；wget 按第一个参数成功（写 -O 目标）或失败
+# 子 shell 里跑：桩掉 curl、wget 与内核重载。ok = 写 -O 目标，empty = 成功但文件是空的，别的 = 下载失败；记下 wget 取的地址与 curl 有没有被调
 run_update_geo() (
     configPath="${GEO_DIR}conf/"
     release="debian"; wgetShowProgressStatus=""
-    GEO_WGET_MODE="$1"; GEO_API_JSON="$2"
-    [[ "${3:-}" == "mv-fail" ]] && mv() { return 1; }
-    curl() { printf '%s' "${GEO_API_JSON}"; }
+    GEO_WGET_MODE="$1"
+    [[ "${2:-}" == "mv-fail" ]] && mv() { return 1; }
+    curl() { : >"${GEO_DIR}curl-called"; }
     wget() {
         local out=""
+        printf '%s\n' "${*: -1}" >>"${GEO_DIR}wget-urls"
         while [[ $# -gt 0 ]]; do [[ "$1" == "-O" ]] && out="$2"; shift; done
-        [[ "${GEO_WGET_MODE}" == "ok" && -n "${out}" ]] || return 8
-        printf 'new' >"${out}"
+        case "${GEO_WGET_MODE}" in
+            ok) printf 'new' >"${out}" ;;
+            empty) : >"${out}" ;;
+            *) return 8 ;;
+        esac
     }
     reloadCore() { : >"${GEO_DIR}reloaded"; }
     echoContent() { printf '%s\n' "$2"; }
@@ -3184,30 +3188,79 @@ geo_files() { printf '%s %s' "$(cat "${GEO_DIR}geosite.dat" 2>/dev/null)" "$(cat
 geo_staging_left() { find "${GEO_DIR}" -maxdepth 1 -name 'geo-update.*' | wc -l | tr -d ' '; }
 
 printf 'old' >"${GEO_DIR}geosite.dat"; printf 'old' >"${GEO_DIR}geoip.dat"
-run_update_geo fail '[{"tag_name":"v2099"}]'
+run_update_geo fail
 assert_equals "1" "$?" "updateGeoSite：下载失败返回 1"
 assert_equals "old old" "$(geo_files)" "updateGeoSite：下载失败时旧 geo 文件原样保留"
 assert_equals "0" "$(geo_staging_left)" "updateGeoSite：下载失败不留暂存目录"
 
-run_update_geo ok ''
-assert_equals "1" "$?" "updateGeoSite：取不到版本号返回 1"
-assert_equals "old old" "$(geo_files)" "updateGeoSite：取不到版本号时旧文件原样保留"
+run_update_geo empty
+assert_equals "1" "$?" "updateGeoSite：下到空文件算失败"
+assert_equals "old old" "$(geo_files)" "updateGeoSite：下到空文件时旧 geo 文件原样保留"
 
 # 发布失败：mv 整体失败（一个都没换），以及 geoip.dat 被同名目录占着（只换掉 geosite）
 rm -f "${GEO_DIR}reloaded"
-run_update_geo ok '[{"tag_name":"v2099"}]' mv-fail
+run_update_geo ok mv-fail
 assert_equals "1" "$?" "updateGeoSite：新文件挪不进去时返回 1"
 assert_equals "old old" "$(geo_files)" "updateGeoSite：挪不进去时旧 geo 文件原样保留"
 assert_equals "0" "$(geo_staging_left)" "updateGeoSite：挪不进去也不留暂存目录"
 rm -f "${GEO_DIR}geoip.dat" && mkdir "${GEO_DIR}geoip.dat"
-run_update_geo ok '[{"tag_name":"v2099"}]'
+run_update_geo ok
 assert_equals "1" "$?" "updateGeoSite：只发布了一部分也返回 1"
 assert_equals "no" "$([[ -e "${GEO_DIR}reloaded" ]] && echo yes || echo no)" "updateGeoSite：发布失败不重载内核"
 rmdir "${GEO_DIR}geoip.dat"
 
-run_update_geo ok '[{"tag_name":"v2099"}]'
+rm -f "${GEO_DIR}wget-urls" "${GEO_DIR}curl-called"
+run_update_geo ok
 assert_equals "0" "$?" "updateGeoSite：两个文件都下到后返回 0"
 assert_equals "yes" "$([[ -e "${GEO_DIR}reloaded" ]] && echo yes || echo no)" "updateGeoSite：发布成功后重载内核"
+assert_equals "new new" "$(geo_files)" "updateGeoSite：两个文件都换成了新的"
+assert_equals "no" "$([[ -e "${GEO_DIR}curl-called" ]] && echo yes || echo no)" "updateGeoSite：不查 GitHub API（未认证额度按出口 IP 算，用完就取不到版本号）"
+assert_equals "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat|https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" \
+    "$(paste -sd'|' - <"${GEO_DIR}wget-urls")" "updateGeoSite：走 releases/latest/download 的固定地址"
+
+# installXray：默认配置不读 geo，下载失败不中止安装（服务这时已停），但要说出来
+IX_FN=$(sed -n '/^fetchGeoFiles() {/,/^}/p;/^installXray() {/,/^}/p' install.sh)
+IX_DIR="${MOCK_ROOT}/installxray/xray"
+# run_ix GEO_MODE → 新装 Xray：桩掉版本解析、下载、解压；GEO_MODE 是 ok 或 fail，打印输出与退出码
+run_ix() {
+    mkdir -p "${IX_DIR}"
+    find "${IX_DIR}" -type f -delete
+    printf 'old' >"${IX_DIR}/geosite.dat"
+    env IX_FN="${IX_FN}" IX_DIR="${IX_DIR}" GEO_MODE="$1" bash -c '
+        eval "${IX_FN}"
+        XRAY_DIR="${IX_DIR}" XRAY_BIN="${IX_DIR}/xray" release=debian xrayCoreCPUVendor=Xray-linux-64 wgetShowProgressStatus= totalProgress=1
+        readInstallType() { :; }
+        resolveXrayVersion() { echo v26.3.27; }
+        extractXrayHash() { :; }
+        echoContent() { echo "$2"; }
+        t() { echo "$1"; }
+        curl() { echo curl-called; }
+        unzip() { : >"${XRAY_BIN}"; }
+        wget() {
+            local out= dir= url="${*: -1}"
+            while [[ $# -gt 0 ]]; do
+                [[ "$1" == "-O" ]] && out="$2"
+                [[ "$1" == "-P" ]] && dir="$2"
+                shift
+            done
+            case "${url}" in
+                *.dat) [[ "${GEO_MODE}" == ok ]] || return 8; printf new >"${out}" ;;
+                *) : >"${dir}/${url##*/}" ;;
+            esac
+        }
+        installXray 1 false
+        echo "rc=$?"' 2>&1
+}
+ixOut=$(run_ix ok)
+assert_contains "${ixOut}" "rc=0" "installXray：geo 下到时安装成功"
+assert_equals "new new" "$(cat "${IX_DIR}/geosite.dat" "${IX_DIR}/geoip.dat" | fold -w 3 | paste -sd' ' -)" "installXray：两个 geo 文件都就位"
+assert_equals "no" "$(grep -q 'GEO_INSTALL_SKIPPED\|curl-called' <<<"${ixOut}" && echo yes || echo no)" "installXray：geo 下到时不告警，也不查 GitHub API"
+ixOut=$(run_ix fail)
+assert_contains "${ixOut}" "rc=0" "installXray：geo 下载失败不中止安装"
+assert_contains "${ixOut}" "GEO_DOWNLOAD_FAILED" "installXray：geo 下载失败报出是哪个文件"
+assert_contains "${ixOut}" "GEO_INSTALL_SKIPPED" "installXray：geo 下载失败说明后果与补救"
+assert_equals "yes old" "$([[ -f "${IX_DIR}/xray" ]] && echo yes || echo no) $(cat "${IX_DIR}/geosite.dat")" "installXray：geo 下载失败时内核照常就位，已有的 geo 不动"
+assert_equals "0" "$(find "${IX_DIR}" -maxdepth 1 -name 'geo-update.*' | wc -l | tr -d ' ')" "installXray：geo 下载失败不留暂存目录"
 assert_equals "new new" "$(geo_files)" "updateGeoSite：成功后两个 geo 文件都换成新版"
 assert_equals "0" "$(geo_staging_left)" "updateGeoSite：成功后不留暂存目录"
 

@@ -3844,17 +3844,9 @@ installXray() {
             unzip -o "${xrayZipFile}" -d ${XRAY_DIR} >/dev/null
             rm -f "${xrayZipFile}" "${xrayDgstFile}"
 
-            version=$(curl -s https://api.github.com/repos/Loyalsoldier/v2ray-rules-dat/releases?per_page=1 | jq -r '.[]|.tag_name')
-            echoContent skyBlue "------------------------Version-------------------------------"
-            echo "version:${version}"
-            rm ${XRAY_DIR}/geo* >/dev/null 2>&1
-
-            if [[ "${release}" == "alpine" ]]; then
-                wget -c -q -P ${XRAY_DIR}/ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geosite.dat"
-                wget -c -q -P ${XRAY_DIR}/ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geoip.dat"
-            else
-                wget -c -q ${wgetShowProgressStatus} -P ${XRAY_DIR}/ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geosite.dat"
-                wget -c -q ${wgetShowProgressStatus} -P ${XRAY_DIR}/ "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/geoip.dat"
+            # 默认配置不读 geo 文件，只有 geosite 分流才用：下载失败不值得中止安装（服务这时已停），但要说出来，不然配分流时 Xray 才起不来
+            if ! fetchGeoFiles "${XRAY_DIR}/"; then
+                echoContent yellow " ---> $(t GEO_INSTALL_SKIPPED)"
             fi
 
             chmod 655 ${XRAY_BIN}
@@ -3948,30 +3940,14 @@ xrayVersionManageMenu() {
     fi
 }
 
-# 更新 geosite
-updateGeoSite() {
-    echoContent yellow "\n来源 https://github.com/Loyalsoldier/v2ray-rules-dat"
-    if [[ -z "${configPath}" ]]; then
-        echoContent red " ---> $(t GEO_NO_CORE)"
-        return 1
-    fi
-
-    version=$(curl -s https://api.github.com/repos/Loyalsoldier/v2ray-rules-dat/releases?per_page=1 | jq -r '.[]|.tag_name')
-    echoContent skyBlue "------------------------Version-------------------------------"
-    echo "version:${version}"
-    if [[ -z "${version}" || "${version}" == "null" ]]; then
-        echoContent red " ---> $(t GEO_VERSION_FETCH_FAILED)"
-        return 1
-    fi
-
-    # 先下到同目录的暂存目录，两个文件都到齐才换掉旧文件——中途失败时内核手里仍是旧 geo，
-    # 不能像以前那样先 rm 再下载。
-    local geoDir="${configPath}../"
-    local stagingDir
+# fetchGeoFiles DIR → 把 DIR 里的 geosite.dat、geoip.dat 换成最新版，失败返回 1（已打印原因）。两个都下到才换，中途失败时 DIR 里还是旧文件。
+# 走 releases/latest/download 的固定地址，不查 GitHub API：未认证额度按出口 IP 算，一小时 60 次，用完就取不到版本号
+fetchGeoFiles() {
+    local geoDir=$1 stagingDir file
     stagingDir=$(mktemp -d "${geoDir}geo-update.XXXXXX") || return 1
-    local file
     for file in geosite.dat geoip.dat; do
-        if ! wget -q ${wgetShowProgressStatus} -O "${stagingDir}/${file}" "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${version}/${file}"; then
+        if ! wget -q --timeout=30 --tries=3 ${wgetShowProgressStatus} -O "${stagingDir}/${file}" "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/${file}" \
+            || [[ ! -s "${stagingDir}/${file}" ]]; then
             rm -rf "${stagingDir}"
             echoContent red " ---> $(t GEO_DOWNLOAD_FAILED "${file}")"
             return 1
@@ -3983,7 +3959,17 @@ updateGeoSite() {
         return 1
     fi
     rm -rf "${stagingDir}"
+}
 
+# 更新 geosite
+updateGeoSite() {
+    echoContent yellow "\n来源 https://github.com/Loyalsoldier/v2ray-rules-dat"
+    if [[ -z "${configPath}" ]]; then
+        echoContent red " ---> $(t GEO_NO_CORE)"
+        return 1
+    fi
+
+    fetchGeoFiles "${configPath}../" || return 1
     reloadCore || return 1
     echoContent green " ---> 更新完毕"
 }
