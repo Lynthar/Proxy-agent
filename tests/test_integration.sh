@@ -1468,7 +1468,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试拼车钩子与 tick ===${NC}"
 
-CP_FN_NAMES="applyAccountChangeAllProtocols xrayConfigTest readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled xrayDaemonRunning carpoolCurrentClientsMap ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolMachineStep carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolGuardAccountMenu carpoolCheckPrerequisites carpoolPickApiPort carpoolApiReady carpoolAllAccounts carpoolFillUuids carpoolRemoveCron carpoolRemoveSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable carpoolHasTty carpoolApply carpoolResetUsage carpoolShowUsage carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolInsertPageBlock carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMembersClean carpoolMembersEditApply carpoolPickMember carpoolAsk carpoolShowProtocolChoices carpoolShowMemberLinks carpoolMemberAdd carpoolMemberEdit carpoolMemberMenu carpoolMenu addUser removeUser cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountStateFile chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget"
+CP_FN_NAMES="applyAccountChangeAllProtocols carpoolSyncUserinfo xrayConfigTest readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled xrayDaemonRunning carpoolCurrentClientsMap ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolMachineStep carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolGuardAccountMenu carpoolCheckPrerequisites carpoolPickApiPort carpoolApiReady carpoolAllAccounts carpoolFillUuids carpoolRemoveCron carpoolRemoveSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable carpoolHasTty carpoolApply carpoolResetUsage carpoolShowUsage carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolInsertPageBlock carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMembersClean carpoolMembersEditApply carpoolPickMember carpoolAsk carpoolShowProtocolChoices carpoolShowMemberLinks carpoolMemberAdd carpoolMemberEdit carpoolMemberMenu carpoolMenu addUser removeUser cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountStateFile chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget"
 CP_FNS=$(sed -n "$(for _f in ${CP_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_not_empty "${CP_FNS}" "拼车：抽到 install.sh 原文"
 assert_equals "$(wc -w <<<"${CP_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CP_FNS}")" "拼车：每个函数都抽到了（抽不到说明函数体里出现了顶格的 }）"
@@ -2457,6 +2457,63 @@ echo placeholder >"${CP_ROOT}/subscribe/sing-box/${CP_ALICE_MD5}"
 run_cp "${SUBSCRIBE_FN}; ${CP_SUB_STUBS}; wget() { return 4; }; subscribe false true" >/dev/null 2>&1
 assert_equals "placeholder" "$(cat "${CP_ROOT}/subscribe/sing-box/${CP_ALICE_MD5}")" "subscribe：模板拉不到时不动已有的 sing-box 配置"
 assert_equals "proxies:" "$(head -1 "${CP_ROOT}/subscribe/clashMeta/${CP_ALICE_MD5}")" "subscribe：模板拉不到不影响 clashMeta 重建"
+
+# --- 用量头：成员的用量写进 subscribe.conf include 的 map；用量变化每小时至多重载一次，成员、配额、到期变了立刻生效 ---
+cp_reset_tree
+printf '%s\n' '# proxy-agent subscribe.conf r3' 'map $uri $paSubUserinfo {' '}' 'server {' '    listen 12345 ssl;' '}' >"${CP_ROOT}/nginx/subscribe.conf"
+CP_UI_FILE="${CP_ROOT}/subscribe_userinfo.map"
+CP_ALICE_LINE() { printf '~/%s$ "upload=0; download=%s; total=%s; expire=%s";' "${CP_ALICE_MD5}" "$1" "$2" "$3"; }
+cp_alice_total=$(cp_state '.members.alice.quotaBytes')
+: >"${CP_CALLS}"
+run_cp 'carpoolSyncUserinfo' >/dev/null 2>&1
+assert_contains "$(cat "${CP_UI_FILE}")" "$(CP_ALICE_LINE 0 "${cp_alice_total}" 0)" "用量头：map 里有成员的 md5 与四个键"
+assert_equals "2" "$(grep -c . "${CP_UI_FILE}")" "用量头：每个成员一行"
+assert_equals "600" "$(stat -c %a "${CP_UI_FILE}" 2>/dev/null || stat -f %Lp "${CP_UI_FILE}")" "用量头：map 含订阅地址的 md5，只给 root 读"
+assert_equals "nginx -t|nginx -s reload" "$(grep -E '^(nginx|handleNginx)' "${CP_CALLS}" | paste -sd'|' -)" "用量头：写完过 nginx -t 再 reload"
+cp_ui_before=$(cat "${CP_UI_FILE}")
+: >"${CP_CALLS}"
+run_cp 'carpoolSyncUserinfo' >/dev/null 2>&1
+assert_equals "" "$(cat "${CP_CALLS}")" "用量头：没变化就不写不重载"
+jq '.members.alice.downBytes += 500' "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/state.json.t" && cat "${CP_ROOT}/carpool/state.json.t" >"${CP_ROOT}/carpool/state.json"
+run_cp 'carpoolSyncUserinfo' >/dev/null 2>&1
+assert_equals "${cp_ui_before}" "$(cat "${CP_UI_FILE}")" "用量头：一小时内只有用量变了，不动文件"
+assert_equals "" "$(cat "${CP_CALLS}")" "用量头：一小时内只有用量变了，不重载"
+touch -t 202001010000 "${CP_UI_FILE}"
+run_cp 'carpoolSyncUserinfo' >/dev/null 2>&1
+assert_contains "$(cat "${CP_UI_FILE}")" "$(CP_ALICE_LINE 1000 "${cp_alice_total}" 0)" "用量头：过了一小时写进新用量（billing=both 算 2 倍，全记在 download）"
+assert_equals "nginx -t|nginx -s reload" "$(grep -E '^nginx' "${CP_CALLS}" | paste -sd'|' -)" "用量头：过了一小时才重载"
+: >"${CP_CALLS}"
+jq '.members.alice.quotaBytes = 2048 | .members.alice.expire = "2026-11-04"' "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/state.json.t" && cat "${CP_ROOT}/carpool/state.json.t" >"${CP_ROOT}/carpool/state.json"
+run_cp 'carpoolSyncUserinfo' >/dev/null 2>&1
+assert_contains "$(cat "${CP_UI_FILE}")" "$(CP_ALICE_LINE 1000 2048 1793836799)" "用量头：配额、到期变了不等一小时"
+assert_equals "nginx -t|nginx -s reload" "$(grep -E '^nginx' "${CP_CALLS}" | paste -sd'|' -)" "用量头：配额、到期变了立刻重载"
+: >"${CP_CALLS}"
+jq '.enabled = false' "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/state.json.t" && cat "${CP_ROOT}/carpool/state.json.t" >"${CP_ROOT}/carpool/state.json"
+run_cp 'carpoolSyncUserinfo' >/dev/null 2>&1
+assert_equals "" "$(cat "${CP_UI_FILE}")" "用量头：关了拼车 map 清空，头就不发了"
+assert_equals "nginx -t|nginx -s reload" "$(grep -E '^nginx' "${CP_CALLS}" | paste -sd'|' -)" "用量头：关了拼车立刻重载"
+# nginx 没在跑：只写文件，下次起来读新的；不能拉起它（tick 撞上安装流程停服的窗口会抢走 80 端口）
+cp_reset_tree
+printf '%s\n' 'map $uri $paSubUserinfo {' '}' 'server {' '    listen 12345 ssl;' '}' >"${CP_ROOT}/nginx/subscribe.conf"
+: >"${CP_CALLS}"
+run_cp 'pgrep() { return 1; }; carpoolSyncUserinfo' >/dev/null 2>&1
+assert_contains "$(cat "${CP_UI_FILE}")" "${CP_ALICE_MD5}" "用量头：nginx 没在跑也写文件"
+assert_equals "" "$(grep -E '^(nginx|handleNginx)' "${CP_CALLS}" || true)" "用量头：nginx 没在跑就不碰它"
+# nginx -t 不过（用户自己的配置坏了）：不 reload
+cp_reset_tree
+printf '%s\n' 'map $uri $paSubUserinfo {' '}' 'server {' '    listen 12345 ssl;' '}' >"${CP_ROOT}/nginx/subscribe.conf"
+: >"${CP_CALLS}"
+CP_NGINX_T_RC=1 run_cp 'carpoolSyncUserinfo' >/dev/null 2>&1
+assert_equals "nginx -t" "$(grep -E '^nginx' "${CP_CALLS}" | paste -sd'|' -)" "用量头：nginx -t 不过就不 reload"
+# 旧模板不读这个文件：不白写、不白重载
+cp_reset_tree
+: >"${CP_CALLS}"
+run_cp 'carpoolSyncUserinfo' >/dev/null 2>&1
+assert_equals "no|" "$([[ -e "${CP_UI_FILE}" ]] && echo yes || echo no)|$(grep -E '^nginx' "${CP_CALLS}" || true)" "用量头：旧模板的机器不写也不重载"
+RSC_FN=$(sed -n '/^renderSubscribeConf() {/,/^EOF$/p' install.sh)
+assert_contains "${RSC_FN}" 'include ${PROXY_AGENT_DIR}/subscribe_userinfo*.map;' "用量头：模板用通配 include，文件缺失时 nginx -t 照过"
+assert_equals "2" "$(grep -c 'add_header Subscription-Userinfo \\$paSubUserinfo always;' <<<"${RSC_FN}")" "用量头：通用地址与定格式地址都带这个头"
+assert_equals "${CP_ROOT}/subscribe_userinfo.map" "$(env PROXY_AGENT_DIR="${CP_ROOT}" bash -c 'source lib/constants.sh; printf %s "${SUBSCRIBE_USERINFO_MAP}"')" "用量头：常量里的路径与模板通配的文件名对得上"
 
 # 「查看订阅」：回车沿用 salt，只有明确答 n 才换（换 salt 等于换掉所有人的订阅地址）
 run_salt() {

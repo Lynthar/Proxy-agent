@@ -862,6 +862,16 @@ carpoolUsageTable() {
       | "\(.key)\t\($m | carpoolUsage($billing) | carpoolFmtBytes)\t\(if $m.quotaBytes > 0 then ($m.quotaBytes | carpoolFmtBytes) else $unlimited end)\t\(if $m.expire == "" then "-" else $m.expire end)\t\(if $m.status == "active" then $active elif $m.reason == "quota" then $quota elif $m.reason == "expired" then $expired else $manual end)"' <<<"$1"
 }
 
+# carpoolUserinfoTable STATE → 每行「成员名<TAB>subscription-userinfo 的值」；没开拼车输出空。用量全记在 download：只有 carpoolUsage 算得对计费口径，
+# 客户端拿 upload + download 比 total，和配额判定对得上；无配额、无到期发 0（客户端当不限），到期算到当天结束
+carpoolUserinfoTable() {
+    jq -r "${_CARPOOL_JQ_DEFS}"'
+      (.billing // "both") as $billing
+      | select(.enabled) | .members | to_entries[] | .value as $m
+      | "\(.key)\tupload=0; download=\($m | carpoolUsage($billing)); total=\($m.quotaBytes // 0); expire=\(
+          if ($m.expire // "") == "" then 0 else (($m.expire | carpoolDays) + 1) * 86400 - 1 end)"' <<<"$1"
+}
+
 # carpoolNginxLocationBlock PAGE_DIR → 嵌进 subscribe.conf 的 location 块：路径只收 32–64 位十六进制、只读静态文件、
 # 禁脚本禁外链、不进搜索引擎；带起止标记，撤掉时按标记整段删。正则必须带引号：nginx 把裸 {32,64} 当块的花括号
 carpoolNginxLocationBlock() {

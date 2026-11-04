@@ -121,7 +121,7 @@ sing-box 的 shadowsocks 出站，还开了 sing-box 特有的 h2mux 多路复�
 
 ## 能力边界
 
-- **它不是面板。** 纯 TTY 菜单，没有 Web UI、没有 API。按人计流量、到期和配额只有 Xray 内核下的拼车会做：车主在菜单里或一个 JSON 文件里管成员，成员只看得到一个只读页面。
+- **它不是面板。** 纯 TTY 菜单，没有 Web UI、没有 API。按人计流量、到期和配额只有 Xray 内核下的拼车会做：车主在菜单里或一个 JSON 文件里管成员，成员只看得到一个只读页面和客户端里的用量。
 - **三个 gRPC 变体已废弃**：Trojan gRPC、VLESS gRPC、VLESS vision gRPC 仍在注册表里
   但标了废弃，别在新部署上用。
 - **VMess 与 Trojan 被 Xray 26.1.23 标为弃用**：仍能装、订阅照出，新部署换用 VLESS，迁移方法见用户指南。

@@ -1066,6 +1066,11 @@ _cpS=$(cp_state 2026-10-15 "{
   \"bob-x\": $(cp_member "${_cpU2}" 0 "" '[0,7]' 5 6 active '')}")
 _cpS=$(carpoolAppendEvents "${_cpS}" '[{"type":"disabled","name":"alice","reason":"quota"}]' "2026-10-31 11:55")
 assert_equals $'alice\t100 GiB\t100 GiB\t2026-12-31\t流量已用尽\nbob-x\t11 B\t不限\t-\t正常' "$(carpoolUsageTable "${_cpS}")" "carpoolUsageTable: 名字 已用 配额 到期 状态"
+assert_equals $'alice\tupload=0; download=107374182401; total=107374182400; expire=1798761599\nbob-x\tupload=0; download=11; total=0; expire=0' "$(carpoolUserinfoTable "${_cpS}")" \
+    "carpoolUserinfoTable: 用量全记在 download，无配额、无到期发 0，到期算到当天结束（UTC）"
+assert_equals "alice	upload=0; download=214748364802; total=107374182400; expire=1798761599" "$(carpoolUserinfoTable "$(jq -c '.billing = "both"' <<<"${_cpS}")" | head -n 1)" \
+    "carpoolUserinfoTable: 用量与 carpoolUsage 同一口径，both 算 2 倍，才和配额判定对得上"
+assert_equals "" "$(carpoolUserinfoTable "$(jq -c '.enabled = false' <<<"${_cpS}")")" "carpoolUserinfoTable: 没开拼车输出空，订阅响应就不带这个头"
 _cpTable=$(carpoolUsageTable "$(jq -c '.billing = "both"' <<<"${_cpS}")")
 assert_equals $'alice\t200 GiB\t100 GiB\t2026-12-31\t流量已用尽\nbob-x\t22 B\t不限\t-\t正常' "${_cpTable}" "carpoolUsageTable: both 下已用列翻倍，配额列不变"
 assert_equals "5" "$(head -1 <<<"${_cpTable}" | awk -F'\t' '{print NF}')" "carpoolUsageTable: 仍是 5 列（每日摘要按 \$1..\$5 取）"

@@ -416,6 +416,16 @@ assert_equals "404" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "${p
 assert_equals "404" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "${pageBase}/${subKeyA}")" \
     "拿订阅地址的 md5 当页面键 404（成员页不等于订阅）"
 
+# 用量头：真 nginx 从 map 里取，两种地址都带；客户端拿 upload + download 比 total
+subHeaders() {
+    curl -s -D- -o /dev/null --max-time 10 -A "$2" "https://${DOMAIN_B}:$(subPort)$1" | tr -d '\r' | sed -n 's/^[Ss]ubscription-[Uu]serinfo: //p'
+}
+assert_contains "$(subHeaders "/s/$(subKey)" 'curl/8')" "upload=0; download=" "通用地址带 subscription-userinfo"
+assert_contains "$(subHeaders "/s/$(subKey)" 'sing-box 1.14.4')" "total=" "按 UA 分发到 sing-box 也带"
+assert_contains "$(subHeaders "/s/default/$(subKey)" 'curl/8')" "expire=" "定格式的地址也带"
+assert_equals "" "$(subHeaders "/s/0123456789abcdef0123456789abcdef" 'curl/8')" "编造的键不带"
+assert_equals "600" "$(stat -c %a "${INSTALL_ROOT}/subscribe_userinfo.map" 2>/dev/null)" "map 只给 root 读（里面有订阅地址的 md5）"
+
 echo ""
 echo -e "${YELLOW}=== 菜单 2 → 1：拼车开着时先去掉 Trojan、再装回来 ===${NC}"
 c3Out=$(runMenu "2\n1\n0,1,3,7,12\ny\n")
@@ -434,6 +444,7 @@ assert_contains "$(cat "${WORK}/sub-check" | base64 -d 2>/dev/null)" "trojan://"
 c5Out=$(runMenu "7\n6\n4\ny\ny\n")
 assert_equals "0" "$?" "关闭拼车退出码 0"
 assert_equals "false" "$(jq -r '.enabled' "${INSTALL_ROOT}/carpool/state.json" 2>/dev/null)" "拼车已关闭"
+assert_equals "" "$(subHeaders "/s/$(subKey)" 'curl/8')" "关了拼车，订阅响应不再带用量头"
 noNoise "拼车各步" "${c1Out}${c2Out}${linksOut}${c3Out}${c4Out}${c5Out}"
 
 # ============================================================================

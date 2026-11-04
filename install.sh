@@ -8536,6 +8536,7 @@ carpoolSettle() {
         carpoolRefreshSubscribe
     fi
     carpoolRenderPages
+    carpoolSyncUserinfo
     carpoolNotifyEvents "${events}"
     return 0
 }
@@ -8905,6 +8906,7 @@ carpoolDisable() {
     carpoolRemoveCron
     carpoolRemovePages
     carpoolEnsureNginxLocation off
+    carpoolSyncUserinfo
     reloadCore
     carpoolRefreshSubscribe
     carpoolWritePlaceholders "$(carpoolReadState)"
@@ -9087,6 +9089,31 @@ carpoolInsertPageBlock() {
     awk -v f="${blockFile}" '/^    location \/ \{/ && !done { while ((getline line < f) > 0) print line; close(f); done = 1 } { print }' "$1" >"$2" || rc=1
     rm -f "${blockFile}"
     return "${rc}"
+}
+
+# carpoolSyncUserinfo → 成员用量写进 map，订阅响应才带 subscription-userinfo。用量每个 tick 都变，重载限成每小时至多一次；成员、配额、到期变了立刻生效。
+# 只读 state，不拿锁。不用 carpoolReloadNginx：它会拉起没在跑的 nginx，tick 撞上安装流程停服的窗口会抢走 80 端口
+carpoolSyncUserinfo() {
+    local conf="${nginxConfigPath}subscribe.conf" state name value md5 body= tmp
+    [[ -f "${conf}" ]] && grep -q 'paSubUserinfo' "${conf}" || return 0
+    state=$(carpoolReadState) || return 0
+    while IFS=$'\t' read -r name value; do
+        [[ -n "${name}" ]] || continue
+        md5=$(carpoolSubscribeMd5 "${name}") || continue
+        body+="~/${md5}\$ \"${value}\";"$'\n'
+    done < <(carpoolUserinfoTable "${state}")
+    [[ "${body%$'\n'}" == "$(cat "${SUBSCRIBE_USERINFO_MAP}" 2>/dev/null)" ]] && return 0
+    if [[ "$(sed -E 's/download=[0-9]+//' <<<"${body%$'\n'}")" == "$(sed -E 's/download=[0-9]+//' "${SUBSCRIBE_USERINFO_MAP}" 2>/dev/null)" ]] \
+        && [[ -z "$(find "${SUBSCRIBE_USERINFO_MAP}" -mmin +59 2>/dev/null)" ]]; then
+        return 0
+    fi
+    # map 里有订阅地址的 md5，mktemp 的 0600 正好；nginx 的 master 是 root，读得到
+    tmp=$(mktemp "${SUBSCRIBE_USERINFO_MAP}.XXXXXX") || return 0
+    printf '%s' "${body}" >"${tmp}" && mv -f "${tmp}" "${SUBSCRIBE_USERINFO_MAP}"
+    if [[ -n $(pgrep -x "nginx") ]] && nginx -t >/dev/null 2>&1; then
+        nginx -s reload >/dev/null 2>&1
+    fi
+    return 0
 }
 
 # carpoolEnsureNginxLocation on|off → subscribe.conf 里加 / 删页面的 location 块（按标记判重）；
@@ -17584,6 +17611,7 @@ installSubscribe() {
 
 # renderSubscribeConf PORT SERVER_NAME → 不交互地写 subscribe.conf：有 SERVER_NAME 的证书就是 https，没有就是 http。
 # 端口与 http / https 是只问一次的设置，这份文件从设置渲染：安装流程收尾按原端口重写，域名换了跟着换
+# 用量头的 map 用通配 include：文件不在时 nginx -t 照过；写成精确路径的话，文件一丢整个 nginx 都起不来
 renderSubscribeConf() {
     local port=$1 subscribeServerName=$2 SSLType= serverName= nginxSubscribeSSL= listenIPv6= nginxSubscribeListen
     nginxVersion=$(nginx -v 2>&1)
@@ -17631,6 +17659,10 @@ map \$http_user_agent \$paSubFormat {
     "~*^(?:clash|mihomo|flclash|stash)" clashMetaProfiles;
     "~*sing-?box"                      sing-box;
 }
+map \$uri \$paSubUserinfo {
+    default "";
+    include ${PROXY_AGENT_DIR}/subscribe_userinfo*.map;
+}
 server {
     ${nginxSubscribeListen}
     ${serverName}
@@ -17647,6 +17679,7 @@ server {
     location ~ "^/s/(?<paSubKey>[0-9a-f]{32})\$" {
         default_type 'text/plain; charset=utf-8';
         add_header Profile-Update-Interval 12 always;
+        add_header Subscription-Userinfo \$paSubUserinfo always;
         add_header Vary User-Agent always;
         root ${SUBSCRIBE_DIR};
         try_files /\$paSubFormat/\$paSubKey /default/\$paSubKey =404;
@@ -17654,6 +17687,7 @@ server {
     location ~ "^/s/(clashMeta|default|clashMetaProfiles|sing-box|sing-box_profiles)/([0-9a-f]{32})\$" {
         default_type 'text/plain; charset=utf-8';
         add_header Profile-Update-Interval 12 always;
+        add_header Subscription-Userinfo \$paSubUserinfo always;
         alias ${SUBSCRIBE_DIR}/\$1/\$2;
     }
     location / {
