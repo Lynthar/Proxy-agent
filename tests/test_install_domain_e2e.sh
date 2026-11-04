@@ -318,20 +318,37 @@ probeSub "加了 Hysteria2" "${WORK}/sub-sb.json"
 assert_equals "hysteria2 trojan vless vless vless vmess" "${probedTypes}" "订阅里多了 Hysteria2 节点（装协议后订阅跟着重建）"
 
 # ============================================================================
-# 装到一半退出：端口自检停了三个服务之后在 path 处输错退出，起步时在跑的都要拉回来
+# 装到一半退出：端口自检已经停了三个服务，却连不回本机（云防火墙没放行时就是这样），起步时在跑的都要拉回来
 # ============================================================================
 
 echo ""
-echo -e "${YELLOW}=== 菜单 1 → 1 重装：端口自检之后输错 path 退出 ===${NC}"
-# 不沿用上次配置、沿用域名、不沿用端口（回车 443，于是做端口自检、停掉三个服务）、不沿用 path、输一个过短的 path
-s4Out=$(runMenu "1\n1\nn\ny\nn\n\nn\nab\n")
+echo -e "${YELLOW}=== 菜单 1 → 1 重装：端口自检不过退出 ===${NC}"
+# raw 表：allowPort 插在 INPUT 最前的放行盖不过它
+iptables -t raw -I PREROUTING 1 -p tcp --dport 443 -j DROP
+# 不沿用上次配置、沿用域名、不沿用端口（回车 443，于是做端口自检）
+s4Out=$(runMenu "1\n1\nn\ny\nn\n\n")
 s4Rc=$?
-assert_equals "yes" "$([[ ${s4Rc} -ne 0 ]] && echo yes || echo no)" "输错 path 时安装以非零退出（${s4Rc}）"
-assert_contains "${s4Out}" "检测到443端口已开放" "退出前确实做过端口自检（三个服务在那里都停过）"
+iptables -t raw -D PREROUTING -p tcp --dport 443 -j DROP
+assert_equals "yes" "$([[ ${s4Rc} -ne 0 ]] && echo yes || echo no)" "端口自检不过时安装以非零退出（${s4Rc}）"
+assert_contains "${s4Out}" "未检测到443端口开放" "退出的原因确实是端口自检（三个服务在那里都停过）"
 sleep 2
 assert_equals "active active active" "$(activeState)" "退出后 Xray、sing-box、nginx 都按旧配置拉回来了"
 assert_equals "204" "$(probeOutbound "${WORK}/sub-sb.json" "$(jq -r '.outbounds[] | select(.type == "hysteria2") | .tag' "${WORK}/sub-sb.json")")" \
     "退出后旁挂的 Hysteria2 照常可用"
+
+echo ""
+echo -e "${YELLOW}=== 菜单 1 → 1 重装：新域名的证书与私钥对不上，退出 ===${NC}"
+DOMAIN_BAD="bad.${publicIP//./-}.sslip.io"
+issueCert "${DOMAIN_BAD}"
+placeCert "${DOMAIN_BAD}"
+cat "${caDir}/${DOMAIN_A}.key" >"${TLS_DIR}/${DOMAIN_BAD}.key"
+# 不沿用上次配置、不沿用域名、输新域名、不沿用端口（回车 443）
+s4bOut=$(runMenu "1\n1\nn\nn\n${DOMAIN_BAD}\nn\n\n")
+s4bRc=$?
+assert_equals "yes" "$([[ ${s4bRc} -ne 0 ]] && echo yes || echo no)" "证书对不上时安装以非零退出（${s4bRc}）"
+assert_contains "${s4bOut}" "证书验证失败" "退出的原因确实是证书与私钥不匹配"
+sleep 2
+assert_equals "active active active" "$(activeState)" "退出后 Xray、sing-box、nginx 都按旧配置拉回来了"
 
 # ============================================================================
 # 换域名重装：A → B，旁挂的 sing-box 要跟着起来，订阅、伪装站、Reality 目标、旁挂的证书都换成 B
@@ -340,13 +357,14 @@ assert_equals "204" "$(probeOutbound "${WORK}/sub-sb.json" "$(jq -r '.outbounds[
 echo ""
 echo -e "${YELLOW}=== 菜单 1 → 1 重装：换成域名 ${DOMAIN_B} ===${NC}"
 placeCert "${DOMAIN_B}"
-# 不沿用配置、不沿用域名、输 B、不沿用端口（回车 443）、沿用 path、不重下 Xray、沿用账号；
+# 不沿用配置、不沿用域名、输 B、不沿用端口（回车 443）、不沿用 path 且输个过短的（重问）、这回沿用 path、不重下 Xray、沿用账号；
 # 12：沿用端口 y、本机域名当目标 y、沿用密钥 y；7：同上；伪装站不重装
-s5Out=$(runMenu "1\n1\nn\nn\n${DOMAIN_B}\nn\n\ny\nn\ny\ny\ny\ny\ny\ny\ny\nn\n")
+s5Out=$(runMenu "1\n1\nn\nn\n${DOMAIN_B}\nn\n\nn\nab\ny\nn\ny\ny\ny\ny\ny\ny\ny\nn\n")
 s5Rc=$?
 [[ ${s5Rc} -ne 0 ]] && tail -n 30 <<<"${s5Out}"
 assert_equals "0" "${s5Rc}" "换域名重装退出码 0"
 noNoise "换域名重装" "${s5Out}"
+assert_contains "${s5Out}" "路径格式非法" "path 输错：报错后重问，安装接着往下走"
 sleep 2
 assert_equals "active active active" "$(activeState)" "重装后旁挂的 sing-box 也起来了（端口自检停过它）"
 assert_equals "${subKeyA}" "$(subKey)" "订阅地址的 md5 没变（沿用 salt），成员手里的订阅地址照常可用"
@@ -364,9 +382,13 @@ probeSub "换域名后" "${WORK}/sub-sb.json"
 assert_equals "hysteria2 trojan vless vless vless vmess" "${probedTypes}" "换域名后订阅里的节点都能用"
 
 echo ""
-echo -e "${YELLOW}=== 菜单 4 → 2：卸掉 Hysteria2（拼车不计量 sing-box 里的协议，开拼车前要拿掉）===${NC}"
+echo -e "${YELLOW}=== 菜单 4 → 3：端口跳跃，再 4 → 2 卸掉 Hysteria2（拼车不计量 sing-box 里的协议，开拼车前要拿掉）===${NC}"
+runMenu "4\n3\n1\n30000-30010\n" >/dev/null
+assert_equals "1" "$(iptables -t nat -S PREROUTING | grep -c 'Proxy-agent_hysteria2_portHopping')" "加了端口跳跃：有一条 DNAT"
+assert_equals "" "$(iptables -S INPUT | grep -F '30000:30010' || true)" "加端口跳跃不放行区间（INPUT 看到的是 DNAT 之后的目标端口）"
 s6Out=$(runMenu "4\n2\n")
 assert_equals "0" "$?" "卸 Hysteria2 退出码 0"
+assert_equals "0" "$(iptables -t nat -S PREROUTING | grep -c 'Proxy-agent_hysteria2_portHopping')" "卸 Hysteria2 带走它的跳跃规则"
 sleep 1
 assert_equals "active inactive active" "$(activeState)" "没有入站了，旁挂的 sing-box 停掉"
 
@@ -474,8 +496,10 @@ assert_equals "" "$(ls -A /usr/share/nginx/html 2>/dev/null | grep -v '^index.ht
 echo "卸载后新多出来的文件（不含包维护脚本生成的 rc.d / alternatives / 自启链接，与 /usr 下的包文件）："
 grep -vE '^/(etc/(rc[0-6S]\.d|alternatives|systemd/(system|user)/[^/]+\.wants)|usr/(bin|sbin|lib|share|libexec))(/|$)' <<<"${newFiles}" |
     grep -vE '^/root/\.acme\.sh/' | sed 's/^/    /'
-echo "防火墙里留下的本脚本规则："
-{ iptables-save 2>/dev/null; cat /etc/iptables/rules.v4 2>/dev/null; } | grep -F 'Proxy-agent' | sort -u | sed 's/^/    /'
-echo "装机时新装的软件包：$(comm -13 "${WORK}/pkgs-before" <(dpkg-query -W -f '${Package}\n' | sort) | tr '\n' ' ')"
+assert_equals "" "$({ iptables-save 2>/dev/null; cat /etc/iptables/rules.v4 2>/dev/null; } | grep -F 'Proxy-agent' || true)" "带本脚本标记的防火墙规则都收回了，存盘的那份也是"
+newPkgs=$(comm -13 "${WORK}/pkgs-before" <(dpkg-query -W -f '${Package}\n' | sort) | tr '\n' ' ')
+echo "装机时新装的软件包：${newPkgs}"
+assert_equals "" "$(tr ' ' '\n' <<<"${newPkgs}" | grep -E '^(exim4|bsd-mailx|inetutils-ping)' || true)" "装机没带进 exim4、bsd-mailx（cron 的推荐包）与 inetutils-ping"
+assert_contains "${u1Out}" "The nginx package" "卸载结尾说明 nginx 软件包还留着"
 
 e2eSummary "带域名的真装机端到端测试" "${E2E_LOG}"

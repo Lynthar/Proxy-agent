@@ -2458,6 +2458,18 @@ run_cp "${SUBSCRIBE_FN}; ${CP_SUB_STUBS}; wget() { return 4; }; subscribe false 
 assert_equals "placeholder" "$(cat "${CP_ROOT}/subscribe/sing-box/${CP_ALICE_MD5}")" "subscribe：模板拉不到时不动已有的 sing-box 配置"
 assert_equals "proxies:" "$(head -1 "${CP_ROOT}/subscribe/clashMeta/${CP_ALICE_MD5}")" "subscribe：模板拉不到不影响 clashMeta 重建"
 
+# 「查看订阅」：回车沿用 salt，只有明确答 n 才换（换 salt 等于换掉所有人的订阅地址）
+run_salt() {
+    cp_reset_tree
+    mkdir -p "${CP_ROOT}/subscribe/clashMetaProfiles"
+    printf "$1" | run_cp "${SUBSCRIBE_FN}; ${CP_SUB_STUBS}; ${CP_WGET_OK}; readSubscribeSalt() { subscribeSalt=newsaltvalue; }; subscribe" >/dev/null 2>&1
+    cat "${CP_ROOT}/subscribe_local/subscribeSalt"
+}
+assert_equals "testsalt" "$(run_salt '\n')" "查看订阅：回车沿用 salt"
+assert_equals "testsalt" "$(run_salt 'y\n')" "查看订阅：答 y 沿用 salt"
+assert_equals "newsaltvalue" "$(run_salt 'n\n')" "查看订阅：答 n 才换 salt"
+assert_equals "newsaltvalue" "$(run_salt 'N\n')" "查看订阅：大写 N 也算"
+
 rm -rf "${CP_ROOT}" "${_snap}" "${CP_TABLE}" "${CP_CALLS}" "${CP_STATS}"
 echo ""
 
@@ -3060,6 +3072,8 @@ assert_equals "1" "$(grep -c '^    ensureCronService$' <<<"${INSTALL_BASE_TOOLS_
 UNINSTALL_FN=$(sed -n '/^unInstall() {/,/^}/p' install.sh)
 assert_equals "yes" "$(grep -n -E 'removeOwnCronEntries|rm -rf \$\{PROXY_AGENT_DIR\}$' <<<"${UNINSTALL_FN}" | head -1 | grep -q removeOwnCronEntries && echo yes || echo no)" \
     "unInstall：先清 cron 行再 rm -rf 安装根"
+assert_equals "removeProtocolPortHopping removeProtocolPortHopping removeOwnFirewallRules rm" "$(grep -oE 'removeProtocolPortHopping|removeOwnFirewallRules|rm -rf \$\{PROXY_AGENT_DIR\}$' <<<"${UNINSTALL_FN}" | cut -d' ' -f1 | paste -sd' ' -)" \
+    "unInstall：跳跃规则与放行都在 rm -rf 安装根之前收（firewalld 要读片段里的目标端口）"
 rm -rf "${CRON_FAKE_ROOT}" "${MOCK_ROOT}/cron.calls"
 
 echo ""
@@ -4083,6 +4097,234 @@ phOut=$(env PH_FN="${PH_FN}" PATH="${AP_DIR}/bin:${PATH}" bash -c '
     echo done' 2>&1)
 assert_equals "done" "${phOut}" "端口跳跃菜单：有 iptables 时连进 20 次都不误判退出"
 
+# --- cron 不装推荐包（Debian 上会拉进常驻 25 端口的 exim4）；不再为 ping6 换掉系统的 iputils-ping ---
+mkdir -p "${AP_DIR}"
+: >"${AP_DIR}/installed"
+btPkgs=$(env BT_FN="${BT_FN}" AP_DIR="${AP_DIR}" bash -c '
+    eval "${BT_FN}"
+    for f in echoContent t ensureCronService ensureAlpineProcps sleep sudo; do eval "$f() { :; }"; done
+    pgrep() { return 1; }
+    crontab() { return 1; }
+    ping6() { return 2; }
+    dpkg-query() { return 1; }
+    instRec() { shift 2; echo "$*" >>"${AP_DIR}/installed"; }
+    release=debian upgrade=true installType="instRec -y install" PROXY_AGENT_DIR="${AP_DIR}"
+    installBaseTools
+    grep -E "cron|ping" "${AP_DIR}/installed"' 2>&1 | paste -sd'|' -)
+assert_equals "--no-install-recommends cron" "${btPkgs}" "installBaseTools：cron 不带推荐包，也不再装 inetutils-ping"
+
+# --- 端口跳跃只给 Hysteria2；加规则时不放行区间（INPUT 看到的是 DNAT 之后的目标端口，那条放行匹配不到） ---
+MT_FN=$(sed -n '/^manageTuic() {/,/^}/p;/^manageHysteria() {/,/^}/p' install.sh)
+MT_DIR="${MOCK_ROOT}/managehop"
+mkdir -p "${MT_DIR}"
+: >"${MT_DIR}/06_hysteria2_inbounds.json"
+: >"${MT_DIR}/09_tuic_inbounds.json"
+run_mt() {
+    env MT_FN="${MT_FN}" MT_DIR="${MT_DIR}" bash -c '
+        eval "${MT_FN}"
+        singBoxConfigPath="${MT_DIR}/" SINGBOX_FRAGMENT_DIR="${MT_DIR}"
+        for f in echoContent singBoxTuicInstall singBoxHysteria2Install unInstallSingBox; do eval "$f() { :; }"; done
+        portHoppingMenu() { echo "hop $1"; }
+        echo 3 | "$0"' "$1" 2>&1
+}
+assert_equals "" "$(run_mt manageTuic)" "TUIC 菜单：没有端口跳跃入口（三种订阅都带不了区间，服务端 DNAT 白开）"
+assert_equals "hop hysteria2" "$(run_mt manageHysteria)" "Hysteria2 菜单：端口跳跃入口还在"
+
+AH_FN=$(sed -n '/^addPortHopping() {/,/^}/p' install.sh)
+ahOut=$(env AH_FN="${AH_FN}" bash -c '
+    eval "${AH_FN}"
+    echoContent() { :; }
+    t() { :; }
+    allowPort() { echo "allowPort $*"; }
+    iptables() { echo "iptables $*"; }
+    iptables-save() { echo "Proxy-agent_hysteria2_portHopping"; }
+    netfilter-persistent() { :; }
+    release=debian
+    echo 30000-30010 | addPortHopping hysteria2 443' 2>&1)
+assert_equals "iptables -t nat -A PREROUTING -p udp --dport 30000:30010 -m comment --comment Proxy-agent_hysteria2_portHopping -j DNAT --to-destination :443" \
+    "${ahOut}" "加端口跳跃：只写 DNAT，不放行区间"
+
+mkdir -p "${AP_DIR}/bin" && printf '#!/bin/sh\nexit 0\n' >"${AP_DIR}/bin/iptables" && chmod +x "${AP_DIR}/bin/iptables"
+phType=$(env PH_FN="${PH_FN}" PATH="${AP_DIR}/bin:${PATH}" bash -c '
+    eval "${PH_FN}"
+    for f in echoContent addPortHopping deletePortHoppingRules carpoolRefreshSubscribe; do eval "$f() { :; }"; done
+    readPortHopping() { echo "$1"; }
+    printf "x\n3\n" | portHoppingMenu hysteria2' 2>&1 | paste -sd' ' -)
+assert_equals "hysteria2 hysteria2" "${phType}" "端口跳跃菜单：选错重来时协议类型不丢"
+
+# --- 已有证书也要对得上私钥：不查的话写完配置内核才起不来，那时服务已停 ---
+IT_FN=$(sed -n '/^installTLS() {/,/^}/p' install.sh)
+IT_DIR="${MOCK_ROOT}/installtls"
+mkdir -p "${IT_DIR}/tls"
+echo cert >"${IT_DIR}/tls/a.example.crt"
+echo key >"${IT_DIR}/tls/a.example.key"
+# run_it MATCH_RC → verifyCertKeyMatch 返回 MATCH_RC；走完打印 finished 和退出码
+run_it() {
+    env IT_FN="${IT_FN}" IT_DIR="${IT_DIR}" MATCH_RC="$1" HOME="${IT_DIR}" bash -c '
+        eval "${IT_FN}"
+        for f in echoContent readAcmeTLS renewalTLS verifyCertExpiry; do eval "$f() { :; }"; done
+        verifyCertKeyMatch() { return "${MATCH_RC}"; }
+        TLS_DIR="${IT_DIR}/tls" domain=a.example lastInstallationConfig=true
+        installTLS 3
+        echo finished' 2>&1
+    echo "rc=$?"
+}
+assert_equals "finished|rc=0" "$(run_it 0 | paste -sd'|' -)" "已有证书且匹配：安装接着走"
+assert_equals "rc=1" "$(run_it 1 | paste -sd'|' -)" "已有证书与私钥不匹配：退出（还在保护区间内，旧服务会拉回来）"
+
+# --- 协议卸载带走跳跃规则：iptables 按标记删；firewalld 只能按目标端口认，读不到端口就不动 ---
+RH_FN=$(sed -n '/^readPortHopping() {/,/^}/p;/^deletePortHoppingRules() {/,/^}/p;/^removeProtocolPortHopping() {/,/^}/p' install.sh)
+RH_DIR="${MOCK_ROOT}/hoprm"
+mkdir -p "${RH_DIR}"
+echo '{"inbounds":[{"listen_port":443}]}' >"${RH_DIR}/06.json"
+# run_rh_ipt TYPE FRAGMENT → iptables 桩：第 2、4 条是 hysteria2 的跳跃规则；打印删除与保存的调用
+run_rh_ipt() {
+    env RH_FN="${RH_FN}" bash -c '
+        eval "${RH_FN}"
+        iptables-save() { echo "-A PREROUTING -p udp -m udp --dport 30000:30010 -m comment --comment Proxy-agent_hysteria2_portHopping -j DNAT --to-destination :443"; }
+        iptables() {
+            if [[ "$*" == *--line-numbers* ]]; then
+                printf "1 DNAT mine\n2 DNAT /* Proxy-agent_hysteria2_portHopping */\n3 DNAT mine\n4 DNAT /* Proxy-agent_hysteria2_portHopping */\n"
+            else
+                echo "iptables $*"
+            fi
+        }
+        exec 3>&1
+        netfilter-persistent() { echo "persist $*" >&3; }
+        release=debian
+        removeProtocolPortHopping "$0" "$1"' "$1" "$2" 2>&1 | paste -sd'|' -
+}
+assert_equals "iptables -t nat -D PREROUTING 4|iptables -t nat -D PREROUTING 2|persist save" "$(run_rh_ipt hysteria2 "${RH_DIR}/06.json")" \
+    "iptables：只删带标记的跳跃规则，行号降序，再保存"
+assert_equals "iptables -t nat -D PREROUTING 4|iptables -t nat -D PREROUTING 2|persist save" "$(run_rh_ipt hysteria2 "${RH_DIR}/missing.json")" \
+    "iptables：片段没了也能按标记收"
+assert_equals "" "$(run_rh_ipt tuic "${RH_DIR}/06.json")" "iptables：这个协议没有跳跃规则就什么都不动"
+# run_rh_fw FRAGMENT → firewalld 桩：两条指向 443 的跳跃、一条用户自己指向 4430 的转发；删除调用打到 stderr（真代码把 stdout 丢了）
+run_rh_fw() {
+    env RH_FN="${RH_FN}" bash -c '
+        eval "${RH_FN}"
+        sudo() { "$@"; }
+        systemctl() { return 0; }
+        firewall-cmd() {
+            case "$*" in
+                --list-forward-ports) printf "port=30000:proto=udp:toport=443:toaddr=\nport=30001:proto=udp:toport=443:toaddr=\nport=8080:proto=tcp:toport=4430:toaddr=\n" ;;
+                *remove-forward-port*) echo "$*" >&2 ;;
+            esac
+        }
+        release=centos
+        removeProtocolPortHopping hysteria2 "$0"' "$1" 2>&1 | paste -sd'|' -
+}
+assert_equals "--permanent --remove-forward-port=port=30000:proto=udp:toport=443|--permanent --remove-forward-port=port=30001:proto=udp:toport=443" \
+    "$(run_rh_fw "${RH_DIR}/06.json")" "firewalld：只删指向这个协议端口的转发，4430 不是 443"
+assert_equals "" "$(run_rh_fw "${RH_DIR}/missing.json")" "firewalld：读不到目标端口就不动（空端口的 toport= 会匹配到用户自己的转发）"
+
+# --- 卸载收回带标记的放行：没标记的是用户自己的；ufw、firewalld 认不出，列出来不动 ---
+RF_FN=$(sed -n '/^sshListenPorts() {/,/^}/p;/^isOwnRuleOnSshPort() {/,/^}/p;/^removeOwnFirewallRules() {/,/^}/p' install.sh)
+# run_rf IPT_LIST NFT_LIST [SSH_LISTEN] [SSH_CONFIG] [SSH_CONNECTION] → 桩掉 iptables / nft / ss / sshd，打印删除、保存与保留提示
+run_rf() {
+    env -u SSH_CONNECTION RF_FN="${RF_FN}" IPT="$1" NFT="$2" SSH_LISTEN="${3:-}" SSH_CONFIG="${4:-}" ${5:+SSH_CONNECTION="$5"} bash -c '
+        eval "${RF_FN}"
+        t() { echo "$1"; }
+        echoContent() { echo "$2"; }
+        ss() { [[ -n "${SSH_LISTEN}" ]] && echo "LISTEN 0 128 0.0.0.0:${SSH_LISTEN} 0.0.0.0:* users:((\"sshd\",pid=1,fd=3))"; echo "LISTEN 0 128 0.0.0.0:443 0.0.0.0:* users:((\"xray\",pid=2,fd=3))"; }
+        sshd() { [[ -n "${SSH_CONFIG}" ]] && printf "port %s\naddressfamily any\n" "${SSH_CONFIG}"; return 0; }
+        iptables() { if [[ "$*" == *--line-numbers* ]]; then printf "%b" "${IPT}"; else echo "iptables $*"; fi; }
+        exec 3>&1
+        netfilter-persistent() { echo "persist $*" >&3; }
+        nft() {
+            case "$*" in
+                "list chain inet filter input") ;;
+                "-a list chain inet filter input") printf "%b" "${NFT}" ;;
+                *) echo "nft $*" ;;
+            esac
+        }
+        systemctl() { return 1; }
+        removeOwnFirewallRules' 2>&1 | paste -sd'|' -
+}
+RF_IPT='num target\n1 ACCEPT tcp dpt:22 /* ssh */\n2 ACCEPT udp dpt:443 /* allow 443/udp(Proxy-agent) */\n3 ACCEPT tcp dpt:80\n4 ACCEPT tcp dpt:443 /* allow 443/tcp(Proxy-agent) */\n'
+RF_NFT='\t\ttcp dport 22 accept comment "mine" # handle 3\n\t\tip saddr 0.0.0.0/0 tcp dport 443 counter packets 0 bytes 0 accept comment "allow 443/tcp(Proxy-agent)" # handle 7\n'
+assert_equals "iptables -D INPUT 4|iptables -D INPUT 2|persist save|nft delete rule inet filter input handle 7" "$(run_rf "${RF_IPT}" "${RF_NFT}")" \
+    "卸载：iptables、nft 里带标记的放行都收回，行号降序，用户自己的规则不动"
+assert_equals "" "$(run_rf 'num target\n1 ACCEPT tcp dpt:22 /* ssh */\n' '\t\ttcp dport 22 accept comment "mine" # handle 3\n')" "卸载：没有带标记的规则就不删也不保存"
+RF_IPT_SSH='num target\n1 ACCEPT tcp dpt:2222 /* allow 2222/tcp(Proxy-agent) */\n2 ACCEPT tcp dpt:443 /* allow 443/tcp(Proxy-agent) */\n3 ACCEPT udp dpt:2222 /* allow 2222/udp(Proxy-agent) */\n'
+RF_NFT_SSH='\t\tip saddr 0.0.0.0/0 tcp dport 2222 counter accept comment "allow 2222/tcp(Proxy-agent)" # handle 8\n\t\tip saddr 0.0.0.0/0 tcp dport 443 counter accept comment "allow 443/tcp(Proxy-agent)" # handle 9\n'
+RF_KEEP="iptables -D INPUT 3|iptables -D INPUT 2| ---> UNINSTALL_KEEP_SSH_RULE|persist save| ---> UNINSTALL_KEEP_SSH_RULE|nft delete rule inet filter input handle 9"
+assert_equals "${RF_KEEP}" "$(run_rf "${RF_IPT_SSH}" "${RF_NFT_SSH}" 2222)" "卸载：sshd 在听的端口的放行留着（只留 tcp），其余照收"
+assert_equals "${RF_KEEP}" "$(run_rf "${RF_IPT_SSH}" "${RF_NFT_SSH}" "" 2222)" "卸载：ss 看不到 sshd（ssh.socket）时按 sshd -T 认"
+assert_equals "${RF_KEEP}" "$(run_rf "${RF_IPT_SSH}" "${RF_NFT_SSH}" "" "" "1.2.3.4 5555 10.0.0.1 2222")" "卸载：这条 SSH 连接自己的端口也算"
+
+RL_FN=$(sed -n '/^reportUninstallLeftovers() {/,/^}/p' install.sh)
+# run_rl HAVE → HAVE 里的工具算装着 / 在跑；打印列出来的键。nginx 源的两个路径没法桩，这里只看其余几项
+run_rl() {
+    env RL_FN="${RL_FN}" HAVE=" $1 " bash -c '
+        eval "${RL_FN}"
+        t() { echo "$1"; }
+        echoContent() { echo "$2"; }
+        command() { [[ "${HAVE}" == *" $2 "* ]]; }
+        ufw() { echo "Status: active"; }
+        systemctl() { [[ "${HAVE}" == *" firewalld "* ]]; }
+        firewall-cmd() { [[ "${HAVE}" == *" masq "* ]]; }
+        semanage() { echo "/etc/Proxy-agent/xray/xray all files bin_t"; }
+        reportUninstallLeftovers' 2>&1 | paste -sd' ' -
+}
+assert_contains "$(run_rl "ufw")" "UNINSTALL_LEFT_UFW" "卸载结尾：ufw 在用就列出它的放行"
+assert_contains "$(run_rl "firewalld masq")" "UNINSTALL_LEFT_FIREWALLD" "卸载结尾：firewalld 在跑就列出它的放行"
+assert_contains "$(run_rl "firewalld masq")" "UNINSTALL_LEFT_MASQUERADE" "卸载结尾：masquerade 开着就列出来"
+assert_contains "$(run_rl "semanage")" "UNINSTALL_LEFT_SELINUX" "卸载结尾：SELinux 里登记过就列出来"
+assert_contains "$(run_rl "nginx")" "UNINSTALL_LEFT_NGINX" "卸载结尾：nginx 软件包还在就说一声"
+assert_equals "no" "$(run_rl "" | grep -qE 'UFW|FIREWALLD|MASQUERADE|SELINUX|LEFT_NGINX( |$)' && echo yes || echo no)" "卸载结尾：没有的东西不列"
+
+# --- 安装走到这些提示时服务已停，输错要重问：退出会把整机留在断线状态 ---
+RA_FN=$(sed -n '/^readInstallAccount() {/,/^}/p' install.sh)
+run_ra() {
+    printf "$1" | env RA_FN="${RA_FN}" bash -c '
+        eval "${RA_FN}"
+        echoContent() { :; }
+        readInstallAccount "echo aaaaaaaa-0000-4000-8000-000000000000"
+        echo "${uuid}|${customEmail}"' 2>&1
+}
+assert_equals "aaaaaaaa-0000-4000-8000-000000000000|alice" "$(run_ra 'not-a-uuid\n\nbad name!\nalice\n')" "UUID、用户名输错都重问，改对后照常往下走"
+assert_equals "11111111-2222-3333-4444-555555555555|11111111-VLESS_TCP/TLS_Vision" "$(run_ra '11111111-2222-3333-4444-555555555555\n\n')" "合法 UUID 照收，用户名回车取默认"
+assert_equals "aaaaaaaa-0000-4000-8000-000000000000|aaaaaaaa-VLESS_TCP/TLS_Vision" "$(run_ra '')" "stdin 关了也不空转：两项都取默认"
+
+RP_FN=$(sed -n '/^randomPathFunction() {/,/^}/p' install.sh)
+assert_equals "valid1" "$(printf 'ab\nvalid1\n' | env RP_FN="${RP_FN}" bash -c '
+    eval "${RP_FN}"
+    echoContent() { :; }
+    currentPath= lastInstallationConfig=
+    randomPathFunction
+    echo "${currentPath}"' 2>&1 | tail -n 1)" "path 输错重问，不退出"
+
+SS_FN=$(sed -n '/^readValidPort() {/,/^}/p;/^initSS2022Config() {/,/^}/p' install.sh)
+assert_equals "23456" "$(printf 'abc\n70000\n23456\n\n' | env SS_FN="${SS_FN}" bash -c '
+    eval "${SS_FN}"
+    echoContent() { :; }
+    t() { :; }
+    allowPort() { :; }
+    singBoxConfigPath=/nonexistent/
+    initSS2022Config
+    echo "${ss2022Port}"' 2>&1 | tail -n 1)" "SS2022 端口输错重问，不退出"
+
+RDT_FN=$(sed -n '/^realityDestBehindCloudflare() {/,/^}/p;/^checkRealityDest() {/,/^}/p;/^initRealityClientServersName() {/,/^}/p' install.sh)
+# run_rd_typed INPUT CF_HOSTS → 手输 Reality 目标；打印最后定下的 目标:端口
+run_rd_typed() {
+    printf "$1" | env RDT_FN="${RDT_FN}" CF="$2" bash -c '
+        eval "${RDT_FN}"
+        echoContent() { :; }
+        t() { echo "$1"; }
+        isYesInput() { [[ "${1,,}" == y ]]; }
+        isValidDomain() { [[ "$1" != *"!"* ]]; }
+        curl() { local u="${*: -1}"; u=${u#https://}; u=${u%%/*}; [[ " ${CF} " == *" ${u} "* ]] && echo "visit_scheme=https"; return 0; }
+        realityServerName= domain= lastInstallationConfig=
+        initRealityClientServersName >/dev/null 2>&1
+        echo "${realityServerName}:${realityDomainPort}"' 2>&1
+}
+assert_equals "ok.example:443" "$(run_rd_typed 'bad!name\nok.example\n' "")" "Reality 目标：格式不对重问，不退出"
+assert_equals "ok.example:443" "$(run_rd_typed 'cf.example\nn\nok.example\n' "cf.example")" "Reality 目标：挂 Cloudflare 答否重问，不退出"
+assert_equals "ok.example:8443" "$(run_rd_typed 'cf.example:9443\nn\nok.example:8443\n' "cf.example")" "Reality 目标：重问后端口跟新输入走，不留上一次的"
+assert_equals "cf.example:443" "$(run_rd_typed 'cf.example\ny\n' "cf.example")" "Reality 目标：挂 Cloudflare 答是照用"
+assert_equals "no" "$(run_rd_typed 'cf.example\n' "cf.example" | grep -q '^cf\.example:' && echo yes || echo no)" "Reality 目标：确认时 stdin 关了算答否，回车随机不空转"
+
 # --- Xray 机上卸 Hysteria2：片段里还有链式的入站就留着 sing-box，不能把链式的片段、状态文件连二进制一起删 ---
 US_FN=$(sed -n '/^unInstallSingBox() {/,/^}/p;/^singBoxFragmentsHaveInbounds() {/,/^}/p' install.sh)
 US_DIR="${MOCK_ROOT}/uninstallsb"
@@ -4101,7 +4343,7 @@ run_us() {
         SINGBOX_FRAGMENT_DIR="${US_DIR}/sing-box/conf/config" SINGBOX_MERGED_CONFIG="${US_DIR}/sing-box/conf/config.json"
         singBoxConfigPath="${SINGBOX_FRAGMENT_DIR}/"
         eval "${US_FN}"
-        for f in echoContent handleSingBox singBoxAutostart refreshSubscribeAfterInstall rm_service; do eval "$f() { :; }"; done
+        for f in echoContent handleSingBox singBoxAutostart refreshSubscribeAfterInstall rm_service removeProtocolPortHopping; do eval "$f() { :; }"; done
         readInstallType() { singBoxConfigPath=; [[ -f "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" ]] && singBoxConfigPath="${SINGBOX_FRAGMENT_DIR}/"; }
         rm() { [[ "$1" == /etc/systemd/system/* ]] && return 0; command rm "$@"; }
         unInstallSingBox hysteria2

@@ -1140,7 +1140,9 @@ tar -czvf proxy-backup.tar.gz /etc/Proxy-agent/
 2. 选择 **20. 卸载脚本**
 3. 确认卸载
 
-卸载后，所有配置和数据将被删除。
+卸载后，所有配置和数据将被删除，带 `(Proxy-agent)` 注释的 iptables / nft 放行与端口跳跃规则也一起收回（sshd 在用的端口除外，收了它，默认拒绝的机器上 SSH 就连不上了）。
+
+认不出是不是你自己配的东西脚本不动，卸载结尾会列出还留着的（只列确实存在的）：ufw 与 firewalld 的端口放行、firewalld 的 masquerade、SELinux 的登记、nginx.org 的软件源、nginx 软件包。acme.sh 也留着，删除方法见卸载开头的提示。
 
 ### Q: 更新脚本会影响现有配置吗？
 

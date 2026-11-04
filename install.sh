@@ -1069,10 +1069,6 @@ initVar() {
     hysteria2PortHoppingEnd=
     hysteria2PortHopping=
 
-    #    tuicPortHoppingStart=
-    #    tuicPortHoppingEnd=
-    #    tuicPortHopping=
-
     # tuic配置文件路径
     #    tuicConfigPath=
     tuicAlgorithm=
@@ -1791,11 +1787,13 @@ unInstallSingBox() {
     local type=$1
     if [[ -n "${singBoxConfigPath}" ]]; then
         if grep -q 'tuic' <${SINGBOX_MERGED_CONFIG} && [[ "${type}" == "tuic" ]]; then
+            removeProtocolPortHopping tuic "${singBoxConfigPath}09_tuic_inbounds.json"
             rm "${singBoxConfigPath}09_tuic_inbounds.json"
             echoContent green " ---> 删除sing-box tuic配置成功"
         fi
 
         if grep -q 'hysteria2' <${SINGBOX_MERGED_CONFIG} && [[ "${type}" == "hysteria2" ]]; then
+            removeProtocolPortHopping hysteria2 "${singBoxConfigPath}06_hysteria2_inbounds.json"
             rm "${singBoxConfigPath}06_hysteria2_inbounds.json"
             echoContent green " ---> 删除sing-box hysteria2配置成功"
         fi
@@ -2203,7 +2201,8 @@ installBaseTools() {
     if ! crontab -l >/dev/null 2>&1; then
         echoContent green " ---> $(t INSTALL_TOOL "crontabs")"
         if [[ "${release}" == "ubuntu" || "${release}" == "debian" ]]; then
-            ${installType} cron >/dev/null 2>&1
+            # 不装推荐包：Debian 上 cron 推荐的 MTA 会拉进常驻 127.0.0.1:25 的 exim4，本脚本的定时任务输出都写日志、用不上邮件
+            ${installType} --no-install-recommends cron >/dev/null 2>&1
         else
             ${installType} crontabs >/dev/null 2>&1
         fi
@@ -2222,11 +2221,6 @@ installBaseTools() {
     if ! openssl help >/dev/null 2>&1; then
         echoContent green " ---> 安装openssl"
         ${installType} openssl >/dev/null 2>&1
-    fi
-
-    if ! ping6 --help >/dev/null 2>&1; then
-        echoContent green " ---> 安装ping6"
-        ${installType} inetutils-ping >/dev/null 2>&1
     fi
 
     if ! qrencode --help >/dev/null 2>&1; then
@@ -3081,6 +3075,12 @@ installTLS() {
             fi
         fi
 
+        # 已有的证书（自定义的、上次留下的）也要对得上私钥：不查的话写完配置内核才起不来，那时服务已停、旧配置也没了
+        if ! verifyCertKeyMatch "${TLS_DIR}/${tlsDomain}.crt" "${TLS_DIR}/${tlsDomain}.key"; then
+            echoContent red " ---> 证书验证失败，请检查证书文件"
+            exit 1
+        fi
+
     elif [[ -d "$HOME/.acme.sh" ]] && [[ ! -f "$HOME/.acme.sh/${tlsDomain}_ecc/${tlsDomain}.cer" || ! -f "$HOME/.acme.sh/${tlsDomain}_ecc/${tlsDomain}.key" ]]; then
         switchDNSAPI
         if [[ -z "${dnsAPIType}" ]]; then
@@ -3191,7 +3191,9 @@ randomPathFunction() {
             # 它会同时嵌入 JSON、Nginx location 与 fallback path。
             if ! [[ "${customPath}" =~ ^[A-Za-z0-9._-]{4,32}$ ]]; then
                 echoContent red " ---> 路径格式非法，仅允许字母数字及 . _ -，长度 4-32"
-                exit 1
+                # 重问不退出：sing-box 的安装走到这里时服务已停，退出会把整机留在断线状态
+                randomPathFunction "$1"
+                return
             fi
             if [[ "${customPath: -2}" == "ws" ]]; then
                 echo
@@ -4786,8 +4788,8 @@ initSS2022Config() {
 
     if [[ -z "${ss2022Port}" ]]; then
         echoContent yellow "请输入Shadowsocks 2022端口[回车随机10000-30000]"
-        # 回车随机；非法直接退出（无递归调用方）
-        readValidPort "端口:" ss2022Port "RANDOM" 10000 30000 || exit 1
+        # 回车随机；非法重问不退出：安装走到这里时服务已停，退出会把整机留在断线状态
+        until readValidPort "端口:" ss2022Port "RANDOM" 10000 30000; do :; done
         echoContent green "\n ---> 端口: ${ss2022Port}"
     fi
     # TCP、UDP 都监听，两个都要放行：漏了防火墙直接拒连
@@ -4861,7 +4863,7 @@ addPortHopping() {
     echoContent skyBlue "\n进度 1/1 : 端口跳跃"
     echoContent red "\n=============================================================="
     echoContent yellow "# 注意事项\n"
-    echoContent yellow "仅支持Hysteria2、Tuic"
+    echoContent yellow "仅支持Hysteria2"
     echoContent yellow "端口跳跃的起始位置为30000"
     echoContent yellow "端口跳跃的结束位置为40000"
     echoContent yellow "可以在30000-40000范围中选一段"
@@ -4908,7 +4910,6 @@ addPortHopping() {
                     echoContent yellow " ---> $(t PORT_HOPPING_NOT_PERSISTENT)"
                 fi
             fi
-            allowPort "${portStart}:${portEnd}" udp
             echoContent green " ---> 端口跳跃添加成功"
         fi
     fi
@@ -4922,8 +4923,8 @@ readPortHopping() {
     local portHoppingEnd=
 
     if [[ "${release}" == "centos" ]]; then
-        portHoppingStart=$(sudo firewall-cmd --list-forward-ports | grep "toport=${targetPort}" | head -1 | cut -d ":" -f 1 | cut -d "=" -f 2)
-        portHoppingEnd=$(sudo firewall-cmd --list-forward-ports | grep "toport=${targetPort}" | tail -n 1 | cut -d ":" -f 1 | cut -d "=" -f 2)
+        portHoppingStart=$(sudo firewall-cmd --list-forward-ports | grep "toport=${targetPort}:" | head -1 | cut -d ":" -f 1 | cut -d "=" -f 2)
+        portHoppingEnd=$(sudo firewall-cmd --list-forward-ports | grep "toport=${targetPort}:" | tail -n 1 | cut -d ":" -f 1 | cut -d "=" -f 2)
     else
         if iptables-save | grep -q "Proxy-agent_${type}_portHopping"; then
             local portHopping=
@@ -4940,7 +4941,6 @@ readPortHopping() {
     elif [[ "${type}" == "tuic" ]]; then
         tuicPortHoppingStart="${portHoppingStart}"
         tuicPortHoppingEnd="${portHoppingEnd}"
-        #        tuicPortHopping="${portHoppingStart}-${portHoppingEnd}"
     fi
 }
 # 删除端口跳跃iptables规则
@@ -4952,9 +4952,9 @@ deletePortHoppingRules() {
 
     if [[ "${release}" == "centos" ]]; then
         for port in $(seq "${start}" "${end}"); do
-            sudo firewall-cmd --permanent --remove-forward-port=port="${port}":proto=udp:toport="${targetPort}"
+            sudo firewall-cmd --permanent --remove-forward-port=port="${port}":proto=udp:toport="${targetPort}" >/dev/null
         done
-        sudo firewall-cmd --reload
+        sudo firewall-cmd --reload >/dev/null
     else
         # 必须按读到的行号降序删：本脚本的规则是 -A 追加在链尾，固定删
         # PREROUTING 1 删的是别人的规则；升序删则每删一条后面的行号就前移一位。
@@ -4969,6 +4969,26 @@ deletePortHoppingRules() {
     fi
 }
 
+# removeProtocolPortHopping TYPE FRAGMENT → 协议卸载时带走它的跳跃规则：留着的话重装换了端口，规则还指向旧端口。
+# iptables 的规则带协议标记；firewalld 的只能按目标端口认，读不到端口就不动，否则 toport= 会匹配到用户自己的转发
+removeProtocolPortHopping() {
+    local type=$1 targetPort= start= end=
+    targetPort=$(jq -r '.inbounds[0].listen_port // empty' "$2" 2>/dev/null)
+    if [[ "${release}" == "centos" ]]; then
+        [[ -n "${targetPort}" ]] && systemctl is-active --quiet firewalld || return 0
+    else
+        command -v iptables >/dev/null 2>&1 || return 0
+    fi
+    readPortHopping "${type}" "${targetPort}"
+    case "${type}" in
+        hysteria2) start=${hysteria2PortHoppingStart} end=${hysteria2PortHoppingEnd} ;;
+        tuic) start=${tuicPortHoppingStart} end=${tuicPortHoppingEnd} ;;
+    esac
+    if [[ -n "${start}" && -n "${end}" ]]; then
+        deletePortHoppingRules "${type}" "${start}" "${end}" "${targetPort}"
+    fi
+}
+
 # 端口跳跃菜单
 portHoppingMenu() {
     local type=$1
@@ -4978,21 +4998,13 @@ portHoppingMenu() {
         exit 1
     fi
 
-    local targetPort=
+    local targetPort=${singBoxHysteria2Port}
     local portHoppingStart=
     local portHoppingEnd=
 
-    if [[ "${type}" == "hysteria2" ]]; then
-        readPortHopping "${type}" "${singBoxHysteria2Port}"
-        targetPort=${singBoxHysteria2Port}
-        portHoppingStart=${hysteria2PortHoppingStart}
-        portHoppingEnd=${hysteria2PortHoppingEnd}
-    elif [[ "${type}" == "tuic" ]]; then
-        readPortHopping "${type}" "${singBoxTuicPort}"
-        targetPort=${singBoxTuicPort}
-        portHoppingStart=${tuicPortHoppingStart}
-        portHoppingEnd=${tuicPortHoppingEnd}
-    fi
+    readPortHopping "${type}" "${targetPort}"
+    portHoppingStart=${hysteria2PortHoppingStart}
+    portHoppingEnd=${hysteria2PortHoppingEnd}
 
     echoContent skyBlue "\n进度 1/1 : 端口跳跃"
     echoContent red "\n=============================================================="
@@ -5015,7 +5027,7 @@ portHoppingMenu() {
             echoContent yellow " ---> 未设置端口跳跃"
         fi
     else
-        portHoppingMenu
+        portHoppingMenu "${type}"
     fi
 }
 
@@ -5722,6 +5734,37 @@ initSingBoxPort() {
 }
 
 # 初始化Xray 配置文件
+# readInstallAccount UUID_CMD → 问自定义 UUID 与用户名，写进 uuid、customEmail；UUID_CMD 生成随机 UUID。
+# 输错重问不退出：安装走到这里时服务已停，退出会把整机留在断线状态
+readInstallAccount() {
+    while true; do
+        echoContent yellow "请输入自定义UUID[需合法]，[回车]随机UUID"
+        read -r -p 'UUID:' customUUID
+        if [[ -z "${customUUID}" ]]; then
+            uuid=$($1)
+            break
+        # 8-4-4-4-12 十六进制，挡住特殊字符进入下游 JSON 构造（与 addUser 走的 customUUID() 同一规则）
+        elif [[ "${customUUID}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            uuid=${customUUID}
+            break
+        fi
+        echoContent red " ---> UUID 格式非法，需 8-4-4-4-12 位十六进制（例：550e8400-e29b-41d4-a716-446655440000）"
+    done
+
+    while true; do
+        echoContent yellow "\n请输入自定义用户名[需合法]，[回车]随机用户名"
+        read -r -p '用户名:' customEmail
+        if [[ -z "${customEmail}" ]]; then
+            # 默认值含 '/'（JSON 合法），不走下面的校验
+            customEmail="$(echo "${uuid}" | cut -d "-" -f 1)-VLESS_TCP/TLS_Vision"
+            break
+        elif [[ "${customEmail}" =~ ^[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}$ ]]; then
+            break
+        fi
+        echoContent red " ---> email 格式非法，仅允许字母数字及 . _ @ + -，长度 1-64"
+    done
+}
+
 initXrayConfig() {
     echoContent skyBlue "\n进度 $2/${totalProgress} : 初始化Xray配置"
     echo
@@ -5754,30 +5797,7 @@ initXrayConfig() {
     fi
 
     if [[ -z "${addClientsStatus}" ]]; then
-        echoContent yellow "请输入自定义UUID[需合法]，[回车]随机UUID"
-        read -r -p 'UUID:' customUUID
-
-        if [[ -n ${customUUID} ]]; then
-            # 输入即校验：UUID 必须是 8-4-4-4-12 十六进制，挡住特殊字符进入下游 JSON 构造
-            # （与 addUser 走的 customUUID() 同一规则；首装路径此前漏了这道校验）。
-            if ! [[ "${customUUID}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
-                echoContent red " ---> UUID 格式非法，需 8-4-4-4-12 位十六进制（例：550e8400-e29b-41d4-a716-446655440000）"
-                exit 1
-            fi
-            uuid=${customUUID}
-        else
-            uuid=$(${XRAY_BIN} uuid)
-        fi
-
-        echoContent yellow "\n请输入自定义用户名[需合法]，[回车]随机用户名"
-        read -r -p '用户名:' customEmail
-        if [[ -z ${customEmail} ]]; then
-            customEmail="$(echo "${uuid}" | cut -d "-" -f 1)-VLESS_TCP/TLS_Vision"
-        elif ! [[ "${customEmail}" =~ ^[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}$ ]]; then
-            # 仅校验用户自定义值；上面的默认值含 '/'（JSON 合法）走 if 分支不经过这里
-            echoContent red " ---> email 格式非法，仅允许字母数字及 . _ @ + -，长度 1-64"
-            exit 1
-        fi
+        readInstallAccount "${XRAY_BIN} uuid"
     fi
 
     if [[ -z "${addClientsStatus}" && -z "${uuid}" ]]; then
@@ -6223,30 +6243,7 @@ initSingBoxConfig() {
     fi
 
     if [[ -z "${addClientsStatus}" ]]; then
-        echoContent yellow "请输入自定义UUID[需合法]，[回车]随机UUID"
-        read -r -p 'UUID:' customUUID
-
-        if [[ -n ${customUUID} ]]; then
-            # 输入即校验：UUID 必须是 8-4-4-4-12 十六进制，挡住特殊字符进入下游 JSON 构造
-            # （与 addUser 走的 customUUID() 同一规则；首装路径此前漏了这道校验）。
-            if ! [[ "${customUUID}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
-                echoContent red " ---> UUID 格式非法，需 8-4-4-4-12 位十六进制（例：550e8400-e29b-41d4-a716-446655440000）"
-                exit 1
-            fi
-            uuid=${customUUID}
-        else
-            uuid=$(${SINGBOX_BIN} generate uuid)
-        fi
-
-        echoContent yellow "\n请输入自定义用户名[需合法]，[回车]随机用户名"
-        read -r -p '用户名:' customEmail
-        if [[ -z ${customEmail} ]]; then
-            customEmail="$(echo "${uuid}" | cut -d "-" -f 1)-VLESS_TCP/TLS_Vision"
-        elif ! [[ "${customEmail}" =~ ^[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}$ ]]; then
-            # 仅校验用户自定义值；上面的默认值含 '/'（JSON 合法）走 if 分支不经过这里
-            echoContent red " ---> email 格式非法，仅允许字母数字及 . _ @ + -，长度 1-64"
-            exit 1
-        fi
+        readInstallAccount "${SINGBOX_BIN} generate uuid"
     fi
 
     if [[ -z "${addClientsStatus}" && -z "${uuid}" ]]; then
@@ -7790,6 +7787,84 @@ EOF
     fi
 }
 
+# sshListenPorts → 一行一个 sshd 在用的端口：此刻这条连接的、在听的（Ubuntu 的 ssh.socket 下监听者可能只有 systemd，所以再问 sshd -T）
+sshListenPorts() {
+    [[ -n "${SSH_CONNECTION:-}" ]] && echo "${SSH_CONNECTION##* }"
+    ss -ltnp 2>/dev/null | awk '/"sshd"/ {n = split($4, a, ":"); print a[n]}'
+    sshd -T 2>/dev/null | awk '$1 == "port" {print $2}'
+}
+
+# isOwnRuleOnSshPort RULE_LINE SSH_PORTS → 0 = 这条带标记的放行正是 sshd 的端口，要留着：默认拒绝的机器上收了它，SSH 就再也连不上
+isOwnRuleOnSshPort() {
+    local port
+    port=$(sed -nE 's/.*allow ([0-9]+)\/tcp\(Proxy-agent\).*/\1/p' <<<"$1")
+    [[ -n "${port}" ]] && grep -qxF "${port}" <<<"$2"
+}
+
+# removeOwnFirewallRules → 收回 allowPort 留下的放行，只认带 (Proxy-agent) 注释的（iptables、nft），sshd 在用的端口除外。
+# ufw、firewalld 的放行没有标记，认不出是不是用户自己加的，不动，由 reportUninstallLeftovers 列出来
+removeOwnFirewallRules() {
+    local line changed= sshPorts
+    sshPorts=$(sshListenPorts)
+    if command -v iptables >/dev/null 2>&1; then
+        # 行号降序删：升序删一条，后面的行号就前移一位
+        while read -r line; do
+            [[ -n "${line}" ]] || continue
+            if isOwnRuleOnSshPort "${line}" "${sshPorts}"; then
+                echoContent yellow " ---> $(t UNINSTALL_KEEP_SSH_RULE)"
+                continue
+            fi
+            iptables -D INPUT "${line%% *}" && changed=true
+        done < <(iptables -L INPUT -n --line-numbers 2>/dev/null | grep -F '(Proxy-agent)' | sort -rn)
+        if [[ -n "${changed}" ]] && command -v netfilter-persistent >/dev/null 2>&1; then
+            netfilter-persistent save >/dev/null 2>&1
+        fi
+    fi
+    changed=
+    if command -v nft >/dev/null 2>&1 && nft list chain inet filter input >/dev/null 2>&1; then
+        while read -r line; do
+            [[ -n "${line}" ]] || continue
+            if isOwnRuleOnSshPort "${line}" "${sshPorts}"; then
+                echoContent yellow " ---> $(t UNINSTALL_KEEP_SSH_RULE)"
+                continue
+            fi
+            nft delete rule inet filter input handle "${line##* }" && changed=true
+        done < <(nft -a list chain inet filter input | grep -F '(Proxy-agent)')
+        if [[ -n "${changed}" ]] && systemctl is-active --quiet nftables 2>/dev/null; then
+            nft list ruleset >/etc/nftables.conf
+        fi
+    fi
+}
+
+# reportUninstallLeftovers → 列出还留在系统里、脚本不敢删的东西（可能是用户自己的配置），只列确实存在的
+reportUninstallLeftovers() {
+    local lines=()
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+        lines+=("$(t UNINSTALL_LEFT_UFW)")
+    fi
+    if systemctl is-active --quiet firewalld 2>/dev/null; then
+        lines+=("$(t UNINSTALL_LEFT_FIREWALLD)")
+        if firewall-cmd --query-masquerade >/dev/null 2>&1; then
+            lines+=("$(t UNINSTALL_LEFT_MASQUERADE)")
+        fi
+    fi
+    if command -v semanage >/dev/null 2>&1 && semanage fcontext -l -C 2>/dev/null | grep -qE 'xray|sing-box'; then
+        lines+=("$(t UNINSTALL_LEFT_SELINUX)")
+    fi
+    if [[ -f /etc/apt/sources.list.d/nginx.list || -f /etc/yum.repos.d/nginx.repo ]]; then
+        lines+=("$(t UNINSTALL_LEFT_NGINX_REPO)")
+    fi
+    if command -v nginx >/dev/null 2>&1; then
+        lines+=("$(t UNINSTALL_LEFT_NGINX)")
+    fi
+    [[ ${#lines[@]} -gt 0 ]] || return 0
+    echoContent yellow "\n ---> $(t UNINSTALL_LEFTOVERS_TITLE)"
+    local line
+    for line in "${lines[@]}"; do
+        echoContent yellow "     ${line}"
+    done
+}
+
 # 卸载脚本
 unInstall() {
     if planAction "$(t PLAN_UNINSTALL)"; then return 0; fi
@@ -7838,6 +7913,10 @@ unInstall() {
     fi
 
     removeOwnCronEntries
+    # 跳跃规则要趁片段还在时收：firewalld 的只能按片段里的目标端口认
+    removeProtocolPortHopping hysteria2 "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json"
+    removeProtocolPortHopping tuic "${SINGBOX_FRAGMENT_DIR}/09_tuic_inbounds.json"
+    removeOwnFirewallRules
     rm -rf ${PROXY_AGENT_DIR}
     # 旧版本建过、从没用过的空目录
     rm -rf /tmp/Proxy-agent-tls
@@ -7860,6 +7939,7 @@ unInstall() {
     rm -rf /usr/sbin/pasly
     echoContent green " ---> 卸载快捷方式完成"
     echoContent green " ---> 卸载 Proxy-agent 脚本完成"
+    reportUninstallLeftovers
 }
 
 # 自定义uuid
@@ -16581,8 +16661,9 @@ singBoxAutostart() {
     if [[ -f "/etc/systemd/system/sing-box.service" ]]; then
         if [[ "$1" == "on" ]]; then
             systemctl is-enabled --quiet sing-box.service 2>/dev/null || systemctl enable sing-box.service >/dev/null 2>&1
-        elif systemctl is-enabled --quiet sing-box.service 2>/dev/null; then
-            systemctl disable sing-box.service >/dev/null 2>&1
+        else
+            # --now：单元可能卡在崩溃重启循环里（老版本删了二进制、留着单元），这时没有进程，handleSingBox stop 看不到它
+            systemctl disable --now sing-box.service >/dev/null 2>&1
         fi
     elif [[ -f "/etc/init.d/sing-box" ]]; then
         if [[ "$1" == "on" ]]; then
@@ -18174,17 +18255,17 @@ subscribe() {
 
         echoContent skyBlue "-------------------------备注---------------------------------"
         echoContent yellow "# 查看订阅会重新生成本地账号的订阅"
-        echoContent red "# 需要手动输入md5加密的salt值，如果不了解使用随机即可"
+        echoContent yellow "# 首次生成或更换 salt 时才要输入 md5 加密的 salt 值，如果不了解使用随机即可"
         echoContent yellow "# 不影响已添加的远程订阅的内容\n"
 
         if [[ -f "${SUBSCRIBE_LOCAL_DIR}/subscribeSalt" && -n $(cat "${SUBSCRIBE_LOCAL_DIR}/subscribeSalt") ]]; then
             if [[ -z "${renewSalt}" ]]; then
-                read -r -p "读取到上次安装设置的Salt，是否使用上次生成的Salt ？[y/n]:" historySaltStatus
-                if [[ "${historySaltStatus}" == "y" ]]; then
-                    subscribeSalt=$(cat ${SUBSCRIBE_LOCAL_DIR}/subscribeSalt)
-                else
-                    readSubscribeSalt
-                fi
+                # 只有明确答 n 才换：换 salt 等于换掉所有人的订阅地址，查看一次不该有这种后果
+                read -r -p "$(t SUBSCRIBE_SALT_REUSE_PROMPT)" historySaltStatus
+                case "${historySaltStatus,,}" in
+                    n | no) readSubscribeSalt ;;
+                    *) subscribeSalt=$(cat ${SUBSCRIBE_LOCAL_DIR}/subscribeSalt) ;;
+                esac
             else
                 subscribeSalt=$(cat ${SUBSCRIBE_LOCAL_DIR}/subscribeSalt)
             fi
@@ -18538,13 +18619,13 @@ realityDestBehindCloudflare() {
     curl -s --connect-timeout 5 --max-time 10 "https://$1/cdn-cgi/trace" 2>/dev/null | grep -q "visit_scheme=https"
 }
 
-# checkRealityDest DOMAIN：用户自己输的目标挂在 Cloudflare 代理后面时要二次确认
+# checkRealityDest DOMAIN → 用户自己输的目标挂在 Cloudflare 代理后面时要二次确认，答否返回 1（由调用方重问）
 checkRealityDest() {
     if realityDestBehindCloudflare "$1"; then
         echoContent red "\n ---> $(t REALITY_CF_WARNING)\n"
         read -r -p "$(t PROMPT_CONTINUE):" setRealityDestStatus
         if ! isYesInput "${setRealityDestStatus}"; then
-            exit 1
+            return 1
         fi
         echoContent yellow "\n ---> $(t REALITY_IGNORE_RISK)"
     fi
@@ -18607,7 +18688,10 @@ initRealityClientServersName() {
                 local realityDomainCheck="${realityServerName%%:*}"
                 if ! isValidDomain "${realityDomainCheck}"; then
                     echoContent red " ---> 域名格式无效或包含不安全字符"
-                    exit 1
+                    # 重问不退出：安装走到这里时服务已停，退出会把整机留在断线状态
+                    realityServerName=
+                    initRealityClientServersName
+                    return
                 fi
             fi
             if echo "${realityServerName}" | grep -q ":"; then
@@ -18617,7 +18701,11 @@ initRealityClientServersName() {
         fi
     fi
 
-    [[ -z "${realityDestRandom}" ]] && checkRealityDest "${realityServerName}"
+    if [[ -z "${realityDestRandom}" ]] && ! checkRealityDest "${realityServerName}"; then
+        realityServerName=
+        initRealityClientServersName
+        return
+    fi
     echoContent yellow "\n ---> 客户端可用域名: ${realityServerName}:${realityDomainPort}\n"
 }
 # initXrayRealityPort KEEP SKIP [EXTRA...] → 选 7 的对外端口写进 realityPort，参数同 portsTakenFor
@@ -18754,7 +18842,6 @@ manageTuic() {
         echoContent yellow "依赖sing-box内核\n"
         echoContent yellow "1.重新安装"
         echoContent yellow "2.卸载"
-        echoContent yellow "3.端口跳跃管理"
         tuicStatus=true
     else
         echoContent yellow "依赖sing-box内核\n"
@@ -18767,8 +18854,6 @@ manageTuic() {
         singBoxTuicInstall
     elif [[ "${installTuicStatus}" == "2" && "${tuicStatus}" == "true" ]]; then
         unInstallSingBox tuic
-    elif [[ "${installTuicStatus}" == "3" && "${tuicStatus}" == "true" ]]; then
-        portHoppingMenu tuic
     fi
 }
 # sing-box log日志
