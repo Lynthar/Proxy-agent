@@ -52,7 +52,7 @@ jobs:
           result-encoding: string
 
       - name: Compute install.sh SHA256
-        if: ${{ steps.version.outputs.file_version != steps.latest.outputs.tag }}
+        if: ${{ steps.version.outputs.file_version != steps.latest.outputs.result }}
         run: |
           HASH=$(sha256sum install.sh | awk '{print $1}')
           # Format matches sha256sum output so verifyInstallSHA256 in install.sh
@@ -61,7 +61,7 @@ jobs:
           echo "Computed SHA256: ${HASH}"
 
       - name: Build lib_bundle.tar.gz + SHA256
-        if: ${{ steps.version.outputs.file_version != steps.latest.outputs.tag }}
+        if: ${{ steps.version.outputs.file_version != steps.latest.outputs.result }}
         run: |
           # Bundle lib/, shell/lang/, and VERSION into a single tarball that
           # install.sh's _bootstrap_libs can fetch when lib/ is missing locally.
@@ -74,7 +74,7 @@ jobs:
           echo "Bundle size: $(stat -c %s lib_bundle.tar.gz) bytes"
 
       - name: Create release, upload assets, cleanup old ones
-        if: ${{ steps.version.outputs.file_version != steps.latest.outputs.tag }}
+        if: ${{ steps.version.outputs.file_version != steps.latest.outputs.result }}
         uses: actions/github-script@v7
         with:
           script: |
