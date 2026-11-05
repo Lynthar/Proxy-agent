@@ -3623,18 +3623,6 @@ run_sub_menu() {
 }
 assert_equals "rc=1 lines=1" "$(run_sub_menu)" "addSubscribeMenu：删除时编号为空退出码 1，订阅清单没被动"
 
-SELINUX_FN=$(sed -n '/^updateSELinuxHTTPPortT() {/,/^}/p' install.sh)
-assert_not_empty "${SELINUX_FN}" "updateSELinuxHTTPPortT：抽到函数原文"
-# 只在 handleNginx 起不来时被调；机器上没有 semanage 就是「起不来且修不了」
-run_selinux() {
-    env PROXY_AGENT_DIR="${CRON_ROOT}" SELINUX_FN="${SELINUX_FN}" bash -c '
-        find() { :; }
-        echoContent() { :; }
-        eval "${SELINUX_FN}"
-        updateSELinuxHTTPPortT 2>/dev/null'
-}
-run_selinux; assert_equals "1" "$?" "updateSELinuxHTTPPortT：不是 SELinux 端口问题时退出码 1"
-
 NGINX302_FN=$(sed -n '/^checkNginx302() {/,/^}/p' install.sh)
 assert_not_empty "${NGINX302_FN}" "checkNginx302：抽到函数原文"
 # $1 是 curl 回包桩值
@@ -4167,6 +4155,95 @@ assert_equals "systemctl start nginx" "$(run_rs ",7," refreshSubscribeAfterInsta
 assert_equals "" "$(run_rs ",7," 'handleNginx start')" "只装 Reality 的安装流程里，不带 force 的 handleNginx start 照旧不起 nginx"
 assert_equals "systemctl start nginx" "$(run_rs ",0,7," 'handleNginx start')" "带 TLS 协议的安装照常起 nginx"
 rm -rf "${RS_DIR}"
+
+# --- handleNginx start 起不来一律退出；要收尾、要接着走的调用方用子 shell 接住 ---
+# checkPortOpen 的 heredoc 里有顶格的 }，按下一个函数名截
+NS_FN=$(sed -n '/^handleNginx() {/,/^}/p;/^carpoolReloadNginx() {/,/^}/p;/^updateNginxBlog() {/,/^}/p;/^customSingBoxInstall() {/,/^}/p' install.sh
+    sed -n '/^checkPortOpen() {/,/^initTLSNginxConfig() {/p' install.sh | sed '$d')
+assert_equals "5" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${NS_FN}")" "nginx 起不来：抽到五个函数原文"
+NS_DIR="${MOCK_ROOT}/nginxstart"
+# run_ns RELEASE MODE CALL → 桩掉服务管理器与 nginx 进程。MODE：ok 服务起得来 · flap 服务报成功、进程却没了 ·
+# dead 都起不来 · manual 只有手动 nginx 起得来 · badconf 配置坏着时起不来、恢复备份后才行
+run_ns() {
+    rm -rf "${NS_DIR}" && mkdir -p "${NS_DIR}/nginx" "${NS_DIR}/log"
+    env NS_FN="${NS_FN}" NS_DIR="${NS_DIR}" NS_MODE="$2" PROXY_AGENT_DIR="${NS_DIR}" release="$1" bash -c '
+        eval "${NS_FN}"
+        for f in ensureAlpineProcps labelNginxPorts sleep handleSingBox handleXray allowPort checkIP checkNginx302 removeNginx302 isValidRedirectUrl; do eval "$f() { :; }"; done
+        echoContent() { printf "%s\n" "$2"; }
+        t() { printf "%s\n" "$1"; }
+        curl() { :; }
+        nsCanStart() { case "${NS_MODE}" in ok) return 0 ;; badconf) [[ ! -f "${NS_DIR}/bad" ]] ;; *) return 1 ;; esac; }
+        systemctl() {
+            [[ "$1" == start ]] || return 0
+            nsCanStart && { : >"${NS_DIR}/up"; return 0; }
+            [[ "${NS_MODE}" == flap ]] && return 0
+            printf "%s\n" "Job for nginx.service failed." "See \"systemctl status nginx.service\" and \"journalctl -xe\" for details." >&2
+            return 1
+        }
+        rc-service() {
+            [[ "$2" == start ]] || return 0
+            nsCanStart && { : >"${NS_DIR}/up"; return 0; }
+            [[ "${NS_MODE}" == manual ]] && { echo " * WARNING: nginx has already been started" >&2; return 0; }
+            echo " * start-stop-daemon: failed to start" >&2
+            return 1
+        }
+        nginx() {
+            [[ "${NS_MODE}" == manual ]] && { : >"${NS_DIR}/up"; return 0; }
+            [[ "$*" == "-s reload" ]] && return 1
+            echo "nginx: bind() failed" >&2
+            return 1
+        }
+        pgrep() { [[ -f "${NS_DIR}/up" ]] && echo 42; return 0; }
+        addNginx302() { : >"${NS_DIR}/bad"; }
+        backupNginxConfig() { echo "backup $1"; [[ "$1" == restoreBackup ]] && mv "${NS_DIR}/bad" "${NS_DIR}/log/bad"; return 0; }
+        nginxConfigPath="${NS_DIR}/nginx/" selectCustomInstallType= coreKind=1 currentInstallProtocolType=,0, nginxStaticPath="${NS_DIR}" totalProgress=1
+        '"$3" 2>&1
+}
+_ns=$(run_ns debian ok 'handleNginx start'); _rc=$?
+assert_equals "0" "${_rc}" "nginx 起得来：handleNginx start 返回 0"
+assert_contains "${_ns}" "Nginx启动成功" "nginx 起得来：打出成功"
+_ns=$(run_ns alpine dead 'handleNginx start'); _rc=$?
+assert_equals "1" "${_rc}" "nginx 起不来（OpenRC，错误里没有 journalctl）：退出码 1，之前这里返回 0"
+assert_equals "0" "$(grep -c "Nginx启动成功" <<<"${_ns}")" "nginx 起不来：不打成功"
+run_ns debian flap 'handleNginx start' >/dev/null; assert_equals "1" "$?" "systemd 报成功、进程却没了：退出码 1，之前这里返回 0"
+_ns=$(run_ns debian dead 'handleNginx start'); _rc=$?
+assert_equals "1" "${_rc}" "nginx 起不来（systemd）：退出码 1"
+assert_equals "1" "$(grep -c "Nginx启动失败" <<<"${_ns}")" "nginx 起不来（systemd）：只试一次，不循环重试"
+run_ns alpine manual 'handleNginx start' >/dev/null; assert_equals "0" "$?" "OpenRC 记成 started、进程没了：手动那条 nginx 救回来就算起来了"
+_ns=$(run_ns debian manual 'handleNginx start'); _rc=$?
+assert_equals "0" "${_rc}" "systemd 起不来但手动起来了：不再退出（否则留下一个没人管的 nginx）"
+assert_contains "${_ns}" "NGINX_STARTED_DIRECTLY" "systemd 起不来但手动起来了：说清它是直接运行的，不停在「启动失败」上"
+
+_ns=$(run_ns debian dead 'checkPortOpen 12345 example.test; echo "after=$?"'); _rc=$?
+assert_equals "1" "${_rc}" "端口自检时 nginx 起不来：退出码 1"
+assert_equals "0" "$(grep -c "after=" <<<"${_ns}")" "端口自检时 nginx 起不来：不往下走"
+assert_equals "0" "$(grep -c "未检测到" <<<"${_ns}")" "端口自检时 nginx 起不来：不误报成端口没开放"
+assert_equals "0" "$(ls -A "${NS_DIR}/nginx" | grep -c checkPortOpen)" "端口自检时 nginx 起不来：临时配置删掉了（留着的话之后每次起 nginx 都多听这个端口）"
+
+_ns=$(run_ns debian dead 'carpoolReloadNginx; echo "after=$?"'); _rc=$?
+assert_equals "0" "${_rc}" "拼车重载 nginx 起不来：不退出（关拼车还要接着把账号放回去）"
+assert_contains "${_ns}" "after=1" "拼车重载 nginx 起不来：把失败返回给调用方"
+
+_ns=$(run_ns debian badconf 'updateNginxBlog 1' <<<$'10\n1\nhttps://example.test\n'); _rc=$?
+assert_equals "1" "${_rc}" "302 配置让 nginx 起不来：退出码 1"
+assert_contains "${_ns}" "backup restoreBackup" "302 配置让 nginx 起不来：配置回滚（之前 systemd 上走不到这里）"
+assert_contains "${_ns}" "NGINX_302_ROLLED_BACK" "302 配置让 nginx 起不来：告诉用户已回滚"
+assert_equals "up" "$(ls "${NS_DIR}" | grep -x up)" "302 配置让 nginx 起不来：回滚后 nginx 重新起来了"
+rm -rf "${NS_DIR}"
+
+# run_csb SELECTION → 自定义安装 sing-box 到收尾，打印 handleNginx 的调用
+run_csb() {
+    env NS_FN="${NS_FN}" REG_FILE="$(pwd)/lib/protocol-registry.sh" bash -c '
+        eval "${NS_FN}"
+        source "${REG_FILE}"
+        for f in echoContent t validateCustomInstallTokens chainRefuseCoreSwitch readLastInstallationConfig installAbortArm installAbortDisarm installTools initTLSNginxConfig installTLS \
+            installSingBox installSingBoxService initSingBoxConfig cleanUp installCronTLS handleSingBox refreshSubscribeAfterInstall checkGFWStatue showAccounts; do eval "$f() { :; }"; done
+        handleNginx() { echo "handleNginx $*"; }
+        customSingBoxInstall' <<<"$1" 2>&1 | paste -sd'|' -
+}
+assert_equals "handleNginx stop" "$(run_csb 14)" "sing-box 只选 SS2022：没装 nginx，不去起它"
+assert_equals "handleNginx stop" "$(run_csb 7,14)" "sing-box 选 7、14：同样不要证书，不去起 nginx"
+assert_equals "handleNginx stop|handleNginx stop|handleNginx start" "$(run_csb 0,14)" "sing-box 选了要证书的协议：照常起 nginx"
 
 # --- 防火墙放行按「端口/协议」整条比对：443 是 8443 的子串，按子串查会把没放行的端口当成已放行 ---
 AP_FN=$(sed -n '/^allowPort() {/,/^}/p;/^checkUFWAllowPort() {/,/^}/p' install.sh)

@@ -2475,7 +2475,11 @@ server {
     }
 }
 EOF
-        handleNginx start
+        # 子 shell 接住 handleNginx 的退出才删得掉临时配置：留着它，之后每次起 nginx 都多听这个端口
+        if ! (handleNginx start); then
+            rm "${nginxConfigPath}checkPortOpen.conf"
+            exit 1
+        fi
         # 检查域名+端口的开放
         checkPortOpenResult=$(curl -s -m 10 "http://${domain}:${port}/checkPort")
         localIP=$(curl -s -m 10 "http://${domain}:${port}/ip")
@@ -3344,28 +3348,6 @@ nginxBlog() {
 }
 
 # 修改http_port_t端口
-updateSELinuxHTTPPortT() {
-
-    $(find /usr/bin /usr/sbin | grep -w journalctl) -xe >${PROXY_AGENT_DIR}/nginx_error.log 2>&1
-
-    if find /usr/bin /usr/sbin | grep -q -w semanage && find /usr/bin /usr/sbin | grep -q -w getenforce && grep -E "31300|31302" <${PROXY_AGENT_DIR}/nginx_error.log | grep -q "Permission denied"; then
-        echoContent red " ---> 检查SELinux端口是否开放"
-        if ! $(find /usr/bin /usr/sbin | grep -w semanage) port -l | grep http_port | grep -q 31300; then
-            $(find /usr/bin /usr/sbin | grep -w semanage) port -a -t http_port_t -p tcp 31300
-            echoContent green " ---> http_port_t 31300 端口开放成功"
-        fi
-
-        if ! $(find /usr/bin /usr/sbin | grep -w semanage) port -l | grep http_port | grep -q 31302; then
-            $(find /usr/bin /usr/sbin | grep -w semanage) port -a -t http_port_t -p tcp 31302
-            echoContent green " ---> http_port_t 31302 端口开放成功"
-        fi
-        handleNginx start
-
-    else
-        exit 1
-    fi
-}
-
 # BusyBox 的 pgrep -x 比对的是 argv[0] 而非进程名，认不出 nginx 与 sing-box，服务启停判定全靠它。
 # 自更新不跑 installTools，所以服务控制函数也调一次，旧版装的 Alpine 机器更新后同样补上
 ensureAlpineProcps() {
@@ -3389,9 +3371,9 @@ handleNginx() {
     if { [[ "$2" == "force" ]] || ! echo "${selectCustomInstallType}" | grep -qwE ",7,|,8,|,7,8,"; } && [[ -z $(pgrep -x "nginx") ]] && [[ "$1" == "start" ]]; then
         labelNginxPorts
         if [[ "${release}" == "alpine" ]]; then
-            rc-service nginx start 2>${PROXY_AGENT_DIR}/nginx_error.log
+            rc-service nginx start
         else
-            systemctl start nginx 2>${PROXY_AGENT_DIR}/nginx_error.log
+            systemctl start nginx
         fi
 
         sleep 0.5
@@ -3400,9 +3382,13 @@ handleNginx() {
             echoContent red " ---> Nginx启动失败"
             echoContent red " ---> 请将下方日志反馈给开发者"
             nginx
-            if grep -q "journalctl -xe" <${PROXY_AGENT_DIR}/nginx_error.log; then
-                updateSELinuxHTTPPortT
+            # 这条 nginx 能救回 OpenRC 记成 started、进程却没了的情形
+            if [[ -n $(pgrep -x "nginx") ]]; then
+                echoContent yellow " ---> $(t NGINX_STARTED_DIRECTLY)"
+                return 0
             fi
+            # 还是没起来就退出，调用方才不会接着打「成功」
+            [[ -n $(pgrep -x "nginx") ]] || exit 1
         else
             echoContent green " ---> Nginx启动成功"
         fi
@@ -7523,8 +7509,8 @@ updateNginxBlog() {
             removeNginx302
             addNginx302 "${redirectDomain}"
             handleNginx stop
-            handleNginx start
-            if [[ -z $(pgrep -x "nginx") ]]; then
+            # 子 shell 接住 handleNginx 的退出，回滚才走得到
+            if ! (handleNginx start); then
                 backupNginxConfig restoreBackup
                 handleNginx start
                 echoContent red " ---> $(t NGINX_302_ROLLED_BACK)"
@@ -9058,12 +9044,13 @@ carpoolRemovePages() {
     find "${CARPOOL_PAGE_DIR}" -maxdepth 1 -type f -delete
 }
 
-# carpoolReloadNginx → 配置已过 nginx -t 之后让它生效：在跑就 reload，没在跑就 start
+# carpoolReloadNginx → 配置已过 nginx -t 之后让它生效：在跑就 reload，没在跑就 start。
+# 起不来只返回非零、不退出：关拼车要接着把账号放回去，菜单启动时升级订阅配置也不能把菜单挡在外面
 carpoolReloadNginx() {
     if [[ -n $(pgrep -x "nginx") ]]; then
         nginx -s reload >/dev/null 2>&1 && return 0
     fi
-    handleNginx start
+    (handleNginx start)
 }
 
 # carpoolInsertPageBlock SRC DEST → SRC 加上页面的 location 块（插在 location / 之前）写进 DEST。
@@ -17180,7 +17167,10 @@ customSingBoxInstall() {
         handleSingBox stop
         handleSingBox start
         handleNginx stop
-        handleNginx start
+        # 不要证书的选择（7、14）没装 nginx；开着订阅的话下面的收尾会把它起来
+        if anyProtocolRequiresTLS "${selectCustomInstallType}"; then
+            handleNginx start
+        fi
         # 生成账号
         refreshSubscribeAfterInstall
         checkGFWStatue 8

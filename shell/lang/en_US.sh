@@ -611,6 +611,7 @@ MSG_GEO_INSTALL_SKIPPED="The geo files could not be downloaded. The default conf
 MSG_GEO_DOWNLOAD_FAILED="Failed to download %s; existing geo files untouched"
 MSG_GEO_PUBLISH_FAILED="Failed to move the new geo files into %s; some may already be replaced, core not reloaded"
 MSG_NGINX_302_ROLLED_BACK="Nginx failed to start; the configuration from before the 302 redirect was restored"
+MSG_NGINX_STARTED_DIRECTLY="The service manager could not start Nginx, so it was run directly and is not managed as a service. Check it again after a reboot"
 MSG_SINGBOX_DIGEST_MISSING="GitHub reports no SHA256 digest for %s; refusing to install an unverified binary"
 MSG_SINGBOX_UNPACK_FAILED="Failed to unpack %s"
 MSG_SINGBOX_NOT_RUNNABLE="The sing-box binary from %s cannot run on this machine (architecture or libc mismatch); removed"
