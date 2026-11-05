@@ -142,7 +142,7 @@ sing-box 的 shadowsocks 出站，还开了 sing-box 特有的 h2mux 多路复�
 
 ## 文档
 
-- [用户指南](docs/user-guide.md) —— 快捷命令、功能速查、故障排查、常见问题。
+- [用户指南](docs/user-guide.md) —— 初次部署、进阶功能、故障排查，以及可折叠的完整菜单总览。
 - [SELinux 说明](docs/selinux.md) —— enforcing 模式下脚本会退出并指到这里。
 
 ## 安全

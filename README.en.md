@@ -163,8 +163,8 @@ CI gates.
 
 ## Documentation
 
-- [User guide](docs/user-guide.md) — command reference, feature index,
-  troubleshooting, FAQ. Written in Chinese.
+- [User guide](docs/user-guide.md) — first deployment, advanced features,
+  troubleshooting, and a collapsible map of every menu. Written in Chinese.
 - [SELinux notes](docs/selinux.md) — where the script sends you when it exits
   under enforcing mode.
 
