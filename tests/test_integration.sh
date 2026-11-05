@@ -2612,7 +2612,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试按账号选出口 ===${NC}"
 
-CA_FN_NAMES="localBlockApiPort ensureXrayLocalBlock localBlockInject directOutboundInject chainAccountStateFile chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountCarry chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection generateExternalOutboundConfig getExternalNodeById initExternalNodeFile"
+CA_FN_NAMES="localBlockApiPort ensureXrayLocalBlock localBlockInject directOutboundInject chainAccountStateFile chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountCarry chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod setupExternalAsSingleExit chainExternalSingleOnXray generateExternalOutboundConfig getExternalNodeById initExternalNodeFile"
 CA_FNS=$(sed -n "$(for _f in ${CA_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_equals "$(wc -w <<<"${CA_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CA_FNS}")" "按账号选出口：每个函数都抽到了"
 CA_ROOT="${MOCK_ROOT}/chainacct.root"
@@ -2868,6 +2868,53 @@ assert_contains "${_out}" "访问外网失败" "外部节点测试（密码错�
 assert_equals "" "$(ls -A "${CA_ROOT}/tmp")" "外部节点测试：带凭据的临时配置用完即删"
 rm -f "${CA_ROOT}/sing-box/sing-box"
 assert_contains "$(printf '1\n' | run_ca "${_caExt}" 2>&1)" "只测了 TCP 端口" "外部节点测试（没装 sing-box）：如实说只测了端口"
+
+# --- 外部节点：加密方式菜单不进节点；Xray 上拒绝设为唯一出口；合并失败还原；旧版写坏的节点拦下 ---
+assert_equals "aes-256-gcm" "$(printf '2\n' | run_ca 'SS_METHODS=(aes-128-gcm aes-256-gcm); selectSSMethod' 2>/dev/null)" \
+    "选加密方式：stdout 只有选中的方式，菜单文字不能被 \$() 一起存进节点"
+ca_ext_nodes() {
+    ca_reset
+    jq -cn --arg bad "$(printf 'Select:\n  1. aes-128-gcm\naes-256-gcm')" '{nodes: [
+        {id: "n1", name: "good", type: "shadowsocks", server: "192.0.2.20", server_port: 8388, method: "aes-128-gcm", password: "p"},
+        {id: "n2", name: "old", type: "shadowsocks", server: "192.0.2.21", server_port: 8388, method: $bad, password: "p"}]}' \
+        >"${CA_ROOT}/sing-box/conf/external_node_info.json"
+}
+ca_chain_files() { find "${CA_F}" -name 'chain_*' | wc -l | tr -d ' '; }
+_caSingle='listExternalNodes() { :; }; getExternalNodeCount() { echo 2; }; ensureSingBoxInstalled() { :; }; setupExternalAsSingleExit; echo rc=$?'
+
+ca_ext_nodes
+_out=$(printf '1\n' | run_ca "coreKind=1; ${_caSingle}" 2>&1)
+assert_equals "rc=1" "$(tail -n 1 <<<"${_out}")" "外部节点唯一出口（Xray）：拒绝，流量到不了 sing-box 片段，接了只会报成功"
+assert_contains "${_out}" "多链路" "外部节点唯一出口（Xray）：指向能用的多链路"
+assert_equals "0|no|" "$(ca_chain_files)|$([[ -f "${CA_ENTRY}" ]] && echo yes || echo no)|$(cat "${CA_CALLS}")" \
+    "外部节点唯一出口（Xray）：不写片段与状态，也不重载"
+
+ca_ext_nodes
+_out=$(printf '1\n' | run_ca "coreKind=2; ${_caSingle}" 2>&1)
+assert_equals "rc=0" "$(tail -n 1 <<<"${_out}")" "外部节点唯一出口（sing-box）：照常配置"
+assert_equals "external_single|chain_external_outbound|merge reloadCore" \
+    "$(jq -r .mode "${CA_ENTRY}")|$(jq -r .route.final "${CA_F}/chain_route.json")|$(paste -sd ' ' - <"${CA_CALLS}")" \
+    "外部节点唯一出口（sing-box）：状态、路由写好，合并后重载"
+
+ca_ext_nodes
+printf '{"old":1}\n' >"${CA_F}/chain_route.json"
+_out=$(printf '1\n' | CA_MERGE_RC=1 run_ca "coreKind=2; ${_caSingle}" 2>&1)
+assert_equals "rc=1" "$(tail -n 1 <<<"${_out}")" "外部节点唯一出口（合并失败）：报失败"
+assert_equals '{"old":1}|no|no|0' "$(cat "${CA_F}/chain_route.json")|$([[ -f "${CA_F}/chain_outbound.json" ]] && echo yes || echo no)|$([[ -f "${CA_ENTRY}" ]] && echo yes || echo no)|$(find "${CA_ROOT}" -maxdepth 1 -name '.txn.*' | wc -l | tr -d ' ')" \
+    "外部节点唯一出口（合并失败）：片段与状态还原、不留事务目录，否则此后每次合并都失败"
+
+ca_ext_nodes
+_out=$(printf '2\n' | run_ca "coreKind=2; ${_caSingle}" 2>&1)
+assert_equals "rc=1" "$(tail -n 1 <<<"${_out}")" "外部节点唯一出口（旧版写坏的节点）：拒绝"
+assert_contains "${_out}" "删除后重新添加" "外部节点唯一出口（旧版写坏的节点）：说清楚怎么办"
+assert_equals "0|" "$(ca_chain_files)|$(cat "${CA_CALLS}")" "外部节点唯一出口（旧版写坏的节点）：不写片段、不重载"
+
+ca_ext_nodes
+jq -cn '{role: "entry", mode: "external_single", external_node_name: "good"}' >"${CA_ENTRY}"
+_caProbe='chainExternalSingleOnXray && echo yes || echo no'
+assert_equals "yes|no" "$(run_ca "coreKind=1; ${_caProbe}")|$(run_ca "coreKind=2; ${_caProbe}")" "旧版留下的状态：只有 Xray 内核上才算没生效"
+ca_single '{}'
+assert_equals "no" "$(run_ca "coreKind=1; ${_caProbe}")" "旧版留下的状态：普通单链路入口不算"
 
 # --- 多链路测试：按每条链路自己的出站真取出口 IP；密钥错、经中继的链路不再只看出口端口 ---
 ca_reset

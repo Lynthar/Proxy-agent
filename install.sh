@@ -11250,6 +11250,7 @@ chainProxyMenu() {
     echoContent yellow "# 用于在多台境外VPS之间建立加密转发链路"
     echoContent yellow "# 支持多层中继: 入口 → 中继1 → 中继2 → ... → 出口 → 互联网"
     echoContent yellow "# 使用 Shadowsocks 2022 协议，加密安全、性能优秀\n"
+    chainExternalSingleOnXray && echoContent red " ---> $(t EXT_SINGLE_EXIT_XRAY_WARNING)\n"
 
     echoContent yellow "1.$(t CHAIN_MENU_WIZARD) [$(t RECOMMENDED)]"
     echoContent yellow "2.$(t CHAIN_MENU_STATUS)"
@@ -13122,6 +13123,15 @@ showChainStatus() {
                 fi
                 ((i++))
             done
+            echoContent green "╚══════════════════════════════════════════════════════════════╝"
+        elif [[ "${mode}" == "external_single" ]]; then
+            echoContent green "╔══════════════════════════════════════════════════════════════╗"
+            echoContent green "║                      链式代理状态                              ║"
+            echoContent green "╠══════════════════════════════════════════════════════════════╣"
+            echoContent yellow "  当前角色: 入口节点 (Entry)"
+            echoContent yellow "  $(t EXT_SINGLE_EXIT_STATUS "$(jq -r '.external_node_name' "${CHAIN_ENTRY_INFO}")")"
+            echoContent yellow "  运行状态: ${status}"
+            chainExternalSingleOnXray && echoContent red "  $(t EXT_SINGLE_EXIT_XRAY_WARNING)"
             echoContent green "╚══════════════════════════════════════════════════════════════╝"
         else
             role="入口节点 (Entry)"
@@ -15624,12 +15634,12 @@ SS_METHODS=(
     "2022-blake3-chacha20-poly1305"
 )
 
-# 显示加密方式选择菜单
+# 显示加密方式选择菜单。调用方用 $() 接结果，菜单必须走 stderr，否则菜单文字一起存进节点，sing-box 合并必败
 selectSSMethod() {
-    echoContent yellow "\n$(t EXT_SELECT_METHOD):"
+    echoContent yellow "\n$(t EXT_SELECT_METHOD):" >&2
     local i=1
     for method in "${SS_METHODS[@]}"; do
-        echoContent yellow "  ${i}. ${method}"
+        echoContent yellow "  ${i}. ${method}" >&2
         ((i++))
     done
 
@@ -16242,6 +16252,11 @@ generateExternalOutboundConfig() {
             port=$(echo "${node}" | jq -r '.server_port')
             method=$(echo "${node}" | jq -r '.method')
             password=$(echo "${node}" | jq -r '.password')
+            # 旧版手动添加的节点 method 里是整段菜单：写进片段后每次合并都失败，sing-box 一重启就起不来，在这里拦下
+            if [[ "${method}" =~ [[:space:]] ]]; then
+                echoContent red " ---> $(t EXT_NODE_METHOD_INVALID "$(echo "${node}" | jq -r '.name')")" >&2
+                return 1
+            fi
 
             jq -n \
                 --arg tag "${tag}" \
@@ -16322,8 +16337,20 @@ generateExternalOutboundConfig() {
     esac
 }
 
-# 将外部节点设置为链式代理出口（单出口模式）
+# chainExternalSingleOnXray → Xray 内核上留着外部节点唯一出口（旧版配得出来）：Xray 的流量没经过它，一直从本机直出
+chainExternalSingleOnXray() {
+    [[ "${coreKind}" == "1" && -f "${CHAIN_ENTRY_INFO}" ]] &&
+        [[ "$(jq -r '.mode // ""' "${CHAIN_ENTRY_INFO}" 2>/dev/null)" == "external_single" ]]
+}
+
+# 将外部节点设置为链式代理出口（单出口模式）。只写 sing-box 片段，Xray 的流量到不了这里，所以 Xray 内核上拒绝：
+# 接了只会报成功、流量照样从本机出去。Xray 机器用多链路接外部节点，那条路有桥、也改 Xray 路由
 setupExternalAsSingleExit() {
+    if [[ "${coreKind}" == "1" ]]; then
+        echoContent red "\n ---> $(t EXT_SINGLE_EXIT_XRAY_REFUSED)"
+        return 1
+    fi
+
     listExternalNodes
 
     local nodeCount
@@ -16377,38 +16404,39 @@ setupExternalAsSingleExit() {
         echoContent red " ---> $(t EXT_CONFIG_FAILED)"
         return 1
     fi
+
+    # 合并失败要还原：写坏的片段留着，此后每次合并都失败，sing-box 一重启就起不来
+    if ! jsonTxBegin; then
+        echoContent red " ---> $(t EXT_CONFIG_FAILED)"
+        return 1
+    fi
+    if ! jsonTxTrack "${configDir}/chain_outbound.json" || ! jsonTxTrack "${configDir}/chain_route.json" || ! jsonTxTrack "${CHAIN_ENTRY_INFO}"; then
+        jsonTxRollback
+        echoContent red " ---> $(t EXT_CONFIG_FAILED)"
+        return 1
+    fi
     printf '%s\n' "${_wrapped}" > "${configDir}/chain_outbound.json"
 
     # 生成路由配置 - 所有流量走外部节点
     # default_domain_resolver 见 chainExit 注释，1.13 起必填
-    cat <<EOF > "${configDir}/chain_route.json"
-{
-    "route": {
-        "rules": [],
-        "final": "chain_external_outbound",
-        "default_domain_resolver": "google"
-    }
-}
-EOF
+    jq -n '{route: {rules: [], final: "chain_external_outbound", default_domain_resolver: "google"}}' \
+        >"${configDir}/chain_route.json"
 
-    # 保存外部节点入口信息（原子写入）
+    # 保存外部节点入口信息（原子写入）。节点名来自用户输入，走 --arg，带引号也不会写坏状态文件
     local __chainEntryInfo
-    __chainEntryInfo=$(cat <<EOF
-{
-    "schema_version": 1,
-    "role": "entry",
-    "mode": "external_single",
-    "external_node_id": "${nodeId}",
-    "external_node_name": "${nodeName}"
-}
-EOF
-)
-    writeChainInfoAtomic "${CHAIN_ENTRY_INFO}" "${__chainEntryInfo}" || return 1
+    __chainEntryInfo=$(jq -n --arg id "${nodeId}" --arg name "${nodeName}" \
+        '{schema_version: 1, role: "entry", mode: "external_single", external_node_id: $id, external_node_name: $name}')
+    if ! writeChainInfoAtomic "${CHAIN_ENTRY_INFO}" "${__chainEntryInfo}"; then
+        jsonTxRollback
+        return 1
+    fi
 
     # 合并配置
     if ! singBoxMergeConfig; then
+        jsonTxRollback
         return 1
     fi
+    jsonTxCommit
 
     # 重启服务
     reloadCore
@@ -19201,6 +19229,10 @@ _doctorCheckConfig() {
         _doctorRow "$(t DOCTOR_CHECK_CONFIG)" skip "$(t DOCTOR_DETAIL_NO_CORE)"
         _doctorRow "$(t DOCTOR_CHECK_PROTOCOLS)" skip "$(t DOCTOR_DETAIL_NO_CORE)"
         return
+    fi
+
+    if chainExternalSingleOnXray; then
+        _doctorRow "$(t DOCTOR_CHECK_CHAIN_EXIT)" fail "$(t EXT_SINGLE_EXIT_XRAY_WARNING)"
     fi
 
     if [[ "${coreKind}" == "1" ]]; then

@@ -89,8 +89,8 @@ V2RAY_LANG=en pasly
 | VMess（Xray 已标弃用） | WS · HTTPUpgrade |
 | 其它 | Trojan TCP（Xray 已标弃用） · Hysteria2 · TUIC · NaiveProxy · AnyTLS · Shadowsocks 2022 |
 
-不需要域名的只有 Reality Vision 和 Shadowsocks 2022，其余都要域名和证书（Reality XHTTP 要与
-VLESS TCP/Vision 同装，所以也要）。Reality 不能挂在 CDN 后面，走 CDN 只能用 WS / HTTPUpgrade。
+不需要域名的是 Reality Vision、Shadowsocks 2022，以及和 Reality Vision 同装的 Reality XHTTP，
+其余都要域名和证书。Reality 不能挂在 CDN 后面，走 CDN 只能用 WS / HTTPUpgrade。
 SOCKS5 只用作链式代理里第三方节点的出口，不作为入站安装。
 
 链式代理里，Xray 与 sing-box 可以混合出站，第三方节点也能接进来当出口。链式的每一跳是
