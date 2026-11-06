@@ -1938,6 +1938,20 @@ jq '.inbounds[1].settings.clients[2].id = "99999999-9999-9999-9999-999999999999"
 _out=$(run_cp 'carpoolHasTty() { return 1; }; carpoolEnable; echo "rc=$?"' 2>&1 </dev/null)
 assert_contains "${_out}" "bob 现在的 UUID 是 99999999-9999-9999-9999-999999999999，开启会改回拼车记着的 ${CP_U2}" "重开（关着时换了 UUID）：说出新旧两个 UUID"
 assert_equals "false" "$(cp_state '.enabled')" "重开（关着时换了 UUID，非 tty）：不开启"
+# 关着时把 bob 从文件和协议里都删了：开启一次之后，第一段撞他的新成员照样要拒，否则他手里的旧订阅链接拉到新成员的凭据
+cp_reset_tree
+jq '.enabled = false' "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/s.tmp" && mv "${CP_ROOT}/carpool/s.tmp" "${CP_ROOT}/carpool/state.json"
+jq 'del(.members.bob)' "${CP_ROOT}/carpool/members.json" >"${CP_ROOT}/t.json" && mv "${CP_ROOT}/t.json" "${CP_ROOT}/carpool/members.json"
+jq 'del(.inbounds[0].settings.clients[2])' "${CP_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json" >"${CP_ROOT}/t.json" && mv "${CP_ROOT}/t.json" "${CP_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
+jq 'del(.inbounds[1].settings.clients[2])' "${CP_ROOT}/xray/conf/07_VLESS_vision_reality_inbounds.json" >"${CP_ROOT}/t.json" && mv "${CP_ROOT}/t.json" "${CP_ROOT}/xray/conf/07_VLESS_vision_reality_inbounds.json"
+printf '%s\n' '{}' >"${CP_STATS}"
+_out=$(run_cp 'carpoolHasTty() { return 1; }; carpoolEnable; echo "rc=$?"' 2>&1 </dev/null)
+assert_contains "${_out}" "rc=0" "重开（关着时从文件和协议都删了 bob）：返回 0"
+assert_equals '["bob"]' "$(cp_state '.retiredNames | tojson')" "重开（关着时删了 bob）：bob 记进 retiredNames"
+jq '.members["bob-2"] = {}' "${CP_ROOT}/carpool/members.json" >"${CP_ROOT}/t.json" && mv "${CP_ROOT}/t.json" "${CP_ROOT}/carpool/members.json"
+_out=$(run_cp 'carpoolHasTty() { return 1; }; carpoolApply; echo "rc=$?"' 2>&1 </dev/null)
+assert_contains "${_out}" "与已删除的成员 bob 名字的第一段相同" "重开之后再加 bob-2：拒绝，说明撞了已删成员"
+assert_equals "null" "$(cp_state '.members["bob-2"] | tojson')" "重开之后再加 bob-2：没有写进 state"
 
 # --- 关闭：只恢复超额停用者；事务失败不关闭 ---
 cp_reset_tree
@@ -4033,7 +4047,7 @@ echo ""
 echo ""
 
 # --- 分享片段：Xray 上的 Trojan 不进 Clash 订阅；VMess WS 的 sing-box 片段用两种服务端都认的 xudp ---
-DB_FN=$(sed -n '/^defaultBase64Code() {/,/^}/p' install.sh)
+DB_FN=$(sed -n '/^defaultBase64Code() {/,/^}/p;/^shareQrCode() {/,/^}/p' install.sh)
 DB_SUB="${MOCK_ROOT}/sharecode.root/subscribe_local"
 # run_db COREKIND ARGS... → 装在 sharecode.root、内核为 COREKIND 时跑 defaultBase64Code ARGS
 run_db() (
@@ -4056,13 +4070,23 @@ assert_equals "0" "$(grep -c 'client-fingerprint' <<<"${_dbOut}")" "Trojan（Xra
 db_reset
 run_db 2 trojan 8443 tro-x pw123 >/dev/null 2>&1
 assert_equals "1" "$(grep -c 'type: trojan' "${DB_SUB}/clashMeta/tro")" "Trojan（sing-box）：照进 Clash 订阅（自带 TLS，没有按 ALPN 的回落）"
+# Clash 的 Reality 节点要开 support-x25519mlkem768，并且缩进在 reality-opts 里：写错层 mihomo 不报错，只是连不上新版 Xray
+db_reset
+run_db 1 vlessReality 443 rea-x uuid1 >/dev/null 2>&1
+run_db 1 vlessXHTTP 8443 rea-y uuid2 example.org /path >/dev/null 2>&1
+assert_equals "2" "$(grep -A3 'reality-opts:' "${DB_SUB}/clashMeta/rea" | grep -c '^      support-x25519mlkem768: true$')" \
+    "Clash 订阅：Xray 的 Reality Vision 与 XHTTP 都开 support-x25519mlkem768"
+db_reset
+run_db 2 vlessReality 443 rea-x uuid1 >/dev/null 2>&1
+assert_equals "1" "$(grep -A3 'reality-opts:' "${DB_SUB}/clashMeta/rea" | grep -c '^      support-x25519mlkem768: true$')" \
+    "Clash 订阅：sing-box 的 Reality Vision 也开 support-x25519mlkem768"
 db_reset
 run_db 1 vmessws 443 vm-x 0f3c8a4e-1b2d-4c5e-8f90-123456789abc example.net /vws >/dev/null 2>&1
 assert_equals "xudp" "$(jq -r '.[0].packet_encoding' "${DB_SUB}/sing-box/vm")" "VMess WS：sing-box 片段的 UDP 用 xudp（packetaddr 只有 sing-box 服务端认，Xray 上 UDP 全丢）"
-# hy2_client OBFSTYPE OBFSPW UP DOWN → 打印出的官方客户端 JSON（从「v2rayN(hysteria+TLS)」那行之后截到下一个提示前）
+# hy2_client OBFSTYPE OBFSPW UP DOWN → 打印出的官方客户端 JSON（从「v2rayN(hysteria+TLS)」那行之后截到下一个提示或输出结束）
 hy2_client() {
     db_reset
-    run_db 2 hysteria 443 hy-x pw123 2>&1 <<<"" | sed -n '/v2rayN(hysteria+TLS)/,/--->/p' | sed '1d;$d' | sed 's/\x1b\[[0-9;]*m//g'
+    run_db 2 hysteria 443 hy-x pw123 2>&1 <<<"" | sed -n '/v2rayN(hysteria+TLS)/,/--->/p' | sed '1d;/--->/d' | sed 's/\x1b\[[0-9;]*m//g'
 }
 _hyJson=$(hysteria2ObfsType='' hysteria2ObfsPassword='' hysteria2ClientUploadSpeed='' hysteria2ClientDownloadSpeed='' singBoxHysteria2Port=443 hy2_client)
 assert_equals 'null|null|example.org:443|pw123' "$(jq -r '[.obfs, .bandwidth, .server, .auth] | map(tostring) | join("|")' <<<"${_hyJson}")" \
@@ -4245,6 +4269,176 @@ assert_equals "handleNginx stop" "$(run_csb 14)" "sing-box 只选 SS2022：没�
 assert_equals "handleNginx stop" "$(run_csb 7,14)" "sing-box 选 7、14：同样不要证书，不去起 nginx"
 assert_equals "handleNginx stop|handleNginx stop|handleNginx start" "$(run_csb 0,14)" "sing-box 选了要证书的协议：照常起 nginx"
 
+# --- 链式与账号菜单的几处：抽真函数，注册表和 JSON 工具都用真的，只桩内核、探测与合并 ---
+# 这些函数里的 heredoc 有顶格的 }，按下一个函数名截
+ah_src() {
+    local n
+    for n in "$@"; do
+        awk -v n="${n}" 'f && /^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{/ {exit} index($0, n "() {") == 1 {f=1} f' install.sh
+    done
+}
+AH_NAMES="testChainConnection getExternalNodeById initExternalNodeFile updateChainKey configureProtocolChainRouting applyProtocolChainRouting generateProtocolChainRoute saveProtocolRoutingPreference writeChainEntryRoute writeChainInfoAtomic multiChainRestoreAccounts chainAccountAssignPorts chainAccountReadState chainAccountStateFile setupMultiChainEntry removeUser shareQrCode"
+AH_FN=$(ah_src ${AH_NAMES})
+assert_equals "$(wc -w <<<"${AH_NAMES}" | tr -d ' ')" "$(grep -cE '^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{$' <<<"${AH_FN}")" "链式与账号菜单：函数都抽到了"
+AH_ROOT="${MOCK_ROOT}/ah.root"
+AH_CONF="${AH_ROOT}/sing-box/conf"
+AH_FRAG="${AH_CONF}/config"
+ah_reset() {
+    rm -rf "${AH_ROOT}"
+    mkdir -p "${AH_FRAG}" "${AH_ROOT}/xray/conf"
+    : >"${AH_ROOT}/sing-box/sing-box"
+}
+# run_ah CALL → 跑 CALL，stdin 照传；AH_MERGE_FAIL=1 让合并失败
+run_ah() {
+    env PROXY_AGENT_DIR="${AH_ROOT}" AH_FN="${AH_FN}" V2RAY_LANG=zh_CN AH_MERGE_FAIL="${AH_MERGE_FAIL:-}" bash -c '
+        source lib/i18n.sh; source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh
+        eval "${AH_FN}"
+        echoContent() { printf "%s\n" "$2"; }
+        _chainTCPProbe() { echo "PROBE $1:$2"; return 1; }
+        singBoxMergeConfig() { [[ -z "${AH_MERGE_FAIL}" ]]; }
+        reloadCore() { echo RELOAD; }
+        listeningPorts() { :; }
+        planAction() { return 1; }
+        ensureSingBoxInstalled() { return 0; }
+        '"$1" 2>&1
+}
+
+# 外部节点当唯一出口时，测链路测的是节点本身
+ah_reset
+printf '%s\n' '{"role":"entry","mode":"external_single","external_node_id":"n1"}' >"${AH_CONF}/chain_entry_info.json"
+printf '%s\n' '{"nodes":[{"id":"n1","name":"hk","server":"node.example","server_port":8388}]}' >"${AH_CONF}/external_node_info.json"
+_out=$(run_ah 'testChainConnection; echo "rc=$?"' </dev/null)
+assert_contains "${_out}" "PROBE node.example:8388" "外部节点唯一出口（测链路）：探测的是节点的地址和端口"
+assert_equals "0" "$(grep -c 'null' <<<"${_out}")" "外部节点唯一出口（测链路）：不再显示 null:null"
+printf '%s\n' '{"nodes":[]}' >"${AH_CONF}/external_node_info.json"
+_out=$(run_ah 'testChainConnection; echo "rc=$?"' </dev/null)
+assert_contains "${_out}" "节点未找到" "外部节点唯一出口（测链路，节点已删）：说明找不到节点"
+assert_equals "rc=1|0" "$(tail -n 1 <<<"${_out}")|$(grep -c 'PROBE' <<<"${_out}")" "外部节点唯一出口（测链路，节点已删）：返回 1，不去探测"
+
+# 中继上更新密钥：说清楚怎么换，不说没配置
+ah_reset
+printf '%s\n' '{"role":"relay"}' >"${AH_CONF}/chain_relay_info.json"
+_out=$(run_ah 'updateChainKey' </dev/null)
+assert_contains "${_out}" "中继节点的密钥在配置时生成" "中继（更新密钥）：说明要重新配置中继"
+assert_equals "0" "$(grep -c '未配置链式代理' <<<"${_out}")" "中继（更新密钥）：不打「未配置链式代理」"
+ah_reset
+_out=$(run_ah 'updateChainKey' </dev/null)
+assert_contains "${_out}" "未配置链式代理" "没有链式配置（更新密钥）：照旧提示未配置"
+
+# 按协议分流：外部节点唯一出口拒绝；能开能关；合并失败原样还原
+ah_reset
+printf '%s\n' '{"role":"entry","mode":"external_single"}' >"${AH_CONF}/chain_entry_info.json"
+: >"${AH_FRAG}/chain_outbound.json"
+_out=$(run_ah 'configureProtocolChainRouting; echo "rc=$?"' </dev/null)
+assert_contains "${_out}" "外部节点当唯一出口时不支持按协议分流" "按协议分流（外部节点唯一出口）：拒绝并说明"
+assert_equals "rc=1|no" "$(tail -n 1 <<<"${_out}")|$([[ -f "${AH_FRAG}/chain_route.json" ]] && echo yes || echo no)" "按协议分流（外部节点唯一出口）：返回 1，不写路由"
+
+ah_routing_setup() {
+    ah_reset
+    printf '%s\n' '{"role":"entry","mode":"single_hop"}' >"${AH_CONF}/chain_entry_info.json"
+    : >"${AH_FRAG}/chain_outbound.json"
+    printf '%s\n' '{"inbounds":[]}' >"${AH_FRAG}/07_VLESS_vision_reality_inbounds.json"
+    printf '%s\n' '{"route":{"final":"chain_outbound","default_domain_resolver":"google"}}' >"${AH_FRAG}/chain_route.json"
+}
+ah_routing_setup
+_before=$(cat "${AH_FRAG}/chain_route.json" "${AH_CONF}/chain_entry_info.json")
+_out=$(printf '1\ny\n' | AH_MERGE_FAIL=1 run_ah 'configureProtocolChainRouting; echo "rc=$?"')
+assert_equals "rc=1|0" "$(tail -n 1 <<<"${_out}")|$(grep -c RELOAD <<<"${_out}")" "按协议分流（开启时合并失败）：返回 1，不重载"
+assert_equals "${_before}" "$(cat "${AH_FRAG}/chain_route.json" "${AH_CONF}/chain_entry_info.json")" "按协议分流（开启时合并失败）：路由与状态逐字还原"
+_out=$(printf '0\n' | run_ah 'configureProtocolChainRouting; echo "rc=$?"')
+assert_equals "0" "$(grep -c '关闭按协议分流' <<<"${_out}")" "按协议分流（没开过）：菜单没有关闭项"
+assert_equals "rc=1" "$(tail -n 1 <<<"${_out}")" "按协议分流（没开过）：输入 0 算选错"
+_out=$(printf '1\ny\n' | run_ah 'configureProtocolChainRouting; echo "rc=$?"')
+assert_equals "rc=0|1" "$(tail -n 1 <<<"${_out}")|$(grep -c RELOAD <<<"${_out}")" "按协议分流（开启）：成功并重载"
+assert_equals 'direct|["VLESSReality"]|true' "$(jq -r '.route.final' "${AH_FRAG}/chain_route.json")|$(jq -c '.route.rules[0].inbound' "${AH_FRAG}/chain_route.json")|$(jq -r '.protocol_routing.enabled' "${AH_CONF}/chain_entry_info.json")" \
+    "按协议分流（开启）：选中的协议走链路，其余直连，状态记下"
+_before=$(cat "${AH_FRAG}/chain_route.json" "${AH_CONF}/chain_entry_info.json")
+_out=$(printf '0\n' | AH_MERGE_FAIL=1 run_ah 'configureProtocolChainRouting; echo "rc=$?"')
+assert_contains "${_out}" "0. 关闭按协议分流" "按协议分流（开过）：菜单有关闭项"
+assert_equals "${_before}" "$(cat "${AH_FRAG}/chain_route.json" "${AH_CONF}/chain_entry_info.json")" "按协议分流（关闭时合并失败）：路由与状态逐字还原"
+_out=$(printf '0\n' | run_ah 'configureProtocolChainRouting; echo "rc=$?"')
+assert_equals "rc=0|1" "$(tail -n 1 <<<"${_out}")|$(grep -c RELOAD <<<"${_out}")" "按协议分流（关闭）：成功并重载"
+assert_contains "${_out}" "按协议分流已关闭" "按协议分流（关闭）：告诉用户"
+assert_equals 'chain_outbound|null|null' "$(jq -r '.route.final' "${AH_FRAG}/chain_route.json")|$(jq -c '.route.rules' "${AH_FRAG}/chain_route.json")|$(jq -c '.protocol_routing' "${AH_CONF}/chain_entry_info.json")" \
+    "按协议分流（关闭）：路由写回全走链路，状态清掉"
+: >"${AH_FRAG}/chain_bridge_inbound.json"
+printf '%s\n' '{"role":"entry","mode":"single_hop","protocol_routing":{"enabled":true}}' >"${AH_CONF}/chain_entry_info.json"
+printf '0\n' | run_ah 'configureProtocolChainRouting' >/dev/null
+assert_equals '"chain_bridge_in"' "$(jq -c '.route.rules[0].inbound' "${AH_FRAG}/chain_route.json")" "按协议分流（关闭，有 Xray 桥）：路由带上桥的规则"
+
+# 重新配置多链路：账号的出口映射带过去，指向没了的当场列出；结果必须过映射校验，否则 sing-box 整个合并失败
+ah_multi_state() {
+    jq -n '{role: "entry", mode: "multi_chain", chains: [{name: "a"}, {name: "b", bridge_port: 31120}], rules: [], default_chain: "direct"}' >"${AH_CONF}/chain_multi_info.json"
+}
+ah_reset; ah_multi_state
+_out=$(run_ah 'multiChainCarriedAccounts='"'"'{"alice":"a","bob":"gone","carol":"direct","dan":"b"}'"'"'; multiChainRestoreAccounts "${CHAIN_MULTI_INFO}"; echo "rc=$?"; chainAccountReadState >/dev/null; echo "valid=$?"' </dev/null)
+assert_equals '{"alice":"a","carol":"direct","dan":"b"}' "$(jq -cS '.accounts' "${AH_CONF}/chain_multi_info.json")" "多链路重配：指向还在的链路和直连的映射带上"
+assert_contains "${_out}" "bob→gone" "多链路重配：指向没了的链路当场列出"
+assert_contains "${_out}" "已带上 3 个账号" "多链路重配：说明带上了几个"
+assert_contains "${_out}" "rc=0" "多链路重配：返回 0"
+assert_contains "${_out}" "valid=0" "多链路重配：结果过映射校验（缺桥端口时不过，sing-box 就合并失败）"
+assert_equals "31112|31120" "$(jq -r '[.chains[].bridge_port] | map(tostring) | join("|")' "${AH_CONF}/chain_multi_info.json")" "多链路重配：新被引用的链路分到空着的桥端口，已有的不变"
+ah_reset; ah_multi_state
+_before=$(cat "${AH_CONF}/chain_multi_info.json")
+_out=$(run_ah 'multiChainRestoreAccounts "${CHAIN_MULTI_INFO}"; echo "rc=$?"' </dev/null)
+assert_equals "rc=0|${_before}" "$(tail -n 1 <<<"${_out}")|$(cat "${AH_CONF}/chain_multi_info.json")" "多链路（首次配置，没有要带的映射）：文件不动"
+# 走向导的真实分支：旧状态删掉之前要先记下映射
+ah_reset
+jq -n '{role: "entry", mode: "multi_chain", chains: [{name: "a", bridge_port: 31111}], accounts: {alice: "a"}}' >"${AH_CONF}/chain_multi_info.json"
+printf '2\ny\n1\n' | run_ah 'setupMultiChainInteractive() { jq -n "{role: \"entry\", mode: \"multi_chain\", chains: [{name: \"a\"}]}" >"${CHAIN_MULTI_INFO}"; multiChainRestoreAccounts "${CHAIN_MULTI_INFO}"; }; setupMultiChainEntry' >/dev/null
+assert_equals '{"alice":"a"}' "$(jq -c '.accounts' "${AH_CONF}/chain_multi_info.json")" "多链路向导（选重新配置）：账号的出口映射没丢"
+
+# 删除用户要确认
+ah_rm_setup() {
+    ah_reset
+    jq -n '{inbounds: [{settings: {clients: [{id: "u1", email: "alice-VLESS_TCP"}]}}]}' >"${AH_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
+}
+AH_RM='carpoolGuardAccountMenu() { return 1; }; applyAccountChangeAllProtocols() { echo "APPLY $*"; }; chainAccountForget() { :; }; readNginxSubscribe() { :; }; subscribe() { :; }; manageAccount() { echo MENU; }; configPath="${XRAY_CONF_DIR}/" coreKind=1 frontingType=02_VLESS_TCP_inbounds; removeUser'
+ah_rm_setup
+_out=$(printf '1\nn\n' | run_ah "${AH_RM}")
+assert_equals "0|1|1" "$(grep -c APPLY <<<"${_out}")|$(grep -c '已取消' <<<"${_out}")|$(grep -c MENU <<<"${_out}")" "删除用户（答 n）：不删，回到菜单"
+_out=$(printf '1\n\n' | run_ah "${AH_RM}")
+assert_equals "0" "$(grep -c APPLY <<<"${_out}")" "删除用户（直接回车）：不删"
+_out=$(run_ah "${AH_RM}" </dev/null)
+assert_equals "0" "$(grep -c APPLY <<<"${_out}")" "删除用户（没有输入）：不删"
+_out=$(printf '1\ny\n' | run_ah "${AH_RM}")
+assert_contains "${_out}" "APPLY delName alice" "删除用户（答 y）：按名字删"
+assert_contains "$(printf '1\ny\n' | run_ah 'read -r -p "$(t REMOVE_USER_CONFIRM alice)" x; printf "%s" "$(t REMOVE_USER_CONFIRM alice)"')" "确认删除用户 alice" "删除用户：确认提示点名"
+
+# 二维码只在本机生成，分享链接不发给第三方
+assert_equals "0" "$(grep -c 'qrserver' install.sh)" "二维码：脚本里没有第三方二维码服务"
+ah_reset
+assert_equals "" "$(run_ah 'qrencode() { echo QR; }; shareQrCode title vless://x' </dev/null)" "二维码：输出不是终端时什么都不打（订阅重建不用白画）"
+assert_equals "12" "$(sed -n '/^defaultBase64Code() {/,/^}/p' install.sh | grep -cF 'shareQrCode "')" "二维码：账号页每种协议都接上了"
+assert_equals "12" "$(sed -n '/^defaultBase64Code() {/,/^}/p' install.sh | grep -F 'shareQrCode "' | grep -cF '"$(tail -n 1 "${SUBSCRIBE_LOCAL_DIR}/default/${user}")"')" "二维码：账号页都画刚写进订阅的那条链接"
+# run_db_qr ARGS... → 同 run_db，只把画二维码换成打印它拿到的链接
+run_db_qr() {
+    env PROXY_AGENT_DIR="${MOCK_ROOT}/sharecode.root" DB_FN="${DB_FN}" V2RAY_LANG=zh_CN bash -c '
+        source lib/i18n.sh; source lib/constants.sh; source lib/utils.sh
+        eval "${DB_FN}"
+        shareQrCode() { printf "QR:%s\n" "$2"; }
+        coreKind=1; currentHost=example.org
+        defaultBase64Code "$@"' _ "$@" 2>&1 | grep '^QR:'
+}
+db_reset
+assert_equals "QR:$(run_db 1 trojan 443 tro-x pw123 >/dev/null 2>&1; tail -n 1 "${DB_SUB}/default/tro")" "$(db_reset; run_db_qr trojan 443 tro-x pw123)" "二维码（Trojan）：内容就是订阅里那条链接"
+assert_contains "$(tail -n 1 "${DB_SUB}/default/tro")" "trojan://pw123@example.org:443" "二维码（Trojan）：订阅里确实是分享链接"
+db_reset
+_qr=$(run_db_qr vlesstcp 443 vl-x 0f3c8a4e-1b2d-4c5e-8f90-123456789abc)
+assert_equals "QR:$(tail -n 1 "${DB_SUB}/default/vl")" "${_qr}" "二维码（VLESS）：内容就是订阅里那条链接"
+assert_contains "${_qr}" "QR:vless://0f3c8a4e-1b2d-4c5e-8f90-123456789abc@example.org:443" "二维码（VLESS）：是未转义的原始链接，客户端才能识别"
+
+# 进度显示：最后一步不超过总步数
+AH_PROG=$(ah_src singBoxInstall)
+_prog=$(env AH_PROG="${AH_PROG}" bash -c '
+    eval "${AH_PROG}"
+    for f in chainRefuseCoreSwitch readLastInstallationConfig installAbortArm installAbortDisarm installTools initTLSNginxConfig installTLS installSingBox installSingBoxService \
+        initSingBoxConfig cleanUp installCronTLS handleSingBox handleXray handleNginx refreshSubscribeAfterInstall checkGFWStatue echoContent; do eval "$f() { :; }"; done
+    showAccounts() { echo "$1/${totalProgress}"; }
+    singBoxInstall' 2>&1)
+assert_equals "9/9" "${_prog}" "sing-box 全量安装：最后一步是 9/9，不是 9/8"
+rm -rf "${AH_ROOT}"
+
 # --- 防火墙放行按「端口/协议」整条比对：443 是 8443 的子串，按子串查会把没放行的端口当成已放行 ---
 AP_FN=$(sed -n '/^allowPort() {/,/^}/p;/^checkUFWAllowPort() {/,/^}/p' install.sh)
 AP_DIR="${MOCK_ROOT}/allowport"
@@ -4346,6 +4540,24 @@ btPkgs=$(env BT_FN="${BT_FN}" AP_DIR="${AP_DIR}" bash -c '
     installBaseTools
     grep -E "cron|ping" "${AP_DIR}/installed"' 2>&1 | paste -sd'|' -)
 assert_equals "--no-install-recommends cron" "${btPkgs}" "installBaseTools：cron 不带推荐包，也不再装 inetutils-ping"
+
+# --- qrencode 的包名按发行版来：Alpine 没有叫 qrencode 的包，装错名字是静默失败，账号页一直没有二维码 ---
+# run_bt_qr RELEASE → 本机有没有 qrencode 都当没有，打印 installBaseTools 要装的跟二维码有关的包
+run_bt_qr() {
+    : >"${AP_DIR}/installed"
+    env BT_FN="${BT_FN}" AP_DIR="${AP_DIR}" RELEASE="$1" bash -c '
+        eval "${BT_FN}"
+        for f in echoContent t ensureCronService ensureAlpineProcps sleep sudo; do eval "$f() { :; }"; done
+        pgrep() { return 1; }
+        dpkg-query() { return 1; }
+        qrencode() { return 127; }
+        instRec() { shift 2; echo "$*" >>"${AP_DIR}/installed"; }
+        release="${RELEASE}" upgrade=true installType="instRec -y install" PROXY_AGENT_DIR="${AP_DIR}"
+        installBaseTools
+        grep qrencode "${AP_DIR}/installed"' 2>&1 | paste -sd'|' -
+}
+assert_equals "libqrencode-tools" "$(run_bt_qr alpine)" "installBaseTools：Alpine 装 libqrencode-tools"
+assert_equals "qrencode" "$(run_bt_qr debian)" "installBaseTools：其他发行版装 qrencode"
 
 # --- 端口跳跃只给 Hysteria2；加规则时不放行区间（INPUT 看到的是 DNAT 之后的目标端口，那条放行匹配不到） ---
 MT_FN=$(sed -n '/^manageTuic() {/,/^}/p;/^manageHysteria() {/,/^}/p' install.sh)

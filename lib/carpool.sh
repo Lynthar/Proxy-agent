@@ -402,7 +402,8 @@ carpoolWriteState() {
 }
 
 # carpoolMergeState OLD_STATE NORMALIZED INBOUND_JSON → 成员表按文件重建：顺序随文件，计数与状态沿用，
-# 文件里没有的成员删掉；uuid 采用顺序 文件 → 旧 state → inbound 同名账号 → 空（由调用方生成）
+# uuid 采用顺序 文件 → 旧 state → inbound 同名账号 → 空（由调用方生成）；文件里没有的成员删掉并记进 .retiredNames（永不清）：
+# 订阅文件按名字第一段定位，漏记的话以后谁再用这一段，就拿到被删的人手里那条旧链接。开着和关着时删的人都从这里离开 state
 carpoolMergeState() {
     jq -c --argjson members "$2" --argjson inbound "$3" '
       . as $old
@@ -414,8 +415,10 @@ carpoolMergeState() {
               upBytes: ($o.upBytes // 0), downBytes: ($o.downBytes // 0),
               status: ($o.status // "active"), reason: ($o.reason // "")}})
         | from_entries) as $nm
+      | ((($old.members // {}) | keys) - ($nm | keys)) as $dropped
       | $old | .members = $nm | .resetDay = $members.resetDay | .notify = $members.notify
-      | .billing = $members.billing | .plan = $members.plan' <<<"$1"
+      | .billing = $members.billing | .plan = $members.plan
+      | if ($dropped | length) > 0 then .retiredNames = ((.retiredNames // []) + $dropped | unique) else . end' <<<"$1"
 }
 
 # carpoolSyncLimits STATE NORMALIZED → 文件里的即时类字段同步进 state：notify、billing、plan、在册成员的 quotaBytes 与 expire
@@ -427,12 +430,10 @@ carpoolSyncLimits() {
           | if $m.members[$k] then .value.quotaBytes = $m.members[$k].quotaBytes | .value.expire = $m.members[$k].expire else . end)' <<<"$1"
 }
 
-# carpoolMarkRemoved STATE NAMES_JSON → 车主确认删除的成员记进 .removing：对账把他们的 clients 删掉，而不是当成不归拼车管的账号留下；
-# 同时记进 .retiredNames（永不清）：订阅文件按名字第一段定位，以后谁再用这一段就拿到被删的人手里那条旧链接
+# carpoolMarkRemoved STATE NAMES_JSON → 车主确认删除的成员记进 .removing：对账把他们的 clients 删掉，而不是当成不归拼车管的账号留下
 carpoolMarkRemoved() {
     jq -c --argjson names "$2" '
-      .removing = ((.removing // []) + $names | unique) | if .removing == [] then del(.removing) else . end
-      | if ($names | length) > 0 then .retiredNames = ((.retiredNames // []) + $names | unique) else . end' <<<"$1"
+      .removing = ((.removing // []) + $names | unique) | if .removing == [] then del(.removing) else . end' <<<"$1"
 }
 
 # carpoolReenableChanges MERGED_STATE INBOUND_JSON → 重开拼车时客户端看得见的改动 {restore: [name], uuid: [{name, from, to}]}：

@@ -805,8 +805,9 @@ assert_equals '{"pat":"pp"}' "$(carpoolForeignAccounts "$(jq -c '.removing = ["z
 _cpRm=$(carpoolMarkRemoved "$(jq -c '.removing = ["zed"]' <<<"${_cpMerged}")" '["pat","zed"]')
 assert_equals '["pat","zed"]' "$(jq -c '.removing' <<<"${_cpRm}")" "carpoolMarkRemoved: 并进 removing、去重"
 assert_equals "null" "$(carpoolMarkRemoved "${_cpMerged}" '[]' | jq -c '.removing')" "carpoolMarkRemoved: 没人被删时不留空字段"
-assert_equals '["pat","tom","zed"]' "$(carpoolMarkRemoved "$(jq -c '.retiredNames = ["tom"]' <<<"${_cpMerged}")" '["pat","zed"]' | jq -c '.retiredNames')" "carpoolMarkRemoved: 删掉的名字并进 retiredNames、去重"
-assert_equals "null" "$(carpoolMarkRemoved "${_cpMerged}" '[]' | jq -c '.retiredNames')" "carpoolMarkRemoved: 没人被删时不加 retiredNames"
+assert_equals '["gone"]' "$(jq -c '.retiredNames' <<<"${_cpMerged}")" "carpoolMergeState: 文件里没有了的成员记进 retiredNames"
+assert_equals '["gone","tom"]' "$(carpoolMergeState "$(jq -c '.retiredNames = ["gone","tom"]' <<<"${_cpOld}")" "${_cpNorm}" '{}' | jq -c '.retiredNames')" "carpoolMergeState: 并进已有的 retiredNames、去重"
+assert_equals "null" "$(carpoolMergeState "${_cpInit}" "${_cpNorm}" '{}' | jq -c '.retiredNames')" "carpoolMergeState: 没人离开时不加 retiredNames"
 assert_equals '["alice","bob","carol","dave","pat","tom"]' "$(carpoolRetiredNames "$(jq -c '.retiredNames = ["tom"] | .removing = ["pat"]' <<<"${_cpMerged}")")" \
     "carpoolRetiredNames: 已删的、待删的与在册成员合在一起"
 _cpRe=$(jq -c --arg u1 "${_cpU1}" '.members = {alice: {uuid: $u1}, bob: {uuid: "22222222-2222-2222-2222-222222222222"}, carol: {uuid: "33333333-3333-3333-3333-333333333333"}, newbie: {uuid: ""}}' <<<"${_cpMerged}")

@@ -69,9 +69,9 @@ readonly REALITY_MIN_CLIENT_VER="1.8.0"
 # 也不经公网 IP 回连自己（云上的 1:1 NAT 常常不回环）。避开端口池、链式桥与拼车 API 段、nginx 的 31300 / 31302 回落
 readonly REALITY_LOCAL_DEST_PORT=31305
 
-# Xray-core 默认钉在官方 sing-box 客户端还能完成 REALITY 握手的最后一个稳定版：26.9.8 起服务端要求
-# ClientHello 带 X25519MLKEM768 份额，sing-box 会剥掉它（SagerNet/sing-box#4520），脚本自己发的
-# sing-box 订阅在 7/12 上报 reality verification failed。升级菜单可显式装最新版；sing-box 修好前别动
+# Xray-core 默认钉在官方 sing-box 客户端还能完成 REALITY 握手的最后一个稳定版：26.9.9 起（首个稳定版 26.10.21）服务端要求
+# ClientHello 带 X25519MLKEM768 份额，sing-box 会剥掉它（SagerNet/sing-box#4520），脚本发的 sing-box 订阅在 7/12 上报
+# reality verification failed。升级菜单可显式装最新版；sing-box 修好前别动
 readonly XRAY_PINNED_VERSION="v26.3.27"
 
 # 拼车要的 api.listen 自 Xray 1.8.12 起才有；只拦手动回钉旧核的机器

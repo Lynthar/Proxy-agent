@@ -139,6 +139,7 @@ missingCopies=$(cd "${PROJECT_ROOT}" && for f in lib/*.sh shell/lang/*.sh; do [[
 assert_equals "" "${missingCopies}" "lib/ 与 shell/lang/ 的每个文件都随行拷入"
 assert_equals "no" "$([[ -d "${HOME}/.acme.sh" ]] && echo yes || echo no)" "Reality-only 没有装 acme.sh"
 assert_equals "" "$(crontab -l 2>/dev/null | grep -F 'acme.sh' || true)" "crontab 里没有 acme.sh 续期行"
+assert_not_empty "$(printf 'vless://e2e' | qrencode -m 1 -t UTF8 2>/dev/null)" "qrencode 已装、画得出二维码（账号页靠它，没装只是静默少一块）"
 
 # ============================================================================
 # 生成的配置：内核自己认、字段是喂进去的值、密钥对自洽
@@ -740,6 +741,10 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
         apt-get install -y -qq faketime >/dev/null 2>&1
         assert_not_empty "$(command -v faketime || true)" "装上 faketime（只给这一次 tick 换日期）"
         assert_contains "$(V2RAY_LANG=en faketime -f '+300s' pasly doctor 2>&1 | sed 's/\x1b\[[0-9;]*m//g')" "[WARN] System clock" "时钟快 5 分钟：doctor 告警"
+        # 这段把周期翻到假日期：cron 按真实时钟的 tick 插进来会把起点改回去、断言变红。
+        # 摘 cron 行没用（重载时 ensureCarpoolCron 会补回来），只能停服务、等在跑的那次结束，段尾再起
+        systemctl stop cron
+        for _ in $(seq 1 60); do pgrep -f 'install.sh CarpoolTick' >/dev/null || break; sleep 1; done
         printf '%s\n' "$(jq --arg u "${E2E_USER}" '.members[$u].quotaGiB = 1' "${carpoolDir}/members.json")" >"${carpoolDir}/members.json"
         # 一个周期的用量测试里跑不出来：拿 state 的同一把锁，把已用量记成 1.5 GiB（cron 里的 tick 不会写到一半）
         flock "${carpoolDir}/.lock" bash -c 'jq --arg u "$1" ".members[\$u].downBytes += 1610612736" "$2" >"$2.e2e" && cat "$2.e2e" >"$2" && rm -f "$2.e2e"' \
@@ -771,6 +776,7 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
             "回到真实日期的 tick：周期起点算回 ${realStart}，不再清零，${E2E_USER} 仍可用"
         printf '%s\n' "$(jq --arg u "${E2E_USER}" '.members[$u].quotaGiB = 0' "${carpoolDir}/members.json")" >"${carpoolDir}/members.json"
         rolloverOut+=$'\n'"${quotaOut}"$'\n'"${afterOut}"
+        systemctl start cron
     fi
 
     echo ""

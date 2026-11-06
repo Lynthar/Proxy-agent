@@ -2039,7 +2039,6 @@ mkdirTools() {
     # Xray配置目录 - 设置适当权限
     mkdir -p ${XRAY_CONF_DIR}
     chmod 700 ${XRAY_CONF_DIR}
-    mkdir -p ${XRAY_DIR}/reality_scan
     mkdir -p ${XRAY_DIR}/tmp
     mkdir -p /etc/systemd/system/
 
@@ -2225,7 +2224,12 @@ installBaseTools() {
 
     if ! qrencode --help >/dev/null 2>&1; then
         echoContent green " ---> 安装qrencode"
-        ${installType} qrencode >/dev/null 2>&1
+        # Alpine 的命令行工具在 libqrencode-tools 里，没有叫 qrencode 的包，按这个名字装会静默失败、一直没有二维码
+        if [[ "${release}" == "alpine" ]]; then
+            ${installType} libqrencode-tools >/dev/null 2>&1
+        else
+            ${installType} qrencode >/dev/null 2>&1
+        fi
     fi
 
     if ! command -v lsb_release >/dev/null 2>&1; then
@@ -2349,7 +2353,7 @@ installWarp() {
 
     ${installType} gnupg2 -y >/dev/null 2>&1
     # Cloudflare WARP 仓库装签：
-    # 用 gpg --dearmor + signed-by 而非 apt-key add（后者在 Debian 12 / Ubuntu 24.04 已删除）；
+    # 用 gpg --dearmor + signed-by 而非 apt-key add（后者已弃用，Debian 13 起没有这个命令）；
     # 每次安装重新拉公钥，应对 Cloudflare 不定期 key 轮转。
     if [[ "${release}" == "debian" || "${release}" == "ubuntu" ]]; then
         local _warpKeyring="/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg"
@@ -5575,7 +5579,7 @@ singBoxMergeConfig() {
     local tmpFile mergeOutput mergeResult checkOutput checkResult
 
     # 一次性迁移：移除已下线的「菜单 15 域名黑名单」遗留片段。
-    # block 类 outbound 在 sing-box 1.13 已彻底删除，留着会让后续 sing-box check FATAL。
+    # block 类 outbound 是 sing-box 1.11 起弃用的旧写法（1.14.4 的 check 还认），这些文件没有菜单管了，留着也用不上。
     # 没用过黑名单菜单的用户这些文件不存在；什么都不打印。
     local _orphanFile _orphanCleaned=0
     for _orphanFile in block_domain_outbound block_domain_route \
@@ -6651,6 +6655,14 @@ EOF
 initSubscribeLocalConfig() {
     rm -rf ${SUBSCRIBE_LOCAL_DIR}/sing-box/*
 }
+# shareQrCode TITLE LINK → 在终端里画分享链接的二维码。只在本机生成：链接含 UUID，交给第三方网站就是把凭据发出去。
+# stdout 不是终端（订阅重建把账号输出丢进 /dev/null，每个成员每个协议画一遍是白耗）或没有 qrencode 时什么都不打
+shareQrCode() {
+    [[ -t 1 ]] && command -v qrencode >/dev/null 2>&1 || return 0
+    [[ -n "$1" ]] && echoContent yellow "$1"
+    printf '%s' "$2" | qrencode -m 1 -t UTF8
+}
+
 # 通用
 defaultBase64Code() {
     local type=$1
@@ -6690,8 +6702,7 @@ EOF
         singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vless\",\"server\":\"${currentHost}\",\"server_port\":${port},\"uuid\":\"${id}\",\"flow\":\"xtls-rprx-vision\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"packet_encoding\":\"xudp\"}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
-        echoContent yellow " ---> 二维码 VLESS(VLESS+TCP+TLS_Vision)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40${currentHost}%3A${port}%3Fencryption%3Dnone%26fp%3Dchrome%26security%3Dtls%26type%3Dtcp%26${currentHost}%3D${currentHost}%26headerType%3Dnone%26sni%3D${currentHost}%26flow%3Dxtls-rprx-vision%23${email}\n"
+        shareQrCode " ---> 二维码 VLESS(VLESS+TCP+TLS_Vision)" "$(tail -n 1 "${SUBSCRIBE_LOCAL_DIR}/default/${user}")"
 
     elif [[ "${type}" == "vmessws" ]]; then
         qrCodeBase64Default=$(echo -n "{\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"ws\",\"add\":\"${add}\",\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}" | base64 | tr -d '\n')
@@ -6701,7 +6712,6 @@ EOF
         echoContent green "    {\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"ws\",\"add\":\"${add}\",\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}\n"
         echoContent yellow " ---> 通用vmess(VMess+WS+TLS)链接"
         echoContent green "    vmess://${qrCodeBase64Default}\n"
-        echoContent yellow " ---> 二维码 vmess(VMess+WS+TLS)"
 
         cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/default/${user}"
 vmess://${qrCodeBase64Default}
@@ -6729,7 +6739,7 @@ EOF
 
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vmess://${qrCodeBase64Default}\n"
+        shareQrCode " ---> 二维码 vmess(VMess+WS+TLS)" "$(tail -n 1 "${SUBSCRIBE_LOCAL_DIR}/default/${user}")"
 
     elif [[ "${type}" == "vlessws" ]]; then
 
@@ -6762,8 +6772,7 @@ EOF
         singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vless\",\"server\":\"${add}\",\"server_port\":${port},\"uuid\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"multiplex\":{\"enabled\":false,\"protocol\":\"smux\",\"max_streams\":32},\"packet_encoding\":\"xudp\",\"transport\":{\"type\":\"ws\",\"path\":\"${path}\",\"headers\":{\"Host\":\"${currentHost}\"}}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
-        echoContent yellow " ---> 二维码 VLESS(VLESS+WS+TLS)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40${add}%3A${port}%3Fencryption%3Dnone%26security%3Dtls%26type%3Dws%26host%3D${currentHost}%26fp%3Dchrome%26sni%3D${currentHost}%26path%3D${path}%23${email}"
+        shareQrCode " ---> 二维码 VLESS(VLESS+WS+TLS)" "$(tail -n 1 "${SUBSCRIBE_LOCAL_DIR}/default/${user}")"
 
     elif [[ "${type}" == "vlessXHTTP" ]]; then
         local pqvParam pqvParamQr
@@ -6779,8 +6788,8 @@ EOF
 vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality${pqvParam}&type=xhttp&sni=${xrayVLESSRealityXHTTPServerName}&fp=chrome&path=${path}&pbk=${currentRealityXHTTPPublicKey}&sid=${currentRealityXHTTPShortId}#${email}
 EOF
 
-        # clashMeta（mihomo）订阅：reality-opts 必须含 publicKey + shortId，
-        # 否则 clashMeta 客户端连不上 Reality。
+        # clashMeta（mihomo）订阅：reality-opts 必须含 publicKey + shortId，否则 clashMeta 客户端连不上 Reality；
+        # support-x25519mlkem768 不写时 mihomo 会剥掉 ML-KEM 份额，Xray ≥ 26.9.9 的 Reality 按认证失败处理。
         cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/clashMeta/${user}"
   - name: "${email}"
     type: vless
@@ -6797,13 +6806,13 @@ EOF
     reality-opts:
       public-key: ${currentRealityXHTTPPublicKey}
       short-id: ${currentRealityXHTTPShortId}
+      support-x25519mlkem768: true
     xhttp-opts:
       path: ${path}
       host: ${xrayVLESSRealityXHTTPServerName}
 EOF
 
-        echoContent yellow " ---> 二维码 VLESS(VLESS+reality+XHTTP)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40$(getPublicIP)%3A${port}%3Fencryption%3Dnone%26security%3Dreality${pqvParamQr}%26type%3Dxhttp%26sni%3D${xrayVLESSRealityXHTTPServerName}%26fp%3Dchrome%26path%3D${path}%26host%3D${xrayVLESSRealityXHTTPServerName}%26pbk%3D${currentRealityXHTTPPublicKey}%26sid%3D${currentRealityXHTTPShortId}%23${email}\n"
+        shareQrCode " ---> 二维码 VLESS(VLESS+reality+XHTTP)" "$(tail -n 1 "${SUBSCRIBE_LOCAL_DIR}/default/${user}")"
 
     elif [[ "${type}" == "trojan" ]]; then
         # URLEncode
@@ -6834,8 +6843,7 @@ EOF
         singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"trojan\",\"server\":\"${currentHost}\",\"server_port\":${port},\"password\":\"${id}\",\"tls\":{\"alpn\":[\"http/1.1\"],\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
-        echoContent yellow " ---> 二维码 Trojan(TLS)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=trojan%3a%2f%2f${id}%40${currentHost}%3a${port}%3fpeer%3d${currentHost}%26fp%3Dchrome%26sni%3d${currentHost}%26alpn%3Dhttp/1.1%23${email}\n"
+        shareQrCode " ---> 二维码 Trojan(TLS)" "$(tail -n 1 "${SUBSCRIBE_LOCAL_DIR}/default/${user}")"
 
     elif [[ "${type}" == "hysteria" ]]; then
         echoContent yellow " ---> Hysteria(TLS)"
@@ -6914,8 +6922,7 @@ EOF
         singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"hysteria2\",\"server\":\"${currentHost}\",\"server_port\":${singBoxHysteria2Port}${singBoxPorts}${singBoxBandwidth},\"password\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"alpn\":[\"h3\"]}${singBoxObfs}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
-        echoContent yellow " ---> 二维码 Hysteria2(TLS)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=hysteria2%3A%2F%2F${id}%40${currentHost}%3A${singBoxHysteria2Port}%3F${multiPortEncode}${obfsUrlParamEncode}peer%3D${currentHost}%26insecure%3D0%26sni%3D${currentHost}%26alpn%3Dh3%23${email}\n"
+        shareQrCode " ---> 二维码 Hysteria2(TLS)" "$(tail -n 1 "${SUBSCRIBE_LOCAL_DIR}/default/${user}")"
 
     elif [[ "${type}" == "vlessReality" ]]; then
         local realityServerName=${xrayVLESSRealityServerName}
@@ -6936,6 +6943,7 @@ EOF
         cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/default/${user}"
 vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality${pqvParam}&type=tcp&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=${currentRealityShortId}&flow=xtls-rprx-vision#${email}
 EOF
+        # support-x25519mlkem768 不写时 mihomo 会剥掉 ML-KEM 份额，Xray ≥ 26.9.9 的 Reality 按认证失败处理
         cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/clashMeta/${user}"
   - name: "${email}"
     type: vless
@@ -6950,14 +6958,14 @@ EOF
     reality-opts:
       public-key: ${publicKey}
       short-id: ${currentRealityShortId}
+      support-x25519mlkem768: true
     client-fingerprint: chrome
 EOF
 
         singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vless\",\"server\":\"$(getPublicIP)\",\"server_port\":${port},\"uuid\":\"${id}\",\"flow\":\"xtls-rprx-vision\",\"tls\":{\"enabled\":true,\"server_name\":\"${realityServerName}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"},\"reality\":{\"enabled\":true,\"public_key\":\"${publicKey}\",\"short_id\":\"${currentRealityShortId}\"}},\"packet_encoding\":\"xudp\"}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
-        echoContent yellow " ---> 二维码 VLESS(VLESS+reality+uTLS+Vision)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40$(getPublicIP)%3A${port}%3Fencryption%3Dnone%26security%3Dreality${pqvParamQr}%26type%3Dtcp%26sni%3D${realityServerName}%26fp%3Dchrome%26pbk%3D${publicKey}%26sid%3D${currentRealityShortId}%26flow%3Dxtls-rprx-vision%23${email}\n"
+        shareQrCode " ---> 二维码 VLESS(VLESS+reality+uTLS+Vision)" "$(tail -n 1 "${SUBSCRIBE_LOCAL_DIR}/default/${user}")"
 
     elif [[ "${type}" == "tuic" ]]; then
         local tuicUUID=
@@ -6997,8 +7005,7 @@ EOF
         singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\": \"tuic\",\"server\": \"${currentHost}\",\"server_port\": ${port},\"uuid\": \"${tuicUUID}\",\"password\": \"${tuicPassword}\",\"congestion_control\": \"${tuicAlgorithm}\",\"tls\": {\"enabled\": true,\"server_name\": \"${currentHost}\",\"alpn\": [\"h3\"]}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
-        echoContent yellow "\n ---> 二维码 Tuic"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=tuic%3A%2F%2F${tuicUUID}%3A${tuicPassword}%40${currentHost}%3A${tuicPort}%3Fcongestion_control%3D${tuicAlgorithm}%26alpn%3Dh3%26sni%3D${currentHost}%26udp_relay_mode%3Dquic%26allow_insecure%3D0%23${email}\n"
+        shareQrCode "\n ---> 二维码 Tuic" "$(tail -n 1 "${SUBSCRIBE_LOCAL_DIR}/default/${user}")"
     elif [[ "${type}" == "naive" ]]; then
         echoContent yellow " ---> Naive(TLS)"
 
@@ -7006,8 +7013,7 @@ EOF
         cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/default/${user}"
 naive+https://${email}:${id}@${currentHost}:${port}?padding=true#${email}
 EOF
-        echoContent yellow " ---> 二维码 Naive(TLS)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=naive%2Bhttps%3A%2F%2F${email}%3A${id}%40${currentHost}%3A${port}%3Fpadding%3Dtrue%23${email}\n"
+        shareQrCode " ---> 二维码 Naive(TLS)" "$(tail -n 1 "${SUBSCRIBE_LOCAL_DIR}/default/${user}")"
     elif [[ "${type}" == "vmessHTTPUpgrade" ]]; then
         qrCodeBase64Default=$(echo -n "{\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"httpupgrade\",\"add\":\"${add}\",\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}" | base64 | tr -d '\n')
         qrCodeBase64Default="${qrCodeBase64Default// /}"
@@ -7016,7 +7022,6 @@ EOF
         echoContent green "    {\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"httpupgrade\",\"add\":\"${add}\",\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}\n"
         echoContent yellow " ---> 通用vmess(VMess+HTTPUpgrade+TLS)链接"
         echoContent green "    vmess://${qrCodeBase64Default}\n"
-        echoContent yellow " ---> 二维码 vmess(VMess+HTTPUpgrade+TLS)"
 
         cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/default/${user}"
 vmess://${qrCodeBase64Default}
@@ -7044,7 +7049,7 @@ EOF
 
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vmess://${qrCodeBase64Default}\n"
+        shareQrCode " ---> 二维码 vmess(VMess+HTTPUpgrade+TLS)" "$(tail -n 1 "${SUBSCRIBE_LOCAL_DIR}/default/${user}")"
 
     elif [[ "${type}" == "anytls" ]]; then
         echoContent yellow " ---> AnyTLS"
@@ -7073,8 +7078,7 @@ EOF
         singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"anytls\",\"server\":\"${currentHost}\",\"server_port\":${singBoxAnyTLSPort},\"password\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\"}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
-        echoContent yellow " ---> 二维码 AnyTLS"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=anytls%3A%2F%2F${id}%40${currentHost}%3A${singBoxAnyTLSPort}%3Fpeer%3D${currentHost}%26insecure%3D0%26sni%3D${currentHost}%23${email}\n"
+        shareQrCode " ---> 二维码 AnyTLS" "$(tail -n 1 "${SUBSCRIBE_LOCAL_DIR}/default/${user}")"
 
     elif [[ "${type}" == "ss2022" ]]; then
         local ss2022ServerKey=$5
@@ -7111,10 +7115,7 @@ EOF
         singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"shadowsocks\",\"server\":\"${ss2022ServerAddr}\",\"server_port\":${port},\"method\":\"${ss2022Method}\",\"password\":\"${ss2022Password}\",\"multiplex\":{\"enabled\":true}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
-        echoContent yellow " ---> 二维码 SS2022"
-        local ss2022QRCode
-        ss2022QRCode=$(echo -n "ss://${ss2022UrlPassword}@${ss2022ServerAddr}:${port}#${email}" | sed 's/:/%3A/g; s/\//%2F/g; s/@/%40/g; s/#/%23/g')
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${ss2022QRCode}\n"
+        shareQrCode " ---> 二维码 SS2022" "$(tail -n 1 "${SUBSCRIBE_LOCAL_DIR}/default/${user}")"
     fi
 
 }
@@ -8196,6 +8197,13 @@ removeUser() {
     fi
 
     if [[ -n "${delUserKey}" ]]; then
+        local confirmDelete
+        read -r -p "$(t REMOVE_USER_CONFIRM "${delUserKey}")" confirmDelete
+        if ! isYesInput "${confirmDelete}"; then
+            echoContent yellow " ---> $(t CANCELLED)"
+            manageAccount 1
+            return
+        fi
         if ! applyAccountChangeAllProtocols delName "${delUserKey}"; then
             manageAccount 1
             return
@@ -13193,6 +13201,16 @@ testChainConnection() {
             # 多跳模式，获取第一跳
             firstHopIP=$(jq -r '.hops[0].ip' ${CHAIN_ENTRY_INFO})
             firstHopPort=$(jq -r '.hops[0].port' ${CHAIN_ENTRY_INFO})
+        elif [[ "${mode}" == "external_single" ]]; then
+            # 外部节点当唯一出口：状态里只有节点 id，地址在节点列表里
+            local externalNode
+            externalNode=$(getExternalNodeById "$(jq -r '.external_node_id // empty' ${CHAIN_ENTRY_INFO})")
+            firstHopIP=$(jq -r '.server // empty' <<<"${externalNode}" 2>/dev/null)
+            firstHopPort=$(jq -r '.server_port // empty' <<<"${externalNode}" 2>/dev/null)
+            if [[ -z "${firstHopIP}" || -z "${firstHopPort}" ]]; then
+                echoContent red " ---> $(t EXT_NODE_NOT_FOUND)"
+                return 1
+            fi
         else
             # 单跳模式
             firstHopIP=$(jq -r '.exit_ip' ${CHAIN_ENTRY_INFO})
@@ -13400,6 +13418,8 @@ updateChainKey() {
         echoContent skyBlue "${chainCode}"
         echoContent yellow "\n请更新入口节点配置！"
 
+    elif [[ -f "${CHAIN_RELAY_INFO}" ]]; then
+        echoContent yellow " ---> $(t CHAIN_KEY_UPDATE_RELAY)"
     elif [[ -f "${CHAIN_ENTRY_INFO}" ]]; then
         echoContent red " ---> 入口节点请从出口节点获取新配置码后重新配置"
     else
@@ -13712,6 +13732,12 @@ configureProtocolChainRouting() {
         return 1
     fi
 
+    # 外部节点唯一出口的出站 tag 不是 chain_outbound，这里写的路由指向不存在的出站，合并必失败
+    if [[ "$(jq -r '.mode // empty' "${CHAIN_ENTRY_INFO}" 2>/dev/null)" == "external_single" ]]; then
+        echoContent red " ---> $(t CHAIN_PROTOCOL_EXTERNAL_UNSUPPORTED)"
+        return 1
+    fi
+
     # 检查链式代理出站是否已配置
     if [[ ! -f "${SINGBOX_FRAGMENT_DIR}/chain_outbound.json" ]]; then
         echoContent red " ---> $(t CHAIN_PROTOCOL_NO_CHAIN_OUTBOUND)"
@@ -13764,6 +13790,10 @@ configureProtocolChainRouting() {
         ((idx++))
     done <<< "$(echo -e "${installedProtocols}" | sort -n | uniq)"
 
+    local routingEnabled=false
+    jq -e '.protocol_routing.enabled == true' "${CHAIN_ENTRY_INFO}" >/dev/null 2>&1 && routingEnabled=true
+    [[ "${routingEnabled}" == "true" ]] && echoContent yellow "0. $(t CHAIN_PROTOCOL_DISABLE)"
+
     echoContent yellow "--------------------------------------------------------------"
     echoContent yellow "$(t CHAIN_PROTOCOL_INPUT_HINT)"
 
@@ -13774,6 +13804,11 @@ configureProtocolChainRouting() {
     if [[ -z "${userSelection}" ]]; then
         echoContent red " ---> $(t CHAIN_PROTOCOL_NO_SELECTION)"
         return 1
+    fi
+
+    if [[ "${userSelection}" == "0" && "${routingEnabled}" == "true" ]]; then
+        applyProtocolChainRouting
+        return $?
     fi
 
     # 解析选择并构建 inbound tag 列表
@@ -13816,25 +13851,45 @@ configureProtocolChainRouting() {
         return 0
     fi
 
-    # 生成路由配置
-    generateProtocolChainRoute "${selectedTags[@]}"
+    applyProtocolChainRouting "${userSelection}" "${selectedProtocolNames[*]}" "${selectedTags[@]}"
+}
 
-    # 保存偏好设置
-    saveProtocolRoutingPreference "${userSelection}" "${selectedProtocolNames[*]}"
-
-    # 重载 sing-box 配置
-    echoContent yellow " ---> $(t CHAIN_PROTOCOL_RELOADING)"
-    if ! singBoxMergeConfig; then
+# applyProtocolChainRouting [SELECTION NAMES TAG...] → 按协议分流写进路由并生效；不带参数是关闭，写回所有协议走链路。
+# 合并失败要还原：写坏的片段留着，此后每次合并都失败，sing-box 一重启就起不来
+applyProtocolChainRouting() {
+    local routeFile="${SINGBOX_FRAGMENT_DIR}/chain_route.json" selection=${1:-} names=${2:-}
+    if ! jsonTxBegin || ! jsonTxTrack "${routeFile}" || ! jsonTxTrack "${CHAIN_ENTRY_INFO}"; then
+        jsonTxRollback
         echoContent red " ---> $(t CHAIN_PROTOCOL_RELOAD_FAILED)"
         return 1
     fi
+    if (($# > 2)); then
+        shift 2
+        generateProtocolChainRoute "$@"
+        saveProtocolRoutingPreference "${selection}" "${names}"
+    else
+        writeChainEntryRoute "$([[ -f "${SINGBOX_FRAGMENT_DIR}/chain_bridge_inbound.json" ]] && echo true || echo false)"
+        writeChainInfoAtomic "${CHAIN_ENTRY_INFO}" "$(jq -c 'del(.protocol_routing)' "${CHAIN_ENTRY_INFO}")"
+    fi
+
+    echoContent yellow " ---> $(t CHAIN_PROTOCOL_RELOADING)"
+    if ! singBoxMergeConfig; then
+        jsonTxRollback
+        echoContent red " ---> $(t CHAIN_PROTOCOL_RELOAD_FAILED)"
+        return 1
+    fi
+    jsonTxCommit
 
     if ! reloadCore; then
         echoContent red " ---> $(t CHAIN_PROTOCOL_RELOAD_FAILED)"
         return 1
     fi
 
-    echoContent green " ---> $(t CHAIN_PROTOCOL_SUCCESS)"
+    if [[ -n "${selection}" ]]; then
+        echoContent green " ---> $(t CHAIN_PROTOCOL_SUCCESS)"
+    else
+        echoContent green " ---> $(t CHAIN_PROTOCOL_DISABLED)"
+    fi
 }
 
 # ======================= 多链路分流功能 =======================
@@ -13983,6 +14038,7 @@ isChainNameExists() {
 
 # 多链路入口配置向导
 setupMultiChainEntry() {
+    local multiChainCarriedAccounts=
     if planAction "$(t PLAN_CHAIN_ENTRY_MULTI)"; then return 0; fi
     echoContent skyBlue "\n$(t CHAIN_MULTI_TITLE)"
     echoContent red "\n=============================================================="
@@ -14017,6 +14073,8 @@ setupMultiChainEntry() {
                 if [[ "${confirmClear}" != "y" ]]; then
                     return 0
                 fi
+                # 账号的出口映射留到新链路都定下来再带回去，见 multiChainRestoreAccounts
+                multiChainCarriedAccounts=$(jq -c '.accounts // {}' "${CHAIN_MULTI_INFO}" 2>/dev/null) || multiChainCarriedAccounts=
                 # 清除现有多链路配置
                 rm -f ${CHAIN_MULTI_INFO}
                 rm -f ${SINGBOX_FRAGMENT_DIR}/chain_outbound_*.json
@@ -14775,6 +14833,27 @@ configureMultiChainRules() {
     return 0
 }
 
+# multiChainRestoreAccounts INFO → 重新配置多链路时带回账号的出口映射：指向还在的链路或直连的留下，其余当场列出、回到跟随默认。
+# 指向不存在的链路或被引用的链路没有 bridge_port 都算非法映射，sing-box 整个合并失败，所以先过滤，端口走 chainAccountAssignPorts
+multiChainRestoreAccounts() {
+    local infoFile=$1 state kept dropped
+    [[ -n "${multiChainCarriedAccounts:-}" && "${multiChainCarriedAccounts}" != "{}" ]] || return 0
+    state=$(cat "${infoFile}") || return 1
+    kept=$(jq -c --argjson old "${multiChainCarriedAccounts}" '([.chains[].name] + ["direct"]) as $exits
+        | $old | with_entries(select(.value as $v | $exits | index($v)))' <<<"${state}") || return 1
+    dropped=$(jq -r --argjson kept "${kept}" '[to_entries[] | select(.key as $k | $kept | has($k) | not) | "\(.key)→\(.value)"] | join(", ")' \
+        <<<"${multiChainCarriedAccounts}") || return 1
+    state=$(jq -c --argjson kept "${kept}" '.accounts = $kept' <<<"${state}") || return 1
+    if ! state=$(chainAccountAssignPorts "${state}"); then
+        echoContent red " ---> $(t CHAIN_ACCOUNT_NO_BRIDGE_PORT "${CHAIN_BRIDGE_PORT}" "${CHAIN_BRIDGE_PORT_LAST}")"
+        return 1
+    fi
+    writeChainInfoAtomic "${infoFile}" "${state}" || return 1
+    [[ "${kept}" != "{}" ]] && echoContent green " ---> $(t CHAIN_ACCOUNT_CARRY_KEPT "$(jq 'length' <<<"${kept}")")"
+    [[ -n "${dropped}" ]] && echoContent yellow " ---> $(t CHAIN_ACCOUNT_CARRY_DROPPED "${dropped}")"
+    return 0
+}
+
 # 完成多链路配置
 finalizeMultiChainConfig() {
     local infoFile="${CHAIN_MULTI_INFO}"
@@ -14834,6 +14913,8 @@ finalizeMultiChainConfig() {
     chmod 600 "${tmpFile}"
     jq --argjson hasXray "${hasXrayProtocols}" '.has_xray = $hasXray' "${infoFile}" > "${tmpFile}"
     mv "${tmpFile}" "${infoFile}"
+
+    multiChainRestoreAccounts "${infoFile}" || return 1
 
     # 生成路由配置
     generateMultiChainRouteConfig
@@ -16597,27 +16678,6 @@ routingToolsMenu() {
 
 }
 
-# VMess+WS+TLS 分流
-vmessWSRouting() {
-    echoContent skyBlue "\n功能 1/${totalProgress} : VMess+WS+TLS 分流"
-    echoContent red "\n=============================================================="
-    echoContent yellow "# 注意事项"
-    echoContent yellow "# 使用提示：详见 docs 目录中的分流与策略说明 \n"
-
-    echoContent yellow "1.添加出站"
-    echoContent yellow "2.卸载"
-    read -r -p "请选择:" selectType
-
-    case ${selectType} in
-    1)
-        setVMessWSRoutingOutbounds
-        ;;
-    2)
-        removeVMessWSRouting
-        ;;
-    esac
-}
-
 # 设置VMess+WS+TLS【仅出站】
 setVMessWSRoutingOutbounds() {
     read -r -p "请输入VMess+WS+TLS的地址:" setVMessWSTLSAddress
@@ -17451,7 +17511,7 @@ singBoxInstall() {
     chainRefuseCoreSwitch 2
     readLastInstallationConfig
     selectCustomInstallType=
-    totalProgress=8
+    totalProgress=9
     installAbortArm
     installTools 2
 
@@ -18379,15 +18439,10 @@ subscribe() {
                     echoContent green "email:${email}\n"
                     echoContent yellow "url:${subscribeType}://${currentDomain}/s/${emailMd5}\n"
                     echoContent yellow "$(t SUBSCRIBE_UNIVERSAL_HINT)\n"
-                    if [[ "${release}" != "alpine" ]]; then
-                        echo "${subscribeType}://${currentDomain}/s/${emailMd5}" | qrencode -s 10 -m 1 -t UTF8
-                    fi
+                    shareQrCode "" "${subscribeType}://${currentDomain}/s/${emailMd5}"
                     echoContent skyBlue "\n----------默认订阅----------\n"
                     echoContent yellow "url:${subscribeType}://${currentDomain}/s/default/${emailMd5}\n"
-                    echoContent yellow "在线二维码:https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${subscribeType}://${currentDomain}/s/default/${emailMd5}\n"
-                    if [[ "${release}" != "alpine" ]]; then
-                        echo "${subscribeType}://${currentDomain}/s/default/${emailMd5}" | qrencode -s 10 -m 1 -t UTF8
-                    fi
+                    shareQrCode "" "${subscribeType}://${currentDomain}/s/default/${emailMd5}"
                 fi
 
                 # clashMeta
@@ -18398,10 +18453,7 @@ subscribe() {
                     if [[ -z "${showStatus}" ]]; then
                         echoContent skyBlue "\n----------clashMeta订阅----------\n"
                         echoContent yellow "url:${subscribeType}://${currentDomain}/s/clashMetaProfiles/${emailMd5}\n"
-                        echoContent yellow "在线二维码:https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${subscribeType}://${currentDomain}/s/clashMetaProfiles/${emailMd5}\n"
-                        if [[ "${release}" != "alpine" ]]; then
-                            echo "${subscribeType}://${currentDomain}/s/clashMetaProfiles/${emailMd5}" | qrencode -s 10 -m 1 -t UTF8
-                        fi
+                        shareQrCode "" "${subscribeType}://${currentDomain}/s/clashMetaProfiles/${emailMd5}"
                     fi
                 fi
                 # sing-box
@@ -18413,10 +18465,7 @@ subscribe() {
                         "${_singboxTpl}" >"${_singboxFile}.tmp" && mv "${_singboxFile}.tmp" "${_singboxFile}" && [[ -z "${showStatus}" ]]; then
                         echoContent skyBlue "\n----------sing-box订阅----------\n"
                         echoContent yellow "url:${subscribeType}://${currentDomain}/s/sing-box/${emailMd5}\n"
-                        echoContent yellow "在线二维码:https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${subscribeType}://${currentDomain}/s/sing-box/${emailMd5}\n"
-                        if [[ "${release}" != "alpine" ]]; then
-                            echo "${subscribeType}://${currentDomain}/s/sing-box/${emailMd5}" | qrencode -s 10 -m 1 -t UTF8
-                        fi
+                        shareQrCode "" "${subscribeType}://${currentDomain}/s/sing-box/${emailMd5}"
                     fi
                     rm -f "${_singboxFile}.tmp"
                 fi
@@ -18797,53 +18846,6 @@ manageReality() {
     fi
 }
 
-# 安装reality scanner
-installRealityScanner() {
-    if [[ ! -f "${XRAY_DIR}/reality_scan/RealiTLScanner-linux-64" ]]; then
-        version=$(curl -s https://api.github.com/repos/XTLS/RealiTLScanner/releases?per_page=1 | jq -r '.[]|.tag_name')
-        wget -c -q -P ${XRAY_DIR}/reality_scan/ "https://github.com/XTLS/RealiTLScanner/releases/download/${version}/RealiTLScanner-linux-64"
-        chmod 655 ${XRAY_DIR}/reality_scan/RealiTLScanner-linux-64
-    fi
-}
-# reality scanner
-realityScanner() {
-    echoContent skyBlue "\n进度 1/1 : 扫描Reality域名"
-    echoContent red "\n=============================================================="
-    echoContent yellow "# 注意事项"
-    echoContent yellow "扫描完成后，请自行检查扫描网站结果内容是否合规，需个人承担风险"
-    echoContent red "某些IDC不允许扫描操作，比如搬瓦工，其中风险请自行承担\n"
-    echoContent yellow "1.扫描IPv4"
-    echoContent yellow "2.扫描IPv6"
-    echoContent red "=============================================================="
-    read -r -p "请选择:" realityScannerStatus
-    local type=
-    if [[ "${realityScannerStatus}" == "1" ]]; then
-        type=4
-    elif [[ "${realityScannerStatus}" == "2" ]]; then
-        type=6
-    fi
-
-    read -r -p "某些IDC不允许扫描操作，比如搬瓦工，其中风险请自行承担，是否继续？[y/n]:" scanStatus
-
-    if [[ "${scanStatus}" != "y" ]]; then
-        exit 0
-    fi
-
-    publicIP=$(getPublicIP "${type}")
-    echoContent yellow "IP:${publicIP}"
-    if [[ -z "${publicIP}" ]]; then
-        echoContent red " ---> 无法获取IP"
-        exit 1
-    fi
-
-    read -r -p "IP是否正确？[y/n]:" ipStatus
-    if [[ "${ipStatus}" == "y" ]]; then
-        echoContent yellow "结果存储在 ${XRAY_DIR}/reality_scan/result.log 文件中\n"
-        ${XRAY_DIR}/reality_scan/RealiTLScanner-linux-64 -addr "${publicIP}" | tee ${XRAY_DIR}/reality_scan/result.log
-    else
-        echoContent red " ---> 无法读取正确IP"
-    fi
-}
 # hysteria管理
 manageHysteria() {
     echoContent skyBlue "\n进度  1/1 : Hysteria2 管理"
