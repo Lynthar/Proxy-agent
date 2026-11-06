@@ -185,8 +185,8 @@ stop connecting (the core menu can install the latest release explicitly). Nothi
 else is version-pinned. The masquerade site assets are a GitHub archive zip with no
 checksum — static files that never enter an execution path.
 
-**Under SELinux enforcing the script exits** and points at `docs/selinux.md`.
-That's deliberate.
+**Under SELinux enforcing the menu exits** and points at `docs/selinux.md`.
+That's deliberate. `doctor`, `topo` and the scheduled jobs (certificate renewal and so on) aren't affected.
 
 To report a vulnerability, use GitHub's private reporting: Security tab → Report a
 vulnerability, or open <https://github.com/Lynthar/Proxy-agent/security/advisories/new>

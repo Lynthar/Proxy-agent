@@ -4929,6 +4929,27 @@ assert_contains "${tuicClash}" 'sni: ${currentHost}' "Clash 的 TUIC 节点 SNI 
 # 测试结果汇总
 # ============================================================================
 
+# --- SELinux 入口检查：菜单照旧退出，只读入口、定时任务和服务停止钩子放行。定时任务被挡的话证书到期也续不上 ---
+SE_BLOCK=$(awk '/^# 只读入口、定时任务和服务停止钩子/{f=1} f{print} f && /^esac$/{exit}' install.sh)
+SE_STUB=$(mktemp -d)
+printf '#!/bin/sh\necho Enforcing\n' >"${SE_STUB}/getenforce"
+chmod +x "${SE_STUB}/getenforce"
+# run_se ARG → 用 install.sh 的那段判断处理 ARG，再过入口检查；放行打印 passed
+run_se() {
+    env SE_BLOCK="${SE_BLOCK}" PATH="${SE_STUB}:${PATH}" bash -c '
+        source lib/i18n.sh; source lib/constants.sh; source lib/utils.sh; source lib/system-detect.sh
+        echoContent() { :; }
+        eval "${SE_BLOCK}"
+        checkCentosSELinux
+        echo passed' _ "$1" 2>/dev/null
+}
+for _seEntry in doctor topo RenewTLS UpdateGeo CarpoolTick CarpoolCollect; do
+    assert_equals "passed" "$(run_se "${_seEntry}")" "SELinux Enforcing：${_seEntry} 放行"
+done
+assert_equals "" "$(run_se "")" "SELinux Enforcing：菜单照旧退出"
+assert_equals "" "$(run_se "--dry-run")" "SELinux Enforcing：别的入口照旧退出"
+rm -rf "${SE_STUB}"
+
 # --- 路由总览：采集器在 mock 树上跑。断言画出来的走向，也断言密钥进不了模型和页面 ---
 TP_FN_NAMES="topoInbounds topoDirectExit topoPlainExit topoRoutingPlain topoRoutingMulti topoRoutingEntry topoRouting topoCoreStart topoIssues topoCoresText topoCollect topoServe topoCommand chainRuleLabel getPresetDisplayName chainExternalSingleOnXray carpoolEnabled singBoxFragmentsHaveInbounds"
 TP_FNS=""

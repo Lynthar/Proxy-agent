@@ -158,7 +158,7 @@ v26.3.27——更新的版本拒绝官方 sing-box 客户端的 Reality 握手�
 会连不上，内核菜单里可以显式装最新版。其余都没有钉版本。伪装站素材是从 GitHub
 archive 取的 zip，没有校验——它是纯静态文件、不进执行链。
 
-**SELinux enforcing 下脚本会直接退出**并指向 `docs/selinux.md`，这是有意的。
+**SELinux enforcing 下菜单会直接退出**并指向 `docs/selinux.md`，这是有意的；`doctor`、`topo` 和定时任务（证书续期等）不受影响。
 
 发现安全问题请走 GitHub 的私密漏洞报告：仓库 Security 页的 Report a vulnerability，或直接打开
 <https://github.com/Lynthar/Proxy-agent/security/advisories/new>。敏感问题请不要发公开 issue。

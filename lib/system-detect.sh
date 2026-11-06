@@ -13,7 +13,7 @@ readonly _SYSTEM_DETECT_LOADED=1
 
 checkCentosSELinux() {
     if command -v getenforce >/dev/null 2>&1 && [[ "$(getenforce)" == "Enforcing" ]]; then
-        # PROXY_AGENT_SELINUX_NONFATAL=1（doctor 入口设置）时只放行不退出，
+        # PROXY_AGENT_SELINUX_NONFATAL=1（只读入口与定时任务设置）时只放行不退出，
         # 否则 doctor 永远到不了自己的 SELinux 诊断行
         if [[ -n "${PROXY_AGENT_SELINUX_NONFATAL:-}" ]]; then
             return 0

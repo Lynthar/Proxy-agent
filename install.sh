@@ -19700,10 +19700,13 @@ topoCommand() {
 
 _load_version
 initVar "${1:-}"
-# doctor 是只读诊断入口：SELinux Enforcing 正是它要报告的问题，不能在初始化期就退出
-if [[ "${1:-}" == "doctor" || "${1:-}" == "topo" ]]; then
-    PROXY_AGENT_SELINUX_NONFATAL=1
-fi
+# 只读入口、定时任务和服务停止钩子不能在初始化期就退出：doctor 要报告的正是 SELinux；定时任务退出的话，setenforce 0 装完、
+# 重启回到 Enforcing 的机器证书到期也续不上，停止钩子退出则丢用量。root 的 cron 跑在 unconfined_t，这些路径在 Enforcing 下真跑过、没有拒绝
+case "${1:-}" in
+    doctor | topo | RenewTLS | UpdateGeo | CarpoolTick | CarpoolCollect)
+        PROXY_AGENT_SELINUX_NONFATAL=1
+        ;;
+esac
 checkSystem
 checkCPUVendor
 
