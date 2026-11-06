@@ -1227,6 +1227,100 @@ echo ""
 
 # ============================================================================
 
+# ============================================================================
+# 路由总览：打码、账号行、收尾、渲染（lib/topo.sh）
+# ============================================================================
+echo ""
+echo -e "${YELLOW}=== lib/topo.sh ===${NC}"
+source lib/topo.sh
+
+assert_equals "203.x.x.x" "$(topoMaskHost 203.0.113.10)" "打码: IPv4 留首段"
+assert_equals "2001:x::" "$(topoMaskHost 2001:db8::1)" "打码: IPv6 留首组"
+assert_equals "*.com" "$(topoMaskHost n1.example.com)" "打码: 域名只留顶级域"
+assert_equals "" "$(topoMaskHost "")" "打码: 空地址还是空"
+
+_tpLabels='{"foreign":"未纳入计量","expire":"到 %s","disabled":"停用：%s","reasonQuota":"超额","reasonExpired":"到期","reasonManual":"手动"}'
+_tpIn='[{"id":0,"users":["alice","carol"]},{"id":7,"users":["alice"]},{"id":"chain","chain":true,"users":[]}]'
+_tpAcc=$(topoAccounts "${_tpIn}" null '{"alice":"a"}' "${_tpLabels}")
+assert_equals 'all|a|[0]|null' "$(jq -r '"\(.[0].protocols)|\(.[0].exit)|\(.[1].protocols | tojson)|\(.[1].exit)"' <<<"${_tpAcc}")" \
+    "账号行: 开了全部入站的算 all，链式入站不算；指定的出口带上，其余为 null"
+_tpState='{"billing":"both","members":{"alice":{"status":"active","upBytes":536870912,"downBytes":536870912,"quotaBytes":10737418240,"expire":"2026-12-01"},"bob":{"status":"disabled","reason":"quota","upBytes":1,"downBytes":1,"quotaBytes":1,"expire":""}}}'
+_tpAcc=$(topoAccounts "${_tpIn}" "${_tpState}" '{}' "${_tpLabels}")
+assert_equals '2 GiB|0.2|2 GiB / 10 GiB · 到 2026-12-01' "$(jq -r '.[0] | "\(.short)|\(.ratio)|\(.sub)"' <<<"${_tpAcc}")" \
+    "账号行: 用量走 carpoolUsage，both 口径 ×2，手算会少一半"
+assert_equals '未纳入计量|true' "$(jq -r '.[] | select(.name == "carol") | "\(.sub)|\(.warn)"' <<<"${_tpAcc}")" "账号行: 拼车开着时入站里有、成员表没有的标未纳入计量"
+assert_equals 'disabled|停用：超额' "$(jq -r '.[] | select(.name == "bob") | "\(.status)|\(.sub)"' <<<"${_tpAcc}")" "账号行: 停用的成员不在入站里也列出来"
+
+_tpFin='{"exits":[{"key":"a","rawHost":"198.51.100.20"},{"key":"w","host":"Cloudflare"}]}'
+assert_equals '198.x.x.x|Cloudflare|false' "$(topoFinalize "${_tpFin}" false | jq -r '"\(.exits[0].host)|\(.exits[1].host)|\(.exits[0] | has("rawHost"))"')" \
+    "收尾: 默认打码，不留原始地址；本来就不是地址的不动"
+assert_equals '198.51.100.20' "$(topoFinalize "${_tpFin}" true | jq -r '.exits[0].host')" "收尾: --full 显示全"
+
+_tpModel=$(jq -cn '{lang: "zh-CN", host: "h1", cores: "Xray 26.3.27", generated: "2026-11-06 14:03", maskNote: "已打码",
+    labels: {title: "路由总览", colInbound: "入站", colAccount: "账号", colExit: "出口", allProtocols: "全部协议 %s 个账号", followDefault: "跟随默认 %s 个账号",
+             pinned: "账号指定", pinnedN: "账号指定 %s 人", issuesTitle: "对不上", footnote: "说明"},
+    inbounds: [{id: 0, name: "VLESS+TCP[TLS_Vision]", sub: "tcp :443"}, {id: 7, name: "VLESS+Reality+Vision", sub: "tcp :2053"}],
+    accounts: [{name: "alice", status: "active", protocols: "all", exit: "a", sub: "1 GiB", short: "1 GiB", ratio: 0.1},
+               {name: "<img src=x>", status: "active", protocols: "all", exit: null, sub: "", short: "", ratio: null},
+               {name: "carol", status: "active", protocols: [7], exit: null, sub: "9 GiB", short: "9 GiB", ratio: 0.9, hot: true},
+               {name: "bob", status: "disabled", protocols: "all", exit: null, sub: "停用：超额", short: "停用：超额", ratio: null}],
+    exits: [{key: "direct", name: "直连", kind: "本机", host: "203.x.x.x", port: ""},
+            {key: "a", name: "节点 a", kind: "链式", host: "198.x.x.x", port: 50080, note: "下一跳是中继，共 2 跳"},
+            {key: "gone", name: "rocky", kind: "", host: "192.x.x.x", port: "", bad: true, note: "状态文件有，生效配置没有"}],
+    flows: [{exit: "a", when: "geosite:netflix"}, {exit: "direct", when: "其余（默认）"}],
+    inboundExits: [], issues: ["链路 rocky 没有出站配置"]}')
+_tpHtml=$(topoRenderHtml "${_tpModel}")
+assert_equals "0" "$?" "渲染: 退出码 0"
+cp_assert_contains "${_tpHtml}" "<!DOCTYPE html>" "渲染: 完整的 HTML"
+cp_assert_contains "${_tpHtml}" "VLESS+TCP[TLS_Vision]" "渲染: 入站写全称"
+cp_assert_contains "${_tpHtml}" "全部协议 2 个账号" "渲染: 全部协议的账号合成一束，不算只开部分协议的 carol 和停用的 bob"
+cp_assert_contains "${_tpHtml}" "跟随默认 2 个账号" "渲染: 跟随默认的账号合成一束，算上只开部分协议的 carol"
+cp_assert_contains "${_tpHtml}" "账号指定" "渲染: 指定出口的账号单独连线"
+cp_assert_contains "${_tpHtml}" "geosite:netflix" "渲染: 分流条件写在连线上"
+cp_assert_contains "${_tpHtml}" "下一跳是中继" "渲染: 下一跳是中继时注明"
+cp_assert_contains "${_tpHtml}" "198.x.x.x" "渲染: 出口节点标地址"
+cp_assert_contains "${_tpHtml}" ":50080" "渲染: 出口节点标端口"
+cp_assert_contains "${_tpHtml}" "链路 rocky 没有出站配置" "渲染: 不一致的列在最前"
+cp_assert_contains "${_tpHtml}" "node-bad" "渲染: 对不上的出口标红"
+cp_assert_contains "${_tpHtml}" "&lt;img src=x&gt;" "渲染: 模型里的文本经过转义"
+cp_assert_not_contains "${_tpHtml}" "<img" "渲染: 账号名不能变成标签"
+cp_assert_not_contains "${_tpHtml}" "<script" "渲染: 无脚本"
+cp_assert_not_contains "${_tpHtml}" "http" "渲染: 不加载外部资源"
+assert_equals "1" "$(grep -o 'edge e-sub' <<<"${_tpHtml}" | grep -c .)" "渲染: 只开部分协议的账号每个协议一根线，carol 只开一个"
+
+_tpMany=$(jq -c '.accounts = ([range(0; 20) | {name: "m\(.)", status: "active", protocols: "all", exit: null, sub: "1 GiB", short: "1 GiB", ratio: 0.1}])
+    | .exits = [.exits[0]] | .flows = [{exit: "direct", when: "全部"}] | .issues = []' <<<"${_tpModel}")
+_tpHtml=$(topoRenderHtml "${_tpMany}")
+cp_assert_contains "${_tpHtml}" "全部协议 20 个账号" "渲染: 20 个账号也只有一束，不是 20 根线"
+assert_equals "0" "$(grep -o 'edge e-sub' <<<"${_tpHtml}" | grep -c .)" "渲染: 没有例外就没有单独的线"
+cp_assert_not_contains "${_tpHtml}" 'class="issues"' "渲染: 没有不一致就不显示那一块"
+
+# 行为一致的账号只画一根线
+_tpTwo=$(jq -c '.accounts = [{name: "alice", status: "active", protocols: "all", exit: "a", sub: "", short: "", ratio: null},
+    {name: "ken", status: "active", protocols: "all", exit: "a", sub: "", short: "", ratio: null},
+    {name: "carol", status: "active", protocols: [0, 7], exit: null, sub: "", short: "", ratio: null},
+    {name: "peggy", status: "active", protocols: [0, 7], exit: null, sub: "", short: "", ratio: null},
+    {name: "dave", status: "active", protocols: "all", exit: null, sub: "", short: "", ratio: null}] | .issues = []' <<<"${_tpModel}")
+_tpHtml=$(topoRenderHtml "${_tpTwo}")
+cp_assert_contains "${_tpHtml}" "账号指定 2 人" "连线: 指定同一出口的两个账号合一束，线上写人数"
+assert_equals "1" "$(grep -o '账号指定' <<<"${_tpHtml}" | grep -c .)" "连线: 同一束只有一根线"
+assert_equals "2" "$(grep -o 'edge e-sub' <<<"${_tpHtml}" | grep -c .)" "连线: 协议集合相同的两个账号合一束，线数等于协议数（2），不是账号数 × 协议数（4）"
+_tpSame=$(jq -c '.flows = [{exit: "a", when: "全部"}] | .exits = [.exits[1]]
+    | .accounts = [{name: "alice", status: "active", protocols: "all", exit: "a", sub: "", short: "", ratio: null},
+                   {name: "dave", status: "active", protocols: "all", exit: null, sub: "", short: "", ratio: null}] | .issues = []' <<<"${_tpModel}")
+_tpHtml=$(topoRenderHtml "${_tpSame}")
+cp_assert_not_contains "${_tpHtml}" "账号指定" "连线: 默认只有一个去向、指定的又正好是它时行为一样，并进默认那束"
+cp_assert_contains "${_tpHtml}" "跟随默认 2 个账号" "连线: 两个账号算在同一束里"
+_tpOne=$(jq -c '.inbounds = [.inbounds[0]] | .flows = [{exit: "direct", when: "全部"}] | .exits = [.exits[0]]
+    | .accounts = [{name: "solo", status: "active", protocols: "all", exit: null, sub: "", short: "", ratio: null}] | .issues = []' <<<"${_tpModel}")
+assert_equals "0" "$(topoRenderHtml "${_tpOne}" | grep -o 'class="brace' | grep -c .)" "连线: 只有一个入站一个账号时不画大括号"
+
+_tpBare=$(jq -c '.accounts = [] | .inbounds = [{id: "chain", chain: true, name: "链式入站", sub: "tcp :50080"}] | .exits = [.exits[0]] | .flows = []
+    | .inboundExits = [{inbound: "chain", exit: "direct", when: "来自入口"}] | .issues = []' <<<"${_tpModel}")
+_tpHtml=$(topoRenderHtml "${_tpBare}")
+assert_equals "0" "$?" "渲染: 只当链式出口、没有账号的机器也能画"
+cp_assert_contains "${_tpHtml}" "来自入口" "渲染: 入站直接决定出口的线标出来"
+
 echo "=============================================="
 echo -e "${YELLOW}测试结果汇总${NC}"
 echo "=============================================="

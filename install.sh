@@ -55,7 +55,7 @@ fi
 # 旁路：PROXY_AGENT_NO_BOOTSTRAP / PROXY_AGENT_BOOTSTRAP_REF / PROXY_AGENT_BOOTSTRAP_MODE。
 _lib_health_ok=1
 if [[ -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" || "${BASH_SOURCE[0]}" != "$0" ]]; then
-    for _f in i18n constants utils json-utils system-detect protocol-registry carpool; do
+    for _f in i18n constants utils json-utils system-detect protocol-registry carpool topo; do
         if [[ ! -f "${_LIB_DIR}/${_f}.sh" ]] || ! bash -n "${_LIB_DIR}/${_f}.sh" 2>/dev/null; then
             _lib_health_ok=
             break
@@ -70,7 +70,7 @@ fi
 if [[ -z "${_lib_health_ok}" && -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
     # 删除可能残留的损坏文件，确保 bootstrap 后是干净状态（避免半新半旧混合）
     if [[ -d "${_LIB_DIR}" ]]; then
-        for _f in i18n constants utils json-utils system-detect protocol-registry carpool; do
+        for _f in i18n constants utils json-utils system-detect protocol-registry carpool topo; do
             if [[ -f "${_LIB_DIR}/${_f}.sh" ]] && ! bash -n "${_LIB_DIR}/${_f}.sh" 2>/dev/null; then
                 printf '\033[33m[bootstrap] 检测到损坏的 %s/%s.sh，将重新下载\033[0m\n' "${_LIB_DIR}" "${_f}" >&2
                 rm -f "${_LIB_DIR}/${_f}.sh"
@@ -84,7 +84,7 @@ if [[ -z "${_lib_health_ok}" && -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
         local apiUrl="https://api.github.com/repos/Lynthar/Proxy-agent/releases/latest"
         local libDst="${_LIB_FALLBACK_DIR}"
         local langDst="${_LANG_FALLBACK_DIR}"
-        local libFiles=(i18n.sh constants.sh utils.sh json-utils.sh system-detect.sh protocol-registry.sh carpool.sh)
+        local libFiles=(i18n.sh constants.sh utils.sh json-utils.sh system-detect.sh protocol-registry.sh carpool.sh topo.sh)
         local langFiles=(zh_CN.sh en_US.sh)
         local fetcher tmpDir
 
@@ -319,8 +319,8 @@ fi
 
 # 加载模块（如果存在）
 if [[ -d "${_LIB_DIR}" ]]; then
-    # 加载顺序不可换：i18n → constants → utils → json-utils → system-detect → protocol-registry → carpool
-    for _module in i18n constants utils json-utils system-detect protocol-registry carpool; do
+    # 加载顺序不可换：i18n → constants → utils → json-utils → system-detect → protocol-registry → carpool → topo
+    for _module in i18n constants utils json-utils system-detect protocol-registry carpool topo; do
         if [[ -f "${_LIB_DIR}/${_module}.sh" ]]; then
             # shellcheck source=/dev/null
             source "${_LIB_DIR}/${_module}.sh"
@@ -339,6 +339,7 @@ _required_lib_fns=(
     getProtocolInboundTag
     anyProtocolRequiresTLS
     carpoolJudge
+    topoRenderHtml
 )
 _missing_lib_fns=()
 for _fn in "${_required_lib_fns[@]}"; do
@@ -9808,7 +9809,7 @@ rollbackScript() {
         local failedModules=()
         if [[ -n "${stagedOk}" ]]; then
             echoContent yellow " ---> 下载模块文件..."
-            for module in i18n constants utils json-utils system-detect protocol-registry carpool; do
+            for module in i18n constants utils json-utils system-detect protocol-registry carpool topo; do
                 # 目标版本的 install.sh 没提到的模块是之后才加的（v1.4.1 及以前没有 carpool），那个 tag 下不存在，不下也不装
                 grep -qF -- "${module}.sh" "${stagingDir}/install.sh" || continue
                 if ! wget -q -O "${stagingDir}/lib/${module}.sh" "${rawBase}/${version}/lib/${module}.sh" ||
@@ -9849,7 +9850,7 @@ rollbackScript() {
         cp -f "${stagingDir}/install.sh" "${installDir}/install.sh.new" && mv -f "${installDir}/install.sh.new" "${installDir}/install.sh"
         chmod 700 "${installDir}/install.sh"
         mkdir -p "${installDir}/lib" "${installDir}/shell/lang"
-        for module in i18n constants utils json-utils system-detect protocol-registry carpool; do
+        for module in i18n constants utils json-utils system-detect protocol-registry carpool topo; do
             # 没下的模块删掉，与本地备份分支整目录替换的结果一致
             if [[ ! -f "${stagingDir}/lib/${module}.sh" ]]; then
                 rm -f "${installDir}/lib/${module}.sh"
@@ -10065,7 +10066,7 @@ updateV2RayAgent() {
     local failedLangs=()
     local _dst _tmp module langFile
 
-    for module in i18n constants utils json-utils system-detect protocol-registry carpool; do
+    for module in i18n constants utils json-utils system-detect protocol-registry carpool topo; do
         _dst="${installDir}/lib/${module}.sh"
         _tmp="${_dst}.new"
         if wget -q -O "${_tmp}" "${rawBase}/lib/${module}.sh" && bash -n "${_tmp}" 2>/dev/null; then
@@ -12218,7 +12219,7 @@ chainAccountBridges() {
 # 端口跟着链路不跟着排序：重载时两个内核先后重启，旧 sing-box 与新 Xray 端口对不上时只会连不上，不会进到别的出口。
 # 本机已有进程在听的端口也跳过：sing-box 绑不上是 exit 1，chainAccountSave 的回滚到不了
 chainAccountAssignPorts() {
-    jq -c --argjson base "${CHAIN_BRIDGE_PORT}" --argjson last "${CHAIN_BRIDGE_PORT_LAST}" \
+    jq -c --argjson base "${CHAIN_BRIDGE_PORT}" --argjson last "$((TOPO_PAGE_PORT - 1))" \
         --argjson busy "$(listeningPorts tcp | jq -sc .)" '
         if .mode != "multi_chain" then . else
             ([(.accounts // {})[] | select(. != "direct")] | unique) as $refs
@@ -18859,7 +18860,7 @@ _doctorCheckInstall() {
 
     local libDir mod libMissing=""
     libDir="${_LIB_DIR:-${PROXY_AGENT_DIR}/lib}"
-    for mod in i18n constants utils json-utils system-detect protocol-registry carpool; do
+    for mod in i18n constants utils json-utils system-detect protocol-registry carpool topo; do
         [[ -f "${libDir}/${mod}.sh" ]] || libMissing="${libMissing}${libMissing:+, }${mod}.sh"
     done
     if [[ -z "${libMissing}" ]]; then
@@ -19233,6 +19234,7 @@ menu() {
     echoContent yellow "21.切换语言 / Switch Language"
     echoContent yellow "22.$(t MENU_SCRIPT_VERSION)"
     echoContent yellow "23.$(t MENU_DOCTOR)"
+    echoContent yellow "24.$(t MENU_TOPO)"
     echoContent red "=============================================================="
     # dry-run 下不建目录树、不装 pasly 别名——mkdirTools/aliasInstall 都是真实写盘
     if ! isDryRun; then
@@ -19301,7 +19303,396 @@ menu() {
     23)
         doctor
         ;;
+    24)
+        topoCommand
+        ;;
     esac
+}
+
+# ============================================================================
+# 路由总览（pasly topo / 菜单 24）：只读。把生效配置采成模型交给 lib/topo.sh 渲染，不写配置、不重启服务
+# ============================================================================
+
+# topoInbounds → [{id, tag, name, sub, users}]：两个目录里带用户的入站。users 只留账号名，协议后缀去掉
+topoInbounds() {
+    local out='[]' pair dir core id file usersPath nameField network port sub users tag fallbackPort=
+    fallbackPort=$(jq -r '.inbounds[0].port // empty' "${XRAY_CONF_DIR}/$(getProtocolConfigFileName 0)" 2>/dev/null)
+    for pair in "${XRAY_CONF_DIR}/:1" "${SINGBOX_FRAGMENT_DIR}/:2"; do
+        dir=${pair%:*}
+        core=${pair##*:}
+        [[ -d "${dir}" ]] || continue
+        for id in $(scanInstalledProtocols "${dir}" | tr ',' ' '); do
+            file=$(getProtocolConfigPath "${id}" "${dir}") || continue
+            usersPath=$(getProtocolUsersPath "${core}" "${id}") || continue
+            nameField=$(getProtocolNameField "${core}" "${id}") || continue
+            network=$(getProtocolListenNetwork "${id}") || network=tcp
+            [[ "${network}" == "both" ]] && network="tcp/udp"
+            if [[ "${core}" == "2" && "${id}" == "11" ]]; then
+                port=$(grep 'listen' <"${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf" 2>/dev/null | awk 'NR == 1 { gsub(/;/, ""); print $2 }')
+            else
+                port=$(jq -r '[.inbounds[]? | select((.listen // "") | startswith("127.") | not) | (.port // .listen_port // empty)] | first // empty' "${file}" 2>/dev/null)
+            fi
+            if [[ -n "${port}" ]]; then
+                sub="${network} :${port}"
+            else
+                sub=$(t TOPO_SUB_FALLBACK "${network}" "${fallbackPort:-?}")
+            fi
+            [[ "${coreKind}" == "1" && "${core}" == "2" ]] && sub+=" · $(t TOPO_SUB_SIDECAR)"
+            users=$(jq -c --arg f "${nameField}" "(${usersPath} // []) | map(.[\$f] // empty | tostring | sub(\"-[^-]*\$\"; \"\")) | unique" "${file}" 2>/dev/null) || users='[]'
+            tag=$(jq -r '.inbounds[0].tag // ""' "${file}" 2>/dev/null)
+            out=$(jq -c --argjson id "${id}" --arg tag "${tag}" --arg name "$(getProtocolDisplayName "${id}")" --arg sub "${sub}" --argjson users "${users:-[]}" \
+                '. + [{id: $id, tag: $tag, name: $name, sub: $sub, users: $users}]' <<<"${out}") || return 1
+        done
+    done
+    printf '%s\n' "${out}"
+}
+
+# topoDirectExit → 本机直连的出口节点。rawHost 是原始地址，打码在 topoFinalize 统一做，这里不判断
+topoDirectExit() {
+    jq -cn --arg name "$(t TOPO_EXIT_DIRECT)" --arg kind "$(t TOPO_KIND_LOCAL)" --arg host "$(getPublicIP 2>/dev/null)" \
+        '{key: "direct", name: $name, kind: $kind, rawHost: $host, port: ""}'
+}
+
+# topoPlainExit TAG → 没接链式时，一个出站标签对应的出口节点
+topoPlainExit() {
+    case "$1" in
+        direct | z_direct_outbound) topoDirectExit ;;
+        IPv4_out) jq -cn --arg name "IPv4" --arg kind "$(t TOPO_KIND_LOCAL)" --arg host "$(getPublicIP 4 2>/dev/null)" '{key: "IPv4_out", name: $name, kind: $kind, rawHost: $host, port: ""}' ;;
+        IPv6_out) jq -cn --arg name "IPv6" --arg kind "$(t TOPO_KIND_LOCAL)" --arg host "$(getPublicIP 6 2>/dev/null)" '{key: "IPv6_out", name: $name, kind: $kind, rawHost: $host, port: ""}' ;;
+        wireguard_out_IPv4 | wireguard_endpoints_IPv4) jq -cn --arg key "$1" '{key: $key, name: "WARP IPv4", kind: "WireGuard", host: "Cloudflare", port: ""}' ;;
+        wireguard_out_IPv6 | wireguard_endpoints_IPv6) jq -cn --arg key "$1" '{key: $key, name: "WARP IPv6", kind: "WireGuard", host: "Cloudflare", port: ""}' ;;
+        *) jq -cn --arg key "$1" '{key: $key, name: $key, kind: "", host: "", port: ""}' ;;
+    esac
+}
+
+# topoRoutingPlain → 没接链式：出口是本机直连与分流工具加的出站，条件从生效配置读
+topoRoutingPlain() {
+    local dflt= candidate rules tag exits='[]' flows='[]' issues='[]' when
+    if [[ "${coreKind}" == "1" ]]; then
+        for candidate in z_direct_outbound IPv4_out IPv6_out wireguard_out_IPv4 wireguard_out_IPv6; do
+            if [[ -f "${XRAY_CONF_DIR}/${candidate}.json" ]]; then
+                dflt=${candidate}
+                break
+            fi
+        done
+        rules=$(jq -c '[.routing.rules[]? | select(.domain != null and (((.ruleTag // "") | startswith("local-block")) | not)) | {tag: .outboundTag, domain}]' "${XRAY_CONF_DIR}/09_routing.json" 2>/dev/null) || rules='[]'
+    else
+        dflt=$(jq -r '.route.final // .outbounds[0].tag // "direct"' "${SINGBOX_MERGED_CONFIG}" 2>/dev/null)
+        rules=$(jq -c '[.route.rules[]? | select(.outbound != null) | {tag: .outbound, domain: ([.domain, .domain_suffix, .domain_keyword, .rule_set] | map(select(. != null)) | flatten)} | select((.domain | length) > 0)]' "${SINGBOX_MERGED_CONFIG}" 2>/dev/null) || rules='[]'
+    fi
+    dflt=${dflt:-direct}
+    while IFS= read -r tag; do
+        [[ -n "${tag}" && "${tag}" != "${dflt}" ]] || continue
+        when=$(jq -r --arg t "${tag}" --arg more "$(t TOPO_FLOW_MORE)" '[.[] | select(.tag == $t) | .domain[]] as $d
+            | ($d[0] | sub("^domain:"; "")) + (if ($d | length) > 1 then ($more | sub("%s"; ($d | length | tostring))) else "" end)' <<<"${rules:-[]}")
+        exits=$(jq -c --argjson x "$(topoPlainExit "${tag}")" '. + [$x]' <<<"${exits}") || return 1
+        flows=$(jq -c --arg k "${tag}" --arg w "${when}" '. + [{exit: $k, when: $w}]' <<<"${flows}") || return 1
+        # 规则指向不存在的出站时 Xray 直接断连接，不走默认出站，这种机器要看得到
+        if [[ "${coreKind}" == "1" && ! -f "${XRAY_CONF_DIR}/${tag}.json" ]]; then
+            issues=$(jq -c --arg s "$(t TOPO_ISSUE_MISSING_OUTBOUND "${tag}")" '. + [$s]' <<<"${issues}")
+        fi
+    done < <(jq -r '.[].tag' <<<"${rules:-[]}" | awk '!seen[$0]++')
+    exits=$(jq -c --argjson x "$(topoPlainExit "${dflt}")" '[$x] + .' <<<"${exits}") || return 1
+    jq -cn --argjson exits "${exits}" --argjson flows "${flows}" --argjson issues "${issues}" --arg dflt "$(jq -r '.key' <<<"$(topoPlainExit "${dflt}")")" --arg w "$(t TOPO_FLOW_DEFAULT)" \
+        '{exits: $exits, flows: ($flows + [{exit: $dflt, when: $w}]), pins: {}, inboundExits: [], issues: $issues}'
+}
+
+# topoRoutingMulti → 多链路。只取画图要的字段：状态文件里 password 和 ip、port 并排，整块转储就把密钥写进页面了
+topoRoutingMulti() {
+    local state name file hops='{}' missing='[]' rules='[]' type value chain
+    state=$(jq -c '{chains: [.chains[]? | {name, ip, port, source, external_type}], rules: [.rules[]? | {type, value, chain}], default_chain, accounts: (.accounts // {})}' "${CHAIN_MULTI_INFO}") || return 1
+    while IFS= read -r name; do
+        [[ -n "${name}" ]] || continue
+        file="${SINGBOX_FRAGMENT_DIR}/chain_outbound_${name}.json"
+        if [[ -f "${file}" ]]; then
+            hops=$(jq -c --arg n "${name}" --argjson o "$(jq -c '{count: ([.outbounds[]?] | length), server: .outbounds[0].server, port: .outbounds[0].server_port}' "${file}" 2>/dev/null || echo '{}')" '. + {($n): $o}' <<<"${hops}")
+        else
+            missing=$(jq -c --arg n "${name}" '. + [$n]' <<<"${missing}")
+        fi
+    done < <(jq -r '.chains[].name' <<<"${state}")
+    while IFS=$'\t' read -r type value chain; do
+        [[ -n "${chain}" ]] || continue
+        rules=$(jq -c --arg c "${chain}" --arg w "$(chainRuleLabel "${type}" "${value}")" '. + [{exit: $c, when: $w}]' <<<"${rules}")
+    done < <(jq -r '.rules[] | [.type, (.value | tostring), .chain] | @tsv' <<<"${state}")
+    jq -c --argjson direct "$(topoDirectExit)" --argjson hops "${hops}" --argjson missing "${missing}" --argjson rules "${rules}" \
+        --arg chainKind "$(t TOPO_KIND_CHAIN)" --arg relayNote "$(t TOPO_NOTE_RELAYS)" --arg badNote "$(t TOPO_NOTE_NOT_APPLIED)" --arg badIssue "$(t TOPO_ISSUE_MISSING_CHAIN)" \
+        --arg badPin "$(t TOPO_ISSUE_PIN_MISSING)" --arg more "$(t TOPO_FLOW_MORE)" --arg w "$(t TOPO_FLOW_DEFAULT)" '
+        (.default_chain // "direct") as $dflt
+        | ([.chains[].name] + ["direct"]) as $known
+        | {
+            exits: ([$direct] + [.chains[] | . as $c
+                | ($hops[$c.name] // {}) as $h
+                | {key: .name, name: .name, kind: (if .source == "external" then (.external_type // "") else $chainKind end), rawHost: ($h.server // .ip), port: ($h.port // .port)}
+                  + (if ($missing | index($c.name)) != null then {bad: true, note: $badNote}
+                     elif ($h.count // 1) > 1 then {note: ($relayNote | sub("%s"; ($h.count | tostring)))} else {} end)]),
+            flows: (($rules | map(select(.exit != $dflt)) | group_by(.exit)
+                     | map(length as $c | {exit: .[0].exit, when: (.[0].when + (if $c > 1 then ($more | sub("%s"; ($c | tostring))) else "" end))}))
+                    + [{exit: $dflt, when: $w}]),
+            pins: .accounts,
+            inboundExits: [],
+            issues: (($missing | map(. as $n | $badIssue | sub("%s"; $n)))
+                     + ([.accounts | to_entries[] | .key as $k | .value as $v | select(($known | index($v)) == null) | ($badPin | sub("%s"; $k) | sub("%s"; $v))]))
+          }' <<<"${state}"
+}
+
+# topoRoutingEntry → 单链路、多跳、外部节点唯一出口。出口节点标这台机器真正连的下一跳，下一跳是中继时注明
+topoRoutingEntry() {
+    local state mode node selected='[]' exitObj issues='[]' dflt flows inboundExits='[]'
+    state=$(jq -c '{mode: (.mode // ""), exit_ip, exit_port, hops: [(.hops // [])[] | {ip, port}], default_chain, accounts: (.accounts // {}),
+        protocolRouting: (.protocol_routing.enabled == true), external_node_id, external_node_name}' "${CHAIN_ENTRY_INFO}") || return 1
+    mode=$(jq -r '.mode' <<<"${state}")
+    if [[ "${mode}" == "external_single" ]]; then
+        node=$(jq -c --arg id "$(jq -r '.external_node_id // ""' <<<"${state}")" 'first(.nodes[]? | select(.id == $id) | {type, server, server_port}) // {}' "${EXTERNAL_NODE_FILE}" 2>/dev/null) || node='{}'
+        exitObj=$(jq -cn --argjson n "${node:-{\}}" --arg name "$(jq -r '.external_node_name // ""' <<<"${state}")" '{key: "chain", name: $name, kind: ($n.type // ""), rawHost: ($n.server // ""), port: ($n.server_port // "")}')
+        if chainExternalSingleOnXray; then
+            issues=$(jq -cn --arg s "$(t TOPO_ISSUE_EXTERNAL_XRAY)" '[$s]')
+            jq -cn --argjson x "${exitObj}" --argjson d "$(topoDirectExit)" --argjson issues "${issues}" --arg w "$(t TOPO_FLOW_ALL)" \
+                '{exits: [$d, $x], flows: [{exit: "direct", when: $w}], pins: {}, inboundExits: [], issues: $issues}'
+            return 0
+        fi
+        jq -cn --argjson x "${exitObj}" --arg w "$(t TOPO_FLOW_ALL)" '{exits: [$x], flows: [{exit: "chain", when: $w}], pins: {}, inboundExits: [], issues: []}'
+        return 0
+    fi
+    exitObj=$(jq -c --arg name "$(t TOPO_EXIT_CHAIN)" --arg kind "$(t TOPO_KIND_CHAIN)" --arg relayNote "$(t TOPO_NOTE_RELAYS)" '
+        (if (.hops | length) > 0 then .hops[0] else {ip: .exit_ip, port: .exit_port} end) as $next
+        | {key: "chain", name: $name, kind: $kind, rawHost: ($next.ip // ""), port: ($next.port // "")}
+          + ((.hops | length) as $n | if $n > 1 then {note: ($relayNote | sub("%s"; ($n | tostring)))} else {} end)' <<<"${state}")
+    if [[ ! -f "${SINGBOX_FRAGMENT_DIR}/chain_outbound.json" ]]; then
+        exitObj=$(jq -c --arg note "$(t TOPO_NOTE_NOT_APPLIED)" '. + {bad: true, note: $note}' <<<"${exitObj}")
+        issues=$(jq -cn --arg s "$(t TOPO_ISSUE_MISSING_CHAIN chain_outbound)" '[$s]')
+    fi
+    dflt=$(jq -r 'if .default_chain == "direct" then "direct" else "chain" end' <<<"${state}")
+    flows=$(jq -cn --arg d "${dflt}" --arg w "$(t TOPO_FLOW_ALL)" '[{exit: $d, when: $w}]')
+    # 按协议分流：选中的入站走链路，其余走 route.final。Xray 经桥进来的流量不看这条，只有 sing-box 自己的入站才分
+    if [[ "$(jq -r '.protocolRouting' <<<"${state}")" == "true" ]]; then
+        selected=$(jq -c '[.route.rules[]? | select(.outbound == "chain_outbound" and .inbound != null) | .inbound[] | select(. != "chain_bridge_in")] | unique' "${SINGBOX_FRAGMENT_DIR}/chain_route.json" 2>/dev/null) || selected='[]'
+        inboundExits=$(jq -c --argjson sel "${selected}" --arg w "$(t TOPO_WHEN_PROTOCOL)" '[.[] | select(.tag as $t | $sel | index($t)) | {inbound: .id, exit: "chain", when: $w}]' <<<"$(topoInbounds)")
+        if [[ "${coreKind}" == "2" ]]; then
+            flows=$(jq -cn --arg w "$(t TOPO_FLOW_OTHER_PROTOCOLS)" '[{exit: "direct", when: $w}]')
+        fi
+    fi
+    jq -c --argjson x "${exitObj}" --argjson d "$(topoDirectExit)" --argjson flows "${flows}" --argjson ie "${inboundExits}" --argjson issues "${issues}" '
+        {exits: [$d, $x], flows: $flows, pins: (.accounts | map_values(if . == "chain_outbound" then "chain" else . end)), inboundExits: $ie, issues: $issues}' <<<"${state}"
+}
+
+# topoRouting → {exits, flows, pins, inboundExits, issues, extraInbounds}。本机当链式出口或中继时，多一个收别的机器流量的入站
+topoRouting() {
+    local base extra='{"extraInbounds":[],"extraExits":[],"inboundExits":[]}' port chainKind
+    if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
+        base=$(topoRoutingMulti) || return 1
+    elif [[ -f "${CHAIN_ENTRY_INFO}" ]]; then
+        base=$(topoRoutingEntry) || return 1
+    else
+        base=$(topoRoutingPlain) || return 1
+    fi
+    chainKind=$(t TOPO_KIND_CHAIN)
+    if [[ -f "${CHAIN_RELAY_INFO}" ]]; then
+        extra=$(jq -c --arg in "$(t TOPO_CHAIN_INBOUND)" --arg when "$(t TOPO_WHEN_FROM_ENTRY)" --arg name "$(t TOPO_EXIT_NEXT_HOP)" --arg kind "${chainKind}" --arg relayNote "$(t TOPO_NOTE_RELAYS)" '
+            ([(.downstream_hops // [])[] | {ip, port}]) as $hops
+            | {extraInbounds: [{id: "chain", chain: true, tag: "", name: $in, sub: "tcp :\(.port // "?")", users: []}],
+               extraExits: [{key: "next", name: $name, kind: $kind, rawHost: ($hops[0].ip // ""), port: ($hops[0].port // "")}
+                            + (if ($hops | length) > 1 then {note: ($relayNote | sub("%s"; ($hops | length | tostring)))} else {} end)],
+               inboundExits: [{inbound: "chain", exit: "next", when: $when}]}' "${CHAIN_RELAY_INFO}") || return 1
+    elif [[ -f "${CHAIN_EXIT_INFO}" ]]; then
+        port=$(jq -r '.port // "?"' "${CHAIN_EXIT_INFO}" 2>/dev/null)
+        extra=$(jq -cn --arg in "$(t TOPO_CHAIN_INBOUND)" --arg when "$(t TOPO_WHEN_FROM_ENTRY)" --arg sub "tcp :${port}" \
+            '{extraInbounds: [{id: "chain", chain: true, tag: "", name: $in, sub: $sub, users: []}], extraExits: [], inboundExits: [{inbound: "chain", exit: "direct", when: $when}]}')
+    fi
+    jq -c --argjson e "${extra}" --argjson d "$(topoDirectExit)" '
+        .extraInbounds = $e.extraInbounds
+        | .exits = (.exits + $e.extraExits)
+        | .inboundExits = (.inboundExits + $e.inboundExits)
+        | if ([.inboundExits[].exit] | index("direct")) != null and ([.exits[].key] | index("direct")) == null then .exits = [$d] + .exits else . end' <<<"${base}"
+}
+
+# topoCoreStart PID → 进程启动的 epoch 秒。/proc/PID 目录的 mtime 是 inode 建立的时间，不是进程启动时间，所以从 stat 算
+topoCoreStart() {
+    local ticks btime
+    ticks=$(sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | awk '{ print $20 }')
+    btime=$(awk '$1 == "btime" { print $2 }' /proc/stat 2>/dev/null)
+    [[ -n "${ticks}" && -n "${btime}" ]] && printf '%s\n' "$((btime + ticks / 100))"
+}
+
+# topoIssues → 生效配置和磁盘、状态文件对不上的地方（JSON 字符串数组）：内核没在跑、配置比进程新、members.json 还没应用
+topoIssues() {
+    local issues='[]' pid start newest state
+    if [[ "${coreKind}" == "1" ]]; then
+        pid=$(pgrep -f "${XRAY_BIN}" | head -n 1)
+        if [[ -z "${pid}" ]]; then
+            issues=$(jq -c --arg s "$(t TOPO_ISSUE_NOT_RUNNING Xray)" '. + [$s]' <<<"${issues}")
+        else
+            start=$(topoCoreStart "${pid}")
+            newest=$(stat -c %Y "${XRAY_CONF_DIR}"/*.json 2>/dev/null | sort -n | tail -n 1)
+            if [[ -n "${start}" && -n "${newest}" && "${newest}" -gt "$((start + 2))" ]]; then
+                issues=$(jq -c --arg s "$(t TOPO_ISSUE_STALE Xray)" '. + [$s]' <<<"${issues}")
+            fi
+        fi
+    fi
+    if [[ "${coreKind}" == "2" ]] || singBoxFragmentsHaveInbounds; then
+        pid=$(pgrep -x sing-box | head -n 1)
+        if [[ -z "${pid}" ]]; then
+            issues=$(jq -c --arg s "$(t TOPO_ISSUE_NOT_RUNNING sing-box)" '. + [$s]' <<<"${issues}")
+        else
+            start=$(topoCoreStart "${pid}")
+            newest=$(stat -c %Y "${SINGBOX_MERGED_CONFIG}" 2>/dev/null)
+            if [[ -n "${start}" && -n "${newest}" && "${newest}" -gt "$((start + 2))" ]]; then
+                issues=$(jq -c --arg s "$(t TOPO_ISSUE_STALE sing-box)" '. + [$s]' <<<"${issues}")
+            fi
+        fi
+    fi
+    if carpoolEnabled 2>/dev/null && [[ -f "${CARPOOL_MEMBERS_FILE}" ]]; then
+        state=$(carpoolReadState)
+        if ! jq -e --argjson s "${state}" '(.members // {} | keys) == ($s.members | keys)' "${CARPOOL_MEMBERS_FILE}" >/dev/null 2>&1; then
+            issues=$(jq -c --arg s "$(t TOPO_ISSUE_MEMBERS_PENDING)" '. + [$s]' <<<"${issues}")
+        fi
+    fi
+    printf '%s\n' "${issues}"
+}
+
+# topoCoresText → 页头的内核与版本
+topoCoresText() {
+    local xray sing
+    [[ "${coreKind}" == "1" ]] && xray="Xray $("${XRAY_BIN}" version 2>/dev/null | awk 'NR == 1 { print $2 }')"
+    if [[ -x "${SINGBOX_BIN}" ]] && { [[ "${coreKind}" == "2" ]] || singBoxFragmentsHaveInbounds; }; then
+        sing="sing-box $("${SINGBOX_BIN}" version 2>/dev/null | awk 'NR == 1 { print $NF }')"
+    fi
+    printf '%s\n' "${xray:-}${xray:+${sing:+ + }}${sing:-}"
+}
+
+# topoCollect FULL → 渲染用的模型。FULL 为 true 时出口地址不打码
+topoCollect() {
+    local full=$1 inbounds routing state='null' labels accounts issues lang=en maskNote hostName=
+    [[ "${CURRENT_LANG:-}" == "zh_CN" ]] && lang=zh-CN
+    inbounds=$(topoInbounds) || return 1
+    routing=$(topoRouting) || return 1
+    if carpoolEnabled 2>/dev/null; then
+        state=$(carpoolReadState) || state='null'
+    fi
+    labels=$(jq -cn --arg title "$(t TOPO_TITLE)" --arg colInbound "$(t TOPO_COL_INBOUND)" --arg colAccount "$(t TOPO_COL_ACCOUNT)" --arg colExit "$(t TOPO_COL_EXIT)" \
+        --arg allProtocols "$(t TOPO_ALL_PROTOCOLS)" --arg followDefault "$(t TOPO_FOLLOW_DEFAULT)" --arg pinned "$(t TOPO_PINNED)" --arg pinnedN "$(t TOPO_PINNED_N)" \
+        --arg issuesTitle "$(t TOPO_ISSUES_TITLE)" --arg footnote "$(t TOPO_FOOTNOTE)" --arg foreign "$(t TOPO_ACCOUNT_FOREIGN)" \
+        --arg expire "$(t TOPO_ACCOUNT_EXPIRE)" --arg disabled "$(t TOPO_ACCOUNT_DISABLED)" --arg reasonQuota "$(t TOPO_REASON_QUOTA)" --arg reasonExpired "$(t TOPO_REASON_EXPIRED)" --arg reasonManual "$(t TOPO_REASON_MANUAL)" \
+        '$ARGS.named')
+    accounts=$(topoAccounts "$(jq -c --argjson r "${routing}" '. + $r.extraInbounds' <<<"${inbounds}")" "${state}" "$(jq -c '.pins' <<<"${routing}")" "${labels}") || return 1
+    issues=$(topoIssues)
+    if [[ "${full}" == "true" ]]; then
+        maskNote=""
+        hostName=$(hostname 2>/dev/null)
+    else
+        maskNote=$(t TOPO_MASK_NOTE)
+    fi
+    topoFinalize "$(jq -cn --argjson in "${inbounds}" --argjson r "${routing}" --argjson acc "${accounts}" --argjson issues "${issues}" --argjson labels "${labels}" \
+        --arg lang "${lang}" --arg host "${hostName}" --arg cores "$(topoCoresText)" --arg generated "$(date '+%F %H:%M')" --arg maskNote "${maskNote}" --arg all "$(t TOPO_FLOW_ALL)" --arg dfltText "$(t TOPO_FLOW_DEFAULT)" '
+        {lang: $lang, host: $host, cores: $cores, generated: $generated, maskNote: $maskNote, labels: $labels,
+         inbounds: (($in + $r.extraInbounds) | map(del(.users, .tag))),
+         accounts: $acc, exits: $r.exits, inboundExits: $r.inboundExits,
+         flows: (if ($r.flows | length) == 1 and $r.flows[0].when == $dfltText then [$r.flows[0] + {when: $all}] else $r.flows end),
+         issues: ($r.issues + $issues)}')" "${full}"
+}
+
+# topoServe PAGE_FILE → 只在 127.0.0.1 上提供这一个页面，前台跑，回车或 Ctrl+C 就撤。不走 nginx：不用动线上配置和重载。
+# 端口在桥端口段里，两边内核早就按端口封了，成员写成解析到 127.0.0.1 的域名也连不到，开页面不用重启内核
+topoServe() {
+    local page=$1 dir=$2 handler pid sshPart
+    if listeningPorts tcp | grep -qx "${TOPO_PAGE_PORT}"; then
+        echoContent red " ---> $(t TOPO_PORT_BUSY "${TOPO_PAGE_PORT}")"
+        return 1
+    fi
+    handler="${dir}/handler.sh"
+    # Host 只认回环：防 DNS 重绑定，不然恶意网页能让车主的浏览器把这一页读走
+    cat <<'EOF' >"${handler}"
+page=$1
+port=$2
+IFS= read -r -t 5 request || exit 0
+host=
+while IFS= read -r -t 5 line; do
+    line=${line%$'\r'}
+    [[ -z "${line}" ]] && break
+    case "${line,,}" in
+        host:*) host=${line#*:}; host=${host# } ;;
+    esac
+done
+reply() { printf 'HTTP/1.0 %s\r\nContent-Length: 0\r\nConnection: close\r\n\r\n' "$1"; exit 0; }
+[[ "${host}" == "127.0.0.1:${port}" || "${host}" == "localhost:${port}" ]] || reply "403 Forbidden"
+[[ "${request}" == "GET / HTTP/"* ]] || reply "404 Not Found"
+printf 'HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %s\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src '"'"'none'"'"'; style-src '"'"'unsafe-inline'"'"'; base-uri '"'"'none'"'"'; form-action '"'"'none'"'"'; frame-ancestors '"'"'none'"'"'\r\nConnection: close\r\n\r\n' "$(wc -c <"${page}")"
+cat "${page}"
+EOF
+    socat "TCP-LISTEN:${TOPO_PAGE_PORT},bind=127.0.0.1,reuseaddr,fork" "EXEC:bash ${handler} ${page} ${TOPO_PAGE_PORT}" 2>/dev/null &
+    pid=$!
+    trap 'kill "${pid}" 2>/dev/null; rm -rf "${dir}"; trap - INT TERM; echo; exit 0' INT TERM
+    sleep 0.5
+    if ! kill -0 "${pid}" 2>/dev/null; then
+        echoContent red " ---> $(t TOPO_SERVE_FAILED "${TOPO_PAGE_PORT}")"
+        trap - INT TERM
+        return 1
+    fi
+    # SSH_CONNECTION 是这次登录真实用的地址和端口，照着抄就能连上
+    if [[ -n "${SSH_CONNECTION:-}" ]]; then
+        sshPart="-p $(awk '{ print $4 }' <<<"${SSH_CONNECTION}") $(id -un)@$(awk '{ print $3 }' <<<"${SSH_CONNECTION}")"
+    else
+        sshPart="root@<server>"
+    fi
+    echoContent green "\n ---> $(t TOPO_SERVE_READY)"
+    echoContent yellow "  1. $(t TOPO_SERVE_STEP_TUNNEL)"
+    echoContent skyBlue "     ssh -N -L ${TOPO_PAGE_PORT}:127.0.0.1:${TOPO_PAGE_PORT} ${sshPart}"
+    echoContent yellow "  2. $(t TOPO_SERVE_STEP_OPEN)"
+    echoContent skyBlue "     http://127.0.0.1:${TOPO_PAGE_PORT}/"
+    read -r -p "$(t TOPO_SERVE_WAIT)" _ || true
+    kill "${pid}" 2>/dev/null
+    wait "${pid}" 2>/dev/null
+    trap - INT TERM
+    return 0
+}
+
+# topoCommand [--full] [--out FILE] → 生成路由总览。给了 FILE 就写文件，否则开一个只听回环的页面等隧道连。页面只读
+topoCommand() {
+    local full=false out= model html dir
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --full) full=true ;;
+            --out)
+                out=${2:-}
+                [[ -n "${out}" ]] || { echoContent red " ---> $(t TOPO_USAGE)"; return 1; }
+                shift
+                ;;
+            *)
+                echoContent red " ---> $(t TOPO_USAGE)"
+                return 1
+                ;;
+        esac
+        shift
+    done
+    readInstallType
+    if [[ -z "${coreKind}" ]]; then
+        echoContent red " ---> $(t TOPO_NOT_INSTALLED)"
+        return 1
+    fi
+    if ! model=$(topoCollect "${full}") || ! html=$(topoRenderHtml "${model}") || [[ -z "${html}" ]]; then
+        echoContent red " ---> $(t TOPO_RENDER_FAILED)"
+        return 1
+    fi
+    if [[ -n "${out}" ]]; then
+        # 这些目录都被 nginx 对外提供，写进去就是公网可取
+        case "$(cd "$(dirname "${out}")" 2>/dev/null && pwd)/" in
+            "${SUBSCRIBE_DIR%/}/"* | "${nginxStaticPath%/}/"*)
+                echoContent red " ---> $(t TOPO_OUT_PUBLIC_DIR "${out}")"
+                return 1
+                ;;
+        esac
+        if ! (umask 077 && printf '%s\n' "${html}" >"${out}") || ! chmod 600 "${out}"; then
+            echoContent red " ---> $(t TOPO_OUT_WRITE_FAILED "${out}")"
+            return 1
+        fi
+        echoContent green " ---> $(t TOPO_OUT_DONE "${out}")"
+        return 0
+    fi
+    dir=$(mktemp -d) || return 1
+    printf '%s\n' "${html}" >"${dir}/index.html"
+    topoServe "${dir}/index.html" "${dir}"
+    local rc=$?
+    rm -rf "${dir}"
+    return "${rc}"
 }
 
 # source 提供函数和布局常量；调用方在独立 Bash 子进程里显式 initVar 并设置生成参数。
@@ -19310,7 +19701,7 @@ menu() {
 _load_version
 initVar "${1:-}"
 # doctor 是只读诊断入口：SELinux Enforcing 正是它要报告的问题，不能在初始化期就退出
-if [[ "${1:-}" == "doctor" ]]; then
+if [[ "${1:-}" == "doctor" || "${1:-}" == "topo" ]]; then
     PROXY_AGENT_SELINUX_NONFATAL=1
 fi
 checkSystem
@@ -19334,6 +19725,13 @@ case "${1:-}" in
     CarpoolCollect)
         carpoolCollectBeforeStop
         exit 0
+        ;;
+    # 只读，要读 600 的配置，所以要 root；开着页面时不走菜单，也不查更新
+    topo)
+        checkRoot
+        shift
+        topoCommand "$@"
+        exit $?
         ;;
     --dry-run|-n)
         export DRY_RUN=1

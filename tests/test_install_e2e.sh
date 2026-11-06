@@ -376,7 +376,9 @@ if ip addr add "${selfAddr}/32" dev lo 2>/dev/null; then
     socat "TCP-LISTEN:18081,bind=${selfAddr},fork,reuseaddr" EXEC:"cat /tmp/proxy-agent-e2e-self.http" &
     selfListener=$!
     sleep 0.5
-    assert_equals "200" "$(viaProxyCode "http://${selfAddr}:18081/")" "对照：核心启动时 ${selfAddr} 还不在网卡上，经代理连得到"
+    selfControl=$(viaProxyCode "http://${selfAddr}:18081/")
+    [[ "${selfControl}" == "200" ]] || cat /tmp/proxy-agent-e2e-client.log
+    assert_equals "200" "${selfControl}" "对照：核心启动时 ${selfAddr} 还不在网卡上，经代理连得到"
     if [[ "${E2E_CORE}" == "xray" ]]; then
         printf '16\n1\n6\n' | V2RAY_LANG=en pasly >/dev/null 2>&1
         selfBlocked=$(jq --arg a "${selfAddr}" '.routing.rules[] | select(.ruleTag == "local-block-ip") | .ip | index($a) != null' "${XRAY_CONF_DIR}/09_routing.json" 2>/dev/null)
@@ -433,15 +435,69 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
         "$(crontab -l 2>/dev/null | grep -F 'install.sh UpdateGeo')" "crontab 里的 UpdateGeo 行带安装根前缀"
 fi
 
-# ============================================================================
-# 拼车（只有 Xray 内核能开）：菜单 7 → 6 → 4 开启，真实流量要被 cron 那条 tick 记进成员名下；增删成员、回滚不倒回用量，再到期停用、关闭时恢复
-# ============================================================================
-
 # listenAddrs PORT → 该 TCP 端口上 LISTEN 的本地地址（/proc/net/tcp{,6} 的十六进制形式），每行一个
 listenAddrs() {
     awk -v p=":$(printf '%04X' "$1")" '$4 == "0A" && substr($2, length($2) - 4) == p { split($2, a, ":"); print a[1] }' \
         /proc/net/tcp /proc/net/tcp6 2>/dev/null
 }
+
+# ============================================================================
+# 路由总览：写文件与只听回环的页面两条路。页面只读，密钥、UUID、分享链接都不能进去
+# ============================================================================
+
+echo ""
+echo -e "${YELLOW}=== pasly topo：路由总览 ===${NC}"
+topoFile=/tmp/proxy-agent-e2e-topo.html
+topoOut=$(V2RAY_LANG=en pasly topo --out "${topoFile}" 2>&1)
+topoRc=$?
+[[ ${topoRc} -ne 0 ]] && echo "${topoOut}"
+assert_equals "0" "${topoRc}" "pasly topo --out 退出码 0"
+assert_equals "600" "$(stat -c %a "${topoFile}" 2>/dev/null)" "页面文件只有 root 可读"
+topoHtml=$(cat "${topoFile}" 2>/dev/null)
+assert_contains "${topoHtml}" "VLESS+Reality+Vision" "页面写入站全称"
+assert_contains "${topoHtml}" ">${E2E_USER}<" "页面列出账号"
+assert_contains "${topoHtml}" ".x.x.x" "出口地址默认打码"
+assert_equals "no" "$([[ "${topoHtml}" == *'class="issues"'* ]] && echo yes || echo no)" "刚装好：和状态、磁盘都对得上，不报不一致"
+assert_equals "0" "$(grep -c "${E2E_UUID}\|vless://\|<script" "${topoFile}")" "页面里没有 UUID、分享链接、脚本"
+V2RAY_LANG=en pasly topo --full --out "${topoFile}" >/dev/null 2>&1
+topoFull=$(cat "${topoFile}" 2>/dev/null)
+assert_equals "no|yes" "$([[ "${topoFull}" == *".x.x.x"* ]] && echo yes || echo no)|$([[ "${topoFull}" =~ [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ ]] && echo yes || echo no)" "--full 才显示完整地址"
+assert_equals "0" "$(grep -c "${E2E_UUID}" "${topoFile}")" "--full 的页面里也没有 UUID"
+assert_contains "$(V2RAY_LANG=en pasly topo --out "${INSTALL_ROOT}/subscribe/topo.html" 2>&1; echo "rc=$?")" "rc=1" "拒绝写进 nginx 对外的订阅目录"
+
+# 页面：前台跑，只听回环。关掉 fifo 的写端相当于按回车，看退出后端口是否撤掉
+topoFifo=/tmp/proxy-agent-e2e-topo.fifo
+mkfifo "${topoFifo}"
+V2RAY_LANG=en pasly topo <"${topoFifo}" >/tmp/proxy-agent-e2e-topo.log 2>&1 &
+topoPid=$!
+exec 9>"${topoFifo}"
+# 等提示打印出来才算开好：端口一开脚本还要确认 socat 活着，这时读日志会读到空
+for _ in $(seq 1 40); do
+    grep -q 'ssh -N -L' /tmp/proxy-agent-e2e-topo.log 2>/dev/null && break
+    sleep 0.5
+done
+assert_equals "0100007F" "$(listenAddrs 31210)" "页面只听 127.0.0.1，公网连不到"
+assert_contains "$(sed 's/\x1b\[[0-9;]*m//g' /tmp/proxy-agent-e2e-topo.log)" "ssh -N -L 31210:127.0.0.1:31210" "终端打印开隧道的命令"
+assert_equals "200" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:31210/)" "经回环打得开"
+assert_equals "200" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://localhost:31210/)" "localhost 也打得开"
+assert_equals "403" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H 'Host: evil.example' http://127.0.0.1:31210/)" "别的 Host 一律拒绝（防 DNS 重绑定）"
+assert_equals "404" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:31210/x)" "只有这一个页面"
+topoHeaders=$(curl -s -D - -o /dev/null --max-time 5 http://127.0.0.1:31210/)
+assert_contains "${topoHeaders}" "Cache-Control: no-store" "页面不缓存"
+assert_contains "${topoHeaders}" "default-src 'none'" "页面的 CSP 不许加载任何外部资源"
+assert_contains "$(curl -s --max-time 5 http://127.0.0.1:31210/)" "<svg" "取到的是页面本身"
+for topoTarget in 127.0.0.1 localtest.me; do
+    assert_equals "000" "$(viaProxyCode "http://${topoTarget}:31210/")" "代理用户连不到页面（${topoTarget}:31210，桥端口段按端口封）"
+done
+exec 9>&-
+wait "${topoPid}"
+assert_equals "0" "$?" "关闭页面退出码 0"
+assert_equals "" "$(listenAddrs 31210)" "关掉之后端口撤掉"
+assert_equals "" "$(pgrep -f 'TCP-LISTEN:31210' || true)" "关掉之后 socat 不留"
+
+# ============================================================================
+# 拼车（只有 Xray 内核能开）：菜单 7 → 6 → 4 开启，真实流量要被 cron 那条 tick 记进成员名下；增删成员、回滚不倒回用量，再到期停用、关闭时恢复
+# ============================================================================
 
 # runCarpoolTick CRON_LINE [AT] → 把 crontab 那一行原样执行一次，打印它这次追加进日志的内容，返回它的退出码。
 # 环境照 Debian cron 交给任务的给（实测 PATH=/usr/bin:/bin）；Alpine 的 crond 继承 OpenRC，比这宽。
@@ -710,6 +766,17 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
         assert_contains "$(V2RAY_LANG=en pasly </dev/null 2>&1 | sed 's/\x1b\[[0-9;]*m//g')" "Core: Xray-core [Running]" \
             "多了 sing-box 桥之后内核仍认作 Xray（拼车只在 Xray 上计量）"
         assert_equals "204" "$(realityProbe)" "接上链式后客户端经入口 → 出口访问外网"
+        # 路由总览：接上链式之后出口要画出来。配置码的密钥和出口地址并排放在状态文件里，打码和选字段都要真生效
+        chainKeyPlain=$(sed -E 's/.*[?&]key=([^&]*).*/\1/' <<<"${E2E_CHAIN_CODE}" | base64 -d 2>/dev/null)
+        chainHostPlain=${E2E_CHAIN_CODE#*@}
+        chainHostPlain=${chainHostPlain%%:*}
+        V2RAY_LANG=en pasly topo --out "${topoFile}" >/dev/null 2>&1
+        assert_equals "no" "$(grep -qF "${chainHostPlain}" "${topoFile}" && echo yes || echo no)" "路由总览（链式）：默认看不到出口地址 ${chainHostPlain}"
+        assert_not_empty "${chainKeyPlain}" "从配置码取到出口的密钥"
+        assert_equals "no" "$(grep -qF "${chainKeyPlain}" "${topoFile}" && echo yes || echo no)" "路由总览（链式）：页面里没有出口的密钥"
+        V2RAY_LANG=en pasly topo --full --out "${topoFile}" >/dev/null 2>&1
+        assert_equals "yes" "$(grep -qF "${chainHostPlain}" "${topoFile}" && echo yes || echo no)" "路由总览（链式）：--full 显示出口地址"
+        assert_equals "no" "$(grep -qF "${chainKeyPlain}" "${topoFile}" && echo yes || echo no)" "路由总览（链式）：--full 的页面里也没有密钥"
     fi
 
     # Vision 下行走 splice 时要到连接关闭才计数，传输中只看得到握手那几十 KB；关掉 splice 后边传边记

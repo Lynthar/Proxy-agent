@@ -78,10 +78,11 @@ Description: Multi-Protocol Proxy Script
 For historical reasons, 10, 13, 14 and 15 are gaps left by removed or hidden
 entries.
 
-Three subcommands run and exit without entering the menu:
+Four subcommands run and exit without entering the menu:
 
 ```bash
 pasly doctor       # read-only diagnostics; this one doesn't need root
+pasly topo         # read-only routing overview: inbounds, accounts and exits on one page
 pasly --dry-run    # plan mode: install / uninstall / chaining print, never run (same as -n)
 V2RAY_LANG=en pasly
 ```

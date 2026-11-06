@@ -4929,6 +4929,157 @@ assert_contains "${tuicClash}" 'sni: ${currentHost}' "Clash 的 TUIC 节点 SNI 
 # 测试结果汇总
 # ============================================================================
 
+# --- 路由总览：采集器在 mock 树上跑。断言画出来的走向，也断言密钥进不了模型和页面 ---
+TP_FN_NAMES="topoInbounds topoDirectExit topoPlainExit topoRoutingPlain topoRoutingMulti topoRoutingEntry topoRouting topoCoreStart topoIssues topoCoresText topoCollect topoServe topoCommand chainRuleLabel getPresetDisplayName chainExternalSingleOnXray carpoolEnabled singBoxFragmentsHaveInbounds"
+TP_FNS=""
+for _tpName in ${TP_FN_NAMES}; do
+    TP_FNS+=$(sed -n "/^${_tpName}() {/,/^}/p" install.sh)$'\n'
+done
+TP_ROOT="${MOCK_ROOT}/topo.root"
+TP_X="${TP_ROOT}/xray/conf"
+TP_F="${TP_ROOT}/sing-box/conf/config"
+TP_C="${TP_ROOT}/sing-box/conf"
+# run_tp CODE → 装在 TP_ROOT、内核为 TP_CORE（默认 1）时跑 CODE。getPublicIP、pgrep 桩掉：不打外网；pgrep 答这个刚起的子进程，
+# 所以 mock 文件都比它旧，TP_PID 置空就是内核没在跑
+run_tp() (
+    env PROXY_AGENT_DIR="${TP_ROOT}" TP_FNS="${TP_FNS}" TP_CORE="${TP_CORE-1}" TP_PID="${TP_PID-1}" V2RAY_LANG=zh_CN bash -c '
+        source lib/i18n.sh; source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh; source lib/carpool.sh; source lib/topo.sh
+        eval "${TP_FNS}"
+        getPublicIP() { if [[ "${1:-}" == 6 ]]; then echo 2001:db8::10; else echo 203.0.113.10; fi; }
+        pgrep() { [[ -n "${TP_PID}" ]] && echo "$$"; }
+        readInstallType() { coreKind=${TP_CORE}; }
+        coreKind=${TP_CORE}; nginxConfigPath=/nonexistent/; nginxStaticPath=/nonexistent/static/
+        eval "$1"' _ "$1"
+)
+tp_reset() {
+    rm -rf "${TP_ROOT}" && mkdir -p "${TP_X}" "${TP_F}"
+    jq -n '{inbounds: [{port: 443, protocol: "vless", settings: {clients: [{id: "uuid-secret-1", email: "alice-VLESS_TCP"}, {id: "uuid-secret-2", email: "carol-VLESS_TCP"}]}}]}' >"${TP_X}/02_VLESS_TCP_inbounds.json"
+    jq -n '{inbounds: [{port: 2053, protocol: "dokodemo-door", tag: "dokodemo-in-VLESSReality"}, {port: 45987, listen: "127.0.0.1", settings: {clients: [{id: "uuid-secret-1", email: "alice-VLESS_Reality_Vision"}]}}]}' >"${TP_X}/07_VLESS_vision_reality_inbounds.json"
+    printf '%s\n' '{"outbounds":[{"tag":"z_direct_outbound","protocol":"freedom"}]}' >"${TP_X}/z_direct_outbound.json"
+    jq -n '{routing: {rules: [{ruleTag: "local-block-ip", ip: ["127.0.0.0/8"], outboundTag: "local_block"}, {domain: ["domain:gstatic.com"], outboundTag: "z_direct_outbound"}]}}' >"${TP_X}/09_routing.json"
+}
+tp_model() { run_tp "topoCollect ${1:-false}" 2>/dev/null; }
+
+# 没接链式：入站全称、账号的协议集合、默认走直连
+tp_reset
+_tp=$(tp_model)
+assert_equals 'VLESS+TCP[TLS_Vision]|tcp :443|VLESS+Reality+Vision|tcp :2053' "$(jq -r '.inbounds | "\(.[0].name)|\(.[0].sub)|\(.[1].name)|\(.[1].sub)"' <<<"${_tp}")" \
+    "路由总览：入站写全称，Reality 的端口取对外的那个，不取回环上的"
+assert_equals 'all|[0]' "$(jq -r '.accounts[] | select(.name == "alice") | .protocols' <<<"${_tp}")|$(jq -c '.accounts[] | select(.name == "carol") | .protocols' <<<"${_tp}")" \
+    "路由总览：alice 开了全部协议，carol 只开一个"
+assert_equals 'direct|全部|203.x.x.x' "$(jq -r '"\(.flows[0].exit)|\(.flows[0].when)|\(.exits[0].host)"' <<<"${_tp}")" \
+    "路由总览：没接链式、没有分流时全走直连，本机地址默认也打码；指向默认出口的 gstatic 不算一条分流"
+assert_equals "0" "$(grep -c 'uuid-secret\|rawHost\|203.0.113.10' <<<"${_tp}")" "路由总览：模型里没有 UUID，也没有未打码的地址"
+assert_contains "$(tp_model true)" "203.0.113.10" "路由总览：--full 才显示本机地址"
+assert_equals "" "$(jq -r '.host' <<<"${_tp}")" "路由总览：默认不写主机名，截图和地址打码一样认不出机器"
+assert_not_empty "$(tp_model true | jq -r '.host')" "路由总览：--full 才写主机名"
+
+# 分流工具：条件写在连线上；规则指向不存在的出站要报出来（Xray 会直接断连接）
+jq '.routing.rules += [{domain: ["geosite:netflix", "domain:example.org"], outboundTag: "IPv6_out"}, {domain: ["a.example"], outboundTag: "gone_out"}]' "${TP_X}/09_routing.json" >"${TP_X}/r.tmp" && mv "${TP_X}/r.tmp" "${TP_X}/09_routing.json"
+printf '%s\n' '{"outbounds":[{"tag":"IPv6_out","protocol":"freedom"}]}' >"${TP_X}/IPv6_out.json"
+_tp=$(tp_model)
+assert_equals 'IPv6_out|geosite:netflix 等 2 项' "$(jq -r '.flows[] | select(.exit == "IPv6_out") | "\(.exit)|\(.when)"' <<<"${_tp}")" "路由总览：分流条件写在线上"
+assert_equals 'direct|其余（默认）' "$(jq -r '.flows[-1] | "\(.exit)|\(.when)"' <<<"${_tp}")" "路由总览：有分流时默认那条写成其余"
+assert_contains "$(jq -r '.issues[]' <<<"${_tp}")" "gone_out" "路由总览：规则指向不存在的出站要报出来"
+
+# 多链路：密钥和 ip、port 并排放在状态文件里，只能取需要的字段；出口标下一跳，下一跳是中继时注明，出站配置缺失的标红
+tp_reset
+jq -n '{mode: "multi_chain", default_chain: "a", accounts: {alice: "b", zed: "nosuch"},
+    rules: [{type: "custom", value: "x.example", chain: "b"}, {type: "ip_cidr", value: "1.2.3.0/24", chain: "b"}, {type: "custom", value: "y.example", chain: "a"}],
+    chains: [{name: "a", ip: "198.51.100.20", port: 50080, method: "m", password: "pw-secret-a"}, {name: "b", ip: "198.51.100.30", port: 44074, method: "m", password: "pw-secret-b"},
+             {name: "c", ip: "198.51.100.40", port: 1, method: "m", password: "pw-secret-c"}]}' >"${TP_C}/chain_multi_info.json"
+printf '%s\n' '{"outbounds":[{"tag":"a","server":"198.51.100.20","server_port":50080,"password":"pw-secret-a"}]}' >"${TP_F}/chain_outbound_a.json"
+printf '%s\n' '{"outbounds":[{"tag":"b-hop-1","server":"192.0.2.1","server_port":40000,"password":"pw-secret-r"},{"tag":"b","server":"198.51.100.30","server_port":44074,"password":"pw-secret-b"}]}' >"${TP_F}/chain_outbound_b.json"
+_tp=$(tp_model)
+assert_equals '198.x.x.x:50080|192.x.x.x:40000|下一跳是中继，共 2 跳' "$(jq -r '[.exits[] | select(.key == "a" or .key == "b")] | "\(.[0].host):\(.[0].port)|\(.[1].host):\(.[1].port)|\(.[1].note)"' <<<"${_tp}")" \
+    "路由总览（多链路）：出口标下一跳的地址和端口，不标最终出口；下一跳是中继时注明"
+assert_equals 'b' "$(jq -r '.accounts[] | select(.name == "alice") | .exit' <<<"${_tp}")" "路由总览（多链路）：账号指定的出口带上"
+assert_equals 'b|自定义域名 等 2 项' "$(jq -r '.flows[0] | "\(.exit)|\(.when)"' <<<"${_tp}")" "路由总览（多链路）：同一条链路的规则合成一根线；指向默认链路的规则不重复画"
+assert_equals 'a|其余（默认）' "$(jq -r '.flows[-1] | "\(.exit)|\(.when)"' <<<"${_tp}")" "路由总览（多链路）：默认链路"
+assert_equals 'true' "$(jq -r '.exits[] | select(.key == "c") | .bad' <<<"${_tp}")" "路由总览（多链路）：状态里有、出站配置没有的链路标红"
+assert_contains "$(jq -r '.issues[]' <<<"${_tp}")" "账号 zed 指定的出口 nosuch 不存在" "路由总览（多链路）：指向不存在链路的账号要报出来"
+assert_equals "0" "$(grep -c 'pw-secret\|192.0.2.1' <<<"${_tp}")" "路由总览（多链路）：模型里没有密钥"
+assert_equals "0" "$(run_tp 'topoRenderHtml "$(topoCollect true)"' 2>/dev/null | grep -c 'pw-secret')" "路由总览（多链路）：--full 的页面里也没有密钥"
+
+# 单链路与多跳：中继给的配置码带全部跳，出口标第一跳
+tp_reset
+jq -n '{role: "entry", exit_ip: "198.51.100.20", exit_port: 50080, key: "pw-secret-a", accounts: {alice: "direct"}}' >"${TP_C}/chain_entry_info.json"
+printf '%s\n' '{"outbounds":[{"tag":"chain_outbound"}]}' >"${TP_F}/chain_outbound.json"
+_tp=$(tp_model)
+assert_equals 'chain|全部|direct|null' "$(jq -r '"\(.flows[0].exit)|\(.flows[0].when)|\(.accounts[] | select(.name == "alice") | .exit)|\(.exits[] | select(.key == "chain") | .note)"' <<<"${_tp}")" \
+    "路由总览（单链路）：默认走链路，指定直连的账号单独走，没有中继"
+jq -n '{role: "entry", mode: "multi_hop", hop_count: 2, hops: [{ip: "192.0.2.1", port: 1000, key: "pw-secret-r", method: "m"}, {ip: "198.51.100.20", port: 50080, key: "pw-secret-a", method: "m"}], default_chain: "direct"}' >"${TP_C}/chain_entry_info.json"
+_tp=$(tp_model true)
+assert_equals '192.0.2.1|1000|下一跳是中继，共 2 跳|direct' "$(jq -r '"\(.exits[] | select(.key == "chain") | "\(.host)|\(.port)|\(.note)")|\(.flows[0].exit)"' <<<"${_tp}")" \
+    "路由总览（多跳）：标第一跳的地址并注明是中继；默认直连时全走直连"
+assert_equals "0" "$(grep -c 'pw-secret' <<<"${_tp}")" "路由总览（多跳）：模型里没有密钥"
+rm -f "${TP_F}/chain_outbound.json"
+assert_equals 'true' "$(tp_model | jq -r '.exits[] | select(.key == "chain") | .bad')" "路由总览（单链路）：出站配置不在就标红"
+
+# 按协议分流（sing-box 内核）：入站决定出口，选中的单独连线，其余走 final
+tp_reset
+rm -f "${TP_X}"/*.json
+printf '%s\n' '{"outbounds":[{"tag":"chain_outbound"}]}' >"${TP_F}/chain_outbound.json"
+jq -n '{inbounds: [{listen_port: 443, tag: "VLESSReality", users: [{name: "alice-VLESS_Reality_Vision", uuid: "uuid-secret-1"}]}]}' >"${TP_F}/07_VLESS_vision_reality_inbounds.json"
+jq -n '{inbounds: [{listen_port: 2087, tag: "Hysteria2", users: [{name: "alice-Hysteria2", password: "pw-secret-h"}]}]}' >"${TP_F}/06_hysteria2_inbounds.json"
+jq -n '{route: {rules: [{inbound: ["Hysteria2"], outbound: "chain_outbound"}], final: "direct"}}' >"${TP_F}/chain_route.json"
+jq -n '{role: "entry", exit_ip: "198.51.100.20", exit_port: 50080, protocol_routing: {enabled: true, selection: "1", protocols: "Hysteria2"}}' >"${TP_C}/chain_entry_info.json"
+_tp=$(TP_CORE=2 tp_model)
+assert_equals '6|chain|按协议|direct|其余协议' "$(jq -r '"\(.inboundExits[0].inbound)|\(.inboundExits[0].exit)|\(.inboundExits[0].when)|\(.flows[0].exit)|\(.flows[0].when)"' <<<"${_tp}")" \
+    "路由总览（按协议分流）：选中的入站直接连到链路，其余协议走直连"
+assert_equals "0" "$(grep -c 'pw-secret\|uuid-secret' <<<"${_tp}")" "路由总览（sing-box）：模型里没有密码和 UUID"
+
+# 本机当链式出口或中继：多一个收别的机器流量的入站
+tp_reset
+jq -n '{role: "exit", ip: "203.0.113.10", port: 50080, key: "pw-secret-a"}' >"${TP_C}/chain_exit_info.json"
+_tp=$(tp_model)
+assert_equals 'chain|tcp :50080|direct|来自入口' "$(jq -r '"\(.inbounds[-1].id)|\(.inbounds[-1].sub)|\(.inboundExits[0].exit)|\(.inboundExits[0].when)"' <<<"${_tp}")" "路由总览（链式出口）：入口来的流量从本机出去"
+assert_equals 'all' "$(jq -r '.accounts[] | select(.name == "alice") | .protocols' <<<"${_tp}")" "路由总览（链式出口）：链式入站不算账号要开的协议"
+rm -f "${TP_C}/chain_exit_info.json"
+jq -n '{role: "relay", port: 40000, key: "pw-secret-a", downstream_hops: [{ip: "192.0.2.1", port: 1000, key: "pw-secret-r"}, {ip: "198.51.100.20", port: 50080, key: "pw-secret-b"}], total_hops: 3}' >"${TP_C}/chain_relay_info.json"
+_tp=$(tp_model true)
+assert_equals 'next|192.0.2.1|下一跳是中继，共 2 跳' "$(jq -r '.inboundExits[0].exit as $k | .exits[] | select(.key == $k) | "\(.key)|\(.host)|\(.note)"' <<<"${_tp}")" "路由总览（中继）：标下一跳的地址，后面还有中继时注明"
+assert_equals "0" "$(grep -c 'pw-secret' <<<"${_tp}")" "路由总览（中继）：模型里没有密钥"
+
+# 拼车与对不上的检查
+tp_reset
+mkdir -p "${TP_ROOT}/carpool"
+jq -n '{enabled: true, billing: "both", members: {alice: {status: "active", upBytes: 0, downBytes: 0, quotaBytes: 0, expire: ""}, bob: {status: "disabled", reason: "quota", upBytes: 0, downBytes: 0, quotaBytes: 1, expire: ""}}}' >"${TP_ROOT}/carpool/state.json"
+jq -n '{members: {alice: {}, bob: {}}}' >"${TP_ROOT}/carpool/members.json"
+_tp=$(tp_model)
+assert_equals 'disabled|未纳入计量' "$(jq -r '"\(.accounts[] | select(.name == "bob") | .status)|\(.accounts[] | select(.name == "carol") | .sub)"' <<<"${_tp}")" "路由总览（拼车）：停用的成员列出来，表外账号标未纳入计量"
+assert_equals "[]" "$(jq -c '.issues' <<<"${_tp}")" "路由总览（拼车）：内核在跑、成员表一致时不报对不上"
+jq -n '{members: {alice: {}, bob: {}, newbie: {}}}' >"${TP_ROOT}/carpool/members.json"
+assert_contains "$(tp_model | jq -r '.issues[]')" "members.json 改过还没应用" "路由总览（拼车）：成员表改了没应用要报出来"
+assert_contains "$(TP_PID="" tp_model | jq -r '.issues[]')" "Xray 没在运行" "路由总览：内核没在跑要报出来"
+if [[ -r /proc/self/stat ]]; then
+    touch -t 209901010000 "${TP_X}/09_routing.json"
+    assert_contains "$(tp_model | jq -r '.issues[]')" "Xray 的配置比进程新" "路由总览：配置比进程新要报出来"
+fi
+
+# 入口：写文件的权限、拒绝写进 nginx 对外的目录、参数错误、没装内核
+tp_reset
+_tpOut="${MOCK_ROOT}/topo.html"
+: >"${_tpOut}" && chmod 644 "${_tpOut}"
+run_tp "topoCommand --out ${_tpOut}" >/dev/null 2>&1
+assert_equals "0" "$?" "路由总览：--out 退出码 0"
+assert_contains "$(cat "${_tpOut}")" "<svg" "路由总览：--out 写出页面"
+if stat -c %a "${_tpOut}" >/dev/null 2>&1; then
+    assert_equals "600" "$(stat -c %a "${_tpOut}")" "路由总览：页面文件只有 root 可读，已有文件的权限也收紧"
+fi
+mkdir -p "${TP_ROOT}/subscribe"
+_tpSub=$(run_tp "topoCommand --out ${TP_ROOT}/subscribe/x.html; echo rc=\$?" 2>&1)
+assert_contains "${_tpSub}" "rc=1" "路由总览：拒绝写进订阅目录（nginx 对外提供）"
+assert_equals "no" "$([[ -e "${TP_ROOT}/subscribe/x.html" ]] && echo yes || echo no)" "路由总览：拒绝时文件没写出来"
+assert_contains "$(run_tp 'topoCommand --bogus; echo rc=$?' 2>&1)" "rc=1" "路由总览：不认识的参数返回 1"
+assert_contains "$(TP_CORE="" run_tp 'topoCommand; echo rc=$?' 2>&1)" "rc=1" "路由总览：没装内核返回 1"
+
+# 页面端口在桥端口段里，分桥端口时要让开：撞上的话开页面会占掉一条链路的桥
+_tpChains=$(jq -cn '{mode: "multi_chain", chains: [range(1; 99) | {name: "c\(.)", ip: "x", port: 1}], accounts: ([range(1; 99) | {key: "u\(.)", value: "c\(.)"}] | from_entries)}')
+printf '%s\n' "${_tpChains}" >"${MOCK_ROOT}/topo-chains.json"
+assert_equals "31209" "$(run_ca "chainAccountAssignPorts \"\$(cat ${MOCK_ROOT}/topo-chains.json)\"" 2>/dev/null | jq '[.chains[].bridge_port] | max')" "路由总览：桥端口分配让开页面端口 31210"
+assert_equals "31210" "$(bash -c 'source lib/constants.sh; echo "${TOPO_PAGE_PORT}"')" "路由总览：页面端口是被两边封住的桥端口段的最后一个"
+
 echo "=============================================="
 echo -e "${YELLOW}测试结果汇总${NC}"
 echo "=============================================="
