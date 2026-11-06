@@ -368,6 +368,29 @@ for localTarget in 127.0.0.1 '[::ffff:127.0.0.1]' 0.0.0.0; do
     assert_equals "000" "$(viaProxyCode --connect-to "${E2E_SNI}:443:${localTarget}:${linkPort}" "https://${E2E_SNI}/")" \
         "经代理连服务端本机 ${localTarget}:${linkPort} 被拦下"
 done
+# 本机网卡上的公网地址：经代理连它走 lo、绕过 INPUT 防火墙。挂地址要 NET_ADMIN，只有 Debian 腿有。
+# 规则在核心启动时才读网卡，所以先有一条经代理连得到的对照，重启之后才是被拦下，两种结果分得开
+selfAddr=198.51.100.7
+if ip addr add "${selfAddr}/32" dev lo 2>/dev/null; then
+    printf 'HTTP/1.0 200 OK\r\n\r\n' >/tmp/proxy-agent-e2e-self.http
+    socat "TCP-LISTEN:18081,bind=${selfAddr},fork,reuseaddr" EXEC:"cat /tmp/proxy-agent-e2e-self.http" &
+    selfListener=$!
+    sleep 0.5
+    assert_equals "200" "$(viaProxyCode "http://${selfAddr}:18081/")" "对照：核心启动时 ${selfAddr} 还不在网卡上，经代理连得到"
+    if [[ "${E2E_CORE}" == "xray" ]]; then
+        printf '16\n1\n6\n' | V2RAY_LANG=en pasly >/dev/null 2>&1
+        selfBlocked=$(jq --arg a "${selfAddr}" '.routing.rules[] | select(.ruleTag == "local-block-ip") | .ip | index($a) != null' "${XRAY_CONF_DIR}/09_routing.json" 2>/dev/null)
+    else
+        printf '16\n2\n4\n' | V2RAY_LANG=en pasly >/dev/null 2>&1
+        selfBlocked=$(jq --arg a "${selfAddr}" '[.route.rules[] | .ip_cidr // [] | index($a)] | any' "${INSTALL_ROOT}/sing-box/conf/config.json" 2>/dev/null)
+    fi
+    sleep 6
+    assert_equals "true" "${selfBlocked}" "重启后 ${selfAddr} 进了本机封锁的规则"
+    assert_equals "000" "$(viaProxyCode "http://${selfAddr}:18081/")" "经代理连本机网卡上的公网地址被拦下，靠防火墙挡外网的服务摸不到"
+    kill "${selfListener}" 2>/dev/null
+    wait "${selfListener}" 2>/dev/null
+    ip addr del "${selfAddr}/32" dev lo
+fi
 
 # ============================================================================
 # 重入：pasly 认得出已装状态，doctor 全绿

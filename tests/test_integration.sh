@@ -2626,7 +2626,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试按账号选出口 ===${NC}"
 
-CA_FN_NAMES="localBlockApiPort ensureXrayLocalBlock localBlockInject directOutboundInject chainAccountStateFile chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountCarry chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod setupExternalAsSingleExit chainExternalSingleOnXray generateExternalOutboundConfig getExternalNodeById initExternalNodeFile"
+CA_FN_NAMES="localBlockApiPort localGlobalAddrs ensureXrayLocalBlock localBlockInject directOutboundInject chainAccountStateFile chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountCarry chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod setupExternalAsSingleExit chainExternalSingleOnXray generateExternalOutboundConfig getExternalNodeById initExternalNodeFile"
 CA_FNS=$(sed -n "$(for _f in ${CA_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_equals "$(wc -w <<<"${CA_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CA_FNS}")" "按账号选出口：每个函数都抽到了"
 CA_ROOT="${MOCK_ROOT}/chainacct.root"
@@ -2640,9 +2640,10 @@ CA_MERGED="${MOCK_ROOT}/chainacct_merged.json"
 # run_ca CMD → 以 CA_ROOT 为安装根跑 CMD；合并与重载桩掉（调用记进 CA_CALLS，CA_MERGE_RC 让合并失败，
 # XRAY_TEST_FAIL=once 让装了的 xray 桩第一次 -test 不过，CA_LISTEN 是本机正在听的 TCP 端口）
 run_ca() (
-    env PROXY_AGENT_DIR="${CA_ROOT}" CA_FNS="${CA_FNS}" CA_CALLS="${CA_CALLS}" CA_MERGE_RC="${CA_MERGE_RC:-0}" XRAY_TEST_FAIL="${XRAY_TEST_FAIL:-}" CA_LISTEN="${CA_LISTEN:-}" V2RAY_LANG=zh_CN bash -c '
+    env PROXY_AGENT_DIR="${CA_ROOT}" CA_FNS="${CA_FNS}" CA_ADDRS="${CA_ADDRS:-}" CA_CALLS="${CA_CALLS}" CA_MERGE_RC="${CA_MERGE_RC:-0}" XRAY_TEST_FAIL="${XRAY_TEST_FAIL:-}" CA_LISTEN="${CA_LISTEN:-}" V2RAY_LANG=zh_CN bash -c '
         source lib/i18n.sh; source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh
         eval "${CA_FNS}"
+        ip() { [[ -n "${CA_ADDRS}" ]] && printf "%s\n" "${CA_ADDRS}"; }
         singBoxMergeConfig() { echo merge >>"${CA_CALLS}"; return "${CA_MERGE_RC}"; }
         reloadCore() { echo reloadCore >>"${CA_CALLS}"; }
         listeningPorts() { [[ "$1" == tcp ]] && printf "%s\n" ${CA_LISTEN}; }
@@ -2967,8 +2968,7 @@ assert_equals "newkey|newkey|merge reloadCore" "$(jq -r '.inbounds[0].password' 
     "更新密钥（答 y）：换掉并生效"
 
 # --- 卸载链式：出口 / 中继机按角色说明，不说成单链路模式 ---
-# 函数里的 heredoc 有顶格的 }，按下一个函数的开头截取
-_caRemove=$(awk '/^removeChainProxy\(\) \{/{f=1} f && /^generateProtocolChainRoute\(\) \{/{f=0} f' install.sh)
+_caRemove=$(sed -n '/^removeChainProxy() {/,/^}/p' install.sh)
 ca_reset
 printf '%s\n' '{"role":"exit"}' >"${CA_ROOT}/sing-box/conf/chain_exit_info.json"
 _out=$(printf 'n\n' | run_ca "${_caRemove}"$'\n''removeChainProxy' 2>&1)
@@ -3108,6 +3108,34 @@ rm -f "${CA_X}/12_stats_api.json"
 printf '%s\n' '{"outbounds":[{"type":"direct","tag":"direct"}]}' >"${CA_MERGED}"
 run_ca "localBlockInject ${CA_MERGED}" >/dev/null 2>&1
 assert_equals "3|null" "$(jq -r '"\(.route.rules | length)|\(.route.final)"' "${CA_MERGED}")" "本机封锁（sing-box）：没开拼车就没有 API 端口那条；原来没有 route 也只加规则、不设 final"
+
+# --- 本机网卡上的全局地址也封：发往它们的连接经 lo 送达、绕过 INPUT 防火墙。行的形状照 ip -o addr 的原样 ---
+ca_reset
+CA_ADDRS=$'2: eth0    inet 203.0.113.5/24 brd 203.0.113.255 scope global eth0\\       valid_lft forever preferred_lft forever\n2: eth0    inet6 2001:db8::5/64 scope global \\       valid_lft forever preferred_lft forever'
+run_ca 'ensureXrayLocalBlock' >/dev/null 2>&1
+assert_equals '["2001:db8::5","203.0.113.5"]' "$(ca_rules '.routing.rules[] | select(.ruleTag == "local-block-ip") | .ip[-2:]')" "本机地址（Xray）：v4、v6 去掉前缀长度后并进 IP 清单"
+assert_equals "true" "$(ca_rules '.routing.rules[] | select(.ruleTag == "local-block-ip") | .ip | index("127.0.0.0/8") != null')" "本机地址（Xray）：原来的回环与私网照封"
+CA_ADDRS='2: eth0    inet 203.0.113.9/24 scope global eth0'
+run_ca 'ensureXrayLocalBlock' >/dev/null 2>&1
+assert_equals "true|false|1" "$(ca_rules '[.routing.rules[] | select(.ruleTag == "local-block-ip")] | "\(.[0].ip | index("203.0.113.9") != null)|\(.[0].ip | index("203.0.113.5") != null)|\(length)"' | jq -r .)" \
+    "本机地址（Xray）：地址换了，下次启动整组换成新的，不留旧的"
+CA_ADDRS='2: eth0    inet 203.0.113.5/24 scope global eth0'
+printf '%s\n' '{"route":{"rules":[]}}' >"${CA_MERGED}"
+run_ca "localBlockInject ${CA_MERGED}" >/dev/null 2>&1
+assert_equals '["0.0.0.0/8","::ffff:0:0/96","203.0.113.5"]' "$(jq -c '.route.rules[1].ip_cidr' "${CA_MERGED}")" "本机地址（sing-box）：并进 ip_cidr"
+CA_ADDRS=
+
+# --- 卸载链式、又没有路由备份：默认路由只在直连出站还在时才指向它。规则指向不存在的出站，Xray 会直接断连接 ---
+run_remove_nobak() {
+    ca_reset
+    printf '%s\n' '{"role":"entry"}' >"${CA_ROOT}/sing-box/conf/chain_entry_info.json"
+    printf '%s\n' '{"outbounds":[]}' >"${CA_X}/chain_outbound.json"
+    [[ "$1" == direct ]] && printf '%s\n' '{"outbounds":[]}' >"${CA_X}/z_direct_outbound.json"
+    printf 'y\n' | run_ca "${_caRemove}"$'\n''handleXray() { :; }; removeChainProxy' >/dev/null 2>&1
+    jq -c '[.routing.rules[].outboundTag]' "${CA_X}/09_routing.json" 2>&1
+}
+assert_equals '["z_direct_outbound"]' "$(run_remove_nobak direct)" "卸载链式（没有备份）：直连出站在时默认路由指向它"
+assert_equals '[]' "$(run_remove_nobak)" "卸载链式（没有备份，WARP / IPv6 全局）：直连出站不在就不写指向它的规则"
 
 echo ""
 
@@ -3717,7 +3745,6 @@ run_renew() {
         currentHost=www.example.test; coreKind=1
         echoContent() { printf "%s\n" "$2"; }
         t() { printf "%s\n" "$1"; }
-        sudo() { "$@"; }
         handleNginx() { :; }; handleXray() { :; }; reloadCore() { :; }
         eval "${RENEW_FN}"
         renewalTLS'
@@ -4451,7 +4478,6 @@ run_ap() {
     env AP_FN="${AP_FN}" AP_DIR="${AP_DIR}" FW="$1" PATH="${AP_DIR}/bin:${PATH}" bash -c '
         eval "${AP_FN}"
         echoContent() { :; }
-        sudo() { "$@"; }
         netfilter-persistent() { :; }
         rc-update() { return 1; }
         if [[ "${FW}" == ufw ]]; then
@@ -4499,7 +4525,7 @@ run_bt() {
     rm -rf "${AP_DIR}" && mkdir -p "${AP_DIR}"
     env BT_FN="${BT_FN}" AP_DIR="${AP_DIR}" UFW_STATE="$1" bash -c '
         eval "${BT_FN}"
-        for f in echoContent t ensureCronService ensureAlpineProcps sleep sudo; do eval "$f() { :; }"; done
+        for f in echoContent t ensureCronService ensureAlpineProcps sleep debconf-set-selections; do eval "$f() { :; }"; done
         pgrep() { return 1; }
         dpkg-query() { [[ -n "${UFW_STATE}" ]] && printf "%s" "${UFW_STATE}"; [[ -n "${UFW_STATE}" ]]; }
         instRec() { shift 2; echo "$*" >>"${AP_DIR}/installed"; }
@@ -4530,7 +4556,7 @@ mkdir -p "${AP_DIR}"
 : >"${AP_DIR}/installed"
 btPkgs=$(env BT_FN="${BT_FN}" AP_DIR="${AP_DIR}" bash -c '
     eval "${BT_FN}"
-    for f in echoContent t ensureCronService ensureAlpineProcps sleep sudo; do eval "$f() { :; }"; done
+    for f in echoContent t ensureCronService ensureAlpineProcps sleep debconf-set-selections; do eval "$f() { :; }"; done
     pgrep() { return 1; }
     crontab() { return 1; }
     ping6() { return 2; }
@@ -4541,13 +4567,17 @@ btPkgs=$(env BT_FN="${BT_FN}" AP_DIR="${AP_DIR}" bash -c '
     grep -E "cron|ping" "${AP_DIR}/installed"' 2>&1 | paste -sd'|' -)
 assert_equals "--no-install-recommends cron" "${btPkgs}" "installBaseTools：cron 不带推荐包，也不再装 inetutils-ping"
 
+# --- 确认一律走 isYesInput（裸比较不认 Y / yes，同一句提示在不同菜单行为不一样）；脚本只以 root 跑，不用 sudo（主机名解析不了时它还会打噪音） ---
+assert_equals "0" "$(grep -cE '(==|!=) "[Yy]"' install.sh)" "install.sh 里没有裸的 y / Y 比较"
+assert_equals "0" "$(grep -cE '(^|[^A-Za-z_-])sudo( |$)' install.sh)" "install.sh 里没有 sudo"
+
 # --- qrencode 的包名按发行版来：Alpine 没有叫 qrencode 的包，装错名字是静默失败，账号页一直没有二维码 ---
 # run_bt_qr RELEASE → 本机有没有 qrencode 都当没有，打印 installBaseTools 要装的跟二维码有关的包
 run_bt_qr() {
     : >"${AP_DIR}/installed"
     env BT_FN="${BT_FN}" AP_DIR="${AP_DIR}" RELEASE="$1" bash -c '
         eval "${BT_FN}"
-        for f in echoContent t ensureCronService ensureAlpineProcps sleep sudo; do eval "$f() { :; }"; done
+        for f in echoContent t ensureCronService ensureAlpineProcps sleep debconf-set-selections; do eval "$f() { :; }"; done
         pgrep() { return 1; }
         dpkg-query() { return 1; }
         qrencode() { return 127; }
@@ -4669,7 +4699,6 @@ assert_equals "" "$(run_rh_ipt tuic "${RH_DIR}/06.json")" "iptables：这个协�
 run_rh_fw() {
     env RH_FN="${RH_FN}" bash -c '
         eval "${RH_FN}"
-        sudo() { "$@"; }
         systemctl() { return 0; }
         firewall-cmd() {
             case "$*" in

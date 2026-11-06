@@ -1181,53 +1181,6 @@ initVar() {
 
 # stripAnsi 由 lib/utils.sh 提供（同样的 [a-zA-Z] 宽匹配）。
 
-readCredentialBySource() {
-
-    local tips=$1
-    local defaultValue=$2
-    echoContent skyBlue "\n${tips}用于配置双方握手的凭据，可手动/文件/环境变量方式录入" >&2
-    echoContent yellow "请选择${tips}录入方式（自动化部署可用文件或环境变量）" >&2
-    echoContent yellow "1.直接输入${defaultValue:+[回车默认] }" >&2
-    echoContent yellow "2.从文件读取" >&2
-    echoContent yellow "3.从环境变量读取" >&2
-    echo -n "请选择:" >&2
-    read -r credentialSource
-    local credentialValue=
-    case ${credentialSource} in
-    2)
-        echo -n "请输入文件路径:" >&2
-        read -r credentialPath
-        if [[ -z "${credentialPath}" || ! -f "${credentialPath}" ]]; then
-            echoContent red " ---> 文件路径无效"
-            exit 1
-        fi
-        credentialValue=$(tr -d '\n' <"${credentialPath}")
-        ;;
-    3)
-        echo -n "请输入环境变量名称:" >&2
-        read -r credentialEnv
-        credentialValue=${!credentialEnv}
-        ;;
-    *)
-        echo -n "${tips}:" >&2
-        read -r credentialValue
-        if [[ -z "${credentialValue}" && -n "${defaultValue}" ]]; then
-            credentialValue=${defaultValue}
-        fi
-        ;;
-    esac
-
-    # 去除可能的ANSI控制符，防止写入配置文件后产生\x1b错误
-    credentialValue=$(stripAnsi "${credentialValue}")
-
-    if [[ -z "${credentialValue}" ]]; then
-        echoContent red " ---> ${tips}不可为空"
-        exit 1
-    fi
-
-    echo "${credentialValue}"
-}
-
 # 读取tls证书详情
 readAcmeTLS() {
     # 重置 DNS API 状态，避免上次调用的残留值
@@ -1615,17 +1568,6 @@ check1Panel() {
         fi
     fi
 }
-# 读取当前alpn的顺序
-readInstallAlpn() {
-    if [[ -n "${currentInstallProtocolType}" && -z "${realityStatus}" ]]; then
-        local alpn
-        alpn=$(jq -r .inbounds[0].streamSettings.tlsSettings.alpn[0] ${configPath}${frontingType}.json)
-        if [[ -n ${alpn} ]]; then
-            currentAlpn=${alpn}
-        fi
-    fi
-}
-
 # 检查防火墙
 allowPort() {
     local type=$2
@@ -1638,9 +1580,9 @@ allowPort() {
         if ufw status | grep -q "Status: active"; then
             # 不先 grep 查重（ufw 自己跳过已有的同一条）：443/tcp 是 8443/tcp 的子串，按子串查会把没放行的端口当成已放行
             if [[ -n "${sourceRange}" && "${sourceRange}" != "0.0.0.0/0" ]]; then
-                sudo ufw allow from "${sourceRange}" to any port "$1" proto "${type}"
+                ufw allow from "${sourceRange}" to any port "$1" proto "${type}"
             else
-                sudo ufw allow "$1/${type}"
+                ufw allow "$1/${type}"
             fi
             checkUFWAllowPort "$1" "${type}"
         fi
@@ -1669,7 +1611,7 @@ allowPort() {
         fi
     elif rc-update show 2>/dev/null | grep -q ufw; then
         if ufw status | grep -q "Status: active"; then
-            sudo ufw allow "$1/${type}"
+            ufw allow "$1/${type}"
             checkUFWAllowPort "$1" "${type}"
         fi
     elif command -v nft >/dev/null 2>&1 && systemctl is-active --quiet nftables 2>/dev/null; then
@@ -1777,7 +1719,7 @@ readLastInstallationConfig() {
     # 只有链式片段的 sing-box 机也有 configPath，那里没有可复用的协议配置
     if [[ -n "${configPath}" && "$(scanInstalledProtocols "${configPath}")" != "," ]]; then
         read -r -p "读取到上次安装的配置，是否使用 ？[y/n]:" lastInstallationConfigStatus
-        if [[ "${lastInstallationConfigStatus}" == "y" ]]; then
+        if isYesInput "${lastInstallationConfigStatus}"; then
             lastInstallationConfig=true
         fi
     fi
@@ -2073,7 +2015,7 @@ installTools() {
             nginxVersion=$(echo "${nginxVersion}" | awk -F "[n][g][i][n][x][/]" '{print $2}' | awk -F "[.]" '{print $2}')
             if [[ ${nginxVersion} -lt 14 ]]; then
                 read -r -p "读取到当前的Nginx版本过旧（低于1.14），是否卸载后重新安装 ？[y/n]:" unInstallNginxStatus
-                if [[ "${unInstallNginxStatus}" == "y" ]]; then
+                if isYesInput "${unInstallNginxStatus}"; then
                     ${removeType} nginx >/dev/null 2>&1
                     echoContent yellow " ---> nginx卸载完成"
                     echoContent green " ---> 安装nginx"
@@ -2157,11 +2099,6 @@ installBaseTools() {
         ${installType} epel-release >/dev/null 2>&1
     fi
 
-    if ! sudo --version >/dev/null 2>&1; then
-        echoContent green " ---> $(t INSTALL_TOOL "sudo")"
-        ${installType} sudo >/dev/null 2>&1
-    fi
-
     if ! wget --help >/dev/null 2>&1; then
         echoContent green " ---> $(t INSTALL_TOOL "wget")"
         ${installType} wget >/dev/null 2>&1
@@ -2171,8 +2108,8 @@ installBaseTools() {
     if ! command -v netfilter-persistent >/dev/null 2>&1 && ! dpkg-query -W -f '${Status}' ufw 2>/dev/null | grep -q 'ok installed'; then
         if [[ "${release}" == "debian" || "${release}" == "ubuntu" ]]; then
             echoContent green " ---> $(t INSTALL_TOOL "iptables")"
-            echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | sudo debconf-set-selections
-            echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | sudo debconf-set-selections
+            echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | debconf-set-selections
+            echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | debconf-set-selections
             ${installType} iptables-persistent >/dev/null 2>&1
         fi
     fi
@@ -2298,22 +2235,22 @@ ensureCronService() {
 installNginxTools() {
 
     if [[ "${release}" == "debian" ]]; then
-        sudo apt install gnupg2 ca-certificates lsb-release -y >/dev/null 2>&1
-        echo "deb https://nginx.org/packages/mainline/debian $(lsb_release -cs) nginx" | sudo tee /etc/apt/sources.list.d/nginx.list >/dev/null 2>&1
-        echo -e "Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900\n" | sudo tee /etc/apt/preferences.d/99nginx >/dev/null 2>&1
+        apt install gnupg2 ca-certificates lsb-release -y >/dev/null 2>&1
+        echo "deb https://nginx.org/packages/mainline/debian $(lsb_release -cs) nginx" | tee /etc/apt/sources.list.d/nginx.list >/dev/null 2>&1
+        echo -e "Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900\n" | tee /etc/apt/preferences.d/99nginx >/dev/null 2>&1
         curl -o /tmp/nginx_signing.key https://nginx.org/keys/nginx_signing.key >/dev/null 2>&1
         # gpg --dry-run --quiet --import --import-options import-show /tmp/nginx_signing.key
-        sudo mv /tmp/nginx_signing.key /etc/apt/trusted.gpg.d/nginx_signing.asc
-        sudo apt update >/dev/null 2>&1
+        mv /tmp/nginx_signing.key /etc/apt/trusted.gpg.d/nginx_signing.asc
+        apt update >/dev/null 2>&1
 
     elif [[ "${release}" == "ubuntu" ]]; then
-        sudo apt install gnupg2 ca-certificates lsb-release -y >/dev/null 2>&1
-        echo "deb https://nginx.org/packages/mainline/ubuntu $(lsb_release -cs) nginx" | sudo tee /etc/apt/sources.list.d/nginx.list >/dev/null 2>&1
-        echo -e "Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900\n" | sudo tee /etc/apt/preferences.d/99nginx >/dev/null 2>&1
+        apt install gnupg2 ca-certificates lsb-release -y >/dev/null 2>&1
+        echo "deb https://nginx.org/packages/mainline/ubuntu $(lsb_release -cs) nginx" | tee /etc/apt/sources.list.d/nginx.list >/dev/null 2>&1
+        echo -e "Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900\n" | tee /etc/apt/preferences.d/99nginx >/dev/null 2>&1
         curl -o /tmp/nginx_signing.key https://nginx.org/keys/nginx_signing.key >/dev/null 2>&1
         # gpg --dry-run --quiet --import --import-options import-show /tmp/nginx_signing.key
-        sudo mv /tmp/nginx_signing.key /etc/apt/trusted.gpg.d/nginx_signing.asc
-        sudo apt update >/dev/null 2>&1
+        mv /tmp/nginx_signing.key /etc/apt/trusted.gpg.d/nginx_signing.asc
+        apt update >/dev/null 2>&1
 
     elif [[ "${release}" == "centos" ]]; then
         ${installType} yum-utils >/dev/null 2>&1
@@ -2334,78 +2271,12 @@ enabled=0
 gpgkey=https://nginx.org/keys/nginx_signing.key
 module_hotfixes=true
 EOF
-        sudo yum-config-manager --enable nginx-mainline >/dev/null 2>&1
+        yum-config-manager --enable nginx-mainline >/dev/null 2>&1
     elif [[ "${release}" == "alpine" ]]; then
         rm "${nginxConfigPath}default.conf"
     fi
     ${installType} nginx >/dev/null 2>&1
     bootStartup nginx
-}
-
-# 安装warp
-installWarp() {
-    # cpuVendor 取值：amd64 / arm64 / armv7（旧 inline 实现把 aarch64 统一记作 "arm"，
-    # 新 lib 实现细分成 arm64 和 armv7；用 arm* 通配兼容两种命名）
-    if [[ "${cpuVendor}" == arm* ]]; then
-        echoContent red " ---> 官方WARP客户端不支持ARM架构"
-        exit 1
-    fi
-
-    ${installType} gnupg2 -y >/dev/null 2>&1
-    # Cloudflare WARP 仓库装签：
-    # 用 gpg --dearmor + signed-by 而非 apt-key add（后者已弃用，Debian 13 起没有这个命令）；
-    # 每次安装重新拉公钥，应对 Cloudflare 不定期 key 轮转。
-    if [[ "${release}" == "debian" || "${release}" == "ubuntu" ]]; then
-        local _warpKeyring="/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg"
-        local _warpCodename
-        if [[ "${release}" == "ubuntu" ]]; then
-            # Cloudflare 仓库只对 focal codename 发包，新版 Ubuntu 用 focal 二进制兼容
-            _warpCodename="focal"
-        else
-            _warpCodename="$(lsb_release -cs)"
-        fi
-        sudo install -m 0755 -d /usr/share/keyrings
-        sudo rm -f "${_warpKeyring}"
-        if ! curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | \
-                sudo gpg --yes --dearmor --output "${_warpKeyring}" 2>/dev/null; then
-            echoContent red " ---> 下载/解析 Cloudflare WARP 公钥失败，请检查网络与 gnupg2 安装"
-            exit 1
-        fi
-        if [[ ! -s "${_warpKeyring}" ]]; then
-            echoContent red " ---> Cloudflare WARP 公钥落盘为空，安装中止"
-            exit 1
-        fi
-        sudo chmod a+r "${_warpKeyring}"
-        # 旧版残留：把先前可能写过的 trusted.gpg 形态删掉，避免新旧 key 同时存在导致 apt 警告
-        sudo rm -f /etc/apt/trusted.gpg.d/cloudflare-warp-archive-keyring.gpg 2>/dev/null
-        echo "deb [signed-by=${_warpKeyring}] https://pkg.cloudflareclient.com/ ${_warpCodename} main" | \
-            sudo tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null
-        sudo apt update >/dev/null 2>&1
-
-    elif [[ "${release}" == "centos" ]]; then
-        ${installType} yum-utils >/dev/null 2>&1
-        sudo rpm -ivh "https://pkg.cloudflareclient.com/cloudflare-release-el${centosVersion}.rpm" >/dev/null 2>&1
-    fi
-
-    echoContent green " ---> 安装WARP"
-    ${installType} cloudflare-warp >/dev/null 2>&1
-    if [[ -z $(which warp-cli) ]]; then
-        echoContent red " ---> 安装WARP失败"
-        exit 1
-    fi
-    systemctl enable warp-svc
-    warp-cli --accept-tos register
-    warp-cli --accept-tos set-mode proxy
-    warp-cli --accept-tos set-proxy-port 31303
-    warp-cli --accept-tos connect
-    warp-cli --accept-tos enable-always-on
-
-    local warpStatus=
-    warpStatus=$(curl -s --socks5 127.0.0.1:31303 https://www.cloudflare.com/cdn-cgi/trace | grep "warp" | cut -d "=" -f 2)
-
-    if [[ "${warpStatus}" == "on" ]]; then
-        echoContent green " ---> WARP启动成功"
-    fi
 }
 
 # 通过dns检查域名的IP
@@ -2517,7 +2388,7 @@ initTLSNginxConfig() {
     if [[ -n "${currentHost}" && -z "${lastInstallationConfig}" ]]; then
         echo
         read -r -p "读取到上次安装记录，是否使用上次安装时的域名 ？[y/n]:" historyDomainStatus
-        if [[ "${historyDomainStatus}" == "y" ]]; then
+        if isYesInput "${historyDomainStatus}"; then
             domain=${currentHost}
             echoContent yellow "\n ---> 域名: ${domain}"
         else
@@ -2753,7 +2624,7 @@ checkIP() {
 customSSLEmail() {
     if echo "$1" | grep -q "validate email"; then
         read -r -p "是否重新输入邮箱地址[y/n]:" sslEmailStatus
-        if [[ "${sslEmailStatus}" == "y" ]]; then
+        if isYesInput "${sslEmailStatus}"; then
             sed '/ACCOUNT_EMAIL/d' /root/.acme.sh/account.conf >/root/.acme.sh/account.conf_tmp && mv /root/.acme.sh/account.conf_tmp /root/.acme.sh/account.conf
         else
             exit 0
@@ -2777,7 +2648,7 @@ customSSLEmail() {
 # DNS API申请证书
 switchDNSAPI() {
     read -r -p "是否使用DNS API申请证书[支持NAT]？[y/n]:" dnsAPIStatus
-    if [[ "${dnsAPIStatus}" == "y" ]]; then
+    if isYesInput "${dnsAPIStatus}"; then
         echoContent red "\n=============================================================="
         echoContent yellow "1.cloudflare[默认]"
         echoContent yellow "2.aliyun"
@@ -2881,7 +2752,7 @@ acmeInstallSSL() {
 export CF_Token="${cfAPIToken}"
 ACME_ENV_EOF
         # shellcheck source=/dev/null
-        sudo bash -c "source '${acmeEnvFile}' && '$HOME/.acme.sh/acme.sh' --issue ${acmeDomainArgs} --dns dns_cf -k ec-256 --server '${sslType}' ${sslIPv6}" 2>&1 | tee -a ${TLS_DIR}/acme.log >/dev/null
+        bash -c "source '${acmeEnvFile}' && '$HOME/.acme.sh/acme.sh' --issue ${acmeDomainArgs} --dns dns_cf -k ec-256 --server '${sslType}' ${sslIPv6}" 2>&1 | tee -a ${TLS_DIR}/acme.log >/dev/null
         rm -f "${acmeEnvFile}"
     elif [[ "${dnsAPIType}" == "aliyun" ]]; then
         echoContent green " --->  DNS API 生成证书中"
@@ -2894,11 +2765,11 @@ export Ali_Key="${aliKey}"
 export Ali_Secret="${aliSecret}"
 ACME_ENV_EOF
         # shellcheck source=/dev/null
-        sudo bash -c "source '${acmeEnvFile}' && '$HOME/.acme.sh/acme.sh' --issue ${acmeDomainArgs} --dns dns_ali -k ec-256 --server '${sslType}' ${sslIPv6}" 2>&1 | tee -a ${TLS_DIR}/acme.log >/dev/null
+        bash -c "source '${acmeEnvFile}' && '$HOME/.acme.sh/acme.sh' --issue ${acmeDomainArgs} --dns dns_ali -k ec-256 --server '${sslType}' ${sslIPv6}" 2>&1 | tee -a ${TLS_DIR}/acme.log >/dev/null
         rm -f "${acmeEnvFile}"
     else
         echoContent green " ---> 生成证书中"
-        sudo "$HOME/.acme.sh/acme.sh" --issue -d "${tlsDomain}" --standalone -k ec-256 --server "${sslType}" ${sslIPv6} 2>&1 | tee -a ${TLS_DIR}/acme.log >/dev/null
+        "$HOME/.acme.sh/acme.sh" --issue -d "${tlsDomain}" --standalone -k ec-256 --server "${sslType}" ${sslIPv6} 2>&1 | tee -a ${TLS_DIR}/acme.log >/dev/null
     fi
 }
 # 自定义端口
@@ -3058,7 +2929,7 @@ installTLS() {
                 if [[ -n "${wildcardCertFile}" ]]; then
                     local wildcardDomain
                     wildcardDomain=$(basename "${wildcardCertDir}" | sed 's/_ecc$//')
-                    sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${wildcardDomain}" --fullchainpath "${TLS_DIR}/${tlsDomain}.crt" --keypath "${TLS_DIR}/${tlsDomain}.key" --ecc >/dev/null
+                    "$HOME/.acme.sh/acme.sh" --installcert -d "${wildcardDomain}" --fullchainpath "${TLS_DIR}/${tlsDomain}.crt" --keypath "${TLS_DIR}/${tlsDomain}.key" --ecc >/dev/null
                 else
                     echoContent red " ---> 未找到有效的通配符证书，将尝试申请新证书"
                     installedDNSAPIStatus=""
@@ -3067,7 +2938,7 @@ installTLS() {
                     return
                 fi
             else
-                sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${tlsDomain}" --fullchainpath "${TLS_DIR}/${tlsDomain}.crt" --keypath "${TLS_DIR}/${tlsDomain}.key" --ecc >/dev/null
+                "$HOME/.acme.sh/acme.sh" --installcert -d "${tlsDomain}" --fullchainpath "${TLS_DIR}/${tlsDomain}.crt" --keypath "${TLS_DIR}/${tlsDomain}.key" --ecc >/dev/null
             fi
 
         else
@@ -3075,7 +2946,7 @@ installTLS() {
                 if [[ -z "${lastInstallationConfig}" ]]; then
                     echoContent yellow " ---> 如未过期或者自定义证书请选择[n]\n"
                     read -r -p "是否重新安装？[y/n]:" reInstallStatus
-                    if [[ "${reInstallStatus}" == "y" ]]; then
+                    if isYesInput "${reInstallStatus}"; then
                         rm -rf ${TLS_DIR}/*
                         installTLS "$1"
                     fi
@@ -3108,12 +2979,12 @@ installTLS() {
             if [[ -n "${wildcardCertDir}" ]]; then
                 local wildcardDomain
                 wildcardDomain=$(basename "${wildcardCertDir}" | sed 's/_ecc$//')
-                sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${wildcardDomain}" --fullchainpath "${TLS_DIR}/${tlsDomain}.crt" --keypath "${TLS_DIR}/${tlsDomain}.key" --ecc >/dev/null
+                "$HOME/.acme.sh/acme.sh" --installcert -d "${wildcardDomain}" --fullchainpath "${TLS_DIR}/${tlsDomain}.crt" --keypath "${TLS_DIR}/${tlsDomain}.key" --ecc >/dev/null
             else
                 echoContent red " ---> 通配符证书目录不存在"
             fi
         else
-            sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${tlsDomain}" --fullchainpath "${TLS_DIR}/${tlsDomain}.crt" --keypath "${TLS_DIR}/${tlsDomain}.key" --ecc >/dev/null
+            "$HOME/.acme.sh/acme.sh" --installcert -d "${tlsDomain}" --fullchainpath "${TLS_DIR}/${tlsDomain}.crt" --keypath "${TLS_DIR}/${tlsDomain}.key" --ecc >/dev/null
         fi
 
         if [[ ! -f "${TLS_DIR}/${tlsDomain}.crt" || ! -f "${TLS_DIR}/${tlsDomain}.key" ]] || [[ -z $(cat "${TLS_DIR}/${tlsDomain}.key") || -z $(cat "${TLS_DIR}/${tlsDomain}.crt") ]]; then
@@ -3184,7 +3055,7 @@ randomPathFunction() {
         historyPathStatus="y"
     fi
 
-    if [[ "${historyPathStatus}" == "y" ]]; then
+    if isYesInput "${historyPathStatus}"; then
         customPath=${currentPath}
         echoContent green " ---> 使用成功\n"
     else
@@ -3255,7 +3126,7 @@ nginxBlog() {
             nginxBlogInstallStatus="n"
         fi
 
-        if [[ "${nginxBlogInstallStatus}" == "y" ]]; then
+        if isYesInput "${nginxBlogInstallStatus}"; then
             # 随机选择模板
             randomNum=$(randomNum 0 $((templateCount - 1)))
             local selectedTemplate="${templates[$randomNum]}"
@@ -3509,10 +3380,10 @@ renewalTLS() {
             # acme.sh ≤3.1.2 按签发后第 60 天排期且不看到期，遇上 45 天证书 --cron 永远轮不到
             local renewFailed=
             if ! openssl x509 -in "${acmeCertFile}" -noout -checkend "${renewWindow}" >/dev/null 2>&1 &&
-                ! sudo "$HOME/.acme.sh/acme.sh" --renew -d "${acmeCertName}" --ecc --force --home "$HOME/.acme.sh"; then
+                ! "$HOME/.acme.sh/acme.sh" --renew -d "${acmeCertName}" --ecc --force --home "$HOME/.acme.sh"; then
                 echoContent red " ---> $(t TLS_RENEW_ACME_FAILED)"
                 renewFailed=true
-            elif ! sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${acmeCertName}" --fullchainpath "${renewCertFile}" --keypath "${renewKeyFile}" --ecc; then
+            elif ! "$HOME/.acme.sh/acme.sh" --installcert -d "${acmeCertName}" --fullchainpath "${renewCertFile}" --keypath "${renewKeyFile}" --ecc; then
                 echoContent red " ---> $(t TLS_RENEW_INSTALL_FAILED)"
                 renewFailed=true
             elif ! verifyCertKeyMatch "${renewCertFile}" "${renewKeyFile}"; then
@@ -4047,7 +3918,7 @@ updateXray() {
 
         if [[ -n "${1:-}" ]]; then
             read -r -p "回退版本为${version}，是否继续？[y/n]:" rollbackXrayStatus
-            if [[ "${rollbackXrayStatus}" == "y" ]]; then
+            if isYesInput "${rollbackXrayStatus}"; then
                 mv -f ${XRAY_BIN} "${xrayBakBin}"
                 updateXray "${version}"
             else
@@ -4055,7 +3926,7 @@ updateXray() {
             fi
         elif [[ "${version}" == "${currentVersion}" ]]; then
             read -r -p "$(t XRAY_SAME_VERSION "${version}")" reInstallXrayStatus
-            if [[ "${reInstallXrayStatus}" == "y" ]]; then
+            if isYesInput "${reInstallXrayStatus}"; then
                 mv -f ${XRAY_BIN} "${xrayBakBin}"
                 updateXray
             else
@@ -4063,7 +3934,7 @@ updateXray() {
             fi
         else
             read -r -p "$(t XRAY_SWITCH_CONFIRM "${currentVersion}" "${version}")" installXrayStatus
-            if [[ "${installXrayStatus}" == "y" ]]; then
+            if isYesInput "${installXrayStatus}"; then
                 mv -f ${XRAY_BIN} "${xrayBakBin}"
                 updateXray
             else
@@ -4307,12 +4178,18 @@ localBlockApiPort() {
     jq -r '.api.listen // "" | if test(":[0-9]+$") then sub("^.*:"; "") else "" end' "${file}"
 }
 
+# localGlobalAddrs → 本机网卡上的全局地址（JSON 数组）。发往它们的连接经 lo 送达、绕过 INPUT 防火墙，绑 0.0.0.0 靠防火墙挡外网的服务
+# 会被经代理摸到。云厂商 NAT 的公网 IP 不在网卡上，走网关回来，防火墙看得到，不用管。没有 ip 命令时是空数组，封锁少这一块而已
+localGlobalAddrs() {
+    { ip -o addr show scope global 2>/dev/null || true; } | awk '{ sub(/\/.*/, "", $4); print $4 }' | jq -Rsc 'split("\n") | map(select(length > 0)) | unique'
+}
+
 # ensureXrayLocalBlock → Xray 启动前把「代理用户不许连本机与内网」放到 09_routing.json 最前（幂等）：
-# 统计 API 端口与桥端口段按端口封（写成域名、DNS rebinding 都绕不过），回环 / 私网 / 链路本地 / 未指定按字面 IP 封。
+# 统计 API 端口与桥端口段按端口封（写成域名、DNS rebinding 都绕不过），回环 / 私网 / 链路本地 / 未指定 / 本机网卡地址按字面 IP 封。
 # 不封的话成员能经代理连到统计 API 清零自己的计数。09_routing.json 有好几个写入者，所以每次启动前补，不在写入处补
 ensureXrayLocalBlock() {
     local routing="${XRAY_CONF_DIR}/09_routing.json" outbound="${XRAY_CONF_DIR}/local_block_tail_outbound.json"
-    local outbounds apiPort hops current updated file
+    local outbounds apiPort hops current updated file addrs
     [[ -d "${XRAY_CONF_DIR}" ]] || return 0
     # 文件名必须带 tail：不带的出站会被插到最前当默认出站，z_direct_outbound 被 WARP / IPv6 全局模式删掉时就是它，全部流量进黑洞
     outbounds='{"outbounds":[{"tag":"local_block","protocol":"blackhole"},{"tag":"local_pass","protocol":"freedom"}]}'
@@ -4331,13 +4208,14 @@ ensureXrayLocalBlock() {
     if [[ -f "${routing}" ]]; then
         current=$(cat "${routing}") || return 1
     fi
+    addrs=$(localGlobalAddrs)
     # ruleTag 各不相同、都以 local-block 开头（按前缀认、整组替换）：Xray 26.9.9 起启动时就查 ruleTag 重复，撞了直接起不来
-    updated=$(jq --arg ports "${CHAIN_BRIDGE_PORT}-${CHAIN_BRIDGE_PORT_LAST}${apiPort:+,${apiPort}}" --argjson hops "${hops}" '
+    updated=$(jq --arg ports "${CHAIN_BRIDGE_PORT}-${CHAIN_BRIDGE_PORT_LAST}${apiPort:+,${apiPort}}" --argjson hops "${hops}" --argjson addrs "${addrs}" '
         ((if ($hops | length) > 0 then [{type: "field", ruleTag: "local-block-pass", inboundTag: $hops, outboundTag: "local_pass"}] else [] end)
          + [{type: "field", ruleTag: "local-block-port", port: $ports, outboundTag: "local_block"},
          {type: "field", ruleTag: "local-block-ip", outboundTag: "local_block",
-          ip: ["0.0.0.0/8", "10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4",
-               "255.255.255.255/32", "::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8"]}]) as $block
+          ip: (["0.0.0.0/8", "10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4",
+               "255.255.255.255/32", "::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8"] + $addrs)}]) as $block
         | .routing.rules = ($block + [(.routing.rules // [])[] | select((.ruleTag // "") | startswith("local-block") | not)])' <<<"${current}") || return 1
     [[ "${updated}" == "$(jq . <<<"${current}")" ]] && return 0
     jsonWriteFile "${routing}" "${updated}" false
@@ -4348,9 +4226,9 @@ ensureXrayLocalBlock() {
 localBlockInject() {
     local merged=$1 apiPort out
     apiPort=$(localBlockApiPort) || return 1
-    out=$(jq --arg ports "${CHAIN_BRIDGE_PORT}:${CHAIN_BRIDGE_PORT_LAST}" --arg api "${apiPort}" '
+    out=$(jq --arg ports "${CHAIN_BRIDGE_PORT}:${CHAIN_BRIDGE_PORT_LAST}" --arg api "${apiPort}" --argjson addrs "$(localGlobalAddrs)" '
         ([{ip_is_private: true, action: "reject"},
-          {ip_cidr: ["0.0.0.0/8", "::ffff:0:0/96"], action: "reject"},
+          {ip_cidr: (["0.0.0.0/8", "::ffff:0:0/96"] + $addrs), action: "reject"},
           {port_range: [$ports], action: "reject"}]
          + (if $api == "" then [] else [{port: [($api | tonumber)], action: "reject"}] end)) as $block
         | .route.rules = ($block + (.route.rules // []))' "${merged}") || return 1
@@ -4756,7 +4634,7 @@ initSS2022Config() {
 
     if [[ -n "${ss2022Port}" ]]; then
         read -r -p "读取到上次安装时的端口 ${ss2022Port}，是否使用？[y/n]:" historySS2022PortStatus
-        if [[ "${historySS2022PortStatus}" != "y" ]]; then
+        if ! isYesInput "${historySS2022PortStatus}"; then
             ss2022Port=
             ss2022ServerKey=
         fi
@@ -4816,9 +4694,9 @@ addFirewalldPortHopping() {
     local end=$2
     local targetPort=$3
     for port in $(seq "$start" "$end"); do
-        sudo firewall-cmd --permanent --add-forward-port=port="${port}":proto=udp:toport="${targetPort}"
+        firewall-cmd --permanent --add-forward-port=port="${port}":proto=udp:toport="${targetPort}"
     done
-    sudo firewall-cmd --reload
+    firewall-cmd --reload
 }
 
 # 端口跳跃
@@ -4868,10 +4746,10 @@ addPortHopping() {
         else
             echoContent green "\n端口范围: ${portHoppingRange}\n"
             if [[ "${release}" == "centos" ]]; then
-                sudo firewall-cmd --permanent --add-masquerade
-                sudo firewall-cmd --reload
+                firewall-cmd --permanent --add-masquerade
+                firewall-cmd --reload
                 addFirewalldPortHopping "${portStart}" "${portEnd}" "${targetPort}"
-                if ! sudo firewall-cmd --list-forward-ports | grep -q "toport=${targetPort}"; then
+                if ! firewall-cmd --list-forward-ports | grep -q "toport=${targetPort}"; then
                     echoContent red " ---> 端口跳跃添加失败"
                     exit 1
                 fi
@@ -4899,8 +4777,8 @@ readPortHopping() {
     local portHoppingEnd=
 
     if [[ "${release}" == "centos" ]]; then
-        portHoppingStart=$(sudo firewall-cmd --list-forward-ports | grep "toport=${targetPort}:" | head -1 | cut -d ":" -f 1 | cut -d "=" -f 2)
-        portHoppingEnd=$(sudo firewall-cmd --list-forward-ports | grep "toport=${targetPort}:" | tail -n 1 | cut -d ":" -f 1 | cut -d "=" -f 2)
+        portHoppingStart=$(firewall-cmd --list-forward-ports | grep "toport=${targetPort}:" | head -1 | cut -d ":" -f 1 | cut -d "=" -f 2)
+        portHoppingEnd=$(firewall-cmd --list-forward-ports | grep "toport=${targetPort}:" | tail -n 1 | cut -d ":" -f 1 | cut -d "=" -f 2)
     else
         if iptables-save | grep -q "Proxy-agent_${type}_portHopping"; then
             local portHopping=
@@ -4928,9 +4806,9 @@ deletePortHoppingRules() {
 
     if [[ "${release}" == "centos" ]]; then
         for port in $(seq "${start}" "${end}"); do
-            sudo firewall-cmd --permanent --remove-forward-port=port="${port}":proto=udp:toport="${targetPort}" >/dev/null
+            firewall-cmd --permanent --remove-forward-port=port="${port}":proto=udp:toport="${targetPort}" >/dev/null
         done
-        sudo firewall-cmd --reload >/dev/null
+        firewall-cmd --reload >/dev/null
     else
         # 必须按读到的行号降序删：本脚本的规则是 -A 追加在链尾，固定删
         # PREROUTING 1 删的是别人的规则；升序删则每删一条后面的行号就前移一位。
@@ -5011,7 +4889,7 @@ portHoppingMenu() {
 initTuicProtocol() {
     if [[ -n "${tuicAlgorithm}" && -z "${lastInstallationConfig}" ]]; then
         read -r -p "读取到上次使用的算法，是否使用 ？[y/n]:" historyTuicAlgorithm
-        if [[ "${historyTuicAlgorithm}" != "y" ]]; then
+        if ! isYesInput "${historyTuicAlgorithm}"; then
             tuicAlgorithm=
         else
             echoContent yellow "\n ---> 算法: ${tuicAlgorithm}\n"
@@ -5115,7 +4993,7 @@ addSingBoxRouteRule() {
     # 读取上次安装内容
     if [[ -f "${singBoxConfigPath}${routingName}.json" ]]; then
         read -r -p "读取到上次的配置，是否保留 ？[y/n]:" historyRouteStatus
-        if [[ "${historyRouteStatus}" == "y" ]]; then
+        if isYesInput "${historyRouteStatus}"; then
             domainList="${domainList},$(jq -rc .route.rules[0].rule_set[] "${singBoxConfigPath}${routingName}.json" | awk -F "[_]" '{print $1}' | paste -sd ',')"
             domainList="${domainList},$(jq -rc .route.rules[0].domain_regex[] "${singBoxConfigPath}${routingName}.json" | awk -F "[*]" '{print $2}' | paste -sd ',' | sed 's/\\//g')"
         fi
@@ -5154,16 +5032,6 @@ EOF
         jq 'if .route.rule_set == [] then del(.route.rule_set) else . end' "${singBoxConfigPath}${routingName}.json" >"${singBoxConfigPath}${routingName}_tmp.json" && mv "${singBoxConfigPath}${routingName}_tmp.json" "${singBoxConfigPath}${routingName}.json"
     fi
 
-}
-
-# 移除sing-box route rule
-removeSingBoxRouteRule() {
-    local outboundTag=$1
-    local delRules
-    if [[ -f "${singBoxConfigPath}${outboundTag}_route.json" ]]; then
-        delRules=$(jq -r 'del(.route.rules[]|select(.outbound=="'"${outboundTag}"'"))' "${singBoxConfigPath}${outboundTag}_route.json")
-        echo "${delRules}" >"${singBoxConfigPath}${outboundTag}_route.json"
-    fi
 }
 
 # 确保基础 direct 出站存在（tag 恒为 "direct"）。
@@ -5548,17 +5416,6 @@ singBoxHysteria2Install() {
     showAccounts 4
 }
 
-# sing-box Shadowsocks 2022 安装
-singBoxSS2022Install() {
-    totalProgress=5
-    installSingBox 1 || { echoContent red "\n ---> sing-box 安装失败，已中止安装流程"; exit 1; }
-    selectCustomInstallType=",14,"
-    initSingBoxConfig custom 2 true
-    installSingBoxService 3
-    reloadCore
-    showAccounts 4
-}
-
 # 原子写入 chain/external 状态 JSON：$1=路径 $2=JSON。走 jsonWriteFile，backup=false
 # （避免 conf/ 堆积 .bak）。返回 1 时旧文件保持不变。
 writeChainInfoAtomic() {
@@ -5692,7 +5549,7 @@ initSingBoxPort() {
     fi
     if [[ -n "${port}" && -z "${lastInstallationConfig}" ]]; then
         read -r -p "读取到上次使用的端口，是否使用 ？[y/n]:" historyPort
-        if [[ "${historyPort}" != "y" ]]; then
+        if ! isYesInput "${historyPort}"; then
             port=
         else
             echo "${port}"
@@ -5764,7 +5621,7 @@ initXrayConfig() {
     local addClientsStatus=
     if [[ -n "${currentUUID}" && -z "${lastInstallationConfig}" ]]; then
         read -r -p "读取到上次用户配置，是否使用上次安装的配置 ？[y/n]:" historyUUIDStatus
-        if [[ "${historyUUIDStatus}" == "y" ]]; then
+        if isYesInput "${historyUUIDStatus}"; then
             addClientsStatus=true
             echoContent green "\n ---> 使用成功"
         fi
@@ -6167,22 +6024,6 @@ EOF
     fi
 }
 
-# 初始化TCP Brutal
-initTCPBrutal() {
-    echoContent skyBlue "\n进度 $2/${totalProgress} : 初始化TCP_Brutal配置"
-    read -r -p "是否使用TCP_Brutal？[y/n]:" tcpBrutalStatus
-    if [[ "${tcpBrutalStatus}" == "y" ]]; then
-        read -r -p "请输入本地带宽峰值的下行速度（默认：100，单位：Mbps）:" tcpBrutalClientDownloadSpeed
-        if [[ -z "${tcpBrutalClientDownloadSpeed}" ]]; then
-            tcpBrutalClientDownloadSpeed=100
-        fi
-
-        read -r -p "请输入本地带宽峰值的上行速度（默认：50，单位：Mbps）:" tcpBrutalClientUploadSpeed
-        if [[ -z "${tcpBrutalClientUploadSpeed}" ]]; then
-            tcpBrutalClientUploadSpeed=50
-        fi
-    fi
-}
 # 初始化sing-box配置文件
 initSingBoxConfig() {
     echoContent skyBlue "\n进度 $2/${totalProgress} : 初始化sing-box配置"
@@ -6210,7 +6051,7 @@ initSingBoxConfig() {
     fi
     if [[ -n "${currentUUID}" && -z "${lastInstallationConfig}" ]]; then
         read -r -p "读取到上次用户配置，是否使用上次安装的配置 ？[y/n]:" historyUUIDStatus
-        if [[ "${historyUUIDStatus}" == "y" ]]; then
+        if isYesInput "${historyUUIDStatus}"; then
             addClientsStatus=true
             echoContent green "\n ---> 使用成功"
         fi
@@ -7842,7 +7683,7 @@ reportUninstallLeftovers() {
 unInstall() {
     if planAction "$(t PLAN_UNINSTALL)"; then return 0; fi
     read -r -p "是否确认卸载安装内容？[y/n]:" unInstallStatus
-    if [[ "${unInstallStatus}" != "y" ]]; then
+    if ! isYesInput "${unInstallStatus}"; then
         echoContent green " ---> 放弃卸载"
         menu
         exit 0
@@ -9854,7 +9695,7 @@ rollbackScript() {
 
     # 确认回退
     read -r -p "$(t SCRIPT_ROLLBACK_CONFIRM) [y/n]: " confirmRollback
-    if [[ "${confirmRollback}" != "y" ]]; then
+    if ! isYesInput "${confirmRollback}"; then
         echoContent green " ---> $(t CANCEL)"
         return 0
     fi
@@ -9893,7 +9734,7 @@ rollbackScript() {
             echoContent yellow "\n$(t SCRIPT_ROLLBACK_CONFIG_PROMPT)"
             local restoreConfig
             read -r -p "[y/n]: " restoreConfig
-            if [[ "${restoreConfig}" == "y" ]]; then
+            if isYesInput "${restoreConfig}"; then
                 # 在覆盖前先把"当前配置"快照到本次回退创建的备份目录里，让回退本身可逆
                 local preRestoreSnapshot="${backupPath}/pre_rollback_config"
                 if backupConfigSnapshot "${preRestoreSnapshot}" 2>/dev/null; then
@@ -10118,7 +9959,7 @@ updateV2RayAgent() {
             if ! compareVersions "${SCRIPT_VERSION}" "${latestVersion}"; then
                 echoContent green " ---> 当前已是最新版本 (${SCRIPT_VERSION})"
                 read -r -p "是否继续更新? [y/N]: " forceUpdate
-                if [[ "${forceUpdate}" != "y" && "${forceUpdate}" != "Y" ]]; then
+                if ! isYesInput "${forceUpdate}"; then
                     menu
                     return
                 fi
@@ -10308,22 +10149,6 @@ updateV2RayAgent() {
     exit 0
 }
 
-# 防火墙
-handleFirewall() {
-    if systemctl status ufw 2>/dev/null | grep -q "active (exited)" && [[ "$1" == "stop" ]]; then
-        systemctl stop ufw >/dev/null 2>&1
-        systemctl disable ufw >/dev/null 2>&1
-        echoContent green " ---> ufw关闭成功"
-
-    fi
-
-    if systemctl status firewalld 2>/dev/null | grep -q "active (running)" && [[ "$1" == "stop" ]]; then
-        systemctl stop firewalld >/dev/null 2>&1
-        systemctl disable firewalld >/dev/null 2>&1
-        echoContent green " ---> firewalld关闭成功"
-    fi
-}
-
 # 安装BBR
 bbrInstall() {
     echoContent red "\n=============================================================="
@@ -10353,7 +10178,7 @@ optimizeTCPBuffers() {
         echoContent yellow " ---> 当前拥塞控制算法: ${currentCC}"
         echoContent yellow " ---> 建议先安装 BBR 再进行缓冲区优化"
         read -r -p "是否继续优化? [y/n]:" confirmOptimize
-        if [[ "${confirmOptimize}" != "y" && "${confirmOptimize}" != "Y" ]]; then
+        if ! isYesInput "${confirmOptimize}"; then
             return
         fi
     else
@@ -10743,7 +10568,7 @@ ipv6Routing() {
         globalEgressChainNotice
         read -r -p "是否确认设置？[y/n]:" IPv6OutStatus
 
-        if [[ "${IPv6OutStatus}" == "y" ]]; then
+        if isYesInput "${IPv6OutStatus}"; then
             if [[ "${coreKind}" == "1" ]]; then
                 addXrayOutbound IPv6_out
                 removeXrayOutbound IPv4_out
@@ -10897,13 +10722,8 @@ addXrayRouting() {
     done < <(echo "${domain}" | tr ',' '\n')
 
     unInstallRouting "${tag}" "${type}"
-    if ! grep -q "gstatic.com" ${configPath}09_routing.json && [[ "${tag}" == "blackhole_out" ]]; then
-        local routing=
-        routing=$(jq -r '.routing.rules += [{"type":"field","domain":["gstatic.com"],"outboundTag":"direct"}]' ${configPath}09_routing.json)
-        echo "${routing}" | jq . >${configPath}09_routing.json
-    fi
-
     # routingRule 本身是 jq 产物的合法 JSON，改用 --argjson 明示
+    local routing=
     routing=$(jq -r --argjson rule "${routingRule}" '.routing.rules += [$rule]' ${configPath}09_routing.json)
     echo "${routing}" | jq . >${configPath}09_routing.json
 }
@@ -10936,18 +10756,6 @@ unInstallRouting() {
             echo "${routing}" | jq . >${configPath}09_routing.json
         fi
     fi
-}
-
-# 卸载嗅探
-unInstallSniffing() {
-
-    find ${configPath} -name "*inbounds.json*" | awk -F "[c][o][n][f][/]" '{print $2}' | while read -r inbound; do
-        if grep -q "destOverride" <"${configPath}${inbound}"; then
-            sniffing=$(jq -r 'del(.inbounds[0].sniffing)' "${configPath}${inbound}")
-            echo "${sniffing}" | jq . >"${configPath}${inbound}"
-        fi
-    done
-
 }
 
 # 安装嗅探
@@ -10988,7 +10796,7 @@ installWarpReg() {
 
         read -r -p "warp-reg未安装，是否安装 ？[y/n]:" installWarpRegStatus
 
-        if [[ "${installWarpRegStatus}" == "y" ]]; then
+        if isYesInput "${installWarpRegStatus}"; then
 
             # v1.0 资产 SHA256（2026-08-23 实测钉定）。上游 release 资产可被替换，
             # root 直接执行的第三方二进制必须校验；不匹配即拒装
@@ -11073,49 +10881,6 @@ addWireGuardRoute() {
     fi
 }
 
-# 卸载wireGuard
-unInstallWireGuard() {
-    local type=$1
-    if [[ "${coreKind}" == "1" ]]; then
-
-        if [[ "${type}" == "IPv4" ]]; then
-            if [[ ! -f "${configPath}wireguard_out_IPv6.json" ]]; then
-                rm -rf ${WARP_DIR}/config >/dev/null 2>&1
-            fi
-        elif [[ "${type}" == "IPv6" ]]; then
-            if [[ ! -f "${configPath}wireguard_out_IPv4.json" ]]; then
-                rm -rf ${WARP_DIR}/config >/dev/null 2>&1
-            fi
-        fi
-    fi
-
-    if [[ -n "${singBoxConfigPath}" ]]; then
-        if [[ ! -f "${singBoxConfigPath}wireguard_endpoints_IPv6_route.json" && ! -f "${singBoxConfigPath}wireguard_endpoints_IPv4_route.json" ]]; then
-            rm "${singBoxConfigPath}wireguard_outbound.json" >/dev/null 2>&1
-            rm -rf ${WARP_DIR}/config >/dev/null 2>&1
-        fi
-    fi
-}
-# 移除WireGuard分流
-removeWireGuardRoute() {
-    local type=$1
-    if [[ "${coreKind}" == "1" ]]; then
-
-        unInstallRouting wireguard_out_"${type}" outboundTag
-
-        removeXrayOutbound "wireguard_out_${type}"
-        if [[ ! -f "${configPath}IPv4_out.json" ]]; then
-            addXrayOutbound IPv4_out
-        fi
-    fi
-
-    # sing-box
-    if [[ -n "${singBoxConfigPath}" ]]; then
-        removeSingBoxRouteRule "wireguard_endpoints_${type}"
-    fi
-
-    unInstallWireGuard "${type}"
-}
 # warp分流-第三方IPv4
 warpRoutingReg() {
     local type=$2
@@ -11160,7 +10925,7 @@ warpRoutingReg() {
         globalEgressChainNotice
         read -r -p "是否确认设置？[y/n]:" warpOutStatus
 
-        if [[ "${warpOutStatus}" == "y" ]]; then
+        if isYesInput "${warpOutStatus}"; then
             readConfigWarpReg
             if [[ "${coreKind}" == "1" ]]; then
                 addXrayOutbound "wireguard_out_${type}"
@@ -11531,7 +11296,7 @@ setupChainExit() {
     if [[ -f "${SINGBOX_FRAGMENT_DIR}/chain_inbound.json" ]]; then
         echoContent yellow "\n检测到已存在链式代理配置"
         read -r -p "是否覆盖现有配置？[y/n]:" confirmOverwrite
-        if [[ "${confirmOverwrite}" != "y" ]]; then
+        if ! isYesInput "${confirmOverwrite}"; then
             # 显示现有配置码
             showExistingChainCode
             return 0
@@ -12178,7 +11943,7 @@ setupChainRelay() {
        [[ -f "${SINGBOX_FRAGMENT_DIR}/chain_outbound.json" ]]; then
         echoContent yellow "\n检测到已存在链式代理配置"
         read -r -p "是否覆盖现有配置？[y/n]:" confirmOverwrite
-        if [[ "${confirmOverwrite}" != "y" ]]; then
+        if ! isYesInput "${confirmOverwrite}"; then
             return 0
         fi
     fi
@@ -12718,7 +12483,7 @@ setupChainEntryMultiHop() {
     if [[ -f "${SINGBOX_FRAGMENT_DIR}/chain_outbound.json" ]]; then
         echoContent yellow "\n检测到已存在链式代理配置"
         read -r -p "是否覆盖现有配置？[y/n]:" confirmOverwrite
-        if [[ "${confirmOverwrite}" != "y" ]]; then
+        if ! isYesInput "${confirmOverwrite}"; then
             return 0
         fi
     fi
@@ -12861,7 +12626,7 @@ setupChainEntry() {
     if [[ -f "${SINGBOX_FRAGMENT_DIR}/chain_outbound.json" ]]; then
         echoContent yellow "\n检测到已存在链式代理配置"
         read -r -p "是否覆盖现有配置？[y/n]:" confirmOverwrite
-        if [[ "${confirmOverwrite}" != "y" ]]; then
+        if ! isYesInput "${confirmOverwrite}"; then
             return 0
         fi
     fi
@@ -13549,7 +13314,7 @@ removeChainProxy() {
     fi
 
     read -r -p "确认卸载链式代理？[y/n]:" confirmRemove
-    if [[ "${confirmRemove}" != "y" ]]; then
+    if ! isYesInput "${confirmRemove}"; then
         return 0
     fi
 
@@ -13598,24 +13363,12 @@ removeChainProxy() {
             mv ${XRAY_CONF_DIR}/09_routing.json.bak.chain ${XRAY_CONF_DIR}/09_routing.json
             echoContent yellow " ---> 已恢复 Xray 原路由配置"
         else
-            # 如果没有备份，创建默认路由配置
-            cat <<EOF >${XRAY_CONF_DIR}/09_routing.json
-{
-    "routing": {
-        "rules": [
-            {
-                "type": "field",
-                "domain": [
-                    "domain:gstatic.com",
-                    "domain:googleapis.com",
-                    "domain:googleapis.cn"
-                ],
-                "outboundTag": "z_direct_outbound"
-            }
-        ]
-    }
-}
-EOF
+            # 没有备份：重置成默认路由。直连出站被 WARP / IPv6 全局删掉时不写这条：规则指向不存在的出站，Xray 会直接断连接
+            local defaultRules='[]'
+            if [[ -f "${XRAY_CONF_DIR}/z_direct_outbound.json" ]]; then
+                defaultRules='[{"type":"field","domain":["domain:gstatic.com","domain:googleapis.com","domain:googleapis.cn"],"outboundTag":"z_direct_outbound"}]'
+            fi
+            jsonWriteFile "${XRAY_CONF_DIR}/09_routing.json" "$(jq -n --argjson rules "${defaultRules}" '{routing: {rules: $rules}}')" false
             echoContent yellow " ---> 已重置 Xray 路由配置为默认"
         fi
 
@@ -13846,7 +13599,7 @@ configureProtocolChainRouting() {
 
     # 确认
     read -r -p "$(t CHAIN_PROTOCOL_CONFIRM) [y/n]:" confirmChoice
-    if [[ "${confirmChoice}" != "y" && "${confirmChoice}" != "Y" ]]; then
+    if ! isYesInput "${confirmChoice}"; then
         echoContent yellow " ---> $(t CANCELLED)"
         return 0
     fi
@@ -14070,7 +13823,7 @@ setupMultiChainEntry() {
             2)
                 echoContent yellow "$(t CHAIN_CONFIRM_CLEAR)[y/n]"
                 read -r -p "$(t CONFIRM):" confirmClear
-                if [[ "${confirmClear}" != "y" ]]; then
+                if ! isYesInput "${confirmClear}"; then
                     return 0
                 fi
                 # 账号的出口映射留到新链路都定下来再带回去，见 multiChainRestoreAccounts
@@ -14135,7 +13888,7 @@ EOF
 )
     writeChainInfoAtomic "${CHAIN_MULTI_INFO}" "${__chainMultiInit}" || return 1
 
-    while [[ "${continueAdding}" == "y" ]]; do
+    while isYesInput "${continueAdding}"; do
         ((chainCount++))
         echoContent skyBlue "\n$(t CHAIN_ADD_NUMBER) #${chainCount}"
         echoContent red "=============================================================="
@@ -14254,7 +14007,7 @@ EOF
     echoContent yellow "\n$(t CHAIN_CONFIG_RULES_NOW)[y/n]"
     read -r -p "$(t CONFIRM):" configRules
 
-    if [[ "${configRules}" == "y" ]]; then
+    if isYesInput "${configRules}"; then
         configureMultiChainRules
     fi
 
@@ -15477,7 +15230,7 @@ removeMultiChainOutbound() {
     echoContent yellow "\n确认删除链路 [${selectedChain}]？[y/n]"
     read -r -p "确认: " confirmDelete
 
-    if [[ "${confirmDelete}" != "y" ]]; then
+    if ! isYesInput "${confirmDelete}"; then
         return 0
     fi
 
@@ -15626,12 +15379,6 @@ initExternalNodeFile() {
 # 生成唯一节点ID
 generateNodeId() {
     echo "ext_$(date +%s)_${RANDOM}"
-}
-
-# 获取外部节点列表
-getExternalNodes() {
-    initExternalNodeFile
-    jq -r '.nodes' "${EXTERNAL_NODE_FILE}" 2>/dev/null || echo "[]"
 }
 
 # 获取外部节点数量
@@ -16198,7 +15945,7 @@ addExternalNodeByLink() {
 
     echo
     read -r -p "$(t EXT_CONFIRM_ADD)? [y/n]: " confirmAdd
-    if [[ "${confirmAdd}" != "y" && "${confirmAdd}" != "Y" ]]; then
+    if ! isYesInput "${confirmAdd}"; then
         echoContent yellow " ---> $(t CANCEL)"
         return 0
     fi
@@ -16288,7 +16035,7 @@ deleteExternalNode() {
     nodeName=$(jq -r --argjson idx "$((selectIndex-1))" '.nodes[$idx].name' "${EXTERNAL_NODE_FILE}" 2>/dev/null)
 
     read -r -p "$(t EXT_CONFIRM_DELETE) [${nodeName}]? [y/n]: " confirmDelete
-    if [[ "${confirmDelete}" != "y" && "${confirmDelete}" != "Y" ]]; then
+    if ! isYesInput "${confirmDelete}"; then
         return
     fi
 
@@ -16721,16 +16468,6 @@ setVMessWSRoutingOutbounds() {
     fi
     echoContent red " ---> 地址不可为空"
     setVMessWSRoutingOutbounds
-}
-
-# 移除VMess+WS+TLS分流
-removeVMessWSRouting() {
-
-    removeXrayOutbound VMess-out
-    unInstallRouting VMess-out outboundTag
-
-    reloadCore
-    echoContent green " ---> 卸载成功"
 }
 
 # 重启核心
@@ -17394,7 +17131,7 @@ realityQuickConfirm() {
     done <<<"${dropped}"
     echoContent yellow " ---> $(t REALITY_QUICK_DROPS "${names}")"
     read -r -p "$(t REALITY_QUICK_CONFIRM)" answer
-    if [[ "${answer}" != "y" ]]; then
+    if ! isYesInput "${answer}"; then
         echoContent green " ---> $(t REALITY_QUICK_ABORTED)"
         exit 0
     fi
@@ -17637,7 +17374,7 @@ installSubscribe() {
         if echo "${nginxVersion}" | grep -q "not found" || [[ -z "${nginxVersion}" ]]; then
             echoContent yellow "未检测到nginx，无法使用订阅服务\n"
             read -r -p "是否安装[y/n]？" installNginxStatus
-            if [[ "${installNginxStatus}" == "y" ]]; then
+            if isYesInput "${installNginxStatus}"; then
                 installNginxTools
                 nginxVersion=$(nginx -v 2>&1)
             else
@@ -17658,7 +17395,7 @@ installSubscribe() {
             echo
             read -r -p "是否使用http订阅[y/n]？" addNginxSubscribeStatus
             echo
-            if [[ "${addNginxSubscribeStatus}" != "y" ]]; then
+            if ! isYesInput "${addNginxSubscribeStatus}"; then
                 echoContent yellow " ---> 退出安装"
                 exit
             fi
@@ -17912,7 +17649,7 @@ addOtherSubscribe() {
         fi
         echo
         read -r -p "是否是HTTP订阅？[y/n]" httpSubscribeStatus
-        if [[ "${httpSubscribeStatus}" == "y" ]]; then
+        if isYesInput "${httpSubscribeStatus}"; then
             remoteSubscribeUrl="${remoteSubscribeUrl}:http"
         fi
         echo "${remoteSubscribeUrl}" >>${SUBSCRIBE_REMOTE_DIR}/remoteSubscribeUrl
@@ -18414,7 +18151,7 @@ subscribe() {
                 emailMd5=$(echo -n "${email}${subscribeSalt}"$'\n' | md5sum | awk '{print $1}')
 
                 cat "${SUBSCRIBE_LOCAL_DIR}/default/${email}" >>"${SUBSCRIBE_DIR}/default/${emailMd5}"
-                if [[ "${updateOtherSubscribeStatus}" == "y" ]]; then
+                if isYesInput "${updateOtherSubscribeStatus}"; then
                     updateRemoteSubscribe "${emailMd5}" "${email}"
                 fi
                 local base64Result
@@ -18600,7 +18337,7 @@ initRealityKey() {
     echoContent skyBlue "\n生成Reality key\n"
     if [[ -n "${currentRealityPublicKey}" && -z "${lastInstallationConfig}" ]]; then
         read -r -p "读取到上次安装记录，是否使用上次安装时的PublicKey/PrivateKey ？[y/n]:" historyKeyStatus
-        if [[ "${historyKeyStatus}" == "y" ]]; then
+        if isYesInput "${historyKeyStatus}"; then
             realityPrivateKey=${currentRealityPrivateKey}
             realityPublicKey=${currentRealityPublicKey}
         fi
@@ -18681,7 +18418,7 @@ initRealityMldsa65() {
         if [ "$length" -gt 3500 ]; then
             if [[ -n "${currentRealityMldsa65Seed}" && -z "${lastInstallationConfig}" ]]; then
                 read -r -p "读取到上次安装记录，是否使用上次安装时的Seed/Verify ？[y/n]:" historyMldsa65Status
-                if [[ "${historyMldsa65Status}" == "y" ]]; then
+                if isYesInput "${historyMldsa65Status}"; then
                     realityMldsa65Seed=${currentRealityMldsa65Seed}
                     realityMldsa65Verify=${currentRealityMldsa65Verify}
                 fi
@@ -18727,7 +18464,7 @@ initRealityClientServersName() {
     if [[ -n "${realityServerName}" && -z "${lastInstallationConfig}" ]]; then
         if echo ${realityDestDomainList} | grep -q "${realityServerName}"; then
             read -r -p "读取到上次安装设置的Reality域名，是否使用？[y/n]:" realityServerNameStatus
-            if [[ "${realityServerNameStatus}" != "y" ]]; then
+            if ! isYesInput "${realityServerNameStatus}"; then
                 realityServerName=
                 realityDomainPort=
             fi
@@ -18742,7 +18479,7 @@ initRealityClientServersName() {
         if [[ -n "${domain}" ]]; then
             echo
             read -r -p "是否使用 ${domain} 此域名作为Reality目标域名 ？[y/n]:" realityServerNameCurrentDomainStatus
-            if [[ "${realityServerNameCurrentDomainStatus}" == "y" ]]; then
+            if isYesInput "${realityServerNameCurrentDomainStatus}"; then
                 if renderRealityLocalDest "${domain}"; then
                     realityServerName="${domain}"
                     realityDestHost=127.0.0.1
