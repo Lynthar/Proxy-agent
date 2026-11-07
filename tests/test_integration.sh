@@ -1913,6 +1913,16 @@ assert_equals "false|active" "$(cp_state '"\(.enabled)|\(.members.alice.status)"
 assert_equals "" "$(cp_state '.lastTick')" "tick（等锁时被关掉）：不判定、不写 state"
 assert_equals '["zed","alice","bob"]' "$(cp_emails 02_VLESS_TCP_inbounds.json '.inbounds[0].settings.clients')" "tick（等锁时被关掉）：入站里还有他"
 assert_equals "0" "$(grep -c 'statsquery\|^reloadCore$' "${CP_CALLS}")" "tick（等锁时被关掉）：不采集、不重载"
+# 结算读 state 和对账都在锁里：对账时另开一个描述符抢锁应当抢不到，重载时已经放开（停止钩子还要拿这把锁）
+if command -v flock >/dev/null 2>&1; then
+    cp_reset_tree
+    printf '%s\n' '{}' >"${CP_STATS}"
+    run_cp 'carpoolHeld() { if flock -n "${CARPOOL_LOCK_FILE}" true; then echo "$1 free"; else echo "$1 held"; fi >>"${CP_CALLS}"; }
+        carpoolReconcile() { carpoolHeld reconcile; echo changed; }
+        reloadCore() { carpoolHeld reload; }
+        carpoolSettle "[]"' >/dev/null 2>&1
+    assert_equals "reconcile held|reload free" "$(grep -E '^(reconcile|reload) ' "${CP_CALLS}" | paste -sd'|' -)" "结算：对账在锁里，重载在锁外"
+fi
 cp_reset_tree
 _out=$(CP_CORE=2 run_cp 'carpoolTick; echo "rc=$?"' 2>&1)
 assert_contains "${_out}" "rc=0" "tick（内核不是 Xray）：返回 0"
@@ -2138,6 +2148,15 @@ cp_reset_tree
 jq --argjson six $((6 * GiB)) '.members.alice.status = "disabled" | .members.alice.reason = "quota" | .members.alice.upBytes = $six' "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/s.tmp" && mv "${CP_ROOT}/carpool/s.tmp" "${CP_ROOT}/carpool/state.json"
 jq 'del(.inbounds[0].settings.clients[1])' "${CP_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json" >"${CP_ROOT}/t.json" && mv "${CP_ROOT}/t.json" "${CP_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
 jq 'del(.inbounds[1].settings.clients[1])' "${CP_ROOT}/xray/conf/07_VLESS_vision_reality_inbounds.json" >"${CP_ROOT}/t.json" && mv "${CP_ROOT}/t.json" "${CP_ROOT}/xray/conf/07_VLESS_vision_reality_inbounds.json"
+printf '%s\n' '{}' >"${CP_STATS}"
+run_cp 'ensureCarpoolXray' >/dev/null 2>&1
+# 停在确认提示上的这段流量也要入账：答 y 之前换一份计数，等于开头那次采集之后又跑了 7 字节
+_upBefore=$(cp_state '.members.bob.upBytes')
+jq -n '{stat: [{name: "user>>>bob-VLESS_TCP/TLS_Vision>>>traffic>>>uplink", value: 100}]}' >"${CP_STATS}"
+_savedState=$(cat "${CP_ROOT}/carpool/state.json")
+printf 'y\n' | run_cp 'isYesInput() { jq -n "{stat: [{name: \"user>>>bob-VLESS_TCP/TLS_Vision>>>traffic>>>uplink\", value: 7}]}" >"${CP_STATS}"; [[ "$1" == y ]]; }; carpoolDisable' >/dev/null 2>&1
+assert_equals "$((_upBefore + 107))" "$(cp_state '.members.bob.upBytes')" "关闭：停在提示上的流量也入账（翻 enabled 之前再采一次）"
+printf '%s\n' "${_savedState}" >"${CP_ROOT}/carpool/state.json"
 printf '%s\n' '{}' >"${CP_STATS}"
 run_cp 'ensureCarpoolXray' >/dev/null 2>&1
 _out=$(printf 'n\n' | run_cp 'carpoolDisable; echo "rc=$?"' 2>&1)

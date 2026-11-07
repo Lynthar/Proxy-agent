@@ -8637,14 +8637,19 @@ carpoolSetNotified() {
 # carpoolSettle EVENTS [FORCE_REFRESH] → 放锁之后：对账 clients → 占位 → 有变更就重载 → 有恢复（或 FORCE）就重建订阅。
 # state 从磁盘重读，不用调用方的副本：reload 里的 stop 钩子还会再写一笔
 carpoolSettle() {
-    local events=$1 state result now ev
+    local events=$1 state result now ev rc=1
     now=$(date '+%F %H:%M')
-    state=$(carpoolReadState) || return 1
     while read -r ev; do
         [[ -n "${ev}" ]] && echoContent yellow " ---> ${now} $(carpoolEventText "${ev}")"
     done < <(jq -c '.[]' <<<"${events}")
+    # 读 state 和对账在同一把锁里：锁外读到的旧 state 晚写进协议文件，会盖掉关闭拼车时放回的用户；只放开 reload
+    if carpoolLock; then
+        state=$(carpoolReadState) && result=$(carpoolReconcile "${state}")
+        rc=$?
+        carpoolUnlock
+    fi
     # 对账失败时每个 tick 都会重试：txFailed 只在第一次失败时发，成功一次后清掉去重键
-    if ! result=$(carpoolReconcile "${state}"); then
+    if [[ ${rc} -ne 0 ]]; then
         echoContent red " ---> ${now} $(t CARPOOL_RECONCILE_FAILED)"
         carpoolSetNotified "tx:failed" true && events=$(jq -c '. + [{type: "txFailed"}]' <<<"${events}")
         carpoolNotifyEvents "${events}"
@@ -8994,7 +8999,7 @@ carpoolEnable() {
 # carpoolDisable → 关闭 = 不再计量：Xray 在跑就先采一次，超额停用者恢复、到期与手动停用者保持（可选一并恢复）；
 # 确认之后从重读 state 到翻 enabled=false 整段持锁（对账事务不 reload），事务失败整体不关闭
 carpoolDisable() {
-    local state groups today answer restoreAll=false kept
+    local state newState groups today answer restoreAll=false kept
     if ! carpoolEnabled; then
         echoContent yellow " ---> $(t CARPOOL_NOT_ENABLED)"
         return 0
@@ -9019,6 +9024,9 @@ carpoolDisable() {
     fi
     carpoolLock || return 1
     state=$(carpoolReadState)
+    # 停在提示上的这段流量只能在这里收：enabled 翻掉后停止钩子直接返回，重载一清就没了
+    newState=$(carpoolCollect "${state}") && state=${newState}
+    newState=$(carpoolMachineStep "${state}") && state=${newState}
     groups=$(carpoolCloseGroups "${state}" "${today}")
     state=$(carpoolApplyClose "${state}" "${groups}" "${restoreAll}")
     if ! carpoolWriteState "${state}" || ! carpoolReconcile "${state}" >/dev/null; then
