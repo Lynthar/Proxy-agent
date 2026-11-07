@@ -10608,6 +10608,22 @@ EOF
 }
 
 # 查看、检查日志
+# setRealityLogShow true|false：改 Xray 每个 Reality 入站的 realitySettings.show（07 的 Reality 在 inbounds[1]，[0] 是 dokodemo）
+setRealityLogShow() {
+    if [[ "${1}" != "true" && "${1}" != "false" ]]; then
+        echoContent red " ---> setRealityLogShow: invalid arg '${1}'"
+        return 1
+    fi
+    local file
+    for file in "${configPath}07_VLESS_vision_reality_inbounds.json" "${configPath}12_VLESS_XHTTP_inbounds.json"; do
+        [[ -f "${file}" ]] || continue
+        if ! jsonModifyFile "${file}" ".inbounds |= map(if (.streamSettings.realitySettings | type) == \"object\" then .streamSettings.realitySettings.show = ${1} else . end)" false; then
+            echoContent red " ---> setRealityLogShow: 写入失败 ${file}"
+            return 1
+        fi
+    done
+}
+
 checkLog() {
     if [[ "${coreKind}" == "2" ]]; then
         echoContent red "\n ---> 此功能仅支持Xray-core内核"
@@ -10649,19 +10665,6 @@ checkLog() {
         } >${configPath}00_log.json
     }
 
-    updateRealityLogShow() {
-        if [[ -n ${realityStatus} ]]; then
-            # 仅允许布尔字面量传入，避免 $1 拼接进 jq 过滤器；随后以 --argjson 送值
-            if [[ "${1}" != "true" && "${1}" != "false" ]]; then
-                echoContent red " ---> updateRealityLogShow: invalid arg '${1}'"
-                return 1
-            fi
-            local vlessVisionRealityInbounds
-            vlessVisionRealityInbounds=$(jq -r --argjson show "${1}" '.inbounds[0].streamSettings.realitySettings.show = $show' ${configPath}07_VLESS_vision_reality_inbounds.json)
-            echo "${vlessVisionRealityInbounds}" | jq . >${configPath}07_VLESS_vision_reality_inbounds.json
-        fi
-    }
-
     echoContent skyBlue "\n功能 $1/${totalProgress} : 查看日志"
     echoContent red "\n=============================================================="
     echoContent yellow "# 建议仅调试时打开access日志\n"
@@ -10695,7 +10698,7 @@ checkLog() {
             writeLogConfig "" "${defaultErrorPath}" "${currentLogLevel}"
         fi
 
-        updateRealityLogShow "${realityLogShow}"
+        setRealityLogShow "${realityLogShow}"
         reloadCore
         checkLog 1
         ;;
@@ -10741,7 +10744,7 @@ checkLog() {
             mkdir -p "${tmpLogDir}"
             currentLogLevel="warning"
             writeLogConfig "${tmpLogDir}/access.log" "${tmpLogDir}/error.log" "${currentLogLevel}"
-            updateRealityLogShow "false"
+            setRealityLogShow "false"
             reloadCore
             echoContent green "\n ---> 已切换为最小日志模式"
             echoContent yellow " ---> access/error 将写入 ${tmpLogDir}/，系统临时目录会在重启或周期清理时自动清空，如需立即清理可执行 [rm -f ${tmpLogDir}/*.log]"
@@ -10756,7 +10759,7 @@ checkLog() {
                 realityLogShow=false
             fi
             writeLogConfig "${targetAccessPath}" "${defaultErrorPath}" "${currentLogLevel}"
-            updateRealityLogShow "${realityLogShow}"
+            setRealityLogShow "${realityLogShow}"
             reloadCore
             checkLog 1
         fi
