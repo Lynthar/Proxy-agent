@@ -1887,6 +1887,16 @@ jq '.enabled = false' "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/s.tmp
 _iState=$(cp_inode "${CP_ROOT}/carpool/state.json")
 assert_equals "0|" "$(run_cp 'carpoolTick' 2>&1; echo "$?|")" "tick（关着）：静默返回 0"
 assert_equals "${_iState}" "$(cp_inode "${CP_ROOT}/carpool/state.json")" "tick（关着）：state 不写"
+# 开头看到还开着，等锁时被关掉：关闭时恢复的人（配额已超、到期已过）不能又被判停用
+cp_reset_tree
+jq -n '{stat: [{name: "user>>>alice-VLESS_TCP/TLS_Vision>>>traffic>>>uplink", value: 1}]}' >"${CP_STATS}"
+jq '.members.alice.expire = "2000-01-01" | .members.alice.upBytes = 53687091200' "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/s.tmp" && mv "${CP_ROOT}/carpool/s.tmp" "${CP_ROOT}/carpool/state.json"
+: >"${CP_CALLS}"
+run_cp 'carpoolLock() { jq ".enabled = false" "${CARPOOL_DIR}/state.json" >"${CARPOOL_DIR}/s.tmp" && mv "${CARPOOL_DIR}/s.tmp" "${CARPOOL_DIR}/state.json"; }; carpoolTick' >/dev/null 2>&1
+assert_equals "false|active" "$(cp_state '"\(.enabled)|\(.members.alice.status)"')" "tick（等锁时被关掉）：关闭时恢复的人不再被判停用"
+assert_equals "" "$(cp_state '.lastTick')" "tick（等锁时被关掉）：不判定、不写 state"
+assert_equals '["zed","alice","bob"]' "$(cp_emails 02_VLESS_TCP_inbounds.json '.inbounds[0].settings.clients')" "tick（等锁时被关掉）：入站里还有他"
+assert_equals "0" "$(grep -c 'statsquery\|^reloadCore$' "${CP_CALLS}")" "tick（等锁时被关掉）：不采集、不重载"
 cp_reset_tree
 _out=$(CP_CORE=2 run_cp 'carpoolTick; echo "rc=$?"' 2>&1)
 assert_contains "${_out}" "rc=0" "tick（内核不是 Xray）：返回 0"

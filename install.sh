@@ -8732,6 +8732,11 @@ carpoolTick() {
         return 1
     fi
     state=$(carpoolReadState)
+    # 等锁时拼车可能刚被关掉：再判定会把关闭时恢复的人又停掉，之后也没有 tick 能纠正
+    if [[ "$(jq -r '.enabled' <<<"${state}")" != "true" ]]; then
+        carpoolUnlock
+        return 0
+    fi
     if newState=$(carpoolCollect "${state}"); then
         state=$(jq -c '.collectFailures = 0' <<<"${newState}")
     else
