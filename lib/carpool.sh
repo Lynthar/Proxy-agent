@@ -8,7 +8,7 @@
 readonly _CARPOOL_LOADED=1
 
 # 可纳入拼车计量的协议：Xray 自己承载的入站。6/9 在 Xray 内核下跑在 sing-box sidecar，v2ray_api 计不到
-readonly CARPOOL_PROTOCOLS=",0,1,3,4,7,12,"
+readonly CARPOOL_PROTOCOLS=",0,1,3,4,7,12,15,"
 
 # jq 侧共享定义。日期算术只有这一份实现（Hinnant days_from_civil，输入 "YYYY-MM-DD"），判定算到期天数用它；
 # 用量也只在这里算：成员 = 上下行合计 × 口径系数（both 为 2），整机按网卡收发（out 只计发、max 取大）

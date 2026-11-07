@@ -86,7 +86,7 @@ V2RAY_LANG=en pasly
 
 | 类别 | 协议 |
 |---|---|
-| VLESS | TCP/Vision · WS · Reality Vision · Reality XHTTP |
+| VLESS | TCP/Vision · WS · Reality Vision · Reality XHTTP · XHTTP+TLS |
 | VMess（Xray 已标弃用） | WS · HTTPUpgrade |
 | 其它 | Trojan TCP（Xray 已标弃用） · Hysteria2 · TUIC · NaiveProxy · AnyTLS · Shadowsocks 2022 |
 

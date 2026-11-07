@@ -191,7 +191,7 @@ probeSub() {
     probedTypes=$(tr ' ' '\n' <<<"${probedTypes}" | grep . | sort | tr '\n' ' ' | sed 's/ $//')
 }
 
-# probeXhttpLink LINK → 按 Reality XHTTP 分享链接起 Xray 客户端（sing-box 没有 XHTTP），经它访问外网，打印 HTTP 状态码；
+# probeXhttpLink LINK → 按 XHTTP 分享链接（Reality 或 TLS）起 Xray 客户端（sing-box 没有 XHTTP），经它访问外网，打印 HTTP 状态码；
 # 不是 204 时同 probeOutbound 打出报错
 probeXhttpLink() {
     local link=$1 query pid code pair key value
@@ -207,13 +207,14 @@ probeXhttpLink() {
     hostPort=${hostPort%%\?*}
     jq -n --arg id "$(sed 's#^vless://##; s#@.*##' <<<"${link}")" --arg addr "${hostPort%:*}" --arg port "${hostPort##*:}" \
         --arg sni "${p[sni]:-}" --arg fp "${p[fp]:-}" --arg pbk "${p[pbk]:-}" --arg sid "${p[sid]:-}" --arg path "${p[path]:-}" \
-        --arg host "${p[host]:-}" '{log: {loglevel: "warning"},
+        --arg host "${p[host]:-}" --arg security "${p[security]:-}" --arg alpn "${p[alpn]:-}" '{log: {loglevel: "warning"},
         inbounds: [{listen: "127.0.0.1", port: 10809, protocol: "socks"}],
         outbounds: [{protocol: "vless",
             settings: {vnext: [{address: $addr, port: ($port | tonumber), users: [{id: $id, encryption: "none"}]}]},
-            streamSettings: {network: "xhttp", security: "reality",
-                realitySettings: {serverName: $sni, fingerprint: $fp, publicKey: $pbk, shortId: $sid},
-                xhttpSettings: {path: $path, host: $host}}}]}' >"${WORK}/xhttp.json"
+            streamSettings: ({network: "xhttp", security: $security, xhttpSettings: {path: $path, host: $host}}
+                + if $security == "reality"
+                  then {realitySettings: {serverName: $sni, fingerprint: $fp, publicKey: $pbk, shortId: $sid}}
+                  else {tlsSettings: {serverName: $sni, fingerprint: $fp, alpn: [$alpn]}} end)}]}' >"${WORK}/xhttp.json"
     "${XRAY_BIN}" run -c "${WORK}/xhttp.json" >"${WORK}/xhttp.log" 2>&1 &
     pid=$!
     sleep 2
@@ -239,7 +240,7 @@ noNoise "Xray 全部安装" "${s1Out}"
 assert_equals "active - active" "$(activeState | sed 's/inactive/-/; s/unknown/-/')" "Xray 与 nginx 在跑，sing-box 没装"
 assert_equals "enabled enabled" "$(systemctl is-enabled xray nginx 2>/dev/null | tr '\n' ' ' | sed 's/ $//')" "Xray 与 nginx 开机自启"
 assert_contains "$("${XRAY_BIN}" run -test -confdir "${XRAY_CONF_DIR}" 2>&1)" "Configuration OK" "xray run -test 通过"
-for f in 02_VLESS_TCP_inbounds 03_VLESS_WS_inbounds 04_trojan_TCP_inbounds 05_VMess_WS_inbounds 07_VLESS_vision_reality_inbounds 12_VLESS_XHTTP_inbounds; do
+for f in 02_VLESS_TCP_inbounds 03_VLESS_WS_inbounds 04_trojan_TCP_inbounds 05_VMess_WS_inbounds 07_VLESS_vision_reality_inbounds 12_VLESS_XHTTP_inbounds 15_VLESS_XHTTP_TLS_inbounds; do
     assert_equals "yes" "$([[ -f "${XRAY_CONF_DIR}/${f}.json" ]] && echo yes || echo no)" "${f}.json 已生成"
 done
 assert_equals "127.0.0.1:31305" "$(jq -r '.inbounds[1].streamSettings.realitySettings.target' "${XRAY_CONF_DIR}/07_VLESS_vision_reality_inbounds.json" 2>/dev/null)" \
@@ -273,9 +274,16 @@ fetchSingBoxClient
 assert_equals "yes" "$([[ -x "${SB_CLIENT}" ]] && echo yes || echo no)" "官方 sing-box 客户端已就位（$("${SB_CLIENT}" version 2>/dev/null | awk 'NR == 1 {print $3}')）"
 probeSub "Xray 全装" "${WORK}/sub-sb.json"
 assert_equals "trojan vless vless vless vmess" "${probedTypes}" "sing-box 订阅里是 VLESS TLS / WS / Reality、VMess、Trojan 五个节点"
-xhttpLink=$(base64 -d "${WORK}/sub-default.txt" 2>/dev/null | grep -m1 'type=xhttp')
+xhttpLink=$(base64 -d "${WORK}/sub-default.txt" 2>/dev/null | grep -m1 'security=reality.*type=xhttp')
 assert_not_empty "${xhttpLink}" "通用订阅里有 Reality XHTTP 的链接"
 assert_equals "204" "$(probeXhttpLink "${xhttpLink}")" "按 XHTTP 链接配的 Xray 客户端经服务端访问外网"
+xhttpTlsLink=$(base64 -d "${WORK}/sub-default.txt" 2>/dev/null | grep -m1 'security=tls&type=xhttp')
+assert_not_empty "${xhttpTlsLink}" "通用订阅里有 XHTTP+TLS 的链接"
+assert_equals "204" "$(probeXhttpLink "${xhttpTlsLink}")" "XHTTP+TLS：经 443 回落、nginx 转发，Xray 客户端访问外网"
+assert_equals "127.0.0.1" "$(jq -r '.inbounds[0].listen' "${XRAY_CONF_DIR}/15_VLESS_XHTTP_TLS_inbounds.json")" "XHTTP+TLS 的入站只在回环上听"
+xhttpTlsPath=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' "${XRAY_CONF_DIR}/15_VLESS_XHTTP_TLS_inbounds.json")
+assert_equals "404" "$(curl -s -o /dev/null -w '%{http_code}' --http1.1 --max-time 10 "https://${DOMAIN_A}${xhttpTlsPath}/")" "XHTTP+TLS：路径对、但走 http/1.1 只看到伪装站"
+assert_equals "404" "$(curl -s -o /dev/null -w '%{http_code}' --http2 --max-time 10 "https://${DOMAIN_A}/not${xhttpTlsPath#/}/")" "XHTTP+TLS：路径不对的 h2 请求只看到伪装站"
 
 # ============================================================================
 # 菜单 4 → 1：Xray 机上旁挂 Hysteria2，同一个账号
@@ -409,7 +417,7 @@ echo -e "${YELLOW}=== 菜单 2 → 1：拼车开着时先去掉 Trojan、再装�
 c3Out=$(runMenu "2\n1\n0,1,3,7,12\ny\n")
 assert_equals "0" "$?" "个性化安装去掉 4 退出码 0"
 assert_equals "no" "$([[ -f "${XRAY_CONF_DIR}/04_trojan_TCP_inbounds.json" ]] && echo yes || echo no)" "Trojan 入站已去掉"
-c4Out=$(runMenu "2\n1\n0,1,3,4,7,12\ny\n")
+c4Out=$(runMenu "2\n1\n0,1,3,4,7,12,15\ny\n")
 c4Rc=$?
 [[ ${c4Rc} -ne 0 ]] && tail -n 20 <<<"${c4Out}"
 assert_equals "0" "${c4Rc}" "个性化安装装回 4 退出码 0"
@@ -419,6 +427,17 @@ for ua in 'sing-box 1.14.4' 'clash-verge/v2.4.0' 'v2rayN/7.0'; do
     assert_equals "200" "$(fetchSub "${DOMAIN_B}" "${ua}" "${WORK}/sub-check")" "拼车下重建过的订阅，UA「${ua}」照样 200"
 done
 assert_contains "$(cat "${WORK}/sub-check" | base64 -d 2>/dev/null)" "trojan://" "重建后的通用订阅里有装回来的 Trojan"
+assert_equals "${E2E_USER}-VLESS_XHTTP_TLS" "$(jq -r '.inbounds[0].settings.clients[].email' "${XRAY_CONF_DIR}/15_VLESS_XHTTP_TLS_inbounds.json" 2>/dev/null | head -n 1)" \
+    "协议设为 all 的成员也进了 XHTTP+TLS 的入站"
+# carpoolUsed → 成员累计用量；只有下面这次探测的流量，涨了才说明 15 真在计量
+carpoolUsed() {
+    bash "${INSTALL_ROOT}/install.sh" CarpoolCollect >/dev/null 2>&1
+    jq -r --arg u "${E2E_USER}" '.members[$u] | .upBytes + .downBytes' "${INSTALL_ROOT}/carpool/state.json" 2>/dev/null
+}
+usedBefore=$(carpoolUsed)
+assert_equals "204" "$(probeXhttpLink "$(base64 -d "${WORK}/sub-check" 2>/dev/null | grep -m1 'security=tls&type=xhttp')")" "拼车开着时 XHTTP+TLS 照样能用"
+usedAfter=$(carpoolUsed)
+assert_equals "yes" "$([[ "${usedAfter:-0}" -gt "${usedBefore:-0}" ]] && echo yes || echo no)" "XHTTP+TLS 的流量记到成员头上（${usedBefore} → ${usedAfter}）"
 c5Out=$(runMenu "7\n6\n4\ny\ny\n")
 assert_equals "0" "$?" "关闭拼车退出码 0"
 assert_equals "false" "$(jq -r '.enabled' "${INSTALL_ROOT}/carpool/state.json" 2>/dev/null)" "拼车已关闭"
@@ -429,6 +448,24 @@ noNoise "拼车各步" "${c1Out}${c2Out}${linksOut}${c3Out}${c4Out}${c5Out}"
 # 只留 Reality：nginx 还得在（订阅要它，Reality 的本机伪装站也在它上面）
 # ============================================================================
 
+echo ""
+echo -e "${YELLOW}=== 菜单 2 → 1：单选 15，自动带上 0，路径从它自己的入站读回来 ===${NC}"
+x1Out=$(runMenu "2\n1\n15\ny\n")
+x1Rc=$?
+[[ ${x1Rc} -ne 0 ]] && tail -n 20 <<<"${x1Out}"
+assert_equals "0" "${x1Rc}" "单选 15 退出码 0"
+noNoise "单选 15" "${x1Out}"
+assert_equals "yes no" "$([[ -f "${XRAY_CONF_DIR}/02_VLESS_TCP_inbounds.json" ]] && echo yes || echo no) $([[ -f "${XRAY_CONF_DIR}/03_VLESS_WS_inbounds.json" ]] && echo yes || echo no)" "带上了 0，没有 1"
+assert_equals "200" "$(fetchSub "${DOMAIN_B}" 'v2rayN/7.0' "${WORK}/sub-default.txt")" "订阅照样 200"
+xhttpTlsLink=$(base64 -d "${WORK}/sub-default.txt" 2>/dev/null | grep -m1 'security=tls&type=xhttp')
+assert_contains "${xhttpTlsLink}" "path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' "${XRAY_CONF_DIR}/15_VLESS_XHTTP_TLS_inbounds.json")#" "分享链接的路径就是入站的路径"
+assert_equals "204" "$(probeXhttpLink "${xhttpTlsLink}")" "只有 0 + 15 时 XHTTP+TLS 照样能用"
+# 单选 15 把 Reality 删了，装回 7 要再答：端口回车、本机域名当目标 y、私钥回车生成
+x2Out=$(runMenu "2\n1\n0,7\ny\n\ny\n\n")
+assert_equals "0" "$?" "去掉 15 退出码 0"
+noNoise "去掉 15" "${x2Out}"
+assert_equals "no" "$([[ -f "${XRAY_CONF_DIR}/15_VLESS_XHTTP_TLS_inbounds.json" ]] && echo yes || echo no)" "15 的入站已去掉"
+assert_equals "0" "$(grep -c grpc_pass /etc/nginx/conf.d/alone.conf 2>/dev/null)" "15 的 location 也去掉了"
 echo ""
 echo -e "${YELLOW}=== 菜单 2 → 1：只选 7 ===${NC}"
 s8Out=$(runMenu "2\n1\n7\ny\n")

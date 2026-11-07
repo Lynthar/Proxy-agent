@@ -1336,6 +1336,9 @@ readInstallProtocolType() {
                 singBoxVLESSWSPort=$(jq .inbounds[0].listen_port "${row}.json")
             fi
         fi
+        if echo "${row##*/}" | grep -q VLESS_XHTTP_TLS_inbounds; then
+            currentInstallProtocolType="${currentInstallProtocolType}15,"
+        fi
         if echo "${row##*/}" | grep -q VLESS_XHTTP_inbounds; then
             currentInstallProtocolType="${currentInstallProtocolType}12,"
             xrayVLESSRealityXHTTPort=$(jq -r .inbounds[0].port "${row}.json")
@@ -1850,6 +1853,9 @@ readConfigHostPathUUID() {
                         currentPath=$(grep "grpc {" <${nginxConfigPath}alone.conf | head -1 | awk -F "[/]" '{print $2}' | awk -F "[g][r][p][c]" '{print $1}')
                     fi
                 fi
+            fi
+            if [[ -z "${currentPath}" && -f "${configPath}15_VLESS_XHTTP_TLS_inbounds.json" ]]; then
+                currentPath=$(jq -r .inbounds[0].streamSettings.xhttpSettings.path "${configPath}15_VLESS_XHTTP_TLS_inbounds.json" | sed -e 's#^/##' -e 's#xhttp$##')
             fi
             if [[ -z "${currentPath}" && -f "${configPath}12_VLESS_XHTTP_inbounds.json" ]]; then
                 currentPath=$(jq -r .inbounds[0].streamSettings.xhttpSettings.path "${configPath}12_VLESS_XHTTP_inbounds.json" | awk -F "[x][H][T][T][P]" '{print $1}' | awk -F "[/]" '{print $2}')
@@ -2435,10 +2441,31 @@ removeNginxDefaultConf() {
         fi
     fi
 }
-# 修改nginx重定向配置
+# xhttpTlsNginxLocation CUSTOM_PATH → 15 在 h2 块里的 location，路径与 initXrayConfig 写进入站的同源（/CUSTOM_PATHxhttp）。
+# 超时要长过 Xray 默认的 300 秒空闲：nginx 默认 60 秒，代理连接一空闲就被掐。一个包一条 POST，access_log 开着日志会暴涨
+xhttpTlsNginxLocation() {
+    cat <<EOF
+location /${1}xhttp/ {
+		access_log off;
+		client_max_body_size 0;
+		client_body_timeout 5m;
+		grpc_read_timeout 315s;
+		grpc_send_timeout 5m;
+		grpc_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+		grpc_pass grpc://127.0.0.1:${XHTTP_TLS_LOCAL_PORT};
+	}
+EOF
+}
+
+# 修改nginx重定向配置。全部安装传 all（此时 selectCustomInstallType 是空的）
 updateRedirectNginxConf() {
     local redirectDomain=
     redirectDomain=${domain}:${port}
+
+    local xhttpLocation=
+    if [[ "$1" == "all" || "${selectCustomInstallType}" == *",15,"* ]]; then
+        xhttpLocation=$(xhttpTlsNginxLocation "${customPath}")
+    fi
 
     local nginxH2Conf=
     nginxH2Conf="listen 127.0.0.1:31302 http2 so_keepalive=on proxy_protocol;"
@@ -2472,6 +2499,7 @@ server {
 	add_header X-Content-Type-Options "nosniff" always;
 	add_header X-Frame-Options "SAMEORIGIN" always;
 
+	${xhttpLocation}
 	location / {
 		try_files \$uri \$uri/ =404;
 	}
@@ -3425,12 +3453,16 @@ labelNginxPorts() {
     command -v getenforce >/dev/null 2>&1 && command -v semanage >/dev/null 2>&1 || return 0
     [[ "$(getenforce 2>/dev/null)" == "Disabled" || -z "$(getenforce 2>/dev/null)" ]] && return 0
     httpPorts=$(semanage port -l 2>/dev/null | awk '$1 == "http_port_t" && $2 == "tcp" {$1 = $2 = ""; print}' | tr -d ' ' | tr ',' '\n')
-    for port in $(grep -hoE '^[[:space:]]*listen[[:space:]]+(\[[^]]*\]:|[0-9.]+:)?[0-9]+' "${nginxConfigPath}"*.conf 2>/dev/null | grep -oE '[0-9]+$' | sort -un); do
+    for port in $(grep -hoE '^[[:space:]]*(listen[[:space:]]+(\[[^]]*\]:|[0-9.]+:)?[0-9]+|grpc_pass[[:space:]]+grpc://127\.0\.0\.1:[0-9]+)' "${nginxConfigPath}"*.conf 2>/dev/null | grep -oE '[0-9]+$' | sort -un); do
         grep -qx "${port}" <<<"${httpPorts}" && continue
         if ! semanage port -a -t http_port_t -p tcp "${port}" 2>/dev/null && ! semanage port -m -t http_port_t -p tcp "${port}" 2>/dev/null; then
             echoContent yellow " ---> $(t SELINUX_NGINX_PORT_FAILED "${port}")"
         fi
     done
+    # grpc_pass 连回环也受策略管：端口是 http_port_t 还不够，不开这个布尔值 nginx 照样连不上，15 全 502
+    if grep -qE '^[[:space:]]*grpc_pass[[:space:]]' "${nginxConfigPath}"*.conf 2>/dev/null && [[ "$(getsebool httpd_can_network_relay 2>/dev/null)" != *" on" ]]; then
+        setsebool -P httpd_can_network_relay on 2>/dev/null || echoContent yellow " ---> $(t SELINUX_NGINX_RELAY_FAILED)"
+    fi
 }
 
 # labelCoreBinary BIN → SELinux 没禁用时把核心二进制登记成 bin_t 并 restorecon：留在 etc_t 下 systemd 拉起后跑在 init_t，
@@ -4401,6 +4433,13 @@ initXrayClients() {
             users=$(echo "${users}" | jq \
                 --arg id "${uuid}" \
                 --arg email "${email}-VLESS_Reality_XHTTP" \
+                '. += [{id: $id, email: $email}]')
+        fi
+        # VLESS XHTTP TLS (id 15)
+        if [[ "${type}" == *",15,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg id "${uuid}" \
+                --arg email "${email}-VLESS_XHTTP_TLS" \
                 '. += [{id: $id, email: $email}]')
         fi
         # VMess WS (id 3)
@@ -5859,6 +5898,35 @@ EOF
     elif [[ -z "${3:-}" ]]; then
         rm ${XRAY_CONF_DIR}/12_VLESS_XHTTP_inbounds.json >/dev/null 2>&1
     fi
+    # VLESS_XHTTP_TLS：只听回环，0 把 h2 回落给 nginx，nginx 按路径转进来；host 不写，校验交给 nginx 的 server_name
+    if echo "${selectCustomInstallType}" | grep -q ",15," || [[ "$1" == "all" ]]; then
+        cat <<EOF >${XRAY_CONF_DIR}/15_VLESS_XHTTP_TLS_inbounds.json
+{
+"inbounds":[
+    {
+	  "port": ${XHTTP_TLS_LOCAL_PORT},
+	  "listen": "127.0.0.1",
+	  "protocol": "vless",
+	  "tag":"VLESSXHTTPTLS",
+	  "settings": {
+		"clients": $(initXrayClients 15),
+		"decryption": "none"
+	  },
+	  "streamSettings": {
+		"network": "xhttp",
+		"security": "none",
+		"xhttpSettings": {
+		  "path": "/${customPath}xhttp",
+		  "mode": "auto"
+		}
+	  }
+	}
+]
+}
+EOF
+    elif [[ -z "${3:-}" ]]; then
+        rm ${XRAY_CONF_DIR}/15_VLESS_XHTTP_TLS_inbounds.json >/dev/null 2>&1
+    fi
     if echo "${selectCustomInstallType}" | grep -q ",3," || [[ "$1" == "all" ]]; then
         fallbacksList=${fallbacksList}',{"path":"/'${customPath}'vws","dest":31299,"xver":1}'
         cat <<EOF >${XRAY_CONF_DIR}/05_VMess_WS_inbounds.json
@@ -6680,6 +6748,35 @@ EOF
 
         shareQrCode " ---> 二维码 VLESS(VLESS+reality+XHTTP)" "$(tail -n 1 "${SUBSCRIBE_LOCAL_DIR}/default/${user}")"
 
+    elif [[ "${type}" == "vlessXHTTPTLS" ]]; then
+        local xhttpTlsLink="vless://${id}@${add}:${port}?encryption=none&security=tls&type=xhttp&mode=auto&host=${currentHost}&sni=${currentHost}&fp=chrome&alpn=h2&path=${path}#${email}"
+        echoContent yellow " ---> $(t ACCOUNT_LINK_XHTTP_TLS)"
+        echoContent green "    ${xhttpTlsLink}\n"
+
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/default/${user}"
+${xhttpTlsLink}
+EOF
+        # 不进 sing-box 订阅：官方 sing-box 没有 XHTTP
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/clashMeta/${user}"
+  - name: "${email}"
+    type: vless
+    server: ${add}
+    port: ${port}
+    uuid: ${id}
+    udp: true
+    tls: true
+    network: xhttp
+    client-fingerprint: chrome
+    alpn:
+      - h2
+    servername: ${currentHost}
+    xhttp-opts:
+      path: ${path}
+      host: ${currentHost}
+EOF
+
+        shareQrCode " ---> $(t ACCOUNT_QR_XHTTP_TLS)" "$(tail -n 1 "${SUBSCRIBE_LOCAL_DIR}/default/${user}")"
+
     elif [[ "${type}" == "trojan" ]]; then
         # URLEncode
         echoContent yellow " ---> Trojan(TLS)"
@@ -7207,6 +7304,24 @@ showAccounts() {
                 echoContent skyBlue "\n ---> 账号:${email}${count}"
                 if [[ -n "${line}" ]]; then
                     defaultBase64Code vlessXHTTP "${xrayVLESSRealityXHTTPort}" "${email}${count}" "$(echo "${user}" | jq -r .id//.uuid)" "${line}" "${path}"
+                    count=$((count + 1))
+                    echo
+                fi
+            done < <(echo "${currentCDNAddress}" | tr ',' '\n')
+        done
+    fi
+    # VLESS XHTTP TLS
+    if echo ${currentInstallProtocolType} | grep -q ",15,"; then
+        echoContent skyBlue "\n================================ $(t ACCOUNT_TITLE_XHTTP_TLS) ================================\n"
+        jq -c '.inbounds[0].settings.clients[]' "${configPath}15_VLESS_XHTTP_TLS_inbounds.json" | while read -r user; do
+            local email=
+            email=$(echo "${user}" | jq -r .email)
+
+            local count=
+            while read -r line; do
+                echoContent skyBlue "\n ---> 账号:${email}${count}"
+                if [[ -n "${line}" ]]; then
+                    defaultBase64Code vlessXHTTPTLS "${currentDefaultPort}" "${email}${count}" "$(echo "${user}" | jq -r .id)" "${line}" "/${currentPath}xhttp"
                     count=$((count + 1))
                     echo
                 fi
@@ -7903,7 +8018,7 @@ applyAccountChangeAllProtocols() {
     for protocolId in ${currentInstallProtocolType//,/ }; do
         # 覆盖面与旧的手写分支一致：2/5/8 已废弃冻结，20 是内部 inbound，12 仅 Xray
         case "${protocolId}" in
-        0 | 1 | 3 | 4 | 6 | 7 | 9 | 10 | 11 | 12 | 13 | 14) ;;
+        0 | 1 | 3 | 4 | 6 | 7 | 9 | 10 | 11 | 12 | 13 | 14 | 15) ;;
         *) continue ;;
         esac
         if [[ "${protocolId}" == "12" && "${coreKind}" != "1" ]]; then
@@ -17005,28 +17120,29 @@ customSingBoxInstall() {
 # Xray-core个性化安装
 customXrayInstall() {
     echoContent skyBlue "\n========================个性化安装============================"
-    echoContent yellow "VLESS前置：选了 1 / 3 / 4 会自动带上 0；无域名只装 Reality 选 7 或 7,12"
+    echoContent yellow "VLESS前置：选了 1 / 3 / 4 / 15 会自动带上 0；无域名只装 Reality 选 7 或 7,12"
     echoContent yellow "0.VLESS+TLS_Vision+TCP[推荐]"
     echoContent yellow "1.VLESS+TLS+WS[仅CDN推荐]"
     echoContent yellow "$(t INSTALL_ITEM_VMESS_WS)"
     echoContent yellow "$(t INSTALL_ITEM_TROJAN)"
     echoContent yellow "7.VLESS+Reality+uTLS+Vision[推荐]"
     echoContent yellow "12.VLESS+Reality+XHTTP"
+    echoContent yellow "$(t INSTALL_ITEM_XHTTP_TLS)"
     read -r -p "请选择[多选]，[例如:1,2,3]:" selectCustomInstallType
     echoContent skyBlue "--------------------------------------------------------------"
     if echo "${selectCustomInstallType}" | grep -q "，"; then
         echoContent red " ---> 请使用英文逗号分隔"
         exit 1
     fi
-    if [[ "${selectCustomInstallType}" != "12" ]] && ((${#selectCustomInstallType} >= 2)) && ! echo "${selectCustomInstallType}" | grep -q ","; then
+    if [[ ! "${selectCustomInstallType}" =~ ^(12|15)$ ]] && ((${#selectCustomInstallType} >= 2)) && ! echo "${selectCustomInstallType}" | grep -q ","; then
         echoContent red " ---> 多选请使用英文逗号分隔"
         exit 1
     fi
 
     selectCustomInstallType=",${selectCustomInstallType},"
-    # 1 / 3 / 4 是 0 的 TLS 回落，没选 0 就补上；12 也要 0 或 7 当前置（readInstallType 与账号管理只认它们）。
+    # 1 / 3 / 4 / 15 是 0 的 TLS 回落，没选 0 就补上；12 也要 0 或 7 当前置（readInstallType 与账号管理只认它们）。
     # 7、7,12 不补：补了 0 就要域名和证书，无域名的机器装不上
-    if [[ ("${selectCustomInstallType}" =~ ,(1|3|4), || ("${selectCustomInstallType}" == *",12,"* && "${selectCustomInstallType}" != *",7,"*)) \
+    if [[ ("${selectCustomInstallType}" =~ ,(1|3|4|15), || ("${selectCustomInstallType}" == *",12,"* && "${selectCustomInstallType}" != *",7,"*)) \
         && "${selectCustomInstallType}" != *",0,"* ]]; then
         selectCustomInstallType=",0${selectCustomInstallType}"
     fi
@@ -17034,10 +17150,12 @@ customXrayInstall() {
     if [[ "${selectCustomInstallType:0:1}" != "," ]]; then
         selectCustomInstallType=",${selectCustomInstallType},"
     fi
-    if validateCustomInstallTokens "${selectCustomInstallType}" 0 1 3 4 7 12; then
+    if validateCustomInstallTokens "${selectCustomInstallType}" 0 1 3 4 7 12 15; then
         # 走 CDN 的协议提示：Reality 的 TLS 必须直连本机，挂在 CDN 后面连不上
         if echo "${selectCustomInstallType}" | grep -q -E ",1,|,3,"; then
             echoContent yellow "\n ---> 提示: WS 只在走 CDN 时才值得用；不走 CDN 选 7 或 12（Reality）抗检测更好，但 Reality 不能挂在 CDN 后面"
+        fi
+        if echo "${selectCustomInstallType}" | grep -q -E ",1,|,3,|,15,"; then
             echoContent yellow " ---> 走 CDN 时端口要选 CDN 会转发的，Cloudflare 的 HTTPS 只转发 443、2053、2083、2087、2096、8443\n"
         fi
 
@@ -17066,7 +17184,7 @@ customXrayInstall() {
 
         handleNginx stop
         # 随机path
-        if echo "${selectCustomInstallType}" | grep -qE ",1,|,2,|,3,|,5,|,12,"; then
+        if echo "${selectCustomInstallType}" | grep -qE ",1,|,2,|,3,|,5,|,12,|,15,"; then
             randomPathFunction 4
         fi
         if [[ -n "${btDomain}" ]]; then
@@ -17257,7 +17375,7 @@ xrayCoreInstall() {
     else
         nginxBlog 10
     fi
-    updateRedirectNginxConf
+    updateRedirectNginxConf all
     # 端口自检停过旁挂的 sing-box（链式、6 / 9），重启要连它一起按片段拉回来，只起 Xray 会让它一直停着
     reloadCore
 

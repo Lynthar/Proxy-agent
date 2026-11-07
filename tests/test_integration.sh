@@ -1164,9 +1164,9 @@ render_install_status() (
 assert_equals "$(printf '%s\n' '\nCORE_CURRENT_STOPPED' 'PROTOCOLS_INSTALLED:' \
     'VLESS+TCP[TLS_Vision]' 'VLESS+WS[TLS]' 'Trojan+gRPC[TLS]' 'VMess+WS[TLS]' 'Trojan+TCP[TLS]' \
     'VLESS+gRPC[TLS]' 'Hysteria2' 'VLESS+Reality+Vision' 'VLESS+Reality+gRPC' 'Tuic' 'Naive' \
-    'VMess+TLS+HTTPUpgrade' 'VLESS+Reality+XHTTP' 'AnyTLS' 'SS2022' '')" \
-    "$(render_install_status 2 ",0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,")" \
-    "showInstallStatus：全部 15 个协议按 ID 升序、用菜单文案显示"
+    'VMess+TLS+HTTPUpgrade' 'VLESS+Reality+XHTTP' 'AnyTLS' 'SS2022' 'VLESS+XHTTP[TLS]' '')" \
+    "$(render_install_status 2 ",0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,")" \
+    "showInstallStatus：全部 16 个协议按 ID 升序、用菜单文案显示"
 assert_equals "$(printf '%s\n' '\nCORE_CURRENT_STOPPED' 'PROTOCOLS_INSTALLED:' 'VLESS+Reality+Vision' 'Tuic' 'Naive' '')" \
     "$(render_install_status 1 ",10,9,7,")" \
     "showInstallStatus：显示顺序按 ID 数值、与状态串顺序无关"
@@ -1385,6 +1385,29 @@ rm -f "${DOTTED_ROOT}/xray/conf/03_VLESS_WS_inbounds.json"
 printf '%s\n' '{"inbounds":[{"port":443,"settings":{"clients":[{"id":"a1","email":"alice"},{"id":"b2","email":"bob"}]}}]}' \
     >"${DOTTED_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
 
+# 15 走同一个事务：加人写进它的入站，后缀对得上才删得掉；文件名不能被 12 的探测吞掉
+printf '%s\n' '{"inbounds":[{"port":31307,"settings":{"clients":[{"id":"a1","email":"alice-VLESS_XHTTP_TLS"}]}}]}' \
+    >"${DOTTED_ROOT}/xray/conf/15_VLESS_XHTTP_TLS_inbounds.json"
+run_dotted_15() {
+    env PROXY_AGENT_DIR="${DOTTED_ROOT}" DOTTED_FNS="${DOTTED_FNS}" bash -c '
+        source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh
+        eval "${DOTTED_FNS}"
+        readInstallType; readInstallProtocolType
+        echo "${currentInstallProtocolType}"
+        currentClients="[{\"uuid\":\"a1\",\"name\":\"alice\"}]"
+        [[ -z "$1" ]] || applyAccountChangeAllProtocols "$@" >/dev/null 2>&1' _ "$@" 2>/dev/null
+}
+assert_equals ",0,15," "$(run_dotted_15)" "readInstallProtocolType：认出 15，不当成 12"
+run_dotted_15 add c3 carol >/dev/null
+assert_equals '["alice-VLESS_XHTTP_TLS","carol-VLESS_XHTTP_TLS"]' "$(jq -c '[.inbounds[0].settings.clients[].email]' "${DOTTED_ROOT}/xray/conf/15_VLESS_XHTTP_TLS_inbounds.json")" \
+    "账户事务：加人写进 15，后缀是 VLESS_XHTTP_TLS"
+run_dotted_15 delName carol >/dev/null
+assert_equals '["alice-VLESS_XHTTP_TLS"]' "$(jq -c '[.inbounds[0].settings.clients[].email]' "${DOTTED_ROOT}/xray/conf/15_VLESS_XHTTP_TLS_inbounds.json")" \
+    "账户事务：按名删人，15 里也没了"
+rm -f "${DOTTED_ROOT}/xray/conf/15_VLESS_XHTTP_TLS_inbounds.json"
+printf '%s\n' '{"inbounds":[{"port":443,"settings":{"clients":[{"id":"a1","email":"alice"},{"id":"b2","email":"bob"}]}}]}' \
+    >"${DOTTED_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
+
 # 生成器回归成空数组时，事务必须拒绝提交，而不是把该协议的用户清空再报成功
 env PROXY_AGENT_DIR="${DOTTED_ROOT}" DOTTED_FNS="${DOTTED_FNS}" bash -c '
     source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh
@@ -1423,7 +1446,7 @@ render_clients() (
 )
 
 # 每个内核上该产出用户的协议独立写死（加协议时同步）：删掉一个活分支，产出集合就对不上
-CLIENTS_LIVE_1="0 1 3 4 6 7 9 12"
+CLIENTS_LIVE_1="0 1 3 4 6 7 9 12 15"
 CLIENTS_LIVE_2="0 1 3 4 6 7 9 10 11 13 14 20"
 REGISTRY_IDS=$(for _pid in $(seq 0 30); do getProtocolConfigFileName "${_pid}" >/dev/null && echo "${_pid}"; done)
 for _core in 1 2; do
@@ -4148,6 +4171,15 @@ db_reset
 run_db 2 vlessReality 443 rea-x uuid1 >/dev/null 2>&1
 assert_equals "1" "$(grep -A3 'reality-opts:' "${DB_SUB}/clashMeta/rea" | grep -c '^      support-x25519mlkem768: true$')" \
     "Clash 订阅：sing-box 的 Reality Vision 也开 support-x25519mlkem768"
+# 15 的地址可以是 CDN，SNI 和 Host 始终是本机域名；sing-box 没有 XHTTP，写进它的订阅整份配置都起不来
+db_reset
+run_db 1 vlessXHTTPTLS 443 xt-x uuid3 cdn.example.net /abcdxhttp >/dev/null 2>&1
+assert_equals "vless://uuid3@cdn.example.net:443?encryption=none&security=tls&type=xhttp&mode=auto&host=example.org&sni=example.org&fp=chrome&alpn=h2&path=/abcdxhttp#xt-x" \
+    "$(cat "${DB_SUB}/default/xt")" "XHTTP+TLS：分享链接"
+assert_equals "$(printf '%s\n' '  - name: "xt-x"' '    type: vless' '    server: cdn.example.net' '    port: 443' '    uuid: uuid3' '    udp: true' '    tls: true' \
+    '    network: xhttp' '    client-fingerprint: chrome' '    alpn:' '      - h2' '    servername: example.org' '    xhttp-opts:' '      path: /abcdxhttp' '      host: example.org')" \
+    "$(cat "${DB_SUB}/clashMeta/xt")" "XHTTP+TLS：Clash 节点没有 reality-opts，SNI 和 Host 是本机域名"
+assert_equals "[]" "$(jq -c . "${DB_SUB}/sing-box/xt")" "XHTTP+TLS：不进 sing-box 订阅"
 db_reset
 run_db 1 vmessws 443 vm-x 0f3c8a4e-1b2d-4c5e-8f90-123456789abc example.net /vws >/dev/null 2>&1
 assert_equals "xudp" "$(jq -r '.[0].packet_encoding' "${DB_SUB}/sing-box/vm")" "VMess WS：sing-box 片段的 UDP 用 xudp（packetaddr 只有 sing-box 服务端认，Xray 上 UDP 全丢）"
@@ -4477,8 +4509,8 @@ assert_contains "$(printf '1\ny\n' | run_ah 'read -r -p "$(t REMOVE_USER_CONFIRM
 assert_equals "0" "$(grep -c 'qrserver' install.sh)" "二维码：脚本里没有第三方二维码服务"
 ah_reset
 assert_equals "" "$(run_ah 'qrencode() { echo QR; }; shareQrCode title vless://x' </dev/null)" "二维码：输出不是终端时什么都不打（订阅重建不用白画）"
-assert_equals "12" "$(sed -n '/^defaultBase64Code() {/,/^}/p' install.sh | grep -cF 'shareQrCode "')" "二维码：账号页每种协议都接上了"
-assert_equals "12" "$(sed -n '/^defaultBase64Code() {/,/^}/p' install.sh | grep -F 'shareQrCode "' | grep -cF '"$(tail -n 1 "${SUBSCRIBE_LOCAL_DIR}/default/${user}")"')" "二维码：账号页都画刚写进订阅的那条链接"
+assert_equals "13" "$(sed -n '/^defaultBase64Code() {/,/^}/p' install.sh | grep -cF 'shareQrCode "')" "二维码：账号页每种协议都接上了"
+assert_equals "13" "$(sed -n '/^defaultBase64Code() {/,/^}/p' install.sh | grep -F 'shareQrCode "' | grep -cF '"$(tail -n 1 "${SUBSCRIBE_LOCAL_DIR}/default/${user}")"')" "二维码：账号页都画刚写进订阅的那条链接"
 # run_db_qr ARGS... → 同 run_db，只把画二维码换成打印它拿到的链接
 run_db_qr() {
     env PROXY_AGENT_DIR="${MOCK_ROOT}/sharecode.root" DB_FN="${DB_FN}" V2RAY_LANG=zh_CN bash -c '
@@ -4942,13 +4974,15 @@ LN_FN=$(sed -n '/^labelNginxPorts() {/,/^}/p' install.sh)
 LN_DIR="${MOCK_ROOT}/selinuxnginx"
 rm -rf "${LN_DIR}" && mkdir -p "${LN_DIR}/conf.d"
 printf '%s\n' 'server {' '    listen 2087 so_keepalive=on ssl;' '    listen [::]:2087 ssl;' '}' >"${LN_DIR}/conf.d/a.conf"
-printf '%s\n' 'server {' '    listen 127.0.0.1:31305 ssl;' '    listen 443 ssl;' '    # listen 9999;' '}' >"${LN_DIR}/conf.d/b.conf"
+printf '%s\n' 'server {' '    listen 127.0.0.1:31305 ssl;' '    listen 443 ssl;' '    # listen 9999;' '    location /a/ {' '        grpc_pass grpc://127.0.0.1:31307;' '    }' '}' >"${LN_DIR}/conf.d/b.conf"
 # run_ln ENFORCE → getenforce 报 ENFORCE；semanage 桩：已登记 80 443 8443，打印它被要求登记的端口
 run_ln() {
-    env LN_FN="${LN_FN}" LN_DIR="${LN_DIR}" ENF="$1" bash -c '
+    env LN_FN="${LN_FN}" LN_DIR="${LN_DIR}" ENF="$1" RELAY="${2:-off}" bash -c '
         eval "${LN_FN}"
         echoContent() { :; }
         getenforce() { echo "${ENF}"; }
+        getsebool() { echo "httpd_can_network_relay --> ${RELAY}"; }
+        setsebool() { echo "setsebool $*"; }
         semanage() {
             [[ "$1 $2" == "port -l" ]] && { echo "http_port_t                    tcp      80, 81, 443, 8443"; return 0; }
             echo "$*"
@@ -4956,10 +4990,36 @@ run_ln() {
         nginxConfigPath="${LN_DIR}/conf.d/"
         labelNginxPorts' 2>&1 | paste -sd'|' -
 }
-assert_equals "port -a -t http_port_t -p tcp 2087|port -a -t http_port_t -p tcp 31305" "$(run_ln Enforcing)" \
-    "SELinux Enforcing：只登记还不是 http_port_t 的 listen 端口（IPv6、带地址的写法都认，注释掉的不算）"
-assert_equals "port -a -t http_port_t -p tcp 2087|port -a -t http_port_t -p tcp 31305" "$(run_ln Permissive)" "Permissive 也登记：之后切回 Enforcing 或重启照样能绑"
+LN_RELAY="setsebool -P httpd_can_network_relay on"
+assert_equals "port -a -t http_port_t -p tcp 2087|port -a -t http_port_t -p tcp 31305|port -a -t http_port_t -p tcp 31307|${LN_RELAY}" "$(run_ln Enforcing)" \
+    "SELinux Enforcing：只登记还不是 http_port_t 的 listen 端口（IPv6、带地址的写法都认，注释掉的不算），以及 grpc_pass 要连的回环端口"
+assert_equals "port -a -t http_port_t -p tcp 2087|port -a -t http_port_t -p tcp 31305|port -a -t http_port_t -p tcp 31307|${LN_RELAY}" "$(run_ln Permissive)" "Permissive 也登记：之后切回 Enforcing 或重启照样能绑"
+assert_equals "port -a -t http_port_t -p tcp 2087|port -a -t http_port_t -p tcp 31305|port -a -t http_port_t -p tcp 31307" "$(run_ln Enforcing on)" "relay 已经开着就不再 setsebool（-P 要改策略存储）"
 assert_equals "" "$(run_ln Disabled)" "SELinux 关掉时什么都不做"
+rm -f "${LN_DIR}/conf.d/b.conf"
+assert_equals "port -a -t http_port_t -p tcp 2087" "$(run_ln Enforcing)" "没有 grpc_pass（没装 15）就不开 relay"
+
+# --- 15 的 location 只进 h2 块：Xray 只把 h2 回落给 31302。全部安装时 selectCustomInstallType 是空的，靠 all 参数 ---
+UR_FN=$(sed -n '/^xhttpTlsNginxLocation() {/,/^}/p;/^updateRedirectNginxConf() {/,/^# writeHttpRedirectNginxConf/p' install.sh)
+UR_DIR="${MOCK_ROOT}/redirectnginx"
+# run_ur SELECTION ARG → 跑 updateRedirectNginxConf，打印 31302 那个 server 块里的 location 行与 grpc_pass，再打印一行 h1= 另一个块的 grpc_pass 数
+run_ur() {
+    rm -rf "${UR_DIR}" && mkdir -p "${UR_DIR}"
+    env UR_FN="${UR_FN}" UR_DIR="${UR_DIR}" SEL="$1" ARG="$2" bash -c '
+        source lib/constants.sh
+        eval "${UR_FN}"
+        nginx() { echo "nginx version: nginx/1.22.1" >&2; }
+        handleNginx() { :; }; writeHttpRedirectNginxConf() { :; }
+        nginxConfigPath="${UR_DIR}/"; domain=ex.org; port=443; nginxStaticPath=/www; customPath=abcd; selectCustomInstallType="${SEL}"
+        updateRedirectNginxConf ${ARG}' >/dev/null 2>&1
+    awk '/^server \{/ { block = "" } /listen 127.0.0.1:31302/ { block = "h2" } /listen 127.0.0.1:31300/ { block = "h1" }
+        block == "h2" && /location \/[a-z]+xhttp|grpc_pass/ { gsub(/^[ \t]+/, ""); print }
+        block == "h1" && /grpc_pass/ { h1++ } END { print "h1=" h1 + 0 }' "${UR_DIR}/alone.conf" | paste -sd'|' -
+}
+_urWant="location /abcdxhttp/ {|grpc_pass grpc://127.0.0.1:${XHTTP_TLS_LOCAL_PORT:-31307};|h1=0"
+assert_equals "${_urWant}" "$(run_ur "" all)" "15 的 location：全部安装写进 h2 块，路径与端口对得上入站"
+assert_equals "${_urWant}" "$(run_ur ",0,15," "")" "15 的 location：个性化选了 15 也写"
+assert_equals "h1=0" "$(run_ur ",0,1," "")" "15 的 location：没选 15 不写，猜中路径也只看到伪装站"
 
 # --- Clash 的 TUIC 节点按域名发 SNI 并校验证书：mihomo 见 disable-sni 会直接关掉证书校验 ---
 tuicClash=$(sed -n '/^    type: tuic$/,/^EOF$/p' install.sh)

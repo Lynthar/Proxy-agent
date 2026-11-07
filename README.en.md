@@ -93,7 +93,7 @@ V2RAY_LANG=en pasly
 
 | Family | Protocols |
 |---|---|
-| VLESS | TCP/Vision · WS · Reality Vision · Reality XHTTP |
+| VLESS | TCP/Vision · WS · Reality Vision · Reality XHTTP · XHTTP+TLS |
 | VMess (deprecated by Xray) | WS · HTTPUpgrade |
 | Others | Trojan TCP (deprecated by Xray) · Hysteria2 · TUIC · NaiveProxy · AnyTLS · Shadowsocks 2022 |
 

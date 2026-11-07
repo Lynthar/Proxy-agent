@@ -33,6 +33,7 @@ getProtocolConfigFileName() {
         12) echo "12_VLESS_XHTTP_inbounds.json" ;;
         13) echo "13_anytls_inbounds.json" ;;
         14) echo "14_ss2022_inbounds.json" ;;
+        15) echo "15_VLESS_XHTTP_TLS_inbounds.json" ;;
         20) echo "20_socks5_inbounds.json" ;;
         *)  return 1 ;;
     esac
@@ -61,6 +62,7 @@ parseProtocolIdFromFileName() {
         *VLESS_XHTTP_inbounds.json)         echo "12" ;;
         *anytls_inbounds.json)              echo "13" ;;
         *ss2022_inbounds.json)              echo "14" ;;
+        *VLESS_XHTTP_TLS_inbounds.json)     echo "15" ;;
         *socks5_inbounds.json)              echo "20" ;;
         *)  return 1 ;;
     esac
@@ -91,6 +93,7 @@ getProtocolDisplayName() {
         12) echo "VLESS+Reality+XHTTP" ;;
         13) echo "AnyTLS" ;;
         14) echo "SS2022" ;;
+        15) echo "VLESS+XHTTP[TLS]" ;;
         20) echo "SOCKS5" ;;
         *)  echo "Unknown" ;;
     esac
@@ -115,6 +118,7 @@ getProtocolInboundTag() {
         12) echo "VLESSRealityXHTTP" ;;
         13) echo "anytls" ;;
         14) echo "ss2022-in" ;;
+        15) echo "VLESSXHTTPTLS" ;;
         *)  return 1 ;;
     esac
 }
@@ -129,7 +133,7 @@ protocolRequiresTLS() {
     local protocolId="$1"
 
     case "${protocolId}" in
-        0|1|2|3|4|5|6|9|10|11|13) return 0 ;;
+        0|1|2|3|4|5|6|9|10|11|13|15) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -149,13 +153,13 @@ getProtocolListenNetwork() {
     case "$1" in
         6|9) echo "udp" ;;
         10|14) echo "both" ;;
-        0|1|2|3|4|5|7|8|11|12|13|20) echo "tcp" ;;
+        0|1|2|3|4|5|7|8|11|12|13|15|20) echo "tcp" ;;
         *) return 1 ;;
     esac
 }
 
 # protocolUsesPortPool ID → 0=回车默认端口从 TLS_PORT_POOL 取，1=随机
-# 1 / 3 不进池：池只有六个位，sing-box 全装时要留给 0 4 7 10 11 13
+# 1 / 3 不进池：池只有六个位，sing-box 全装时要留给 0 4 7 10 11 13；15 经 0 的 443 回落，没有对外端口
 protocolUsesPortPool() {
     case "$1" in
         0|4|6|7|9|10|11|12|13) return 0 ;;
@@ -177,7 +181,7 @@ getProtocolUsersPath() {
         case "${protocolId}" in
             7)                       echo ".inbounds[1].settings.clients" ;;
             6 | 9)                   echo ".inbounds[0].users" ;;
-            0 | 1 | 2 | 3 | 4 | 5 | 8 | 11 | 12) echo ".inbounds[0].settings.clients" ;;
+            0 | 1 | 2 | 3 | 4 | 5 | 8 | 11 | 12 | 15) echo ".inbounds[0].settings.clients" ;;
             *) return 1 ;;
         esac
     elif [[ "${core}" == "2" ]]; then
@@ -197,7 +201,7 @@ getProtocolIdField() {
 
     if [[ "${core}" == "1" ]]; then
         case "${protocolId}" in
-            0 | 1 | 3 | 5 | 7 | 8 | 12) echo "id" ;;
+            0 | 1 | 3 | 5 | 7 | 8 | 12 | 15) echo "id" ;;
             2 | 4 | 6)                  echo "password" ;;
             9)                          echo "uuid" ;;
             *) return 1 ;;
@@ -222,7 +226,7 @@ getProtocolNameField() {
     if [[ "${core}" == "1" ]]; then
         case "${protocolId}" in
             6 | 9)                                   echo "name" ;;
-            0 | 1 | 2 | 3 | 4 | 5 | 7 | 8 | 11 | 12) echo "email" ;;
+            0 | 1 | 2 | 3 | 4 | 5 | 7 | 8 | 11 | 12 | 15) echo "email" ;;
             *) return 1 ;;
         esac
     elif [[ "${core}" == "2" ]]; then
@@ -251,6 +255,7 @@ getProtocolEmailSuffix() {
             7)  echo "vless_reality_vision" ;;
             9)  echo "singbox_tuic" ;;
             12) echo "VLESS_Reality_XHTTP" ;;
+            15) echo "VLESS_XHTTP_TLS" ;;
             *) return 1 ;;
         esac
     elif [[ "${core}" == "2" ]]; then

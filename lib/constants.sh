@@ -70,6 +70,8 @@ readonly REALITY_MIN_CLIENT_VER="1.8.0"
 # Reality 目标选本机域名时转交连接的落点：nginx 只在回环上听、用这个域名的证书。不指订阅端口（订阅一改一删 Reality 就断），
 # 也不经公网 IP 回连自己（云上的 1:1 NAT 常常不回环）。避开端口池、链式桥与拼车 API 段、nginx 的 31300 / 31302 回落
 readonly REALITY_LOCAL_DEST_PORT=31305
+# 15（VLESS+XHTTP+TLS）的入站只在回环上听，nginx 的 h2 块按路径 grpc_pass 到这里。与上面同样避开那些段，也避开 sing-box 11 的 31306
+readonly XHTTP_TLS_LOCAL_PORT=31307
 
 # Xray-core 默认钉在官方 sing-box 客户端还能完成 REALITY 握手的最后一个稳定版：26.9.9 起（首个稳定版 26.10.21）服务端要求
 # ClientHello 带 X25519MLKEM768 份额，sing-box 会剥掉它（SagerNet/sing-box#4520），脚本发的 sing-box 订阅在 7/12 上报

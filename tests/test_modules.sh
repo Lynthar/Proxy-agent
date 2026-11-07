@@ -208,16 +208,17 @@ assert_true "! protocolRequiresTLS 7" "VLESS_REALITY_VISION does not require TLS
 assert_true "protocolRequiresTLS 6" "Hysteria2 requires TLS (ACME cert under tls/)"
 assert_true "protocolRequiresTLS 9" "TUIC requires TLS (ACME cert under tls/)"
 assert_true "! protocolRequiresTLS 14" "SS2022 does not require TLS"
+assert_true "protocolRequiresTLS 15" "VLESS+XHTTP+TLS requires TLS (falls back from 0)"
 
 # 测试 getProtocolListenNetwork / protocolUsesPortPool：逐格钉住，错一格就会和别的协议撞端口或拿错默认端口
-for _cell in 0:tcp 1:tcp 3:tcp 4:tcp 6:udp 7:tcp 9:udp 10:both 11:tcp 12:tcp 13:tcp 14:both; do
+for _cell in 0:tcp 1:tcp 3:tcp 4:tcp 6:udp 7:tcp 9:udp 10:both 11:tcp 12:tcp 13:tcp 14:both 15:tcp; do
     assert_equals "${_cell#*:}" "$(getProtocolListenNetwork "${_cell%%:*}")" "getProtocolListenNetwork(${_cell%%:*}) = ${_cell#*:}"
 done
 assert_true '! getProtocolListenNetwork 99 >/dev/null' "getProtocolListenNetwork: 未知 ID 返回 1"
 for _id in 0 4 6 7 9 10 11 12 13; do
     assert_true "protocolUsesPortPool ${_id}" "protocolUsesPortPool(${_id}): 回车默认从 443 端口池取"
 done
-for _id in 1 3 14 20; do
+for _id in 1 3 14 15 20; do
     assert_true "! protocolUsesPortPool ${_id}" "protocolUsesPortPool(${_id}): 不进端口池，回车随机"
 done
 assert_equals "443 8443 2053 2083 2087 2096" "${TLS_PORT_POOL}" "TLS_PORT_POOL: 443 打头，其后是 Cloudflare 也转发的 HTTPS 端口"
@@ -306,6 +307,7 @@ done <<'CELLS'
 1:6:password
 1:9:uuid
 1:12:id
+1:15:id
 2:0:uuid
 2:4:password
 2:9:uuid
@@ -318,12 +320,22 @@ done <<'CELLS'
 1:0:email
 1:6:name
 1:12:email
+1:15:email
 2:0:name
 2:10:username
 2:14:name
 CELLS
 assert_true "! getProtocolUsersPath 1 10" "usersPath rejects naive on Xray core"
 assert_true "! getProtocolUsersPath 2 12" "usersPath rejects XHTTP on sing-box core"
+assert_true "! getProtocolUsersPath 2 15" "usersPath rejects XHTTP+TLS on sing-box core"
+assert_true "! getProtocolIdField 2 15" "idField rejects XHTTP+TLS on sing-box core"
+assert_true "! getProtocolNameField 2 15" "nameField rejects XHTTP+TLS on sing-box core"
+assert_equals ".inbounds[0].settings.clients" "$(getProtocolUsersPath 1 15)" "usersPath(core=1,id=15)"
+assert_equals "15" "$(parseProtocolIdFromFileName 15_VLESS_XHTTP_TLS_inbounds.json)" "文件名解析：15 不被 12 的模式吞掉"
+assert_equals "12" "$(parseProtocolIdFromFileName 12_VLESS_XHTTP_inbounds.json)" "文件名解析：12 不被 15 的模式吞掉"
+assert_equals "15_VLESS_XHTTP_TLS_inbounds.json" "$(getProtocolConfigFileName 15)" "getProtocolConfigFileName(15)"
+assert_equals "VLESS+XHTTP[TLS]" "$(getProtocolDisplayName 15)" "getProtocolDisplayName(15)"
+assert_equals "VLESSXHTTPTLS" "$(getProtocolInboundTag 15)" "getProtocolInboundTag(15)"
 assert_true "! getProtocolNameField 2 20" "nameField rejects socks internal inbound (no name)"
 assert_true "! getProtocolIdField 3 0" "idField rejects unknown core"
 
@@ -481,6 +493,8 @@ assert_equals "VMess_WS" "$(getProtocolEmailSuffix 1 3)" "getProtocolEmailSuffix
 assert_equals "trojan_tcp" "$(getProtocolEmailSuffix 1 4)" "getProtocolEmailSuffix(1,4)"
 assert_equals "vless_reality_vision" "$(getProtocolEmailSuffix 1 7)" "getProtocolEmailSuffix(1,7)"
 assert_equals "VLESS_Reality_XHTTP" "$(getProtocolEmailSuffix 1 12)" "getProtocolEmailSuffix(1,12)"
+assert_equals "VLESS_XHTTP_TLS" "$(getProtocolEmailSuffix 1 15)" "getProtocolEmailSuffix(1,15)"
+assert_true '! getProtocolEmailSuffix 2 15 >/dev/null' "getProtocolEmailSuffix(2,15): XHTTP 不在 sing-box 下"
 assert_equals "Trojan_TCP" "$(getProtocolEmailSuffix 2 4)" "getProtocolEmailSuffix(2,4): sing-box 的大小写不同"
 assert_equals "VLESS_Reality_Vision" "$(getProtocolEmailSuffix 2 7)" "getProtocolEmailSuffix(2,7)"
 assert_equals "singbox_naive" "$(getProtocolEmailSuffix 2 10)" "getProtocolEmailSuffix(2,10)"
@@ -556,7 +570,7 @@ assert_true 'carpoolIsValidUUID "550e8400-e29b-41d4-a716-446655440000"' "carpool
 assert_true '! carpoolIsValidUUID "550e8400-e29b-41d4-a716"' "carpoolIsValidUUID: 短了拒绝"
 assert_equals "[0,1,7,12]" "$(carpoolInstalledProtocolsJson ",0,1,6,7,9,12,")" "carpoolInstalledProtocolsJson: 6/9 不入拼车，升序"
 assert_equals "[]" "$(carpoolInstalledProtocolsJson ",6,9,")" "carpoolInstalledProtocolsJson: 只装 6/9 时为空"
-assert_equals "" "$(carpoolUnmanagedProtocols ",0,1,3,4,7,12,")" "carpoolUnmanagedProtocols: 现在 Xray 能装的协议都在名单里"
+assert_equals "" "$(carpoolUnmanagedProtocols ",0,1,3,4,7,12,15,")" "carpoolUnmanagedProtocols: 现在 Xray 能装的协议都在名单里"
 assert_equals "2 8" "$(carpoolUnmanagedProtocols ",2,7,8," | tr '\n' ' ' | sed 's/ $//')" "carpoolUnmanagedProtocols: v1.0.x 留下的 gRPC 2 / 8 带用户却不归拼车管，挑出来"
 assert_equals "" "$(carpoolUnmanagedProtocols ",0,7,20,")" "carpoolUnmanagedProtocols: 没有用户的入站（20 SOCKS5）不算"
 
