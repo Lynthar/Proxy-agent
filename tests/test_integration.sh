@@ -2934,7 +2934,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试按账号选出口 ===${NC}"
 
-CA_FN_NAMES="localBlockApiPort localGlobalAddrs ensureXrayLocalBlock localBlockInject directOutboundInject chainAccountStateFile chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountCarry chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod setupExternalAsSingleExit chainExternalSingleOnXray generateExternalOutboundConfig getExternalNodeById initExternalNodeFile"
+CA_FN_NAMES="localBlockApiPort localGlobalAddrs ensureXrayLocalBlock localBlockInject directOutboundInject chainAccountStateFile chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountCarry chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod setupExternalAsSingleExit chainExternalSingleOnXray generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig"
 CA_FNS=$(sed -n "$(for _f in ${CA_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_equals "$(wc -w <<<"${CA_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CA_FNS}")" "按账号选出口：每个函数都抽到了"
 CA_ROOT="${MOCK_ROOT}/chainacct.root"
@@ -2957,6 +2957,7 @@ run_ca() (
         listeningPorts() { [[ "$1" == tcp ]] && printf "%s\n" ${CA_LISTEN}; }
         setDefaultChain() { echo setDefaultChain >>"${CA_CALLS}"; }
         generateMultiChainRouteConfig() { echo routeConfig >>"${CA_CALLS}"; }
+        curl() { echo "curl $*" >>"${CA_CALLS}"; printf "%s" "${CA_HTTP:-200}"; }
         ensureDirectOutbound() { echo "{\"outbounds\":[{\"type\":\"direct\",\"tag\":\"direct\"}]}" >"${singBoxConfigPath}01_direct_outbound.json"; }
         eval "$1"' _ "$1"
 )
@@ -3170,6 +3171,72 @@ assert_equals "external routeConfig merge reloadCore" "$(paste -sd ' ' - <"${CA_
 : >"${CA_CALLS}"
 printf '0\n' | run_ca "${_caAdd}" >/dev/null 2>&1
 assert_equals "" "$(cat "${CA_CALLS}")" "继续添加（多链路）：选 0 取消，什么都不动"
+
+# --- 继续添加时 Xray 侧没接上（向导在起 sing-box 处失败过）：补 has_xray、桥入站、Xray 出站，再重建路由 ---
+ca_reset
+ca_multi '{"has_xray": false}'
+echo '{"inbounds":[]}' >"${CA_X}/07_VLESS_vision_reality_inbounds.json"
+_caAddX='addExternalNodeAsChain() { echo external >>"${CA_CALLS}"; }; writeChainBridgeInbound() { echo "bridge $1" >>"${CA_CALLS}"; }; multiChainAddChain'
+printf '2\n' | run_ca "${_caAddX}" >/dev/null 2>&1
+assert_equals "external bridge 31111 routeConfig merge reloadCore" "$(paste -sd ' ' - <"${CA_CALLS}")" "继续添加（Xray 没接上）：先补桥入站，再重建路由、合并、重载"
+assert_equals "true|yes" "$(jq -r .has_xray "${CA_MULTI}")|$([[ -f "${CA_X}/chain_outbound.json" ]] && echo yes)" "继续添加（Xray 没接上）：has_xray 置真，Xray 的 chain_outbound.json 写出来了"
+: >"${CA_CALLS}"
+printf '2\n' | run_ca "${_caAddX}" >/dev/null 2>&1
+assert_equals "external routeConfig merge reloadCore" "$(paste -sd ' ' - <"${CA_CALLS}")" "继续添加（Xray 已接上）：不再碰桥与 Xray 出站，重启交给 reloadCore"
+
+# --- 向导收尾：Xray 在 sing-box 启动之前接好，sing-box 起不来时 Xray 用户是断网，不是静默直连 ---
+ca_reset
+ca_multi '{"default_chain": "us"}'
+echo '{"inbounds":[]}' >"${CA_X}/07_VLESS_vision_reality_inbounds.json"
+_caFin='multiChainRestoreAccounts() { :; }; writeChainBridgeInbound() { echo bridge >>"${CA_CALLS}"; }; configureXrayForMultiChain() { echo "xray $1" >>"${CA_CALLS}"; }
+    handleSingBox() { echo "singbox $1" >>"${CA_CALLS}"; }; pgrep() { [[ -z "${CA_SB_DOWN:-}" ]]; }; showMultiChainSummary() { echo summary >>"${CA_CALLS}"; }
+    testMultiChainConnection() { echo test >>"${CA_CALLS}"; }; sleep() { :; }; finalizeMultiChainConfig; echo rc=$?'
+_out=$(run_ca "${_caFin}" 2>&1)
+assert_equals "rc=0|routeConfig bridge xray 31111 merge singbox stop singbox start summary test" "$(grep -o 'rc=[0-9]' <<<"${_out}")|$(paste -sd ' ' - <"${CA_CALLS}")" "向导收尾：Xray 接线在 sing-box 启动之前"
+: >"${CA_CALLS}"
+_out=$(CA_SB_DOWN=1 run_ca "${_caFin}" 2>&1)
+assert_equals "rc=1|routeConfig bridge xray 31111 merge singbox stop singbox start" "$(grep -o 'rc=[0-9]' <<<"${_out}")|$(paste -sd ' ' - <"${CA_CALLS}")" "向导收尾：sing-box 起不来返回 1，Xray 已经接好"
+
+# --- 规则集预检：预设与 GeoIP 选中时就 HEAD 一遍，上游没有的（404）或连不上的重问，不写进配置 ---
+ca_reset
+assert_equals "rc=0|preset|developer|开发者 (GitHub/GitLab/...)" "$(_caRule later '2\n4\n')" "选规则：开发者预设的规则集上游都在"
+assert_contains "$(cat "${CA_CALLS}")" "geo/geosite/stackexchange.srs" "选规则：预检 HEAD 的是写进配置的那个地址，开发者预设用 stackexchange"
+assert_equals "0" "$(grep -c stackoverflow "${CA_CALLS}")" "选规则：不再引用上游没有的 stackoverflow"
+assert_equals "rc=0|default||所有未匹配流量" "$(CA_HTTP=404 _caRule later '2\n4\n6\n')" "选规则：规则集 404 时重问，没有落成预设规则"
+_out=$(printf '2\n4\n6\n' | CA_HTTP=404 run_ca 'chainReadRule later' 2>&1)
+assert_contains "${_out}" "规则集 geosite-github 在上游不存在" "选规则：404 的报文点名规则集"
+_out=$(printf '5\n8\nkr\n6\n' | CA_HTTP=000 run_ca 'chainReadRule later; echo "rc=$?|${chainRuleType}"' 2>&1)
+assert_contains "${_out}" "规则集 geoip-kr 现在下载不到（HTTP 000）" "选规则：连不上也拒，报文带 HTTP 码"
+assert_contains "${_out}" "rc=0|default" "选规则：连不上时重问，之后选默认照常"
+
+# --- 多链路路由片段：有远程规则集就开 cache_file（起过一次的机器断了 GitHub 也能起），没有就不写 experimental ---
+ca_reset
+ca_multi '{"default_chain": "us", "rules": [{"type": "preset", "value": "developer", "chain": "us"}, {"type": "geoip", "value": "jp", "chain": "jp"}]}'
+_caRoute='eval "$(sed -n "/^generateMultiChainRouteConfig() {/,/^}/p" install.sh)"; generateMultiChainRouteConfig'
+run_ca "${_caRoute}" >/dev/null 2>&1
+assert_equals "true|${CA_ROOT}/sing-box/conf/cache.db" "$(jq -r '"\(.experimental.cache_file.enabled)|\(.experimental.cache_file.path)"' "${CA_F}/chain_route.json")" "多链路路由：有远程规则集时开 cache_file，路径在 sing-box 目录下"
+assert_equals "geosite-github geosite-gitlab geosite-stackexchange geoip-jp" "$(jq -r '[.route.rule_set[].tag] | join(" ")' "${CA_F}/chain_route.json")" "多链路路由：开发者预设写的是 stackexchange"
+assert_equals "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/jp.srs" "$(jq -r '.route.rule_set[] | select(.tag == "geoip-jp") | .url' "${CA_F}/chain_route.json")" "多链路路由：GeoIP 规则集地址与预检用的是同一个"
+assert_equals "us|direct" "$(jq -r .route.final "${CA_F}/chain_route.json")|$(jq -r '.outbounds[0].tag' "${CA_F}/01_direct_outbound.json")" "多链路路由：兜底是默认链路，direct 出站补上"
+ca_multi '{"default_chain": "us", "rules": [{"type": "custom", "value": "a.com", "chain": "us"}]}'
+run_ca "${_caRoute}" >/dev/null 2>&1
+assert_equals "null" "$(jq -r '.experimental' "${CA_F}/chain_route.json")" "多链路路由：没有远程规则集就不写 experimental"
+
+# --- 删外部节点：还被链路引用的不删并点名，没人用的照删 ---
+ca_reset
+ca_multi '{"chains": [{"name": "viaext", "ip": "192.0.2.30", "port": 443, "source": "external", "external_node_id": "n1", "bridge_port": 31112}]}'
+jq -cn '{nodes: [{id: "n1", name: "used", type: "trojan", server: "192.0.2.30", server_port: 443, password: "p"}, {id: "n2", name: "free", type: "socks", server: "192.0.2.31", server_port: 1080}]}' \
+    >"${CA_ROOT}/sing-box/conf/external_node_info.json"
+_caDel='listExternalNodes() { :; }; deleteExternalNode; echo rc=$?'
+_out=$(printf '1\ny\n' | run_ca "${_caDel}" 2>&1)
+assert_contains "${_out}" "节点 used 还是这些链路的出口：viaext" "删外部节点（被链路引用）：拒绝并点名链路"
+assert_equals "rc=1|n1,n2" "$(grep -o 'rc=[0-9]' <<<"${_out}")|$(jq -r '[.nodes[].id] | join(",")' "${CA_ROOT}/sing-box/conf/external_node_info.json")" "删外部节点（被链路引用）：返回 1，节点还在"
+printf '2\ny\n' | run_ca "${_caDel}" >/dev/null 2>&1
+assert_equals "n1" "$(jq -r '[.nodes[].id] | join(",")' "${CA_ROOT}/sing-box/conf/external_node_info.json")" "删外部节点（没人用）：照常删"
+rm -f "${CA_MULTI}"
+ca_single '{"mode": "external_single", "external_node_id": "n1"}'
+_out=$(printf '1\ny\n' | run_ca "${_caDel}" 2>&1)
+assert_contains "${_out}" "还是这些链路的出口：唯一出口" "删外部节点（配成唯一出口）：也拒绝"
 
 # --- 外部节点测试：TCP 通之后经节点真取一次出口 IP，认证不对要报失败 ---
 ca_reset

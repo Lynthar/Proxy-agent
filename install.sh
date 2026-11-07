@@ -12695,7 +12695,7 @@ chainAccountExitMenu() {
     state=$(chainAccountReadState) || return 1
     mode=$(jq -r '.mode // ""' <<<"${state}")
     # 配链路时还没装 Xray 协议的话，Xray 一侧根本没接进链路，映射对 Xray 账号不起作用
-    if [[ -n "$(scanInstalledProtocols "${XRAY_CONF_DIR}/" 2>/dev/null | tr -d ',')" && ! -f "${XRAY_CONF_DIR}/chain_outbound.json" ]]; then
+    if xrayChainUnwired; then
         echoContent red " ---> $(t CHAIN_ACCOUNT_XRAY_UNWIRED)"
         return 1
     fi
@@ -13967,6 +13967,35 @@ applyProtocolChainRouting() {
 
 # ======================= 多链路分流功能 =======================
 
+# multiChainRuleSetUrl TAG → geosite-* / geoip-* 规则集在 MetaCubeX/meta-rules-dat 的下载地址，写配置与预检都从这里取同一个地址
+multiChainRuleSetUrl() {
+    case "$1" in
+        geosite-*) echo "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/${1#geosite-}.srs" ;;
+        geoip-*) echo "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/${1#geoip-}.srs" ;;
+        *) return 1 ;;
+    esac
+}
+
+# multiChainRuleSetsAvailable TAG... → 逐个 HEAD 一遍，404 或连不上都打红返回 1：sing-box 起步时有一个远程规则集下载不到就整个退出
+multiChainRuleSetsAvailable() {
+    local tag url code
+    for tag in "$@"; do
+        url=$(multiChainRuleSetUrl "${tag}") || return 1
+        code=$(curl -sI -o /dev/null -w '%{http_code}' --max-time 10 "${url}" 2>/dev/null)
+        case "${code}" in
+            200) ;;
+            404)
+                echoContent red " ---> $(t CHAIN_RULESET_MISSING "${tag}")"
+                return 1
+                ;;
+            *)
+                echoContent red " ---> $(t CHAIN_RULESET_UNREACHABLE "${tag}" "${code:-000}")"
+                return 1
+                ;;
+        esac
+    done
+}
+
 # 预设规则集定义
 # 返回预设规则对应的 geosite 规则集名称
 getPresetRulesets() {
@@ -13982,7 +14011,7 @@ getPresetRulesets() {
             echo "geosite-telegram,geosite-twitter,geosite-instagram,geosite-facebook"
             ;;
         developer)
-            echo "geosite-github,geosite-gitlab,geosite-stackoverflow"
+            echo "geosite-github,geosite-gitlab,geosite-stackexchange"
             ;;
         gaming)
             echo "geosite-steam,geosite-epicgames"
@@ -14691,7 +14720,7 @@ addRuleToConfig() {
 # chainReadRule [later] → 交互选一条分流规则，结果放在 chainRuleType（none / preset / custom / ip_cidr / geoip / default）与 chainRuleValue。
 # 传 later 时第一项是「稍后统一配置」。输错或留空就重问，不静默落成没有规则——那样流量全走默认出口、看不出配错了。读不到输入返回 1
 chainReadRule() {
-    local later=$1 base=0 choice sub value
+    local later=$1 base=0 choice sub value sets
     chainRuleType=
     chainRuleValue=
     [[ -n "${later}" ]] && base=1
@@ -14738,6 +14767,8 @@ chainReadRule() {
                     8) value=apple ;;
                 esac
                 if [[ -n "${value}" ]]; then
+                    IFS=',' read -ra sets <<<"$(getPresetRulesets "${value}")"
+                    multiChainRuleSetsAvailable "${sets[@]}" || continue
                     chainRuleType=preset
                     chainRuleValue=${value}
                     return 0
@@ -14797,6 +14828,7 @@ chainReadRule() {
                 esac
                 # 代码拼进规则集的 tag 与下载地址，只收字母数字和 - _
                 if [[ "${value}" =~ ^[a-z0-9_-]{1,32}$ ]]; then
+                    multiChainRuleSetsAvailable "geoip-${value}" || continue
                     chainRuleType=geoip
                     chainRuleValue=${value}
                     return 0
@@ -14994,11 +15026,12 @@ finalizeMultiChainConfig() {
     # 生成路由配置
     generateMultiChainRouteConfig
 
-    # 如果有 Xray，创建 SOCKS5 桥接入站
+    # 如果有 Xray，创建 SOCKS5 桥接入站并先接好 Xray：之后 sing-box 起不来时 Xray 用户是断网，不是静默直连
     # sniff/resolve 在 generateMultiChainRouteConfig 路由配置中以 action 形式注入
     local chainBridgePort=${CHAIN_BRIDGE_PORT}
     if [[ "${hasXrayProtocols}" == "true" ]]; then
         writeChainBridgeInbound "${chainBridgePort}"
+        configureXrayForMultiChain "${chainBridgePort}" || return 1
     fi
 
     # 合并配置
@@ -15020,11 +15053,6 @@ finalizeMultiChainConfig() {
         return 1
     fi
     echoContent green " ---> $(t CHAIN_SINGBOX_START_SUCCESS)"
-
-    # 配置 Xray（如果存在）
-    if [[ "${hasXrayProtocols}" == "true" ]]; then
-        configureXrayForMultiChain "${chainBridgePort}" || return 1
-    fi
 
     # 显示配置摘要
     showMultiChainSummary
@@ -15090,7 +15118,8 @@ generateMultiChainRouteConfig() {
                 if [[ ! "${usedRuleSets}" =~ "${ruleset}" ]]; then
                     usedRuleSets="${usedRuleSets},${ruleset}"
 
-                    local rulesetUrl="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/${ruleset#geosite-}.srs"
+                    local rulesetUrl
+                    rulesetUrl=$(multiChainRuleSetUrl "${ruleset}")
 
                     ruleSetDefs=$(echo "${ruleSetDefs}" | jq --arg tag "${ruleset}" --arg url "${rulesetUrl}" '. + [{
                         "tag": $tag,
@@ -15145,7 +15174,8 @@ generateMultiChainRouteConfig() {
             if [[ ! "${usedRuleSets}" =~ "${geoipTag}" ]]; then
                 usedRuleSets="${usedRuleSets},${geoipTag}"
 
-                local geoipUrl="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/${ruleValue}.srs"
+                local geoipUrl
+                geoipUrl=$(multiChainRuleSetUrl "${geoipTag}")
 
                 ruleSetDefs=$(echo "${ruleSetDefs}" | jq --arg tag "${geoipTag}" --arg url "${geoipUrl}" '. + [{
                     "tag": $tag,
@@ -15167,28 +15197,21 @@ generateMultiChainRouteConfig() {
 
     # 确保 direct 出站存在（不写 domain_strategy，详见 ensureSingBoxInstalled 注释）
     if [[ ! -f "${SINGBOX_FRAGMENT_DIR}/01_direct_outbound.json" ]]; then
-        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/01_direct_outbound.json
-{
-    "outbounds": [
-        {
-            "type": "direct",
-            "tag": "direct"
-        }
-    ]
-}
-EOF
+        jq -n '{outbounds: [{type: "direct", tag: "direct"}]}' >"${SINGBOX_FRAGMENT_DIR}/01_direct_outbound.json"
     fi
 
     # 生成最终路由配置
     local finalOutbound="${defaultChain}"
 
-    # 构建完整的路由配置 JSON
-    # default_domain_resolver 见 chainExit 注释，1.13 起必填
+    # 构建完整的路由配置 JSON；default_domain_resolver 见 chainExit 注释，1.13 起必填
+    # 有远程规则集就开 cache_file：sing-box 起步时下载不到任何一个规则集就整个退出，有缓存的机器断了 GitHub 也能起；
+    # 路径写死在 sing-box 目录下，不然按服务的 WorkingDirectory 落到 /root
     local routeConfig
     routeConfig=$(jq -n \
         --argjson rules "${routeRules}" \
         --argjson ruleSets "${ruleSetDefs}" \
         --arg final "${finalOutbound}" \
+        --arg cache "${SINGBOX_CONF_DIR}/cache.db" \
         '{
             "route": {
                 "rule_set": $ruleSets,
@@ -15197,7 +15220,7 @@ EOF
                 "auto_detect_interface": true,
                 "default_domain_resolver": "google"
             }
-        }')
+        } + (if ($ruleSets | length) > 0 then {experimental: {cache_file: {enabled: true, path: $cache}}} else {} end)')
 
     echo "${routeConfig}" > ${SINGBOX_FRAGMENT_DIR}/chain_route.json
 }
@@ -15221,6 +15244,21 @@ configureXrayForMultiChain() {
         echoContent red " ---> $(t CHAIN_XRAY_RESTART_FAILED)"
         echoContent yellow "$(t CHAIN_XRAY_CHECK_CONFIG) ${XRAY_BIN} run -confdir ${XRAY_CONF_DIR}"
     fi
+}
+
+# xrayChainUnwired → 装了 Xray 协议、Xray 侧却没有 chain_outbound.json：链路对 Xray 账号不起作用，它们的流量从本机直连出去
+xrayChainUnwired() {
+    [[ -n "$(scanInstalledProtocols "${XRAY_CONF_DIR}/" 2>/dev/null | tr -d ',')" && ! -f "${XRAY_CONF_DIR}/chain_outbound.json" ]]
+}
+
+# multiChainEnsureXrayWired → 多链路改动前把没接上的 Xray 接进来（向导在起 sing-box 处失败过，或链路配好后才装 Xray）：
+# 补 has_xray、桥入站、Xray 的出站与路由，重启交给随后的 reloadCore。要在生成路由与合并之前调，桥的 sniff 规则跟着 has_xray 走
+multiChainEnsureXrayWired() {
+    xrayChainUnwired || return 0
+    echoContent yellow "$(t CHAIN_CONFIGURING_XRAY)"
+    jsonModifyFile "${CHAIN_MULTI_INFO}" '.has_xray = true' false || return 1
+    writeChainBridgeInbound "${CHAIN_BRIDGE_PORT}"
+    writeXrayChainConfig "${CHAIN_BRIDGE_PORT}"
 }
 
 # 显示多链路配置摘要
@@ -15446,6 +15484,7 @@ multiChainAddChain() {
             return 1
             ;;
     esac
+    multiChainEnsureXrayWired || return 1
     generateMultiChainRouteConfig
     if ! singBoxMergeConfig; then
         echoContent red " ---> 配置合并失败，链路未生效"
@@ -15477,6 +15516,7 @@ multiChainAdvancedMenu() {
         ;;
     3)
         configureMultiChainRules
+        multiChainEnsureXrayWired
         generateMultiChainRouteConfig
         if singBoxMergeConfig; then
             reloadCore
@@ -15582,6 +15622,7 @@ removeMultiChainOutbound() {
     fi
 
     # 重新生成路由配置
+    multiChainEnsureXrayWired
     generateMultiChainRouteConfig
     # 删除语义：物理删除已完成，merge 失败说明剩余配置仍有问题，告警不阻断
     if ! singBoxMergeConfig; then
@@ -16534,6 +16575,18 @@ listExternalNodes() {
 }
 
 # 删除外部节点
+# externalNodeUsers ID → 引用这个外部节点的链路名，逗号分隔；配成唯一出口（external_single）的算一条
+externalNodeUsers() {
+    local names=""
+    if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
+        names=$(jq -r --arg id "$1" '[.chains[]? | select(.external_node_id == $id) | .name] | join(", ")' "${CHAIN_MULTI_INFO}") || return 1
+    fi
+    if [[ -f "${CHAIN_ENTRY_INFO}" ]] && jq -e --arg id "$1" '.mode == "external_single" and .external_node_id == $id' "${CHAIN_ENTRY_INFO}" >/dev/null 2>&1; then
+        names="${names:+${names}, }$(t EXT_SINGLE_EXIT_LABEL)"
+    fi
+    printf '%s' "${names}"
+}
+
 deleteExternalNode() {
     listExternalNodes
 
@@ -16562,6 +16615,14 @@ deleteExternalNode() {
 
     local nodeName
     nodeName=$(jq -r --argjson idx "$((selectIndex-1))" '.nodes[$idx].name' "${EXTERNAL_NODE_FILE}" 2>/dev/null)
+
+    # 还有链路在用它就不删：链路的出站里抄着它的凭据，删了节点那条链路照样走，只是再也看不见、改不动
+    local users
+    users=$(externalNodeUsers "${nodeId}") || return 1
+    if [[ -n "${users}" ]]; then
+        echoContent red " ---> $(t EXT_NODE_IN_USE "${nodeName}" "${users}")"
+        return 1
+    fi
 
     read -r -p "$(t EXT_CONFIRM_DELETE) [${nodeName}]? [y/n]: " confirmDelete
     if ! isYesInput "${confirmDelete}"; then
