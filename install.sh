@@ -18752,9 +18752,9 @@ checkRealityDest() {
 # 初始化客户端可用的ServersName
 # realityDestList → Reality 与 ShadowTLS 握手目标的默认候选，逗号分隔。不含 Apple/MS 系：TLS 握手行为变化、Reality 伪装失败率高；
 # 不含挂在 Cloudflare 代理后面的站（见 checkRealityDest）；不含 AWS CloudFront 与 Akamai 托管的站（按服务器上解析到的 IP 归属判）：
-# 已有工具能比对它们的 TLS 栈，认出拿它们当目标的 Reality
+# 已有工具能比对它们的 TLS 栈，认出拿它们当目标的 Reality；不含 GFW 规则表上单独列出的域名：SNI 被封时节点连不上，也没有提示
 realityDestList() {
-    local realityDestDomainList="download-installer.cdn.mozilla.net,addons.mozilla.org,dl.google.com,www.google-analytics.com,www.python.org,vuejs-jp.org,vuejs.org,zh-hk.vuejs.org,react.dev,cname.vercel-dns.com,vercel-dns.com,www.fom-international.com,github.io"
+    local realityDestDomainList="download-installer.cdn.mozilla.net,dl.google.com,www.google-analytics.com,www.python.org,vuejs-jp.org,vuejs.org,zh-hk.vuejs.org,react.dev,cname.vercel-dns.com,vercel-dns.com,www.fom-international.com,go.dev,pkg.go.dev,nextjs.org,svelte.dev,nuxt.com,vite.dev,pypi.org,rubygems.org,www.kernel.org,www.mozilla.org,www.firefox.com,www.php.net"
     printf '%s\n' "${realityDestDomainList}"
 }
 
@@ -18807,7 +18807,7 @@ initRealityClientServersName() {
             echoContent skyBlue "\n================ 配置客户端可用的serverNames ===============\n"
             echoContent yellow "#注意事项"
             echoContent green "请确保所选 Reality 目标域名支持 TLS，且为可直连的常见站点。\n"
-            echoContent yellow "录入示例:addons.mozilla.org:443\n"
+            echoContent yellow "录入示例:www.python.org:443\n"
             read -r -p "请输入目标域名，[回车]随机域名，默认端口443:" realityServerName
             if [[ -z "${realityServerName}" ]]; then
                 realityServerName=$(pickRandomDest) && realityDestRandom=1
