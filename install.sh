@@ -4172,6 +4172,29 @@ ensureRealityMinClientVer() {
     done
 }
 
+# hostHasRouteTo IP → 0=内核有到它的路由。UDP connect 不发包，Xray 探测本机网络也是这个做法
+hostHasRouteTo() {
+    (exec 3<>"/dev/udp/$1/53") 2>/dev/null
+}
+
+# UseIP 每次从 A + AAAA 里随机选：机器缺一个地址族时选中它就拨不通，5 次全中就断连（约 1/32）。只改恰好是 UseIP 的，手改过的值不动。
+# 别改成 AsIs（绕过内置 DNS，DNS 解锁的 hosts 失效），也别用 dns.queryStrategy（WARP 隧道里的解析会一起被过滤）
+ensureXrayDirectStrategy() {
+    local file="${XRAY_CONF_DIR}/z_direct_outbound.json" strategy hasV4=no hasV6=no
+    [[ -f "${file}" ]] || return 0
+    jq -e 'any(.outbounds[]?; .tag == "z_direct_outbound" and .settings.domainStrategy == "UseIP")' "${file}" >/dev/null 2>&1 || return 0
+    hostHasRouteTo 192.33.4.12 && hasV4=yes
+    hostHasRouteTo 2001:500:2::c && hasV6=yes
+    case "${hasV4}${hasV6}" in
+        yesno) strategy=UseIPv4v6 ;;
+        noyes) strategy=UseIPv6v4 ;;
+        *) return 0 ;;
+    esac
+    if jsonModifyFile "${file}" "(.outbounds[] | select(.tag == \"z_direct_outbound\")).settings.domainStrategy = \"${strategy}\"" false; then
+        echoContent yellow " ---> $(t XRAY_DIRECT_STRATEGY_SET "${strategy}")"
+    fi
+}
+
 # localBlockApiPort → 拼车统计 API 的端口（12_stats_api.json 的 api.listen），没开拼车时为空
 localBlockApiPort() {
     local file="${XRAY_CONF_DIR}/12_stats_api.json"
@@ -4278,6 +4301,7 @@ handleXray() {
         labelCoreBinary "${XRAY_BIN}"
         removeLegacyAllowInsecure
         ensureRealityMinClientVer
+        ensureXrayDirectStrategy
         ensureCorePortTargets || echoContent yellow " ---> $(t CORE_PORT_TARGET_FAILED)"
         ensureCarpoolXray
         # 链式入口的路由每次启动前写回：重装的模板、WARP / IPv6 全局都会整份换掉 09_routing.json，指定了出口的人就静默走本机直连

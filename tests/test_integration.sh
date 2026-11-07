@@ -569,6 +569,37 @@ assert_equals "1.8.0|false" "$(jq -r '.inbounds[0].streamSettings.realitySetting
 assert_equals "" "$(ls "${MINVER_ROOT}/xray/conf" | grep '\.bak')" "启动前补写：xray/conf 里不留 .bak 文件"
 rm -rf "${MINVER_ROOT}"
 
+# 直连出站的地址策略：缺一个地址族才改，只改恰好是 UseIP 的（原文执行，路由探测桩掉）
+DS_ROOT="${MOCK_ROOT}/direct-strategy.root"
+DS_FN=$(sed -n '/^ensureXrayDirectStrategy() {/,/^}/p' install.sh)
+assert_not_empty "${DS_FN}" "抽到 ensureXrayDirectStrategy 原文"
+# run_ds 有v4 有v6 初始策略 → 跑一次，打印结果策略|退出码|提示行数（初始策略为 none 时不建文件）
+run_ds() {
+    rm -rf "${DS_ROOT}" && mkdir -p "${DS_ROOT}/xray/conf"
+    [[ "$3" == none ]] || jq -n --arg s "$3" '{outbounds: [{protocol: "freedom", settings: {domainStrategy: $s}, tag: "z_direct_outbound"}]}' >"${DS_ROOT}/xray/conf/z_direct_outbound.json"
+    env PROXY_AGENT_DIR="${DS_ROOT}" DS_FN="${DS_FN}" DS_V4="$1" DS_V6="$2" V2RAY_LANG=en bash -c '
+        source lib/i18n.sh; source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh
+        echoContent() { printf "%s\n" "$2"; }
+        hostHasRouteTo() { if [[ "$1" == *:* ]]; then [[ "${DS_V6}" == yes ]]; else [[ "${DS_V4}" == yes ]]; fi; }
+        eval "${DS_FN}"
+        out=$(ensureXrayDirectStrategy); rc=$?
+        s=$(jq -r ".outbounds[0].settings.domainStrategy" "${XRAY_CONF_DIR}/z_direct_outbound.json" 2>/dev/null)
+        printf "%s|%s|%s\n" "${s:-none}" "${rc}" "$(grep -c . <<<"${out}")"'
+}
+assert_equals "UseIPv4v6|0|1" "$(run_ds yes no UseIP)" "直连策略：没有 IPv6 路由改成先 IPv4，并提示一次"
+assert_equals "UseIPv6v4|0|1" "$(run_ds no yes UseIP)" "直连策略：没有 IPv4 路由改成先 IPv6（纯 IPv6 + NAT64 不能选到 IPv4）"
+assert_equals "UseIP|0|0" "$(run_ds yes yes UseIP)" "直连策略：双栈不动"
+assert_equals "UseIP|0|0" "$(run_ds no no UseIP)" "直连策略：两边都探不到（断网或 bash 没有 /dev/udp）不动"
+assert_equals "AsIs|0|0" "$(run_ds yes no AsIs)" "直连策略：手改过的值不动"
+assert_equals "ForceIPv6|0|0" "$(run_ds yes no ForceIPv6)" "直连策略：没有 IPv6 也不动手改的 ForceIPv6"
+assert_equals "UseIPv4v6|0|0" "$(run_ds no yes UseIPv4v6)" "直连策略：改过一次之后不再翻回去，也不再提示"
+assert_equals "none|0|0" "$(run_ds yes no none)" "直连策略：WARP / IPv6 全局删掉了直连出站时不新建"
+run_ds yes no UseIP >/dev/null
+assert_equals "" "$(ls "${DS_ROOT}/xray/conf" | grep -v '^z_direct_outbound.json$')" "直连策略：改写后 xray/conf 里不留备份与临时文件"
+assert_equals "freedom|z_direct_outbound" "$(jq -r '.outbounds[0] | "\(.protocol)|\(.tag)"' "${DS_ROOT}/xray/conf/z_direct_outbound.json")" "直连策略：出站的其余字段不动"
+assert_contains "$(sed -n '/^handleXray() {/,/^}/p' install.sh)" "ensureXrayDirectStrategy" "handleXray start 前挂了直连策略修正（存量机器靠它补上）"
+rm -rf "${DS_ROOT}"
+
 echo ""
 
 # ============================================================================
@@ -1437,6 +1468,16 @@ for _pid in ${XRAY_IDS}; do
 done
 for _pid in ${CP_IDS}; do
     assert_contains " ${TX_IDS}" " ${_pid} " "拼车名单里的 ${_pid} 在账户事务白名单里"
+done
+
+# 客户端对象写了两份（initXrayClients 与对账期望）：字段一漂移，对账次次判有变化，每个 tick 都重载、断所有人的连接
+CP_SHAPE_STATE='{"members":{"alice":{"status":"active","protocols":"all","uuid":"11111111-2222-3333-4444-555555555555"}}}'
+for _pid in ${CP_IDS}; do
+    _written=$(render_clients 1 "${_pid}" 2>/dev/null)
+    assert_equals "1" "$(jq 'length' <<<"${_written}" 2>/dev/null)" "id ${_pid}: initXrayClients 写出一个 client"
+    _map=$(jq -nc --arg k "${_pid}" --argjson v "${_written:-null}" '{($k): $v}')
+    assert_equals "rc=0" "$(source lib/carpool.sh; carpoolReconcilePayload "${CP_SHAPE_STATE}" "${_map}"; echo "rc=$?")" \
+        "id ${_pid}: initXrayClients 写出的 client 对账判无变化"
 done
 
 echo ""
@@ -4928,6 +4969,10 @@ assert_contains "${tuicClash}" 'sni: ${currentHost}' "Clash 的 TUIC 节点 SNI 
 # ============================================================================
 # 测试结果汇总
 # ============================================================================
+
+# --- 发版只改 VERSION 就推的话两份 README 还写着旧版本号 ---
+assert_contains "$(cat README.md)" "当前版本: v$(cat VERSION)" "README.md 的版本号跟 VERSION 一致"
+assert_contains "$(cat README.en.md)" "Version: v$(cat VERSION)" "README.en.md 的版本号跟 VERSION 一致"
 
 # --- SELinux 入口检查：菜单照旧退出，只读入口、定时任务和服务停止钩子放行。定时任务被挡的话证书到期也续不上 ---
 SE_BLOCK=$(awk '/^# 只读入口、定时任务和服务停止钩子/{f=1} f{print} f && /^esac$/{exit}' install.sh)

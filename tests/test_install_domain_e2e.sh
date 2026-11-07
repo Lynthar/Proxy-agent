@@ -162,19 +162,8 @@ fetchSingBoxClient() {
 }
 
 # probeOutbound SUBFILE TAG → 只用订阅里这一个出站起 sing-box 客户端，经它访问外网，打印 HTTP 状态码（连不上是 000）。
-# 不是 204 就把 curl 与客户端的报错打出来再试一次：经代理连 google 偶发 curl (35)，一条腿二十多次握手几乎每轮撞一次
+# 不是 204 就把 curl 与客户端的报错打出来，不重试：重试会盖住真问题
 probeOutbound() {
-    local code
-    code=$(probeOutboundOnce "$@")
-    if [[ "${code}" != "204" ]]; then
-        echo -e "${YELLOW}  第一次握手得 ${code}，重试一次${NC}" >&2
-        code=$(probeOutboundOnce "$@")
-    fi
-    printf '%s\n' "${code}"
-}
-
-# probeOutboundOnce SUBFILE TAG → probeOutbound 的一次尝试
-probeOutboundOnce() {
     local conf="${WORK}/client.json" pid code
     jq --arg t "$2" '{log: {level: "warn"}, dns: {servers: [{type: "local", tag: "local"}]},
         inbounds: [{type: "socks", listen: "127.0.0.1", listen_port: 10808}],
@@ -203,19 +192,8 @@ probeSub() {
 }
 
 # probeXhttpLink LINK → 按 Reality XHTTP 分享链接起 Xray 客户端（sing-box 没有 XHTTP），经它访问外网，打印 HTTP 状态码；
-# 不是 204 时同 probeOutbound 再试一次
+# 不是 204 时同 probeOutbound 打出报错
 probeXhttpLink() {
-    local code
-    code=$(probeXhttpLinkOnce "$@")
-    if [[ "${code}" != "204" ]]; then
-        echo -e "${YELLOW}  第一次握手得 ${code}，重试一次${NC}" >&2
-        code=$(probeXhttpLinkOnce "$@")
-    fi
-    printf '%s\n' "${code}"
-}
-
-# probeXhttpLinkOnce LINK → probeXhttpLink 的一次尝试
-probeXhttpLinkOnce() {
     local link=$1 query pid code pair key value
     local -A p=()
     query=${link#*\?}

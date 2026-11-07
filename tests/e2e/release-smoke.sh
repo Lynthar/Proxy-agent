@@ -56,6 +56,10 @@ update)
     assert_equals "$(awk '{print $1}' /tmp/latest.sha256)" "$(sha256sum "${INSTALL_ROOT}/install.sh" | awk '{print $1}')" \
         "装上的 install.sh 与 Release 资产的 SHA256 一致"
     assert_equals "active" "$(systemctl is-active xray 2>/dev/null)" "自更新后 Xray 照常在跑"
+    # 旧版的更新程序只认它自己那份模块清单，新模块要靠新脚本启动时从 lib_bundle 补齐，补不上这个子命令就跑不起来
+    V2RAY_LANG=en pasly topo --out /tmp/smoke-topo.html >>"${LOG}" 2>&1
+    assert_equals "0" "$?" "自更新后新模块补齐：pasly topo 退出码 0"
+    assert_contains "$(cat /tmp/smoke-topo.html 2>/dev/null)" "<svg" "自更新后 pasly topo 生成了页面"
     listing=$(printf '22\n2\n0\n' | V2RAY_LANG=en pasly 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
     idx=$(sed -n "s/^\([0-9][0-9]*\)\. ${OLD_TAG} (GitHub)$/\1/p" <<<"${listing}")
     assert_not_empty "${idx}" "回滚菜单列出 ${OLD_TAG}（GitHub）"

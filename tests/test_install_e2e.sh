@@ -201,6 +201,10 @@ if [[ -f "${realityConf}" && "${E2E_CORE}" == "xray" ]]; then
     assert_equals "${E2E_SNI}" "$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0]' "${realityConf}")" "serverNames 是喂进去的目标域名"
     assert_equals "${E2E_SNI}:443" "$(jq -r '.inbounds[1].streamSettings.realitySettings.target' "${realityConf}")" "target 是域名:443"
     assert_equals "1.8.0" "$(jq -r '.inbounds[1].streamSettings.realitySettings.minClientVer' "${realityConf}")" "minClientVer 钉在 1.8.0"
+    # 容器按 Docker 默认没有 IPv6 路由。留着 UseIP 的话，这个文件里每次经代理连双栈站点约 3% 断开
+    expectDirect=UseIP
+    [[ -z "$(ip -6 route show default 2>/dev/null)" ]] && expectDirect=UseIPv4v6
+    assert_equals "${expectDirect}" "$(jq -r '.outbounds[0].settings.domainStrategy' "${XRAY_CONF_DIR}/z_direct_outbound.json")" "直连出站的地址策略按本机路由选（${expectDirect}）"
     shortIds=$(jq -r '.inbounds[1].streamSettings.realitySettings.shortIds[]' "${realityConf}")
 
     privateKey=$(jq -r '.inbounds[1].streamSettings.realitySettings.privateKey' "${realityConf}")
