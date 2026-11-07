@@ -844,7 +844,7 @@ MSG_CARPOOL_TG_SENT="Sent"
 MSG_CARPOOL_TG_SEND_FAILED="Send failed (%s); this notification is dropped, judgement is unaffected"
 MSG_CARPOOL_TG_DISABLED="Removed %s; notifications are off"
 MSG_PORT_HOPPING_NOT_PERSISTENT="Port hopping is active, but netfilter-persistent is not available here, so the rule is lost on reboot; add it again after a restart"
-MSG_SELINUX_NGINX_RELAY_FAILED="Could not enable httpd_can_network_relay; VLESS+XHTTP+TLS will fail under SELinux Enforcing. Run: setsebool -P httpd_can_network_relay on"
+MSG_SELINUX_NGINX_RELAY_FAILED="Could not enable httpd_can_network_relay; VLESS+XHTTP+TLS and VMess+HTTPUpgrade will fail under SELinux Enforcing. Run: setsebool -P httpd_can_network_relay on"
 MSG_SELINUX_NGINX_PORT_FAILED="Could not register port %s for nginx under SELinux (http_port_t); nginx may fail to start once Enforcing is back"
 
 # ====================================================================

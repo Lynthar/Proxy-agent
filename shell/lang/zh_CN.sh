@@ -844,7 +844,7 @@ MSG_CARPOOL_TG_SENT="已发送"
 MSG_CARPOOL_TG_SEND_FAILED="发送失败（%s），本次通知丢弃，不影响判定"
 MSG_CARPOOL_TG_DISABLED="已删除 %s，不再发送通知"
 MSG_PORT_HOPPING_NOT_PERSISTENT="端口跳跃规则已生效，但本机没有 netfilter-persistent，重启后会丢失，需要重启后重新添加"
-MSG_SELINUX_NGINX_RELAY_FAILED="开启 httpd_can_network_relay 失败，SELinux Enforcing 时 VLESS+XHTTP+TLS 连不上：请手动 setsebool -P httpd_can_network_relay on"
+MSG_SELINUX_NGINX_RELAY_FAILED="开启 httpd_can_network_relay 失败，SELinux Enforcing 时 VLESS+XHTTP+TLS 与 VMess+HTTPUpgrade 连不上：请手动 setsebool -P httpd_can_network_relay on"
 MSG_SELINUX_NGINX_PORT_FAILED="SELinux 下没能把 %s 端口登记给 nginx（http_port_t），切回 Enforcing 后 nginx 可能起不来"
 
 # ====================================================================

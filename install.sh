@@ -3449,18 +3449,20 @@ renewalTLS() {
 # labelNginxPorts → SELinux 没禁用时把 nginx 各 listen 端口登记成 http_port_t。不登记的话回到 Enforcing（含重启）后
 # 订阅口、31300 这类端口绑不上，整个 nginx 起不来。只增不删；没有 semanage 就不管（labelCoreBinary 会去装它）
 labelNginxPorts() {
-    local httpPorts port
+    local httpPorts port upstreams
     command -v getenforce >/dev/null 2>&1 && command -v semanage >/dev/null 2>&1 || return 0
     [[ "$(getenforce 2>/dev/null)" == "Disabled" || -z "$(getenforce 2>/dev/null)" ]] && return 0
     httpPorts=$(semanage port -l 2>/dev/null | awk '$1 == "http_port_t" && $2 == "tcp" {$1 = $2 = ""; print}' | tr -d ' ' | tr ',' '\n')
-    for port in $(grep -hoE '^[[:space:]]*(listen[[:space:]]+(\[[^]]*\]:|[0-9.]+:)?[0-9]+|grpc_pass[[:space:]]+grpc://127\.0\.0\.1:[0-9]+)' "${nginxConfigPath}"*.conf 2>/dev/null | grep -oE '[0-9]+$' | sort -un); do
+    # 自家配置里 nginx 要连的回环端口（15 的 grpc_pass、11 的 proxy_pass）。只看这两个文件：别人的站点不该让脚本改策略
+    upstreams=$(grep -hoE '^[[:space:]]*(grpc_pass[[:space:]]+grpc|proxy_pass[[:space:]]+http)://127\.0\.0\.1:[0-9]+' "${nginxConfigPath}alone.conf" "${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf" 2>/dev/null | grep -oE '[0-9]+$')
+    for port in $({ grep -hoE '^[[:space:]]*listen[[:space:]]+(\[[^]]*\]:|[0-9.]+:)?[0-9]+' "${nginxConfigPath}"*.conf 2>/dev/null | grep -oE '[0-9]+$'; echo "${upstreams}"; } | sort -un); do
         grep -qx "${port}" <<<"${httpPorts}" && continue
         if ! semanage port -a -t http_port_t -p tcp "${port}" 2>/dev/null && ! semanage port -m -t http_port_t -p tcp "${port}" 2>/dev/null; then
             echoContent yellow " ---> $(t SELINUX_NGINX_PORT_FAILED "${port}")"
         fi
     done
-    # grpc_pass 连回环也受策略管：端口是 http_port_t 还不够，不开这个布尔值 nginx 照样连不上，15 全 502
-    if grep -qE '^[[:space:]]*grpc_pass[[:space:]]' "${nginxConfigPath}"*.conf 2>/dev/null && [[ "$(getsebool httpd_can_network_relay 2>/dev/null)" != *" on" ]]; then
+    # 连回环也受策略管：端口是 http_port_t 还不够，不开这个布尔值 nginx 照样连不上，15 和 11 全 502
+    if [[ -n "${upstreams}" && "$(getsebool httpd_can_network_relay 2>/dev/null)" != *" on" ]]; then
         setsebool -P httpd_can_network_relay on 2>/dev/null || echoContent yellow " ---> $(t SELINUX_NGINX_RELAY_FAILED)"
     fi
 }

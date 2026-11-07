@@ -4974,7 +4974,9 @@ LN_FN=$(sed -n '/^labelNginxPorts() {/,/^}/p' install.sh)
 LN_DIR="${MOCK_ROOT}/selinuxnginx"
 rm -rf "${LN_DIR}" && mkdir -p "${LN_DIR}/conf.d"
 printf '%s\n' 'server {' '    listen 2087 so_keepalive=on ssl;' '    listen [::]:2087 ssl;' '}' >"${LN_DIR}/conf.d/a.conf"
-printf '%s\n' 'server {' '    listen 127.0.0.1:31305 ssl;' '    listen 443 ssl;' '    # listen 9999;' '    location /a/ {' '        grpc_pass grpc://127.0.0.1:31307;' '    }' '}' >"${LN_DIR}/conf.d/b.conf"
+printf '%s\n' 'server {' '    listen 127.0.0.1:31305 ssl;' '    listen 443 ssl;' '    # listen 9999;' '    location /site/ {' '        proxy_pass http://127.0.0.1:8080;' '    }' '}' >"${LN_DIR}/conf.d/b.conf"
+printf '%s\n' 'server {' '    location /a/ {' '        grpc_pass grpc://127.0.0.1:31307;' '    }' '}' >"${LN_DIR}/conf.d/alone.conf"
+printf '%s\n' 'server {' '    location /b {' '        proxy_pass                          http://127.0.0.1:31306;' '    }' '}' >"${LN_DIR}/conf.d/sing_box_VMess_HTTPUpgrade.conf"
 # run_ln ENFORCE → getenforce 报 ENFORCE；semanage 桩：已登记 80 443 8443，打印它被要求登记的端口
 run_ln() {
     env LN_FN="${LN_FN}" LN_DIR="${LN_DIR}" ENF="$1" RELAY="${2:-off}" bash -c '
@@ -4991,13 +4993,16 @@ run_ln() {
         labelNginxPorts' 2>&1 | paste -sd'|' -
 }
 LN_RELAY="setsebool -P httpd_can_network_relay on"
-assert_equals "port -a -t http_port_t -p tcp 2087|port -a -t http_port_t -p tcp 31305|port -a -t http_port_t -p tcp 31307|${LN_RELAY}" "$(run_ln Enforcing)" \
-    "SELinux Enforcing：只登记还不是 http_port_t 的 listen 端口（IPv6、带地址的写法都认，注释掉的不算），以及 grpc_pass 要连的回环端口"
-assert_equals "port -a -t http_port_t -p tcp 2087|port -a -t http_port_t -p tcp 31305|port -a -t http_port_t -p tcp 31307|${LN_RELAY}" "$(run_ln Permissive)" "Permissive 也登记：之后切回 Enforcing 或重启照样能绑"
-assert_equals "port -a -t http_port_t -p tcp 2087|port -a -t http_port_t -p tcp 31305|port -a -t http_port_t -p tcp 31307" "$(run_ln Enforcing on)" "relay 已经开着就不再 setsebool（-P 要改策略存储）"
+LN_PORTS="port -a -t http_port_t -p tcp 2087|port -a -t http_port_t -p tcp 31305|port -a -t http_port_t -p tcp 31306|port -a -t http_port_t -p tcp 31307"
+assert_equals "${LN_PORTS}|${LN_RELAY}" "$(run_ln Enforcing)" \
+    "SELinux Enforcing：只登记还不是 http_port_t 的 listen 端口（IPv6、带地址的写法都认，注释掉的不算），以及 15 / 11 要连的回环端口；别人站点的 proxy_pass 不算"
+assert_equals "${LN_PORTS}|${LN_RELAY}" "$(run_ln Permissive)" "Permissive 也登记：之后切回 Enforcing 或重启照样能绑"
+assert_equals "${LN_PORTS}" "$(run_ln Enforcing on)" "relay 已经开着就不再 setsebool（-P 要改策略存储）"
 assert_equals "" "$(run_ln Disabled)" "SELinux 关掉时什么都不做"
-rm -f "${LN_DIR}/conf.d/b.conf"
-assert_equals "port -a -t http_port_t -p tcp 2087" "$(run_ln Enforcing)" "没有 grpc_pass（没装 15）就不开 relay"
+rm -f "${LN_DIR}/conf.d/alone.conf"
+assert_equals "port -a -t http_port_t -p tcp 2087|port -a -t http_port_t -p tcp 31305|port -a -t http_port_t -p tcp 31306|${LN_RELAY}" "$(run_ln Enforcing)" "只有 11 也要 relay"
+rm -f "${LN_DIR}/conf.d/sing_box_VMess_HTTPUpgrade.conf"
+assert_equals "port -a -t http_port_t -p tcp 2087|port -a -t http_port_t -p tcp 31305" "$(run_ln Enforcing)" "没装 15 和 11：别人站点里的 proxy_pass 不让脚本开 relay"
 
 # --- 15 的 location 只进 h2 块：Xray 只把 h2 回落给 31302。全部安装时 selectCustomInstallType 是空的，靠 all 参数 ---
 UR_FN=$(sed -n '/^xhttpTlsNginxLocation() {/,/^}/p;/^updateRedirectNginxConf() {/,/^# writeHttpRedirectNginxConf/p' install.sh)
