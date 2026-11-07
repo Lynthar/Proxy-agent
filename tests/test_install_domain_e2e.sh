@@ -386,6 +386,10 @@ done <<<"${extLinks}"
 extOut=$(runMenu "3\n6\n1\n$(base64 -d "${WORK}/sub-default.txt" 2>/dev/null | grep -m1 'security=reality.*type=xhttp')\n0\n")
 assert_contains "${extOut}" "type = xhttp" "外部节点：XHTTP 链接当场拒绝并说明原因（sing-box 没有 XHTTP）"
 assert_equals "0" "$(jq '.nodes | length' "${INSTALL_ROOT}/sing-box/conf/external_node_info.json" 2>/dev/null)" "外部节点：被拒的链接没有写进节点文件"
+# 留一条走到最后：卸 Hysteria2、重装 sing-box 都要带着它，完整卸载才清掉。443 上的 VLESS TLS 换内核后端口账号不变，所以还能真握手
+keptLink=$(grep -E 'security=tls' <<<"${extLinks}" | grep -E '^vless://[^?]+:443\?' | grep -v 'type=ws' | head -n 1)
+runMenu "3\n6\n1\n${keptLink}\ny\n0\n" >/dev/null
+assert_equals "1" "$(jq '.nodes | length' "${INSTALL_ROOT}/sing-box/conf/external_node_info.json" 2>/dev/null)" "外部节点：留一条，看卸 sing-box 时带不带走"
 
 echo ""
 echo -e "${YELLOW}=== 菜单 4 → 3：端口跳跃，再 4 → 2 卸掉 Hysteria2（拼车不计量 sing-box 里的协议，开拼车前要拿掉）===${NC}"
@@ -397,6 +401,12 @@ assert_equals "0" "$?" "卸 Hysteria2 退出码 0"
 assert_equals "0" "$(iptables -t nat -S PREROUTING | grep -c 'Proxy-agent_hysteria2_portHopping')" "卸 Hysteria2 带走它的跳跃规则"
 sleep 1
 assert_equals "active inactive active" "$(activeState)" "没有入站了，旁挂的 sing-box 停掉"
+assert_equals "no no" "$([[ -e "${SINGBOX_BIN}" ]] && echo yes || echo no) $([[ -e "${SINGBOX_FRAGMENT_DIR}" ]] && echo yes || echo no)" "sing-box 的二进制和片段都删了"
+assert_contains "${s6Out}" "Kept 1 external node" "卸的时候说明留下了外部节点（含凭据）"
+assert_equals "1 600" "$(jq '.nodes | length' "${INSTALL_ROOT}/sing-box/conf/external_node_info.json" 2>/dev/null) $(stat -c %a "${INSTALL_ROOT}/sing-box/conf/external_node_info.json" 2>/dev/null)" \
+    "外部节点清单留着，权限还是 600"
+extOut=$(runMenu "3\n6\n4\n1\n0\n")
+assert_contains "${extOut}" "sing-box is not installed" "sing-box 没了，菜单照常列出留下的节点、只测端口并说明原因"
 
 # ============================================================================
 # 拼车：页面经订阅口发出去，成员页按自己的键；拼车开着时补装协议，成员自动进新入站；订阅三种格式都重建
@@ -503,7 +513,7 @@ xrayRealityPub=$(jq -r '.inbounds[1].streamSettings.realitySettings.publicKey' "
 
 echo ""
 echo -e "${YELLOW}=== 菜单 1 → 2：sing-box 全部安装（沿用账号与 Reality 密钥）===${NC}"
-# 只剩 Reality 时没有带证书的协议，读不出上次的域名，要再输一次；卸 Hysteria2 时 sing-box 已整个删掉，不问要不要升级；
+# 只剩 Reality 时没有带证书的协议，读不出上次的域名，要再输一次；卸 Hysteria2 时 sing-box 只留了外部节点清单，不问要不要升级；
 # 之后沿用账号，逐个协议回车取默认端口，沿用 path、本机域名当 Reality 目标、沿用密钥
 s9Out=$(runMenu "1\n2\nn\n${DOMAIN_B}\ny\n\n\n\n\ny\ny\ny\n\n\n\n\n\n\n\n\n\ny\n\n\n\n\n\n")
 s9Rc=$?
@@ -521,6 +531,9 @@ probeSub "sing-box 全装" "${WORK}/sub-sb.json"
 echo "sing-box 订阅里的节点类型：${probedTypes}"
 assert_contains "${probedTypes}" "hysteria2" "sing-box 订阅里有 Hysteria2"
 assert_contains "${probedTypes}" "tuic" "sing-box 订阅里有 TUIC"
+extOut=$(runMenu "3\n6\n4\n1\n0\n")
+assert_contains "${extOut}" "through this node" "重装 sing-box 后，留下的外部节点经它真握手、访问外网"
+[[ "${extOut}" == *"through this node"* ]] || tail -n 15 <<<"${extOut}"
 stFile="${SINGBOX_FRAGMENT_DIR}/16_shadowtls_inbounds.json"
 stTag=$(jq -r '.inbounds[0].users[0].name' "${stFile}" 2>/dev/null)
 assert_equals "204" "$(probeOutbound "${WORK}/sub-sb.json" "${stTag}")" "ShadowTLS：订阅里的节点经 detour 真握手、访问外网"
@@ -555,7 +568,7 @@ echo ""
 echo -e "${YELLOW}=== 菜单 20：卸载与残留核对 ===${NC}"
 u1Out=$(runMenu "20\ny\n")
 assert_equals "0" "$?" "卸载退出码 0"
-assert_equals "no no" "$([[ -e "${INSTALL_ROOT}" ]] && echo yes || echo no) $([[ -e /usr/bin/pasly ]] && echo yes || echo no)" "安装根与 pasly 已删"
+assert_equals "no no" "$([[ -e "${INSTALL_ROOT}" ]] && echo yes || echo no) $([[ -e /usr/bin/pasly ]] && echo yes || echo no)" "安装根与 pasly 已删（留下的外部节点也在里面）"
 assert_equals "" "$(pgrep -x xray; pgrep -x sing-box)" "两个内核都已退出"
 assert_equals "" "$(crontab -l 2>/dev/null | grep -F "${INSTALL_ROOT}" || true)" "crontab 里不再有指向安装根的任务"
 assert_equals "" "$(find /etc/systemd/system -xtype l 2>/dev/null)" "/etc/systemd/system 下没有悬空的软链（单元删了，开机自启的链接也得撤）"

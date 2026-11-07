@@ -5007,7 +5007,8 @@ assert_equals "no" "$(run_rd_typed 'cf.example\n' "cf.example" | grep -q '^cf\.e
 # --- Xray 机上卸 Hysteria2：片段里还有链式的入站就留着 sing-box，不能把链式的片段、状态文件连二进制一起删 ---
 US_FN=$(sed -n '/^unInstallSingBox() {/,/^}/p;/^singBoxFragmentsHaveInbounds() {/,/^}/p' install.sh)
 US_DIR="${MOCK_ROOT}/uninstallsb"
-# run_us WITH_CHAIN → 造一台 Xray 机：旁挂 6，WITH_CHAIN 非空时再有链式入口的桥片段与状态文件；卸掉 6 后打印 sing-box 目录里还剩什么
+# run_us WITH_CHAIN [NODES] → 造一台 Xray 机：旁挂 6，WITH_CHAIN 非空时再有链式入口的桥片段与状态文件，NODES 是外部节点清单；
+# 卸掉 6 后打印 sing-box 目录里还剩什么
 run_us() {
     rm -rf "${US_DIR}" && mkdir -p "${US_DIR}/sing-box/conf/config"
     : >"${US_DIR}/sing-box/sing-box"
@@ -5017,12 +5018,14 @@ run_us() {
         echo '{"inbounds":[{"type":"socks","tag":"chain_bridge_in"}]}' >"${US_DIR}/sing-box/conf/config/chain_bridge_inbound.json"
         echo '{"role":"entry"}' >"${US_DIR}/sing-box/conf/chain_entry_info.json"
     fi
+    [[ -n "$2" ]] && echo "$2" >"${US_DIR}/sing-box/conf/external_node_info.json"
     env US_FN="${US_FN}" US_DIR="${US_DIR}" bash -c '
-        SINGBOX_DIR="${US_DIR}/sing-box" SINGBOX_BIN="${US_DIR}/sing-box/sing-box"
+        SINGBOX_DIR="${US_DIR}/sing-box" SINGBOX_BIN="${US_DIR}/sing-box/sing-box" SINGBOX_CONF_DIR="${US_DIR}/sing-box/conf"
         SINGBOX_FRAGMENT_DIR="${US_DIR}/sing-box/conf/config" SINGBOX_MERGED_CONFIG="${US_DIR}/sing-box/conf/config.json"
+        EXTERNAL_NODE_FILE="${SINGBOX_CONF_DIR}/external_node_info.json"
         singBoxConfigPath="${SINGBOX_FRAGMENT_DIR}/"
         eval "${US_FN}"
-        for f in echoContent handleSingBox singBoxAutostart refreshSubscribeAfterInstall rm_service removeProtocolPortHopping; do eval "$f() { :; }"; done
+        for f in echoContent t handleSingBox singBoxAutostart refreshSubscribeAfterInstall rm_service removeProtocolPortHopping; do eval "$f() { :; }"; done
         readInstallType() { singBoxConfigPath=; [[ -f "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" ]] && singBoxConfigPath="${SINGBOX_FRAGMENT_DIR}/"; }
         rm() { [[ "$1" == /etc/systemd/system/* ]] && return 0; command rm "$@"; }
         unInstallSingBox hysteria2
@@ -5031,6 +5034,12 @@ run_us() {
 assert_equals "./conf/chain_entry_info.json ./conf/config/chain_bridge_inbound.json ./sing-box" "$(run_us chain)" \
     "Xray 机上卸 Hysteria2：链式的桥片段、入口状态与 sing-box 二进制都留着"
 assert_equals "" "$(run_us "")" "Xray 机上卸 Hysteria2、没有别的入站：sing-box 整个删掉"
+US_NODES='{"nodes":[{"id":"n1","password":"secret"}]}'
+assert_equals "./conf/external_node_info.json" "$(run_us "" "${US_NODES}")" "卸掉最后一个入站：存着的外部节点留下，其余全删"
+assert_equals "secret" "$(jq -r '.nodes[0].password' "${US_DIR}/sing-box/conf/external_node_info.json")" "卸掉最后一个入站：节点内容原样"
+assert_equals "" "$(run_us "" '{"nodes":[]}')" "外部节点清单是空的：照样整个删掉，不留空目录之外的东西"
+assert_equals "./conf/chain_entry_info.json ./conf/config/chain_bridge_inbound.json ./conf/external_node_info.json ./sing-box" \
+    "$(run_us chain "${US_NODES}")" "还有链式入站：外部节点清单和其余状态一样留着"
 
 # --- Xray 带域名重装换了域名：旁挂的 6 / 9 跟着换证书，不然按新域名校验必失败 ---
 SC_FN=$(sed -n '/^syncSidecarTlsDomain() {/,/^}/p' install.sh)

@@ -1770,7 +1770,17 @@ unInstallSingBox() {
         handleSingBox stop
         singBoxAutostart off
         rm /etc/systemd/system/sing-box.service
-        rm -rf ${SINGBOX_DIR}/*
+        # 外部节点清单是用户填的，没有片段能重建；清单空了才整个删
+        local extNodes entry
+        extNodes=$(jq -r '.nodes | length' "${EXTERNAL_NODE_FILE}" 2>/dev/null)
+        if [[ "${extNodes:-0}" -gt 0 ]]; then
+            for entry in "${SINGBOX_DIR}"/* "${SINGBOX_CONF_DIR}"/*; do
+                [[ "${entry}" == "${SINGBOX_CONF_DIR}" || "${entry}" == "${EXTERNAL_NODE_FILE}" ]] || rm -rf "${entry}"
+            done
+            echoContent yellow " ---> $(t EXT_NODES_KEPT "${extNodes}")"
+        else
+            rm -rf ${SINGBOX_DIR}/*
+        fi
         echoContent green " ---> sing-box 卸载完成"
     fi
     refreshSubscribeAfterInstall
