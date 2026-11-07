@@ -1360,6 +1360,115 @@ assert_equals "没有需要证书的协议" "$(doctor_cert_rows 2)" "doctor 证�
 assert_equals "未检测到已安装核心" "$(doctor_cert_rows "")" "doctor 证书：真没有核心时照旧"
 rm -rf "${DOCTOR_TLS}"
 
+# --- doctor：在用证书与配置安全。真 openssl 造证书，函数原文执行 ---
+DS_FNS=$(sed -n '/^_doctorConfigFiles() {/,/^}/p;/^_doctorJqFiles() {/,/^}/p;/^_doctorCertsInUse() {/,/^}/p;/^_doctorCheckOneCert() {/,/^}/p;/^_doctorCheckCert() {/,/^}/p;/^auditUuidWeak() {/,/^}/p;/^_doctorCheckSecurity() {/,/^}/p;/^_doctorCheckConfig() {/,/^}/p;/^verifyCertExpiry() {/,/^}/p;/^verifyCertKeyMatch() {/,/^}/p' install.sh)
+DS_ROOT="${MOCK_ROOT}/doctor-sec.root"
+DS_CA="${MOCK_ROOT}/doctor-sec.ca"
+rm -rf "${DS_CA}" && mkdir -p "${DS_CA}"
+ds_key() { openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$1" -out "$2" -subj "/CN=$3" 2>/dev/null; }
+ds_key "${DS_CA}/ca.key" "${DS_CA}/ca.csr" ds-ca
+openssl x509 -req -in "${DS_CA}/ca.csr" -signkey "${DS_CA}/ca.key" -days 365 -out "${DS_CA}/ca.crt" 2>/dev/null
+ds_reset() { rm -rf "${DS_ROOT}"; mkdir -p "${DS_ROOT}/tls" "${DS_ROOT}/xray/conf" "${DS_ROOT}/sing-box/conf/config"; : >"${DS_ROOT}/xray/xray"; }
+# ds_leaf NAME SAN DAYS [chain] → tls/NAME.crt + .key，测试 CA 签；chain 时把 CA 也写进文件，等于 fullchain
+ds_leaf() {
+    ds_key "${DS_ROOT}/tls/$1.key" "${DS_CA}/leaf.csr" "$2"
+    openssl x509 -req -in "${DS_CA}/leaf.csr" -CA "${DS_CA}/ca.crt" -CAkey "${DS_CA}/ca.key" -CAcreateserial -days "$3" \
+        -extfile <(printf 'subjectAltName=DNS:%s\n' "$2") -out "${DS_ROOT}/tls/$1.crt" 2>/dev/null
+    [[ -n "${4:-}" ]] && cat "${DS_CA}/ca.crt" >>"${DS_ROOT}/tls/$1.crt"
+}
+# ds_use NAME → Xray 的入站引用 tls/NAME.crt
+ds_use() {
+    jq -n --arg c "${DS_ROOT}/tls/$1.crt" --arg k "${DS_ROOT}/tls/$1.key" \
+        '{inbounds: [{streamSettings: {tlsSettings: {certificates: [{certificateFile: $c, keyFile: $k}]}}}]}' >"${DS_ROOT}/xray/conf/02.json"
+}
+# run_ds FUNC → 打印 状态|行名|详情
+run_ds() {
+    env PROXY_AGENT_DIR="${DS_ROOT}" V2RAY_LANG=en DS_FNS="${DS_FNS}" DS_CORE="${DS_CORE:-1}" DS_HOST="${DS_HOST:-}" bash -c '
+        source lib/i18n.sh; source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh
+        eval "${DS_FNS}"
+        _doctorSection() { :; }; _doctorRow() { printf "%s|%s|%s\n" "$2" "$1" "$3"; }
+        echoContent() { :; }; chainExternalSingleOnXray() { return 1; }
+        coreKind=${DS_CORE} currentHost=${DS_HOST} currentInstallProtocolType=",0,"
+        "$1"' _ "$1" 2>&1
+}
+ds_reset; ds_leaf a.example a.example 60 chain; ds_use a.example
+ds_key "${DS_ROOT}/tls/0stale.example.key" "${DS_CA}/x.csr" stale
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "${DS_CA}/other.key" -out "${DS_ROOT}/tls/0stale.example.crt" -subj /CN=stale -days 1 2>/dev/null
+_out=$(run_ds _doctorCheckCert)
+assert_equals "" "$(grep -E '^(fail|warn)\|' <<<"${_out}")" "doctor 证书：tls/ 排在前面的旧证书配不上私钥也不算，查的是配置在用的那张"
+assert_contains "${_out}" "pass|Certificate covers domain|a.example" "doctor 证书：在用证书覆盖域名"
+assert_contains "${_out}" "pass|Certificate chain|a.example.crt" "doctor 证书：fullchain 算完整"
+
+ds_reset; ds_leaf a.example a.example 10 chain; ds_use a.example
+assert_contains "$(run_ds _doctorCheckCert)" "warn|Certificate expiry|a.example.crt expires in under 14 days" "doctor 证书：少于 14 天黄（续期窗口 15 天，这时本该换过了）"
+ds_reset; ds_leaf a.example a.example 20 chain; ds_use a.example
+assert_contains "$(run_ds _doctorCheckCert)" "pass|Certificate expiry|a.example.crt" "doctor 证书：还在续期窗口内不黄"
+ds_reset; ds_leaf a.example a.example 60; ds_use a.example
+assert_contains "$(run_ds _doctorCheckCert)" "warn|Certificate chain|a.example.crt holds one certificate" "doctor 证书：只有叶子证书黄"
+ds_reset; ds_leaf a.example b.example 60 chain; ds_use a.example
+assert_contains "$(run_ds _doctorCheckCert)" "fail|Certificate covers domain|the certificate does not cover a.example" "doctor 证书：SAN 不含域名红"
+ds_reset; ds_leaf w.a.example '*.a.example' 60 chain; ds_use w.a.example
+assert_contains "$(run_ds _doctorCheckCert)" "pass|Certificate covers domain|w.a.example" "doctor 证书：通配符证书算覆盖"
+ds_reset; ds_leaf a.example a.example 60 chain; ds_use a.example
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "${DS_ROOT}/tls/a.example.key" -out "${DS_ROOT}/tls/a.example.crt" -subj /CN=a.example -addext subjectAltName=DNS:a.example -days 60 2>/dev/null
+_out=$(run_ds _doctorCheckCert)
+assert_contains "${_out}" "fail|Self-signed certificate|a.example.crt is self-signed" "doctor 证书：自签红"
+assert_equals "" "$(grep 'Certificate chain' <<<"${_out}")" "doctor 证书：自签时不再报证书链"
+ds_reset; ds_leaf a.example a.example 60 chain; ds_use a.example
+ds_key "${DS_ROOT}/tls/a.example.key" "${DS_CA}/x.csr" other
+assert_contains "$(run_ds _doctorCheckCert)" "fail|Certificate / key match|a.example.crt does not match" "doctor 证书：证书与私钥对不上红"
+ds_reset; ds_use gone.example
+assert_contains "$(run_ds _doctorCheckCert)" "fail|Certificate expiry|gone.example.crt is expired, unreadable or missing" "doctor 证书：配置引用的证书不在了红"
+ds_reset; ds_leaf h.example h.example 60 chain
+assert_contains "$(DS_HOST=h.example run_ds _doctorCheckCert)" "pass|Certificate expiry|h.example.crt" "doctor 证书：配置里没引用时（11 的证书在 nginx 里）按当前域名查"
+ds_reset
+assert_contains "$(run_ds _doctorCheckCert)" "warn|Certificate expiry|no certificate referenced" "doctor 证书：哪张都没有时黄，不红"
+# 已过期的证书只能经 openssl ca 指定日期造出来
+ds_reset; ds_leaf a.example a.example 60 chain; ds_use a.example
+(cd "${DS_CA}" && : >index.txt && echo 01 >serial &&
+    printf '[ca]\ndefault_ca=d\n[d]\ndir=.\ndatabase=index.txt\nserial=serial\nnew_certs_dir=.\ndefault_md=sha256\npolicy=p\n[p]\ncommonName=supplied\n' >ca.conf &&
+    openssl ca -batch -config ca.conf -cert ca.crt -keyfile ca.key -in leaf.csr -out "${DS_ROOT}/tls/a.example.crt" -startdate 20200101000000Z -enddate 20200102000000Z -notext >/dev/null 2>&1)
+assert_contains "$(run_ds _doctorCheckCert)" "fail|Certificate expiry|a.example.crt is expired" "doctor 证书：已过期红"
+
+ds_sec() { printf '%s\n' "$1" >"${DS_ROOT}/xray/conf/$2"; run_ds _doctorCheckSecurity; }
+ds_reset
+_out=$(ds_sec '{"inbounds":[{"settings":{"clients":[{"id":"00000000-0000-0000-0000-000000000000","email":"alice-VLESS_TCP"},{"id":"550E8400-E29B-41D4-A716-446655440000","email":"carol-VLESS_WS"},{"id":"9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d","email":"bob-VLESS_TCP"}]}}]}' a.json)
+assert_contains "${_out}" "fail|Account UUIDs|these accounts use a public sample or single-digit UUID that anyone can guess, replace them: alice,carol" "doctor 配置安全：全零和文档示例 UUID 红，大小写不论，名字去掉协议后缀"
+ds_reset
+_out=$(ds_sec '{"inbounds":[{"settings":{"clients":[{"id":"11111111-2222-3333-4444-555555555555","email":"a-x"}]}},{"users":[{"password":"aGVsbG8gd29ybGQgaGVsbG8h","name":"b-y"}]}],"outbounds":[{"settings":{"vnext":[{"users":[{"id":"00000000-0000-0000-0000-000000000000"}]}]}}]}' a.json)
+assert_contains "${_out}" "pass|Account UUIDs|1" "doctor 配置安全：普通手填 UUID 不算弱，SS 密码不当 UUID，出站里的不算账号"
+ds_reset
+assert_contains "$(ds_sec '{"inbounds":[{"users":[{"password":"ffffffff-ffff-ffff-ffff-ffffffffffff","name":"t-trojan"}]}]}' a.json)" "fail|Account UUIDs" "doctor 配置安全：Trojan、Hysteria2 这类把 UUID 当密码的也查"
+ds_reset
+_out=$(ds_sec '{"outbounds":[{"tag":"keep","tls":{"insecure":false}},{"tag":"node1","tls":{"insecure":true}},{"tag":"old","streamSettings":{"tlsSettings":{"allowInsecure":true}}}]}' a.json)
+assert_contains "${_out}" "warn|Outbound certificate checks|these outbounds do not verify the peer certificate: node1,old" "doctor 配置安全：不校验证书的出站黄，insecure:false 不算"
+assert_equals "" "$(grep '^fail|' <<<"${_out}")" "doctor 配置安全：不校验证书是用户选的，不红"
+ds_reset
+assert_contains "$(ds_sec '{"log":{"loglevel":"debug","access":"none"}}' a.json)" "warn|Log level|currently debug" "doctor 配置安全：debug 黄"
+ds_reset
+_out=$(ds_sec '{"log":{"loglevel":"warning","access":"none"}}' a.json)
+assert_contains "${_out}" "pass|Log level|warning" "doctor 配置安全：warning 不黄"
+assert_contains "${_out}" "pass|Access log|" "doctor 配置安全：access 为 none 算关着"
+ds_reset
+printf 'x%.0s' 1 2 3 4 5 >"${DS_ROOT}/access.log"
+assert_contains "$(ds_sec "{\"log\":{\"access\":\"${DS_ROOT}/access.log\"}}" a.json)" "warn|Access log|on, it records every user's destinations (${DS_ROOT}/access.log, 5 bytes)" "doctor 配置安全：访问日志开着黄，带路径和大小"
+ds_reset
+printf '%s\n' '{"log":{"level":"trace"}}' >"${DS_ROOT}/sing-box/conf/config/00_log.json"
+_out=$(DS_CORE=2 run_ds _doctorCheckSecurity)
+assert_contains "${_out}" "warn|Log level|currently trace" "doctor 配置安全：sing-box 的日志级别也查"
+assert_equals "" "$(grep 'Access log' <<<"${_out}")" "doctor 配置安全：sing-box 没有访问日志这一行"
+ds_reset
+printf '%s\n' '{"log":{"loglevel":"debug"}}' >"${DS_ROOT}/sing-box/conf/config/00_log.json"
+assert_contains "$(DS_CORE=2 run_ds _doctorCheckSecurity)" "warn|Log level" "doctor 配置安全：内核是 sing-box 时读它的片段"
+printf '%s\n' '{"log":{"loglevel":"debug"}}' >"${DS_ROOT}/xray/conf/a.json"
+rm -f "${DS_ROOT}/sing-box/conf/config/00_log.json"
+assert_contains "$(DS_CORE=2 run_ds _doctorCheckSecurity)" "skip|Account UUIDs" "doctor 配置安全：换到 sing-box 后 xray/conf 里剩的不算在读的配置"
+ds_reset
+printf '%s\n' '{}' >"${DS_ROOT}/xray/conf/ok.json"
+: >"${DS_ROOT}/xray/conf/empty.json"
+assert_contains "$(run_ds _doctorCheckConfig)" "fail|Config file validation|1/2 invalid: empty.json" "doctor 配置：空文件算坏（jq -e . 对空输入返回 0，放过去了）"
+rm -rf "${DS_ROOT}" "${DS_CA}"
+
 OVERRIDE_LAYOUT=$(env PROXY_AGENT_DIR=/tmp/pa-override bash -c \
     'source lib/constants.sh; echo "${XRAY_BIN} ${SINGBOX_FRAGMENT_DIR} ${TLS_DIR} ${CHAIN_MULTI_INFO}"')
 assert_equals "/tmp/pa-override/xray/xray /tmp/pa-override/sing-box/conf/config /tmp/pa-override/tls /tmp/pa-override/sing-box/conf/chain_multi_info.json" \

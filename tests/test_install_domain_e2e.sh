@@ -118,6 +118,16 @@ runMenu() {
 }
 
 # noNoise LABEL OUTPUT → 这一步的输出里没有找不到的命令或文件
+# doctorClean LABEL → pasly doctor 退出码 0、零 FAIL，打印去色后的输出
+doctorClean() {
+    local out rc
+    out=$(V2RAY_LANG=en bash /usr/bin/pasly doctor 2>&1)
+    rc=$?
+    out=$(sed 's/\x1b\[[0-9;]*m//g' <<<"${out}")
+    [[ ${rc} -ne 0 || "${out}" == *"[FAIL]"* ]] && grep -F '[FAIL]' <<<"${out}" >&2
+    assert_equals "0" "${rc}" "$1：doctor 退出码 0" >&2
+    printf '%s\n' "${out}"
+}
 noNoise() {
     local noisy
     noisy=$(grep -E 'command not found|No such file or directory' <<<"$2" || true)
@@ -366,6 +376,13 @@ assert_equals "" "$(jq -r --arg a "${DOMAIN_A}" '.outbounds[] | select((.server 
     "订阅里没有节点还指着旧域名 ${DOMAIN_A}"
 probeSub "换域名后" "${WORK}/sub-sb.json"
 assert_equals "hysteria2 trojan vless vless vless vmess" "${probedTypes}" "换域名后订阅里的节点都能用"
+# tls/ 里还留着旧域名的证书和上面那张配不上私钥的坏证书，doctor 查的是在用的 B
+doctorOut=$(doctorClean "换域名后")
+assert_contains "${doctorOut}" "[PASS] Certificate covers domain" "doctor：证书覆盖新域名"
+assert_contains "${doctorOut}" "${DOMAIN_B}.crt" "doctor：查的是在用的 ${DOMAIN_B} 这张"
+assert_equals "" "$(grep -E "\[[A-Z]+\] Certificate.*${DOMAIN_BAD}" <<<"${doctorOut}" || true)" "doctor：tls/ 里那张坏证书不在查的范围内"
+assert_contains "${doctorOut}" "[WARN] Certificate chain" "doctor：测试 CA 签的单张证书提示证书链，不算 FAIL"
+assert_contains "${doctorOut}" "[PASS] Account UUIDs" "doctor：全协议的账号 UUID 没有弱值（Xray + 旁挂 Hysteria2）"
 
 # ============================================================================
 # 菜单 3 → 6：脚本自己发的 vless / vmess 链接当外部节点。走真菜单，由旁挂的 sing-box 真握手，所以要在卸 Hysteria2 之前：入站删光后 sing-box 连二进制一起删
@@ -531,6 +548,9 @@ probeSub "sing-box 全装" "${WORK}/sub-sb.json"
 echo "sing-box 订阅里的节点类型：${probedTypes}"
 assert_contains "${probedTypes}" "hysteria2" "sing-box 订阅里有 Hysteria2"
 assert_contains "${probedTypes}" "tuic" "sing-box 订阅里有 TUIC"
+doctorOut=$(doctorClean "sing-box 全部安装")
+assert_contains "${doctorOut}" "[PASS] Certificate covers domain" "doctor：sing-box 内核下也读得到在用证书"
+assert_contains "${doctorOut}" "[PASS] Account UUIDs" "doctor：sing-box 全协议的账号 UUID 没有弱值"
 extOut=$(runMenu "3\n6\n4\n1\n0\n")
 assert_contains "${extOut}" "through this node" "重装 sing-box 后，留下的外部节点经它真握手、访问外网"
 [[ "${extOut}" == *"through this node"* ]] || tail -n 15 <<<"${extOut}"

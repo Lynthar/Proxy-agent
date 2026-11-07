@@ -426,6 +426,8 @@ assert_equals "" "$(grep -F '[FAIL]' <<<"${doctorOut}" || true)" "doctor 零 FAI
 assert_contains "${doctorOut}" "[PASS] Core process" "doctor 看到核心进程"
 assert_contains "${doctorOut}" "[PASS] Config file validation" "doctor 配置校验通过"
 assert_contains "${doctorOut}" "System clock" "doctor 查了系统时钟"
+assert_contains "${doctorOut}" "[PASS] Account UUIDs" "doctor 配置安全这一节跑了：账号 UUID 没有弱值"
+assert_contains "${doctorOut}" "[PASS] Log level" "doctor 配置安全这一节跑了：日志级别正常"
 
 # 菜单 16 → 1 → 8 加 geo 自动更新：cron 行要带安装根前缀，卸载时要被清掉
 if [[ "${E2E_CORE}" == "xray" ]]; then

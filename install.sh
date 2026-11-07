@@ -19516,7 +19516,7 @@ _doctorCheckConfig() {
             shopt -s nullglob
             for f in "${confDir}"/*.json; do
                 ((total++)) || true
-                if ! jq -e . "${f}" >/dev/null 2>&1; then
+                if ! jsonIsSingleValue <"${f}"; then
                     ((bad++)) || true
                     base=$(basename "${f}")
                     badList="${badList}${badList:+, }${base}"
@@ -19638,32 +19638,155 @@ _doctorCheckCert() {
         return
     fi
 
-    local crt key found=""
-    shopt -s nullglob
-    for crt in "${tlsDir}"/*.crt; do
-        key="${crt%.crt}.key"
-        [[ -f "${key}" ]] || continue
-        found="${crt}"
-        break
-    done
-    shopt -u nullglob
+    local crt key pairs
+    pairs=$(_doctorCertsInUse)
+    if [[ -z "${pairs}" ]]; then
+        _doctorRow "$(t DOCTOR_CHECK_CERT_EXPIRY)" warn "$(t DOCTOR_DETAIL_NO_CERT_IN_USE)"
+        _doctorRow "$(t DOCTOR_CHECK_CERT_MATCH)" skip "$(t DOCTOR_DETAIL_NO_CERT_IN_USE)"
+        return
+    fi
+    while IFS=$'\t' read -r crt key; do
+        _doctorCheckOneCert "${crt}" "${key}"
+    done <<<"${pairs}"
+}
 
-    if [[ -z "${found}" ]]; then
-        _doctorRow "$(t DOCTOR_CHECK_CERT_EXPIRY)" warn "no .crt+.key pair in ${tlsDir}"
-        _doctorRow "$(t DOCTOR_CHECK_CERT_MATCH)" skip "no cert pair"
+# _doctorConfigFiles → 这台机器的内核在读的配置片段，一行一个（Xray 机上的旁挂 sing-box 也算）
+_doctorConfigFiles() {
+    local f
+    for f in "${XRAY_CONF_DIR}"/*.json "${SINGBOX_FRAGMENT_DIR}"/*.json; do
+        [[ -f "${f}" ]] || continue
+        [[ "${f}" == "${XRAY_CONF_DIR}/"* && "${coreKind}" != "1" ]] && continue
+        [[ "${f}" == "${SINGBOX_FRAGMENT_DIR}/"* && "${coreKind}" != "2" && ! -f "${SINGBOX_BIN}" ]] && continue
+        printf '%s\n' "${f}"
+    done
+}
+
+# _doctorJqFiles FILTER FILE... → 逐个文件跑 jq -r；读不了的文件跳过，它们由配置那一节报
+_doctorJqFiles() {
+    local filter=$1 f
+    shift
+    for f in "$@"; do
+        jq -r "${filter}" "${f}" 2>/dev/null
+    done
+}
+
+# _doctorCertsInUse → 在用的证书「证书路径<TAB>私钥路径」，一行一对：配置里引用的，加当前域名的（11 的证书只写在 nginx 里）。
+# 不能按 tls/ 取：换域名后旧证书还留在那里，查到它就是假 FAIL 或假 PASS
+_doctorCertsInUse() {
+    local files=()
+    mapfile -t files < <(_doctorConfigFiles)
+    {
+        _doctorJqFiles '.. | objects | select(.certificateFile? or .certificate_path?)
+            | "\(.certificateFile // .certificate_path)\t\(.keyFile // .key_path // "")"' "${files[@]}"
+        if [[ -n "${currentHost}" && -f "${TLS_DIR}/${currentHost}.crt" ]]; then
+            printf '%s\t%s\n' "${TLS_DIR}/${currentHost}.crt" "${TLS_DIR}/${currentHost}.key"
+        fi
+    } | sort -u
+}
+
+# _doctorCheckOneCert CRT KEY → 一张在用证书的到期、配对、自签、域名覆盖、证书链
+_doctorCheckOneCert() {
+    local crt=$1 key=$2 name renewDays=14 blocks out
+    name=$(basename "${crt}")
+    # 续期窗口 15 天、cron 每天跑一次，少于 14 天还没换说明续期出了问题；设成 15 健康机器会黄一天
+    if ! verifyCertExpiry "${crt}" >/dev/null 2>&1; then
+        _doctorRow "$(t DOCTOR_CHECK_CERT_EXPIRY)" fail "$(t DOCTOR_DETAIL_CERT_EXPIRED "${name}")"
+        return
+    elif ! openssl x509 -in "${crt}" -noout -checkend $((renewDays * 86400)) >/dev/null 2>&1; then
+        _doctorRow "$(t DOCTOR_CHECK_CERT_EXPIRY)" warn "$(t DOCTOR_DETAIL_CERT_EXPIRING "${name}" "${renewDays}")"
+    else
+        _doctorRow "$(t DOCTOR_CHECK_CERT_EXPIRY)" pass "${name}"
+    fi
+
+    if verifyCertKeyMatch "${crt}" "${key}" >/dev/null 2>&1; then
+        _doctorRow "$(t DOCTOR_CHECK_CERT_MATCH)" pass "${name}"
+    else
+        _doctorRow "$(t DOCTOR_CHECK_CERT_MATCH)" fail "$(t DOCTOR_DETAIL_CERT_MISMATCH "${name}")"
+    fi
+
+    local selfSigned=no
+    if [[ "$(openssl x509 -in "${crt}" -noout -issuer_hash 2>/dev/null)" == "$(openssl x509 -in "${crt}" -noout -subject_hash 2>/dev/null)" ]]; then
+        selfSigned=yes
+        _doctorRow "$(t DOCTOR_CHECK_CERT_SELF_SIGNED)" fail "$(t DOCTOR_DETAIL_CERT_SELF_SIGNED "${name}")"
+    fi
+
+    # 脚本的证书都叫 tls/<域名>.crt；手改成别的路径时读不出域名，不猜。-checkhost 不匹配时各版本退出码不一，看文字
+    if [[ "${crt}" == "${TLS_DIR}/"*.crt ]]; then
+        out=$(openssl x509 -in "${crt}" -noout -checkhost "${name%.crt}" 2>/dev/null)
+        case "${out}" in
+            *"does match"*) _doctorRow "$(t DOCTOR_CHECK_CERT_HOST)" pass "${name%.crt}" ;;
+            *"does NOT match"*) _doctorRow "$(t DOCTOR_CHECK_CERT_HOST)" fail "$(t DOCTOR_DETAIL_CERT_HOST "${name%.crt}")" ;;
+            *) _doctorRow "$(t DOCTOR_CHECK_CERT_HOST)" skip "${name%.crt}" ;;
+        esac
+    fi
+
+    blocks=$(grep -c 'BEGIN CERTIFICATE' "${crt}" 2>/dev/null)
+    if [[ "${selfSigned}" == "no" && "${blocks:-0}" -lt 2 ]]; then
+        _doctorRow "$(t DOCTOR_CHECK_CERT_CHAIN)" warn "$(t DOCTOR_DETAIL_CERT_CHAIN "${name}")"
+    elif [[ "${selfSigned}" == "no" ]]; then
+        _doctorRow "$(t DOCTOR_CHECK_CERT_CHAIN)" pass "${name}"
+    fi
+}
+
+# auditUuidWeak UUID → 0=公开的示例值或全同一位，谁都猜得到
+auditUuidWeak() {
+    local hex=${1//-/}
+    hex=${hex,,}
+    [[ -z "${hex//${hex:0:1}/}" ]] && return 0
+    case "${hex}" in
+        550e8400e29b41d4a716446655440000 | 123e4567e89b12d3a456426614174000 | f47ac10b58cc4372a5670e02b2c3d479 | \
+            123456781234123412341234567890ab | 12345678123412341234123456789012 | 0123456789abcdef0123456789abcdef)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+# _doctorCheckSecurity → 配置里读得出来的安全问题：只读、不联网。只有确定的缺陷才 fail（退出码归它们管）
+_doctorCheckSecurity() {
+    _doctorSection "$(t DOCTOR_SECTION_SECURITY)"
+    local files=()
+    mapfile -t files < <(_doctorConfigFiles)
+    if [[ ${#files[@]} -eq 0 ]]; then
+        _doctorRow "$(t DOCTOR_CHECK_WEAK_UUID)" skip "$(t DOCTOR_DETAIL_NO_CORE)"
         return
     fi
 
-    if verifyCertExpiry "${found}" >/dev/null 2>&1; then
-        _doctorRow "$(t DOCTOR_CHECK_CERT_EXPIRY)" pass "$(basename "${found}")"
+    local u name total=0 weak="" list
+    while IFS=$'\t' read -r u name; do
+        ((total++)) || true
+        auditUuidWeak "${u}" && weak+="${name%-*}"$'\n'
+    done < <(_doctorJqFiles '.inbounds[]? | .. | objects | (.id? // .uuid? // .password?) as $u
+        | select(($u | type) == "string" and ($u | test("^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")))
+        | "\($u)\t\(.email // .name // "-")"' "${files[@]}")
+    if [[ -n "${weak}" ]]; then
+        list=$(sort -u <<<"${weak}" | grep . | paste -sd, -)
+        _doctorRow "$(t DOCTOR_CHECK_WEAK_UUID)" fail "$(t DOCTOR_DETAIL_WEAK_UUID "${list}")"
     else
-        _doctorRow "$(t DOCTOR_CHECK_CERT_EXPIRY)" fail "$(basename "${found}") expired or unparseable"
+        _doctorRow "$(t DOCTOR_CHECK_WEAK_UUID)" pass "${total}"
     fi
 
-    if verifyCertKeyMatch "${found}" "${key}" >/dev/null 2>&1; then
-        _doctorRow "$(t DOCTOR_CHECK_CERT_MATCH)" pass "$(basename "${found}") matches key"
+    list=$(_doctorJqFiles '.outbounds[]? | select(.tls.insecure? == true or .streamSettings.tlsSettings.allowInsecure? == true) | .tag // "-"' "${files[@]}" | sort -u | paste -sd, -)
+    if [[ -n "${list}" ]]; then
+        _doctorRow "$(t DOCTOR_CHECK_TLS_VERIFY)" warn "$(t DOCTOR_DETAIL_TLS_VERIFY "${list}")"
     else
-        _doctorRow "$(t DOCTOR_CHECK_CERT_MATCH)" fail "cert/key mismatch"
+        _doctorRow "$(t DOCTOR_CHECK_TLS_VERIFY)" pass
+    fi
+
+    list=$(_doctorJqFiles '.log.loglevel? // .log.level? // empty' "${files[@]}" | sort -u | paste -sd, -)
+    case ",${list}," in
+        *,debug,* | *,trace,*) _doctorRow "$(t DOCTOR_CHECK_LOG_LEVEL)" warn "$(t DOCTOR_DETAIL_LOG_LEVEL "${list}")" ;;
+        *) _doctorRow "$(t DOCTOR_CHECK_LOG_LEVEL)" pass "${list}" ;;
+    esac
+
+    if [[ "${coreKind}" == "1" ]]; then
+        local accessLog
+        accessLog=$(_doctorJqFiles '.log.access? // empty' "${files[@]}" | grep -v -x -F none | head -n 1)
+        if [[ -n "${accessLog}" ]]; then
+            _doctorRow "$(t DOCTOR_CHECK_ACCESS_LOG)" warn "$(t DOCTOR_DETAIL_ACCESS_LOG "${accessLog}" "$(wc -c <"${accessLog}" 2>/dev/null | tr -d ' ')")"
+        else
+            _doctorRow "$(t DOCTOR_CHECK_ACCESS_LOG)" pass
+        fi
     fi
 }
 
@@ -19713,6 +19836,7 @@ doctor() {
     _doctorCheckConfig
     _doctorCheckNetwork
     _doctorCheckCert
+    _doctorCheckSecurity
     _doctorCheckFirewall
 
     echoContent skyBlue "\n=============================================================="
