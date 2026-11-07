@@ -974,7 +974,7 @@ echo ""
 
 echo -e "${BLUE}[真机修复] 链式、安装路径、订阅${NC}"
 
-VPS_FN_NAMES="chainHopOutbounds chainRelayRouteJson chainExitSourceInject directOutboundInject globalEgressChainNotice routingToolsMenu isValidRedirectUrl _ssBase64Decode _ssPercentDecode parseSSLink cleanUp chainRefuseCoreSwitch singBoxFragmentsHaveInbounds configuredPorts portsTakenFor customUserEmail initRealityShortIds"
+VPS_FN_NAMES="chainHopOutbounds chainRelayRouteJson chainExitSourceInject directOutboundInject globalEgressChainNotice routingToolsMenu isValidRedirectUrl _linkBase64Decode _linkPercentDecode _linkQueryGet _linkRefuse _linkCheckEndpoint _linkTlsJson _linkTransportJson parseVlessLink _vmessField parseVmessLink isValidDomain isValidIP parseSSLink cleanUp chainRefuseCoreSwitch singBoxFragmentsHaveInbounds configuredPorts portsTakenFor customUserEmail initRealityShortIds"
 VPS_FNS=$(sed -n "$(for _f in ${VPS_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_equals "$(wc -w <<<"${VPS_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9_]*() {$' <<<"${VPS_FNS}")" "真机修复：每个函数都抽到了"
 # 订阅与 Reality 回落的渲染函数 heredoc 里有顶格的 }，按下一个函数的开头截取（同 installSubscribe 那段）
@@ -1106,6 +1106,62 @@ assert_equals "2022-blake3-aes-128-gcm|xPU/ab+c==" \
 assert_equals "aes-128-gcm|pass" \
     "$(run_vps "parseSSLink 'ss://$(printf 'aes-128-gcm:pass' | base64 | tr -d '=')@192.0.2.5:8388#n'" | jq -r '"\(.method)|\(.password)"')" \
     "SS 链接：SIP002 的 base64 userinfo 照旧解码"
+
+# --- vless / vmess 链接：解析出 sing-box 出站的形状，sing-box 连不了的当场拒绝 ---
+EXT_UUID=0f3c8a4e-1b2d-4c5e-8f90-123456789abc
+ext_vless() { run_vps "parseVlessLink 'vless://$1'" 2>&1; }
+ext_vmess() { run_vps "parseVmessLink 'vmess://$(printf '%s' "$1" | base64 | tr -d '\n')'" 2>&1; }
+assert_equals '{"name":"a b","type":"vless","server":"203.0.113.9","server_port":443,"uuid":"'"${EXT_UUID}"'","flow":"xtls-rprx-vision","tls":{"enabled":true,"server_name":"www.python.org","utls":{"enabled":true,"fingerprint":"chrome"},"reality":{"enabled":true,"public_key":"PBK","short_id":"ab12"}}}' \
+    "$(ext_vless "${EXT_UUID}@203.0.113.9:443?encryption=none&security=reality&type=tcp&sni=www.python.org&fp=chrome&pbk=PBK&sid=ab12&flow=xtls-rprx-vision#a%20b" | jq -c .)" \
+    "VLESS 链接：脚本发的 Reality 链接解析成 sing-box 出站，名字解码"
+assert_equals '{"name":"VLESS-a.example","type":"vless","server":"a.example","server_port":8443,"uuid":"'"${EXT_UUID}"'","tls":{"enabled":true,"server_name":"h.example","utls":{"enabled":true,"fingerprint":"chrome"}},"transport":{"type":"ws","path":"/p/ws","headers":{"Host":"h.example"}}}' \
+    "$(ext_vless "${EXT_UUID}@a.example:8443?encryption=none&security=tls&type=ws&host=h.example&fp=chrome&path=%2Fp%2Fws" | jq -c .)" \
+    "VLESS 链接：WS 路径解码，没写 sni 时用 host，没写名字时用地址"
+assert_equals '["2001:db8::1",443,"grpc","svc",true,["h2","http/1.1"]]' \
+    "$(ext_vless "${EXT_UUID}@[2001:db8::1]:443/?security=tls&type=grpc&serviceName=svc&allowInsecure=1&alpn=h2%2Chttp%2F1.1&sni=x.example" | jq -c '[.server, .server_port, .transport.type, .transport.service_name, .tls.insecure, .tls.alpn]')" \
+    "VLESS 链接：IPv6 字面量去方括号，gRPC、跳过校验、多个 ALPN"
+assert_equals 'null' "$(ext_vless "${EXT_UUID}@a.example:443?xsni=wrong&security=none" | jq -c '.tls')" "VLESS 链接：不加密时没有 tls；参数按整键匹配，xsni 不算 sni"
+assert_equals 'x.example' "$(ext_vless "${EXT_UUID}@a.example:443?xsni=wrong&security=tls&sni=x.example" | jq -r '.tls.server_name')" "VLESS 链接：xsni 不会被当成 sni"
+for _extCase in \
+    "${EXT_UUID}@a.example:443?security=reality&type=xhttp&pbk=K|type = xhttp|sing-box 没有 XHTTP" \
+    "${EXT_UUID}@a.example:443?security=tls&type=kcp|type = kcp|mKCP" \
+    "${EXT_UUID}@a.example:443?encryption=mlkem768x25519plus.native.0rtt.x&security=tls|encryption = mlkem768x25519plus|VLESS Encryption" \
+    "${EXT_UUID}@a.example:443?security=tls&flow=xtls-rprx-vision-udp443|flow = xtls-rprx-vision-udp443|别的 flow" \
+    "${EXT_UUID}@a.example:443?security=tls&headerType=http|headerType = http|TCP 的 HTTP 伪装" \
+    "${EXT_UUID}@a.example:443?security=tls&fp=bogus|fp = bogus|未知指纹（写进片段后整个 sing-box 起不来）" \
+    "${EXT_UUID}@a.example:443?security=reality|pbk = |Reality 没有公钥" \
+    "${EXT_UUID}@a.example:443?security=xtls|security = xtls|未知加密方式" \
+    "not-a-uuid@a.example:443?security=tls|uuid = not-a-uuid|UUID 不合法" \
+    "${EXT_UUID}@a.example:0443?security=tls|port = 0443|端口前导零（--argjson 会解析失败）" \
+    "${EXT_UUID}@a.example:70000?security=tls|port = 70000|端口越界" \
+    "${EXT_UUID}@a\"b.example:443?security=tls|server = a\"b.example|地址里有引号"; do
+    IFS='|' read -r _extLink _extWant _extWhy <<<"${_extCase}"
+    _extOut=$(ext_vless "${_extLink}")
+    assert_contains "${_extOut}" "${_extWant}" "VLESS 链接：拒绝${_extWhy}，并说明是哪一项"
+    assert_equals "" "$(grep -F '"type"' <<<"${_extOut}")" "VLESS 链接：拒绝${_extWhy}时不输出节点"
+done
+assert_equals '{"name":"vm","type":"vmess","server":"a.example","server_port":443,"uuid":"'"${EXT_UUID}"'","packet_encoding":"xudp","security":"auto","tls":{"enabled":true,"server_name":"h.example"},"transport":{"type":"ws","path":"/vws","headers":{"Host":"h.example"}}}' \
+    "$(ext_vmess '{"port":443,"ps":"vm","tls":"tls","id":"'"${EXT_UUID}"'","aid":0,"v":2,"host":"h.example","type":"none","path":"/vws","net":"ws","add":"a.example","scy":"auto"}' | jq -c .)" \
+    "VMess 链接：端口是数字也行，sni 缺省用 host，UDP 用 xudp"
+assert_equals '["httpupgrade","/u",7,8443,null]' \
+    "$(ext_vmess '{"port":"8443","id":"'"${EXT_UUID}"'","aid":"7","path":"/u","net":"httpupgrade","add":"a.example","tls":""}' | jq -c '[.transport.type, .transport.path, .alter_id, .server_port, .tls]')" \
+    "VMess 链接：端口与 aid 是字符串也行，空 tls 不加密"
+assert_equals 'svc' "$(ext_vmess '{"port":443,"id":"'"${EXT_UUID}"'","path":"svc","net":"grpc","add":"a.example","tls":"tls"}' | jq -r '.transport.service_name')" "VMess 链接：gRPC 的 service_name 在 path 字段"
+assert_contains "$(ext_vmess '{"port":443,"id":"'"${EXT_UUID}"'","net":"xhttp","add":"a.example"}')" "type = xhttp" "VMess 链接：拒绝 sing-box 没有的传输"
+assert_contains "$(ext_vmess '{"port":443,"id":"'"${EXT_UUID}"'","net":"tcp","type":"http","add":"a.example"}')" "type = http" "VMess 链接：拒绝 TCP 的 HTTP 伪装"
+assert_contains "$(ext_vmess '{"port":443,"id":"'"${EXT_UUID}"'","net":"tcp","scy":"bogus","add":"a.example"}')" "scy = bogus" "VMess 链接：拒绝未知加密"
+assert_contains "$(ext_vmess '{"port":443,"id":"'"${EXT_UUID}"'","net":"tcp","aid":"x","add":"a.example"}')" "aid = x" "VMess 链接：拒绝 aid 不是数字"
+assert_equals "1" "$(run_vps "parseVmessLink 'vmess://not-base64-json'" >/dev/null 2>&1; echo $?)" "VMess 链接：不是 base64 的 JSON 返回 1"
+assert_equals "a\\b" "$(run_vps "_linkPercentDecode 'a\\b'")" "解码：带反斜杠的原样返回，不被 %b 当转义"
+
+# 节点存盘后生成出站：只挑 sing-box 认的字段，id、name、enabled 这些写进片段会让合并失败
+EXT_GEN_FN=$(sed -n '/^generateExternalOutboundConfig() {/,/^}/p' install.sh)
+assert_equals '{"type":"vless","tag":"chain1","server":"a.example","server_port":443,"uuid":"u","flow":"xtls-rprx-vision","tls":{"enabled":true},"transport":{"type":"ws"}}' \
+    "$(env EXT_GEN_FN="${EXT_GEN_FN}" bash -c 'eval "${EXT_GEN_FN}"; getExternalNodeById() { echo "{\"id\":\"i\",\"name\":\"n\",\"enabled\":true,\"created_at\":\"t\",\"type\":\"vless\",\"server\":\"a.example\",\"server_port\":443,\"uuid\":\"u\",\"flow\":\"xtls-rprx-vision\",\"tls\":{\"enabled\":true},\"transport\":{\"type\":\"ws\"}}"; }; generateExternalOutboundConfig i chain1' | jq -c .)" \
+    "外部节点：VLESS 节点生成的出站只有 sing-box 认的字段"
+assert_equals '["vmess","chain1","xudp",4]' \
+    "$(env EXT_GEN_FN="${EXT_GEN_FN}" bash -c 'eval "${EXT_GEN_FN}"; getExternalNodeById() { echo "{\"id\":\"i\",\"name\":\"n\",\"type\":\"vmess\",\"server\":\"a\",\"server_port\":1,\"uuid\":\"u\",\"packet_encoding\":\"xudp\",\"alter_id\":4}"; }; generateExternalOutboundConfig i chain1' | jq -c '[.type, .tag, .packet_encoding, .alter_id]')" \
+    "外部节点：VMess 节点的 packet_encoding 与 alter_id 带到出站"
 
 # --- 订阅：配置从端口渲染，安装流程选端口时它算已占 ---
 vps_reset

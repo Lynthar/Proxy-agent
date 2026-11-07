@@ -668,7 +668,7 @@ chain://ss2022@1.2.3.4:12345?key=BASE64_ENCODED_KEY&method=2022-blake3-aes-128-g
 
 外部节点是你没有 root 权限的第三方节点，比如购买的机场节点、朋友分享的节点、与他人合租的 VPS 上的节点。你只有连接信息（服务器、端口、密码等），可以把它当链式代理的出口用。
 
-支持的协议：Shadowsocks（同时兼容 Shadowsocks 2022）、SOCKS5、Trojan。
+支持的协议：Shadowsocks（同时兼容 Shadowsocks 2022）、SOCKS5、Trojan、VLESS、VMess。VLESS 和 VMess 只能通过链接添加。
 
 **通过链接添加：3 → 6 → 1。** 支持这些格式：
 
@@ -676,7 +676,11 @@ chain://ss2022@1.2.3.4:12345?key=BASE64_ENCODED_KEY&method=2022-blake3-aes-128-g
 ss://...           (Shadowsocks)
 trojan://...       (Trojan)
 socks5://...       (SOCKS5，也接受 socks://)
+vless://...        (VLESS：TLS、Reality 或不加密，传输支持 TCP、WS、gRPC、HTTPUpgrade)
+vmess://...        (VMess：TLS 或不加密，传输同上)
 ```
+
+出口由 sing-box 连接，sing-box 不支持的节点在粘贴时就会被拒绝并说明原因，比如 XHTTP 传输和 VLESS Encryption。对端是 Xray 26.9.9 及以上的 Reality 节点也连不上（[原因](#更新回退与备份)），添加后用下面的测试确认。
 
 粘贴后脚本显示解析结果，确认后添加：
 

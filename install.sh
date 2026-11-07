@@ -14341,6 +14341,8 @@ addExternalNodeAsChain() {
             "shadowsocks") typeLabel="SS" ;;
             "socks") typeLabel="SOCKS5" ;;
             "trojan") typeLabel="Trojan" ;;
+            "vless") typeLabel="VLESS" ;;
+            "vmess") typeLabel="VMess" ;;
             *) typeLabel="${type}" ;;
         esac
 
@@ -15959,7 +15961,7 @@ addExternalNodeTrojan() {
 # 兼容 url-safe (RFC 4648 §5) 与 standard (§4) 两种 base64 字母表 + 自动补 padding。
 # 多数 SS 客户端导出链接采用 url-safe 编码（用 -_ 替代 +/，且常省略 =）；
 # GNU coreutils base64 默认只接受 standard 字母表 + 严格 padding，url-safe 输入会失败。
-_ssBase64Decode() {
+_linkBase64Decode() {
     local s="$1"
     # url-safe → standard
     s="${s//-/+}"
@@ -15973,9 +15975,9 @@ _ssBase64Decode() {
     printf '%s' "${s}" | base64 -d 2>/dev/null
 }
 
-# _ssPercentDecode S → 百分号解码；只收 SS userinfo 会用到的字符（方法名、base64、%XX），别的原样返回——反斜杠会被 %b 当转义
-_ssPercentDecode() {
-    if [[ "$1" =~ ^[A-Za-z0-9%+/=._~:-]*$ ]]; then
+# _linkPercentDecode S → 百分号解码。带反斜杠的原样返回：%b 会把它当转义，链接内容不可信
+_linkPercentDecode() {
+    if [[ "$1" != *\\* ]]; then
         printf '%b' "${1//%/\\x}"
     else
         printf '%s' "$1"
@@ -16006,7 +16008,7 @@ parseSSLink() {
     else
         # 整个是 base64 编码的（兼容 url-safe / standard 两种字母表）
         local decoded
-        decoded=$(_ssBase64Decode "${link}")
+        decoded=$(_linkBase64Decode "${link}")
         if [[ -n "${decoded}" && "${decoded}" == *"@"* ]]; then
             userInfo="${decoded%%@*}"
             serverPart="${decoded#*@}"
@@ -16024,9 +16026,9 @@ parseSSLink() {
     # 带这两个字符的先按明文解码，不然 base64 解出乱码，或者 %2F 原样进了密码，认证必然失败
     local decodedUser
     if [[ "${userInfo}" == *":"* || "${userInfo}" == *"%"* ]]; then
-        decodedUser=$(_ssPercentDecode "${userInfo}")
+        decodedUser=$(_linkPercentDecode "${userInfo}")
     else
-        decodedUser=$(_ssBase64Decode "${userInfo}")
+        decodedUser=$(_linkBase64Decode "${userInfo}")
     fi
     if [[ -n "${decodedUser}" && "${decodedUser}" == *":"* ]]; then
         method="${decodedUser%%:*}"
@@ -16192,6 +16194,200 @@ parseSOCKS5Link() {
     fi
 }
 
+# _linkQueryGet QUERY KEY → 按整个键名取查询参数并解码，没有就打印空串
+_linkQueryGet() {
+    local pair
+    while IFS= read -r -d '&' pair; do
+        if [[ "${pair%%=*}" == "$2" ]]; then
+            _linkPercentDecode "${pair#*=}"
+            return 0
+        fi
+    done <<<"$1&"
+}
+
+# _linkRefuse FIELD VALUE → 说明这个节点用不了，返回 1。走 stderr：调用方用 $() 只收节点 JSON
+_linkRefuse() {
+    echoContent red " ---> $(t EXT_LINK_REFUSED "$1" "$2")" >&2
+    return 1
+}
+
+# _linkCheckEndpoint HOST PORT → 地址与端口都合法返回 0。端口不收前导零：后面 --argjson 按 JSON 数字解析
+_linkCheckEndpoint() {
+    if ! isValidDomain "$1" && ! isValidIP "$1"; then
+        _linkRefuse server "$1"
+        return 1
+    fi
+    if [[ ! "$2" =~ ^[1-9][0-9]{0,4}$ ]] || (($2 > 65535)); then
+        _linkRefuse port "$2"
+        return 1
+    fi
+}
+
+# _linkTlsJson SECURITY SNI FP ALPN INSECURE PBK SID → sing-box 的 tls 对象，不加密打印 null。INSECURE 是 true / false。
+# 指纹不在 sing-box 的列表里就拒：写进片段后合并失败，整个 sing-box 起不来；Reality 要 uTLS，没给指纹用 chrome
+_linkTlsJson() {
+    local fp=$3
+    case "$1" in
+    "" | none)
+        echo null
+        return 0
+        ;;
+    tls | reality) ;;
+    *)
+        _linkRefuse security "$1"
+        return 1
+        ;;
+    esac
+    case "${fp}" in
+    "" | chrome | firefox | edge | safari | 360 | qq | ios | android | random | randomized) ;;
+    *)
+        _linkRefuse fp "${fp}"
+        return 1
+        ;;
+    esac
+    if [[ "$1" == "reality" ]]; then
+        if [[ -z "$6" ]]; then
+            _linkRefuse pbk ""
+            return 1
+        fi
+        fp=${fp:-chrome}
+    fi
+    jq -cn --arg security "$1" --arg sni "$2" --arg fp "${fp}" --arg alpn "$4" --argjson insecure "$5" --arg pbk "$6" --arg sid "$7" '
+        {enabled: true, server_name: $sni}
+        + (if $insecure and $security == "tls" then {insecure: true} else {} end)
+        + (if $alpn == "" then {} else {alpn: ($alpn | split(","))} end)
+        + (if $fp == "" then {} else {utls: {enabled: true, fingerprint: $fp}} end)
+        + (if $security == "reality" then {reality: {enabled: true, public_key: $pbk, short_id: $sid}} else {} end)'
+}
+
+# _linkTransportJson NET PATH HOST SERVICE → sing-box 的 transport 对象，裸 TCP 打印 null；sing-box 没有的传输（XHTTP、mKCP 等）拒绝
+_linkTransportJson() {
+    case "$1" in
+    "" | tcp | raw) echo null ;;
+    ws) jq -cn --arg p "${2:-/}" --arg h "$3" '{type: "ws", path: $p} + (if $h == "" then {} else {headers: {Host: $h}} end)' ;;
+    httpupgrade) jq -cn --arg p "${2:-/}" --arg h "$3" '{type: "httpupgrade", path: $p} + (if $h == "" then {} else {host: $h} end)' ;;
+    grpc) jq -cn --arg s "$4" '{type: "grpc", service_name: $s}' ;;
+    *) _linkRefuse type "$1" ;;
+    esac
+}
+
+# parseVlessLink LINK → 节点 JSON，字段形状就是 sing-box 出站。sing-box 连不了的节点在这里拒，留到合并时整个 sing-box 都起不来
+parseVlessLink() {
+    local link=${1#vless://} name= query= uuid hostPort host port
+    if [[ "${link}" == *"#"* ]]; then
+        name=$(_linkPercentDecode "${link##*#}")
+        link=${link%%#*}
+    fi
+    if [[ "${link}" == *"?"* ]]; then
+        query=${link#*\?}
+        link=${link%%\?*}
+    fi
+    uuid=${link%%@*}
+    hostPort=${link#*@}
+    hostPort=${hostPort%/}
+    if [[ "${hostPort}" == \[* ]]; then
+        host=${hostPort%%]*}
+        host=${host#\[}
+    else
+        host=${hostPort%%:*}
+    fi
+    port=${hostPort##*:}
+    if [[ ! "${uuid}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+        _linkRefuse uuid "${uuid}"
+        return 1
+    fi
+    _linkCheckEndpoint "${host}" "${port}" || return 1
+
+    local encryption flow headerType hostHeader insecure=false tls transport value
+    encryption=$(_linkQueryGet "${query}" encryption)
+    if [[ -n "${encryption}" && "${encryption}" != "none" ]]; then
+        _linkRefuse encryption "${encryption}"
+        return 1
+    fi
+    flow=$(_linkQueryGet "${query}" flow)
+    if [[ -n "${flow}" && "${flow}" != "xtls-rprx-vision" ]]; then
+        _linkRefuse flow "${flow}"
+        return 1
+    fi
+    headerType=$(_linkQueryGet "${query}" headerType)
+    if [[ -n "${headerType}" && "${headerType}" != "none" ]]; then
+        _linkRefuse headerType "${headerType}"
+        return 1
+    fi
+    hostHeader=$(_linkQueryGet "${query}" host)
+    for value in "$(_linkQueryGet "${query}" allowInsecure)" "$(_linkQueryGet "${query}" insecure)"; do
+        [[ "${value}" == "1" || "${value}" == "true" ]] && insecure=true
+    done
+    value=$(_linkQueryGet "${query}" sni)
+    tls=$(_linkTlsJson "$(_linkQueryGet "${query}" security)" "${value:-${hostHeader:-${host}}}" "$(_linkQueryGet "${query}" fp)" \
+        "$(_linkQueryGet "${query}" alpn)" "${insecure}" "$(_linkQueryGet "${query}" pbk)" "$(_linkQueryGet "${query}" sid)") || return 1
+    transport=$(_linkTransportJson "$(_linkQueryGet "${query}" type)" "$(_linkQueryGet "${query}" path)" "${hostHeader}" "$(_linkQueryGet "${query}" serviceName)") || return 1
+
+    jq -n --arg name "${name:-VLESS-${host}}" --arg server "${host}" --argjson port "${port}" --arg uuid "${uuid}" --arg flow "${flow}" \
+        --argjson tls "${tls}" --argjson transport "${transport}" '
+        {name: $name, type: "vless", server: $server, server_port: $port, uuid: $uuid}
+        + (if $flow == "" then {} else {flow: $flow} end)
+        + (if $tls == null then {} else {tls: $tls} end)
+        + (if $transport == null then {} else {transport: $transport} end)'
+}
+
+# _vmessField JSON KEY → 取 vmess 链接里的字段：各家把端口、aid 写成数字或字符串都有，一律转成字符串，没有打印空串
+_vmessField() {
+    jq -r --arg k "$2" '(.[$k] // "") | tostring' <<<"$1"
+}
+
+# parseVmessLink LINK → 节点 JSON，同 parseVlessLink。UDP 用 xudp：packetaddr 只有 sing-box 服务端认，Xray 上 UDP 全丢
+parseVmessLink() {
+    local json
+    json=$(_linkBase64Decode "${1#vmess://}")
+    if ! jq -e 'type == "object"' >/dev/null 2>&1 <<<"${json}"; then
+        return 1
+    fi
+
+    local name host port uuid alterId security headerType hostHeader insecure=false tls transport value
+    name=$(_vmessField "${json}" ps)
+    host=$(_vmessField "${json}" add)
+    port=$(_vmessField "${json}" port)
+    uuid=$(_vmessField "${json}" id)
+    if [[ ! "${uuid}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+        _linkRefuse id "${uuid}"
+        return 1
+    fi
+    _linkCheckEndpoint "${host}" "${port}" || return 1
+    alterId=$(_vmessField "${json}" aid)
+    if [[ ! "${alterId:-0}" =~ ^[0-9]{1,5}$ ]]; then
+        _linkRefuse aid "${alterId}"
+        return 1
+    fi
+    security=$(_vmessField "${json}" scy)
+    case "${security}" in
+    "" | auto | none | zero | aes-128-gcm | chacha20-poly1305 | aes-128-ctr) ;;
+    *)
+        _linkRefuse scy "${security}"
+        return 1
+        ;;
+    esac
+    headerType=$(_vmessField "${json}" type)
+    if [[ -n "${headerType}" && "${headerType}" != "none" ]]; then
+        _linkRefuse type "${headerType}"
+        return 1
+    fi
+    hostHeader=$(_vmessField "${json}" host)
+    value=$(_vmessField "${json}" allowInsecure)
+    [[ "${value}" == "1" || "${value}" == "true" ]] && insecure=true
+    value=$(_vmessField "${json}" sni)
+    tls=$(_linkTlsJson "$(_vmessField "${json}" tls)" "${value:-${hostHeader:-${host}}}" "$(_vmessField "${json}" fp)" "$(_vmessField "${json}" alpn)" "${insecure}" "" "") || return 1
+    transport=$(_linkTransportJson "$(_vmessField "${json}" net)" "$(_vmessField "${json}" path)" "${hostHeader}" "$(_vmessField "${json}" path)") || return 1
+
+    jq -n --arg name "${name:-VMess-${host}}" --arg server "${host}" --argjson port "${port}" --arg uuid "${uuid}" --argjson alterId "$((10#${alterId:-0}))" \
+        --arg security "${security}" --argjson tls "${tls}" --argjson transport "${transport}" '
+        {name: $name, type: "vmess", server: $server, server_port: $port, uuid: $uuid, packet_encoding: "xudp"}
+        + (if $alterId == 0 then {} else {alter_id: $alterId} end)
+        + (if $security == "" then {} else {security: $security} end)
+        + (if $tls == null then {} else {tls: $tls} end)
+        + (if $transport == null then {} else {transport: $transport} end)'
+}
+
 # 通过链接添加外部节点
 addExternalNodeByLink() {
     echoContent skyBlue "\n$(t EXT_ADD_BY_LINK)"
@@ -16199,7 +16395,9 @@ addExternalNodeByLink() {
     echoContent yellow "$(t EXT_SUPPORTED_LINKS):"
     echoContent yellow "  - ss://..."
     echoContent yellow "  - trojan://..."
-    echoContent yellow "  - socks5://...\n"
+    echoContent yellow "  - socks5://..."
+    echoContent yellow "  - vless://..."
+    echoContent yellow "  - vmess://...\n"
 
     read -r -p "$(t EXT_PASTE_LINK): " link
 
@@ -16220,6 +16418,12 @@ addExternalNodeByLink() {
     elif [[ "${link}" == socks5://* || "${link}" == socks://* ]]; then
         nodeType="SOCKS5"
         nodeJson=$(parseSOCKS5Link "${link}")
+    elif [[ "${link}" == vless://* ]]; then
+        nodeType="VLESS"
+        nodeJson=$(parseVlessLink "${link}")
+    elif [[ "${link}" == vmess://* ]]; then
+        nodeType="VMess"
+        nodeJson=$(parseVmessLink "${link}")
     else
         echoContent red " ---> $(t EXT_LINK_UNSUPPORTED)"
         return 1
@@ -16236,6 +16440,9 @@ addExternalNodeByLink() {
     echoContent yellow "  $(t EXT_SERVER): $(echo "${nodeJson}" | jq -r '.server')"
     echoContent yellow "  $(t EXT_PORT): $(echo "${nodeJson}" | jq -r '.server_port')"
     echoContent yellow "  $(t EXT_NAME): $(echo "${nodeJson}" | jq -r '.name')"
+    if jq -e '.tls.reality.enabled == true' >/dev/null 2>&1 <<<"${nodeJson}"; then
+        echoContent yellow "  $(t EXT_REALITY_NOTE)"
+    fi
 
     echo
     read -r -p "$(t EXT_CONFIRM_ADD)? [y/n]: " confirmAdd
@@ -16285,6 +16492,8 @@ listExternalNodes() {
             "shadowsocks") typeLabel="SS" ;;
             "socks") typeLabel="SOCKS5" ;;
             "trojan") typeLabel="Trojan" ;;
+            "vless") typeLabel="VLESS" ;;
+            "vmess") typeLabel="VMess" ;;
             *) typeLabel="${type}" ;;
         esac
 
@@ -16442,6 +16651,11 @@ generateExternalOutboundConfig() {
                     password: $password,
                     tls: $tls
                 }'
+            ;;
+        "vless" | "vmess")
+            # 节点是按 sing-box 出站的形状存的，这里只挑出站字段：id、name、enabled 这些 sing-box 不认，合并会失败
+            jq --arg tag "${tag}" '{type, tag: $tag, server, server_port, uuid}
+                + with_entries(select(.key as $k | ["flow", "security", "alter_id", "packet_encoding", "tls", "transport"] | index($k)))' <<<"${node}"
             ;;
     esac
 }

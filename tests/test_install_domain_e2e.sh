@@ -367,6 +367,26 @@ assert_equals "" "$(jq -r --arg a "${DOMAIN_A}" '.outbounds[] | select((.server 
 probeSub "换域名后" "${WORK}/sub-sb.json"
 assert_equals "hysteria2 trojan vless vless vless vmess" "${probedTypes}" "换域名后订阅里的节点都能用"
 
+# ============================================================================
+# 菜单 3 → 6：脚本自己发的 vless / vmess 链接当外部节点。走真菜单，由旁挂的 sing-box 真握手，所以要在卸 Hysteria2 之前：入站删光后 sing-box 连二进制一起删
+# ============================================================================
+
+echo ""
+echo -e "${YELLOW}=== 菜单 3 → 6：vless / vmess 链接当外部节点 ===${NC}"
+fetchSub "${DOMAIN_B}" 'v2rayN/7.0' "${WORK}/sub-default.txt" >/dev/null
+extLinks=$(base64 -d "${WORK}/sub-default.txt" 2>/dev/null | grep -E '^(vless|vmess)://' | grep -v 'type=xhttp')
+assert_equals "4" "$(grep -c . <<<"${extLinks}")" "通用订阅里有 VLESS TLS / WS / Reality、VMess 四条能当外部节点的链接"
+while IFS= read -r extLink; do
+    extOut=$(runMenu "3\n6\n1\n${extLink}\ny\n4\n1\n3\n1\ny\n0\n")
+    assert_contains "${extOut}" "Node added" "外部节点：${extLink%%\?*} 添加成功"
+    assert_contains "${extOut}" "through this node" "外部节点：${extLink%%\?*} 经本机 sing-box 真握手、访问外网"
+    [[ "${extOut}" == *"through this node"* ]] || tail -n 15 <<<"${extOut}"
+    assert_equals "0" "$(jq '.nodes | length' "${INSTALL_ROOT}/sing-box/conf/external_node_info.json" 2>/dev/null)" "外部节点：测完删掉，没留下"
+done <<<"${extLinks}"
+extOut=$(runMenu "3\n6\n1\n$(base64 -d "${WORK}/sub-default.txt" 2>/dev/null | grep -m1 'security=reality.*type=xhttp')\n0\n")
+assert_contains "${extOut}" "type = xhttp" "外部节点：XHTTP 链接当场拒绝并说明原因（sing-box 没有 XHTTP）"
+assert_equals "0" "$(jq '.nodes | length' "${INSTALL_ROOT}/sing-box/conf/external_node_info.json" 2>/dev/null)" "外部节点：被拒的链接没有写进节点文件"
+
 echo ""
 echo -e "${YELLOW}=== 菜单 4 → 3：端口跳跃，再 4 → 2 卸掉 Hysteria2（拼车不计量 sing-box 里的协议，开拼车前要拿掉）===${NC}"
 runMenu "4\n3\n1\n30000-30010\n" >/dev/null
