@@ -963,6 +963,22 @@ assert_equals '[{"tag":"rule_set_http"}] rule_set_http' \
     "$(jq -c -j '.http_clients, " ", .route.default_http_client' "${HTTP_CLIENT_DIR}02_http_client.json")" \
     "ensureSingBoxHttpClient：http client 不带 detour（有 direct 出站也不指过去）"
 rm -rf "${HTTP_CLIENT_DIR}"
+# 每次合并都会走这些补写：片段目录里不留 .bak，不然越堆越多
+SB_BAK_DIR=$(mktemp -d)/
+printf '%s\n' '{"route":{"rule_set":[{"type":"remote","tag":"a","download_detour":"direct"}]}}' >"${SB_BAK_DIR}r.json"
+env SB_BAK_DIR="${SB_BAK_DIR}" SB_BAK_FN="$(sed -n '/^ensureSingBoxLocalDns() {/,/^}/p;/^ensureSingBoxHttpClient() {/,/^}/p;/^normalizeSingBoxRuleSetHttpClient() {/,/^}/p' install.sh)" bash -c '
+    source lib/i18n.sh; source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh
+    eval "${SB_BAK_FN}"
+    singBoxConfigPath="${SB_BAK_DIR}"
+    singBoxInstalledVersion() { echo "${SB_VER}"; }
+    SB_VER=1.14.4
+    ensureSingBoxLocalDns; ensureSingBoxLocalDns
+    normalizeSingBoxRuleSetHttpClient "${SB_BAK_DIR}"; normalizeSingBoxRuleSetHttpClient "${SB_BAK_DIR}"
+    SB_VER=1.13.0
+    normalizeSingBoxRuleSetHttpClient "${SB_BAK_DIR}"' >/dev/null 2>&1
+assert_equals "null|null" "$(jq -r '.route.rule_set[0] | "\(.download_detour)|\(.http_client)"' "${SB_BAK_DIR}r.json")" "sing-box 片段的 rule_set 迁移走了一个来回（1.14 迁入、更早的内核去掉）"
+assert_equals "" "$(ls "${SB_BAK_DIR}" | grep '\.bak')" "sing-box 片段目录：补写与迁移都不留 .bak 文件"
+rm -rf "${SB_BAK_DIR}"
 assert_equals "0" "$(jq '[.http_clients[]? | select(has("detour"))] | length' docs/sing-box.json)" \
     "docs/sing-box.json：客户端模板的 http_clients 不带 detour（指向空 direct 时 1.14 客户端启动即 FATAL）"
 
@@ -4670,6 +4686,7 @@ run_ap() {
     printf '#!/bin/sh\nexit 1\n' >"${AP_DIR}/bin/nft" && chmod +x "${AP_DIR}/bin/nft"
     tr ' ' '\n' <<<"$2" | grep . >"${AP_DIR}/rules"
     env AP_FN="${AP_FN}" AP_DIR="${AP_DIR}" FW="$1" PATH="${AP_DIR}/bin:${PATH}" bash -c '
+        set -o pipefail
         eval "${AP_FN}"
         echoContent() { :; }
         netfilter-persistent() { :; }
@@ -5029,6 +5046,9 @@ run_us() {
         echo '{"role":"entry"}' >"${US_DIR}/sing-box/conf/chain_entry_info.json"
     fi
     [[ -n "$2" ]] && echo "$2" >"${US_DIR}/sing-box/conf/external_node_info.json"
+    mkdir -p "${US_DIR}/etc/systemd/system" "${US_DIR}/etc/init.d"
+    : >"${US_DIR}/etc/systemd/system/sing-box.service"
+    : >"${US_DIR}/etc/init.d/sing-box"
     env US_FN="${US_FN}" US_DIR="${US_DIR}" bash -c '
         SINGBOX_DIR="${US_DIR}/sing-box" SINGBOX_BIN="${US_DIR}/sing-box/sing-box" SINGBOX_CONF_DIR="${US_DIR}/sing-box/conf"
         SINGBOX_FRAGMENT_DIR="${US_DIR}/sing-box/conf/config" SINGBOX_MERGED_CONFIG="${US_DIR}/sing-box/conf/config.json"
@@ -5037,13 +5057,14 @@ run_us() {
         eval "${US_FN}"
         for f in echoContent t handleSingBox singBoxAutostart refreshSubscribeAfterInstall rm_service removeProtocolPortHopping; do eval "$f() { :; }"; done
         readInstallType() { singBoxConfigPath=; [[ -f "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" ]] && singBoxConfigPath="${SINGBOX_FRAGMENT_DIR}/"; }
-        rm() { [[ "$1" == /etc/systemd/system/* ]] && return 0; command rm "$@"; }
+        rm() { local a=() x; for x in "$@"; do a+=("${x/#\/etc\//${US_DIR}/etc/}"); done; command rm "${a[@]}"; }
         unInstallSingBox hysteria2
         cd "${SINGBOX_DIR}" && find . -type f | sort | paste -sd" " -' 2>&1
 }
 assert_equals "./conf/chain_entry_info.json ./conf/config/chain_bridge_inbound.json ./sing-box" "$(run_us chain)" \
     "Xray 机上卸 Hysteria2：链式的桥片段、入口状态与 sing-box 二进制都留着"
 assert_equals "" "$(run_us "")" "Xray 机上卸 Hysteria2、没有别的入站：sing-box 整个删掉"
+assert_equals "" "$(cd "${US_DIR}/etc" && find . -type f)" "没有别的入站：systemd 单元和 OpenRC 服务脚本都删掉"
 US_NODES='{"nodes":[{"id":"n1","password":"secret"}]}'
 assert_equals "./conf/external_node_info.json" "$(run_us "" "${US_NODES}")" "卸掉最后一个入站：存着的外部节点留下，其余全删"
 assert_equals "secret" "$(jq -r '.nodes[0].password' "${US_DIR}/sing-box/conf/external_node_info.json")" "卸掉最后一个入站：节点内容原样"

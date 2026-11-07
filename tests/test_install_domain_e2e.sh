@@ -559,6 +559,7 @@ assert_equals "no" "$([[ -f "${SINGBOX_FRAGMENT_DIR}/14_ss2022_inbounds.json" ]]
 sleep 2
 assert_equals "200" "$(fetchSub "${DOMAIN_B}" 'sing-box 1.14.4' "${WORK}/sub-sb.json")" "只剩 16 时取订阅 200"
 assert_equals "204" "$(probeOutbound "${WORK}/sub-sb.json" "${stTag}")" "只剩 16 时节点照样能用"
+assert_equals "" "$(cd "${SINGBOX_FRAGMENT_DIR}" 2>/dev/null && ls | grep '\.bak' || true)" "几轮重装和合并之后，sing-box 片段目录里没有堆 .bak 文件"
 
 # ============================================================================
 # 菜单 20：卸载，再和装前比：文件、软件包、crontab、服务单元

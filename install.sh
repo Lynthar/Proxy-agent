@@ -1769,7 +1769,7 @@ unInstallSingBox() {
     else
         handleSingBox stop
         singBoxAutostart off
-        rm /etc/systemd/system/sing-box.service
+        rm -f /etc/systemd/system/sing-box.service /etc/init.d/sing-box
         # 外部节点清单是用户填的，没有片段能重建；清单空了才整个删
         local extNodes entry
         extNodes=$(jq -r '.nodes | length' "${EXTERNAL_NODE_FILE}" 2>/dev/null)
@@ -5220,7 +5220,7 @@ ensureSingBoxLocalDns() {
     if [[ -z "${singBoxConfigPath}" ]]; then
         return 1
     fi
-    jsonWriteFile "${singBoxConfigPath}02_dns_local.json" '{"dns":{"servers":[{"type":"local","tag":"local"}]}}'
+    jsonWriteFile "${singBoxConfigPath}02_dns_local.json" '{"dns":{"servers":[{"type":"local","tag":"local"}]}}' false
 }
 
 # 读运行中 sing-box 内核版本（形如 1.14.0）；二进制缺失或输出异常时为空
@@ -5231,7 +5231,7 @@ singBoxInstalledVersion() {
 # 顶层 http_clients 片段：remote rule_set 的下载通道，不带 detour 即直连拨号。别加 detour 指向 direct 出站：
 # 指向无拨号参数的 direct 在 1.14 上启动即 FATAL（detour to an empty direct outbound makes no sense），sing-box check 查不出
 ensureSingBoxHttpClient() {
-    jsonWriteFile "${1}02_http_client.json" '{"http_clients":[{"tag":"rule_set_http"}],"route":{"default_http_client":"rule_set_http"}}'
+    jsonWriteFile "${1}02_http_client.json" '{"http_clients":[{"tag":"rule_set_http"}],"route":{"default_http_client":"rule_set_http"}}' false
 }
 
 # sing-box 1.14 起 remote rule_set 用 http_client 引用顶层 http_clients（download_detour 与隐式
@@ -5248,7 +5248,7 @@ normalizeSingBoxRuleSetHttpClient() {
         for file in "${fragmentDir}"*.json; do
             [[ -f "${file}" ]] || continue
             if jq -e '[.route.rule_set[]? | has("download_detour")] | any' "${file}" >/dev/null 2>&1; then
-                if jsonModifyFile "${file}" '.route.rule_set |= map(if has("download_detour") then .http_client = "rule_set_http" | del(.download_detour) else . end)'; then
+                if jsonModifyFile "${file}" '.route.rule_set |= map(if has("download_detour") then .http_client = "rule_set_http" | del(.download_detour) else . end)' false; then
                     changed=1
                 fi
             fi
@@ -5266,7 +5266,7 @@ normalizeSingBoxRuleSetHttpClient() {
         for file in "${fragmentDir}"*.json; do
             [[ -f "${file}" ]] || continue
             if jq -e '[.route.rule_set[]? | has("http_client")] | any' "${file}" >/dev/null 2>&1; then
-                if jsonModifyFile "${file}" '.route.rule_set |= map(del(.http_client))'; then
+                if jsonModifyFile "${file}" '.route.rule_set |= map(del(.http_client))' false; then
                     changed=1
                 fi
             fi
