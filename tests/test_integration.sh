@@ -863,15 +863,20 @@ SINGBOX_TEMPLATE_ROWS=$(awk '
 assert_not_empty "${SINGBOX_TEMPLATE_ROWS}" "initSingBoxConfig：抽到 inbound 模板块"
 
 # 应有的模板全集独立写死（加协议时同步）：抽漏一块就对不上，不能靠「至少抽到一块」放行。
-# 6 不是 heredoc，由 hysteria2InboundJson 生成，下面把它的输出拼成同样一行参加交叉钉
+# 6 与 16 不是 heredoc，由 jq -n 生成，下面把它们的输出拼成同样一行参加交叉钉
 SINGBOX_TEMPLATE_WANT=$(for _pid in 0 1 3 4 7 9 10 11 13 14; do getProtocolConfigFileName "${_pid}"; done | sort)
 assert_equals "${SINGBOX_TEMPLATE_WANT}" "$(cut -d'|' -f1 <<< "${SINGBOX_TEMPLATE_ROWS}" | sort)" \
-    "initSingBoxConfig：抽到的 heredoc 模板恰好是除 6 以外每个 sing-box 协议各一块"
+    "initSingBoxConfig：抽到的 heredoc 模板恰好是除 6、16 以外每个 sing-box 协议各一块"
 HY2_FN=$(sed -n '/^hysteria2InboundJson() {/,/^}/p' install.sh)
 assert_not_empty "${HY2_FN}" "hysteria2InboundJson：抽到函数原文"
 _hy2Row=$(eval "${HY2_FN}"; hysteria2InboundJson 443 '[]' example.com '' '' '' '' '' |
     jq -r '.inbounds[0] | "\(.tag)|\(if .tls.certificate_path then "yes" else "no" end)"')
 SINGBOX_TEMPLATE_ROWS+=$'\n'"$(getProtocolConfigFileName 6)|${_hy2Row}"
+ST_TPL_FN=$(sed -n '/^shadowTlsInbound() {/,/^}/p' install.sh)
+assert_not_empty "${ST_TPL_FN}" "shadowTlsInbound：抽到函数原文"
+_stRow=$(eval "${ST_TPL_FN}"; shadowTlsInbound 443 example.com key '[]' |
+    jq -r '.inbounds[0] | "\(.tag)|\(if .tls.certificate_path then "yes" else "no" end)"')
+SINGBOX_TEMPLATE_ROWS+=$'\n'"$(getProtocolConfigFileName 16)|${_stRow}"
 
 while IFS='|' read -r _tplName _tplTag _tplCert; do
     [[ -z "${_tplName}" ]] && continue
@@ -4223,6 +4228,13 @@ assert_equals "$(printf '%s\n' '  - name: "st-x"' '    type: ss' '    server: 20
 assert_equals '["shadowsocks","st-st-x",true,"srvkey==:upsk=="]' "$(jq -c '.[0] | [.type, .detour, .multiplex.enabled, .password]' "${DB_SUB}/sing-box/st")" "ShadowTLS：sing-box 的 SS 出站经 detour 走外层，开 multiplex（UDP 靠它）"
 assert_equals '["shadowtls","st-st-x","203.0.113.9",8443,3,"stpw","dl.google.com","chrome"]' "$(jq -c '.[1] | [.type, .tag, .server, .server_port, .version, .password, .tls.server_name, .tls.utls.fingerprint]' "${DB_SUB}/sing-box/st")" \
     "ShadowTLS：sing-box 的外层出站，SNI 是握手目标"
+# Naive 进 sing-box 订阅：UDP 要显式开，用户名与入站写的一致
+db_reset
+run_db 2 naive 8443 nv-singbox_naive nvpw >/dev/null 2>&1
+assert_equals '[{"tag":"nv-singbox_naive","type":"naive","server":"example.org","server_port":8443,"username":"nv-singbox_naive","password":"nvpw","udp_over_tcp":true,"tls":{"enabled":true,"server_name":"example.org"}}]' \
+    "$(jq -c . "${DB_SUB}/sing-box/nv")" "Naive：sing-box 节点带 udp_over_tcp（naive 出站默认不带 UDP）"
+assert_contains "$(cat "${DB_SUB}/default/nv")" "naive+https://nv-singbox_naive:nvpw@example.org:8443" "Naive：分享链接照旧"
+assert_equals "no" "$([[ -s "${DB_SUB}/clashMeta/nv" ]] && echo yes || echo no)" "Naive：不进 Clash 订阅（mihomo 不支持）"
 db_reset
 run_db 1 vmessws 443 vm-x 0f3c8a4e-1b2d-4c5e-8f90-123456789abc example.net /vws >/dev/null 2>&1
 assert_equals "xudp" "$(jq -r '.[0].packet_encoding' "${DB_SUB}/sing-box/vm")" "VMess WS：sing-box 片段的 UDP 用 xudp（packetaddr 只有 sing-box 服务端认，Xray 上 UDP 全丢）"

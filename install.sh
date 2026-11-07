@@ -7076,6 +7076,10 @@ EOF
         cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/default/${user}"
 naive+https://${email}:${id}@${currentHost}:${port}?padding=true#${email}
 EOF
+        # udp_over_tcp 不能省：naive 出站默认不带 UDP，TUN 下选中这个节点时 UDP 全断。sing-box 1.13 以下不认 naive 类型，整份订阅加载失败，用户指南写明
+        singBoxSubscribeLocalConfig=$(jq --arg tag "${email}" --arg host "${currentHost}" --argjson port "${port}" --arg pw "${id}" \
+            '. + [{tag: $tag, type: "naive", server: $host, server_port: $port, username: $tag, password: $pw, udp_over_tcp: true, tls: {enabled: true, server_name: $host}}]' "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
         shareQrCode " ---> 二维码 Naive(TLS)" "$(tail -n 1 "${SUBSCRIBE_LOCAL_DIR}/default/${user}")"
     elif [[ "${type}" == "vmessHTTPUpgrade" ]]; then
         qrCodeBase64Default=$(echo -n "{\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"httpupgrade\",\"add\":\"${add}\",\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}" | base64 | tr -d '\n')

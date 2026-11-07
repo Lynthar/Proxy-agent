@@ -80,7 +80,7 @@
 | 6 | Hysteria2 | 旁挂（菜单 4） | ✓ | 要 | 走 UDP |
 | 7 | VLESS+Reality+Vision | ✓ | ✓ | 不要 | Xray 的安装菜单里标「推荐」，不能挂在 CDN 后面 |
 | 9 | TUIC | 旁挂（菜单 6） | ✓ | 要 | 走 UDP |
-| 10 | Naive | | ✓ | 要 | |
+| 10 | Naive | | ✓ | 要 | 进 sing-box 订阅后，这台机器的 sing-box 客户端要 1.13 及以上，见「把节点导入客户端」 |
 | 11 | VMess+TLS+HTTPUpgrade | | ✓ | 要 | VMess 已被 Xray 标为弃用，走 CDN 用 1 代替 |
 | 12 | VLESS+Reality+XHTTP | ✓ | | 选 `7,12` 不要；单选 12 会自动带上 0，就要了 | |
 | 13 | AnyTLS | | ✓ | 要 | |
@@ -205,6 +205,8 @@ UUID 回车随机，用户名例子里填 `owner`。
 | Clash Verge Rev、Clash Party（原 Mihomo Party）、Clash Meta for Android、FlClash、Stash | Clash 配置 |
 | sing-box 官方客户端（SFA / SFI / SFM / SFT）、Hiddify、Karing | sing-box 配置 |
 | v2rayN、v2rayNG、NekoBox、Shadowrocket 及其他 | 分享链接 |
+
+装了 Naive 的机器，sing-box 订阅里有 Naive 节点：sing-box 客户端低于 1.13，或官方 Linux 包的 `sing-box` 旁边没有 `libcronet.so`，整份配置都加载不了，不只是这一个节点。官方客户端和当前版本的 Hiddify 都能用。
 
 客户端是按 User-Agent 认的，改过 UA 的可能被认错；导入失败时改用对应格式的地址。Stash 拿到的是给 mihomo 生成的 Clash 配置，没有实测过。
 
