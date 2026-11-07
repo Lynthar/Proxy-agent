@@ -350,6 +350,8 @@ realityProbe() {
     wait "${pid}" 2>/dev/null
     if [[ "${code}" != "204" ]]; then
         cat /tmp/proxy-agent-e2e-curl.log /tmp/proxy-agent-e2e-client.log >&2
+        # 断连要看服务端怎么说，只有客户端日志的话下次还是查不了
+        tail -n 8 "${INSTALL_ROOT}/xray/error.log" >&2 2>/dev/null
     fi
     printf '%s\n' "${code}"
 }

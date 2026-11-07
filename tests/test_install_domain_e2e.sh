@@ -167,7 +167,7 @@ probeOutbound() {
     local conf="${WORK}/client.json" pid code
     jq --arg t "$2" '{log: {level: "warn"}, dns: {servers: [{type: "local", tag: "local"}]},
         inbounds: [{type: "socks", listen: "127.0.0.1", listen_port: 10808}],
-        outbounds: [.outbounds[] | select(.tag == $t)],
+        outbounds: [.outbounds[] | select(.tag == $t or .tag == ("st-" + $t))],
         route: {final: $t, default_domain_resolver: "local"}}' "$1" >"${conf}"
     "${SB_CLIENT}" run -c "${conf}" >"${WORK}/client.log" 2>&1 &
     pid=$!
@@ -485,7 +485,7 @@ echo ""
 echo -e "${YELLOW}=== 菜单 1 → 2：sing-box 全部安装（沿用账号与 Reality 密钥）===${NC}"
 # 只剩 Reality 时没有带证书的协议，读不出上次的域名，要再输一次；卸 Hysteria2 时 sing-box 已整个删掉，不问要不要升级；
 # 之后沿用账号，逐个协议回车取默认端口，沿用 path、本机域名当 Reality 目标、沿用密钥
-s9Out=$(runMenu "1\n2\nn\n${DOMAIN_B}\ny\n\n\n\n\ny\ny\ny\n\n\n\n\n\n\n\n\n\ny\n\n\n\n")
+s9Out=$(runMenu "1\n2\nn\n${DOMAIN_B}\ny\n\n\n\n\ny\ny\ny\n\n\n\n\n\n\n\n\n\ny\n\n\n\n\n\n")
 s9Rc=$?
 [[ ${s9Rc} -ne 0 ]] && tail -n 30 <<<"${s9Out}"
 assert_equals "0" "${s9Rc}" "sing-box 全部安装退出码 0"
@@ -501,6 +501,31 @@ probeSub "sing-box 全装" "${WORK}/sub-sb.json"
 echo "sing-box 订阅里的节点类型：${probedTypes}"
 assert_contains "${probedTypes}" "hysteria2" "sing-box 订阅里有 Hysteria2"
 assert_contains "${probedTypes}" "tuic" "sing-box 订阅里有 TUIC"
+stFile="${SINGBOX_FRAGMENT_DIR}/16_shadowtls_inbounds.json"
+stTag=$(jq -r '.inbounds[0].users[0].name' "${stFile}" 2>/dev/null)
+assert_equals "204" "$(probeOutbound "${WORK}/sub-sb.json" "${stTag}")" "ShadowTLS：订阅里的节点经 detour 真握手、访问外网"
+assert_equals "" "$(jq -r '.outbounds[] | select(has("outbounds")) | .outbounds[] | select(startswith("st-"))' "${WORK}/sub-sb.json")" "ShadowTLS：只给 detour 用的外层出站不进选择器"
+# Clash 配置经 proxy-providers 引节点，节点本身在 clashMeta 这个地址
+assert_contains "$(curl -sS --max-time 15 "https://${DOMAIN_B}:$(subPort)/s/clashMeta/$(subKey)" 2>/dev/null)" "plugin: shadow-tls" "ShadowTLS：Clash 的节点文件里有它"
+assert_equals "200" "$(fetchSub "${DOMAIN_B}" 'v2rayN/7.0' "${WORK}/sub-default.txt")" "其他 UA 取订阅 200"
+assert_equals "0" "$(base64 -d "${WORK}/sub-default.txt" 2>/dev/null | grep -c 'shadow-tls')" "ShadowTLS：通用订阅里没有它（解析器不认就退化成裸 SS2022）"
+stTarget=$(jq -r '.inbounds[0].handshake.server' "${stFile}" 2>/dev/null)
+stPort=$(jq -r '.inbounds[0].listen_port' "${stFile}" 2>/dev/null)
+assert_equals "0" "$(curl -s -o /dev/null -w '%{ssl_verify_result}' --max-time 15 --resolve "${stTarget}:${stPort}:127.0.0.1" "https://${stTarget}:${stPort}/")" \
+    "ShadowTLS：没有密码直接探这个端口，看到的是 ${stTarget} 的真证书"
+echo ""
+echo -e "${YELLOW}=== 菜单 2 → 2：单选 16，不要证书 ===${NC}"
+s10Out=$(runMenu "2\n2\n16\ny\n")
+s10Rc=$?
+[[ ${s10Rc} -ne 0 ]] && tail -n 20 <<<"${s10Out}"
+assert_equals "0" "${s10Rc}" "单选 16 退出码 0"
+noNoise "单选 16" "${s10Out}"
+assert_equals "${E2E_UUID}" "$(jq -r '.inbounds[0].users[0].password' "${stFile}" 2>/dev/null)" "单选 16：沿用账号，外层密码就是 UUID"
+assert_equals "${stPort} ${stTarget}" "$(jq -r '"\(.inbounds[0].listen_port) \(.inbounds[0].handshake.server)"' "${stFile}" 2>/dev/null)" "单选 16：端口与握手目标沿用，已发的节点不失效"
+assert_equals "no" "$([[ -f "${SINGBOX_FRAGMENT_DIR}/14_ss2022_inbounds.json" ]] && echo yes || echo no)" "单选 16：其余协议已去掉"
+sleep 2
+assert_equals "200" "$(fetchSub "${DOMAIN_B}" 'sing-box 1.14.4' "${WORK}/sub-sb.json")" "只剩 16 时取订阅 200"
+assert_equals "204" "$(probeOutbound "${WORK}/sub-sb.json" "${stTag}")" "只剩 16 时节点照样能用"
 
 # ============================================================================
 # 菜单 20：卸载，再和装前比：文件、软件包、crontab、服务单元

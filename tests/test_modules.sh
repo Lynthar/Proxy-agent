@@ -209,13 +209,14 @@ assert_true "protocolRequiresTLS 6" "Hysteria2 requires TLS (ACME cert under tls
 assert_true "protocolRequiresTLS 9" "TUIC requires TLS (ACME cert under tls/)"
 assert_true "! protocolRequiresTLS 14" "SS2022 does not require TLS"
 assert_true "protocolRequiresTLS 15" "VLESS+XHTTP+TLS requires TLS (falls back from 0)"
+assert_true "! protocolRequiresTLS 16" "ShadowTLS needs no certificate of its own (borrows the handshake target)"
 
 # 测试 getProtocolListenNetwork / protocolUsesPortPool：逐格钉住，错一格就会和别的协议撞端口或拿错默认端口
-for _cell in 0:tcp 1:tcp 3:tcp 4:tcp 6:udp 7:tcp 9:udp 10:both 11:tcp 12:tcp 13:tcp 14:both 15:tcp; do
+for _cell in 0:tcp 1:tcp 3:tcp 4:tcp 6:udp 7:tcp 9:udp 10:both 11:tcp 12:tcp 13:tcp 14:both 15:tcp 16:tcp; do
     assert_equals "${_cell#*:}" "$(getProtocolListenNetwork "${_cell%%:*}")" "getProtocolListenNetwork(${_cell%%:*}) = ${_cell#*:}"
 done
 assert_true '! getProtocolListenNetwork 99 >/dev/null' "getProtocolListenNetwork: 未知 ID 返回 1"
-for _id in 0 4 6 7 9 10 11 12 13; do
+for _id in 0 4 6 7 9 10 11 12 13 16; do
     assert_true "protocolUsesPortPool ${_id}" "protocolUsesPortPool(${_id}): 回车默认从 443 端口池取"
 done
 for _id in 1 3 14 15 20; do
@@ -298,6 +299,7 @@ done <<'CELLS'
 2:7:.inbounds[0].users
 2:10:.inbounds[0].users
 2:14:.inbounds[0].users
+2:16:.inbounds[0].users
 CELLS
 while IFS=: read -r _c _id _want; do
     assert_equals "${_want}" "$(getProtocolIdField "${_c}" "${_id}")" "idField(core=${_c},id=${_id})"
@@ -313,6 +315,7 @@ done <<'CELLS'
 2:9:uuid
 2:10:password
 2:14:password
+2:16:password
 CELLS
 while IFS=: read -r _c _id _want; do
     assert_equals "${_want}" "$(getProtocolNameField "${_c}" "${_id}")" "nameField(core=${_c},id=${_id})"
@@ -324,6 +327,7 @@ done <<'CELLS'
 2:0:name
 2:10:username
 2:14:name
+2:16:name
 CELLS
 assert_true "! getProtocolUsersPath 1 10" "usersPath rejects naive on Xray core"
 assert_true "! getProtocolUsersPath 2 12" "usersPath rejects XHTTP on sing-box core"
@@ -336,6 +340,13 @@ assert_equals "12" "$(parseProtocolIdFromFileName 12_VLESS_XHTTP_inbounds.json)"
 assert_equals "15_VLESS_XHTTP_TLS_inbounds.json" "$(getProtocolConfigFileName 15)" "getProtocolConfigFileName(15)"
 assert_equals "VLESS+XHTTP[TLS]" "$(getProtocolDisplayName 15)" "getProtocolDisplayName(15)"
 assert_equals "VLESSXHTTPTLS" "$(getProtocolInboundTag 15)" "getProtocolInboundTag(15)"
+assert_true "! getProtocolUsersPath 1 16" "usersPath rejects ShadowTLS on Xray core"
+assert_true "! getProtocolIdField 1 16" "idField rejects ShadowTLS on Xray core"
+assert_true "! getProtocolNameField 1 16" "nameField rejects ShadowTLS on Xray core"
+assert_equals "16" "$(parseProtocolIdFromFileName 16_shadowtls_inbounds.json)" "文件名解析：16"
+assert_equals "16_shadowtls_inbounds.json" "$(getProtocolConfigFileName 16)" "getProtocolConfigFileName(16)"
+assert_equals "ShadowTLS+SS2022" "$(getProtocolDisplayName 16)" "getProtocolDisplayName(16)"
+assert_equals "shadowtls-in" "$(getProtocolInboundTag 16)" "getProtocolInboundTag(16)"
 assert_true "! getProtocolNameField 2 20" "nameField rejects socks internal inbound (no name)"
 assert_true "! getProtocolIdField 3 0" "idField rejects unknown core"
 
@@ -494,6 +505,8 @@ assert_equals "trojan_tcp" "$(getProtocolEmailSuffix 1 4)" "getProtocolEmailSuff
 assert_equals "vless_reality_vision" "$(getProtocolEmailSuffix 1 7)" "getProtocolEmailSuffix(1,7)"
 assert_equals "VLESS_Reality_XHTTP" "$(getProtocolEmailSuffix 1 12)" "getProtocolEmailSuffix(1,12)"
 assert_equals "VLESS_XHTTP_TLS" "$(getProtocolEmailSuffix 1 15)" "getProtocolEmailSuffix(1,15)"
+assert_equals "ShadowTLS" "$(getProtocolEmailSuffix 2 16)" "getProtocolEmailSuffix(2,16)"
+assert_true '! getProtocolEmailSuffix 1 16 >/dev/null' "getProtocolEmailSuffix(1,16): ShadowTLS 不在 Xray 下"
 assert_true '! getProtocolEmailSuffix 2 15 >/dev/null' "getProtocolEmailSuffix(2,15): XHTTP 不在 sing-box 下"
 assert_equals "Trojan_TCP" "$(getProtocolEmailSuffix 2 4)" "getProtocolEmailSuffix(2,4): sing-box 的大小写不同"
 assert_equals "VLESS_Reality_Vision" "$(getProtocolEmailSuffix 2 7)" "getProtocolEmailSuffix(2,7)"

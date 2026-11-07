@@ -34,6 +34,7 @@ getProtocolConfigFileName() {
         13) echo "13_anytls_inbounds.json" ;;
         14) echo "14_ss2022_inbounds.json" ;;
         15) echo "15_VLESS_XHTTP_TLS_inbounds.json" ;;
+        16) echo "16_shadowtls_inbounds.json" ;;
         20) echo "20_socks5_inbounds.json" ;;
         *)  return 1 ;;
     esac
@@ -63,6 +64,7 @@ parseProtocolIdFromFileName() {
         *anytls_inbounds.json)              echo "13" ;;
         *ss2022_inbounds.json)              echo "14" ;;
         *VLESS_XHTTP_TLS_inbounds.json)     echo "15" ;;
+        *shadowtls_inbounds.json)           echo "16" ;;
         *socks5_inbounds.json)              echo "20" ;;
         *)  return 1 ;;
     esac
@@ -94,6 +96,7 @@ getProtocolDisplayName() {
         13) echo "AnyTLS" ;;
         14) echo "SS2022" ;;
         15) echo "VLESS+XHTTP[TLS]" ;;
+        16) echo "ShadowTLS+SS2022" ;;
         20) echo "SOCKS5" ;;
         *)  echo "Unknown" ;;
     esac
@@ -119,6 +122,7 @@ getProtocolInboundTag() {
         13) echo "anytls" ;;
         14) echo "ss2022-in" ;;
         15) echo "VLESSXHTTPTLS" ;;
+        16) echo "shadowtls-in" ;;
         *)  return 1 ;;
     esac
 }
@@ -153,7 +157,7 @@ getProtocolListenNetwork() {
     case "$1" in
         6|9) echo "udp" ;;
         10|14) echo "both" ;;
-        0|1|2|3|4|5|7|8|11|12|13|15|20) echo "tcp" ;;
+        0|1|2|3|4|5|7|8|11|12|13|15|16|20) echo "tcp" ;;
         *) return 1 ;;
     esac
 }
@@ -162,7 +166,7 @@ getProtocolListenNetwork() {
 # 1 / 3 不进池：池只有六个位，sing-box 全装时要留给 0 4 7 10 11 13；15 经 0 的 443 回落，没有对外端口
 protocolUsesPortPool() {
     case "$1" in
-        0|4|6|7|9|10|11|12|13) return 0 ;;
+        0|4|6|7|9|10|11|12|13|16) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -186,7 +190,7 @@ getProtocolUsersPath() {
         esac
     elif [[ "${core}" == "2" ]]; then
         case "${protocolId}" in
-            0 | 1 | 3 | 4 | 6 | 7 | 8 | 9 | 10 | 11 | 13 | 14 | 20) echo ".inbounds[0].users" ;;
+            0 | 1 | 3 | 4 | 6 | 7 | 8 | 9 | 10 | 11 | 13 | 14 | 16 | 20) echo ".inbounds[0].users" ;;
             *) return 1 ;;
         esac
     else
@@ -209,7 +213,7 @@ getProtocolIdField() {
     elif [[ "${core}" == "2" ]]; then
         case "${protocolId}" in
             0 | 1 | 3 | 7 | 8 | 9 | 11) echo "uuid" ;;
-            4 | 6 | 10 | 13 | 14)       echo "password" ;;
+            4 | 6 | 10 | 13 | 14 | 16)  echo "password" ;;
             20)                         echo "username" ;;
             *) return 1 ;;
         esac
@@ -232,7 +236,7 @@ getProtocolNameField() {
     elif [[ "${core}" == "2" ]]; then
         case "${protocolId}" in
             10)                                          echo "username" ;;
-            0 | 1 | 3 | 4 | 6 | 7 | 8 | 9 | 11 | 13 | 14) echo "name" ;;
+            0 | 1 | 3 | 4 | 6 | 7 | 8 | 9 | 11 | 13 | 14 | 16) echo "name" ;;
             *) return 1 ;;
         esac
     else
@@ -271,6 +275,7 @@ getProtocolEmailSuffix() {
             11) echo "VMess_HTTPUpgrade" ;;
             13) echo "anytls" ;;
             14) echo "SS2022" ;;
+            16) echo "ShadowTLS" ;;
             *) return 1 ;;
         esac
     else

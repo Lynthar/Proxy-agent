@@ -67,7 +67,7 @@
 |---|---|---|
 | 没有域名，想最快用上 | **19. 一键无域名 Reality 安装** | 只装协议 7 |
 | 有域名，想自己挑协议 | **2. 任意组合安装** | 你选的协议 |
-| 有域名，想把能装的都装上 | **1. 安装** | Xray 内核：0 1 3 4 7 12 15；sing-box 内核：0 1 3 4 6 7 9 10 11 13 14 |
+| 有域名，想把能装的都装上 | **1. 安装** | Xray 内核：0 1 3 4 7 12 15；sing-box 内核：0 1 3 4 6 7 9 10 11 13 14 16 |
 
 编号对应的协议：
 
@@ -86,13 +86,16 @@
 | 13 | AnyTLS | | ✓ | 要 | |
 | 14 | Shadowsocks 2022 | | ✓ | 不要 | |
 | 15 | VLESS+XHTTP+TLS | ✓ | | 要 | 和 0 共用 443；XTLS 推荐的过 CDN 路线，走 CDN 没有实测过；sing-box 没有 XHTTP，不进 sing-box 订阅 |
+| 16 | ShadowTLS v3 + Shadowsocks 2022 | | ✓ | 不要 | 探测者看到的是握手目标站的真证书；只进 sing-box 和 Clash 订阅，不进通用订阅，见下 |
 
 Hysteria2 和 TUIC 只接受 ACME 签发的证书，脚本不生成自签证书。Reality 不能挂在 CDN 后面；要走 CDN 选 XHTTP+TLS、WS 或 HTTPUpgrade，端口也要选 CDN 会转发的（Cloudflare 的 HTTPS 代理端口是 443、2053、2083、2087、2096、8443）。
+
+ShadowTLS 不进通用订阅：v2rayN、mihomo 的链接解析器不认它，会静默丢掉 ShadowTLS 参数，把全加密的 Shadowsocks 流量直接发到这个端口，既连不上，又暴露了它想藏的东西。用别的客户端时，到「查看账号」里抄明文参数手动填。握手目标要是支持 TLS 1.3 的站点，脚本会检查；端口固定连目标的 443。
 
 内核的选择取决于要用的功能：
 
 - 要[拼车](#拼车管理)、伪装站管理（菜单 8）或附加端口（菜单 12），选 Xray。
-- 要 Naive、AnyTLS、Shadowsocks 2022 或 VMess HTTPUpgrade，选 sing-box。
+- 要 Naive、AnyTLS、Shadowsocks 2022、ShadowTLS 或 VMess HTTPUpgrade，选 sing-box。
 - Hysteria2 和 TUIC 两边都能用，在 Xray 内核上是旁挂一个 sing-box 来跑，但装了它们就开不了拼车。
 
 之后可以换内核：重走菜单 1、2 或 19，选另一个内核，原内核的协议会被删掉。拼车开着时不能换到 sing-box，[链式代理](#链式代理)的入口机两边都不能换。
@@ -221,7 +224,7 @@ pasly doctor
 
 **云厂商的安全组要自己放行。** 脚本只管本机防火墙（ufw、firewalld、iptables）。云厂商面板里的安全组或防火墙要自己开：80（HTTP 验证申请证书）、各协议的端口、订阅端口；Hysteria2 和 TUIC 开 UDP。
 
-**默认端口怎么来的。** 看起来像 HTTPS 的协议，端口提示处直接回车取 443：VLESS Vision、Trojan、Reality、Reality XHTTP、Naive、HTTPUpgrade、AnyTLS。443 已被占，就依次取 8443、2053、2083、2087、2096 里第一个空着的，这几个也是 Cloudflare 会转发的 HTTPS 端口；六个全被占才回落随机端口。Hysteria2 与 TUIC 走 UDP，同样从 443/udp 起取，和 TCP 的 443 互不冲突，两个一起装时 Hysteria2 先拿。sing-box 内核上的 VLESS WS、VMess WS 与 Shadowsocks 2022 默认随机端口；Xray 内核上的 1、3、4 和 0 共用一个端口，不单独问。
+**默认端口怎么来的。** 看起来像 HTTPS 的协议，端口提示处直接回车取 443：VLESS Vision、Trojan、Reality、Reality XHTTP、Naive、HTTPUpgrade、AnyTLS、ShadowTLS。443 已被占，就依次取 8443、2053、2083、2087、2096 里第一个空着的，这几个也是 Cloudflare 会转发的 HTTPS 端口；六个全被占才回落随机端口。Hysteria2 与 TUIC 走 UDP，同样从 443/udp 起取，和 TCP 的 443 互不冲突，两个一起装时 Hysteria2 先拿。sing-box 内核上的 VLESS WS、VMess WS 与 Shadowsocks 2022 默认随机端口；Xray 内核上的 1、3、4 和 0 共用一个端口，不单独问。
 
 「已被占」指本机别的程序在用，或这次安装之后仍会留着的其他协议在用。手填已被占的端口，脚本会请你换一个；重装时上次的端口若已被这次安装的其他协议拿走，也会提示重选。带域名的 Xray 里 VLESS Vision 优先拿 443：先用菜单 19 把 Reality 装在 443、之后再装带域名的 Xray，Reality 会改到备选端口，客户端要重新导入它的链接或更新订阅。
 
@@ -1008,7 +1011,7 @@ apt-key del <fingerprint>
 已经装过时显示为「重新安装」。需要域名，流程见[安装第一个节点](#安装第一个节点)。
 
 - **1. Xray-core**：装 0 1 3 4 7 12 15
-- **2. sing-box**：装 0 1 3 4 6 7 9 10 11 13 14。拼车开着时拒绝
+- **2. sing-box**：装 0 1 3 4 6 7 9 10 11 13 14 16。拼车开着时拒绝
 
 </details>
 
@@ -1018,7 +1021,7 @@ apt-key del <fingerprint>
 多选用英文逗号分隔，比如 `0,1,7`。编号见[选装法和内核](#选装法和内核)。
 
 - **1. Xray-core**：可选 0 1 3 4 7 12 15。选 1、3、4、15 会自动带上 0；单选 12 也带上 0；只选 `7` 或 `7,12` 不要域名
-- **2. sing-box**：可选 0 1 3 4 6 7 9 10 11 13 14。只选 7 或 14 不要域名。拼车开着时拒绝
+- **2. sing-box**：可选 0 1 3 4 6 7 9 10 11 13 14 16。只选 7、14、16 不要域名。拼车开着时拒绝
 
 </details>
 

@@ -95,12 +95,12 @@ V2RAY_LANG=en pasly
 |---|---|
 | VLESS | TCP/Vision · WS · Reality Vision · Reality XHTTP · XHTTP+TLS |
 | VMess (deprecated by Xray) | WS · HTTPUpgrade |
-| Others | Trojan TCP (deprecated by Xray) · Hysteria2 · TUIC · NaiveProxy · AnyTLS · Shadowsocks 2022 |
+| Others | Trojan TCP (deprecated by Xray) · Hysteria2 · TUIC · NaiveProxy · AnyTLS · Shadowsocks 2022 · ShadowTLS v3 |
 
-Reality Vision, Shadowsocks 2022, and Reality XHTTP installed alongside Reality
+Reality Vision, Shadowsocks 2022, ShadowTLS, and Reality XHTTP installed alongside Reality
 Vision work without a domain; everything else needs a domain and a certificate.
 Reality cannot sit behind a CDN; for CDN use, pick
-WS or HTTPUpgrade. SOCKS5 is only used as an exit for third-party nodes in a
+XHTTP+TLS, WS or HTTPUpgrade. SOCKS5 is only used as an exit for third-party nodes in a
 chain, not installed as an inbound.
 
 In a chain, Xray and sing-box can mix on the way out, and third-party nodes can

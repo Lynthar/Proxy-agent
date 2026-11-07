@@ -1316,6 +1316,7 @@ readInstallProtocolType() {
     singBoxVLESSRealityVisionServerName=
     singBoxVLESSRealityGRPCServerName=
     singBoxAnyTLSPort=
+    singBoxShadowTlsPort=
     singBoxTuicPort=
     singBoxNaivePort=
     singBoxVMessWSPort=
@@ -1465,6 +1466,16 @@ readInstallProtocolType() {
                     frontingType=14_ss2022_inbounds
                 fi
                 ss2022Port=$(jq .inbounds[0].listen_port "${row}.json")
+            fi
+        fi
+        if echo "${row##*/}" | grep -q shadowtls_inbounds; then
+            currentInstallProtocolType="${currentInstallProtocolType}16,"
+            if [[ "${coreKind}" == "2" ]]; then
+                # 外层密码就是 UUID，比 ss2022 的派生 uPSK 适合当身份源
+                if [[ -z "${frontingType}" || "${frontingType}" == "14_ss2022_inbounds" ]]; then
+                    frontingType=16_shadowtls_inbounds
+                fi
+                singBoxShadowTlsPort=$(jq .inbounds[0].listen_port "${row}.json")
             fi
         fi
         if echo "${row##*/}" | grep -q VMess_HTTPUpgrade_inbounds; then
@@ -4598,6 +4609,13 @@ initSingBoxClients() {
                 --arg name "${name}-SS2022" \
                 '. += [{password: $password, name: $name}]')
         fi
+        # ShadowTLS (id 16) 外层：密码就是 UUID，内层 uPSK 由 shadowTlsWithInnerUsers 派生
+        if [[ "${type}" == *",16,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg password "${uuid}" \
+                --arg name "${name}-ShadowTLS" \
+                '. += [{password: $password, name: $name}]')
+        fi
         # SOCKS5 内部 inbound (id 20) -- {username, password}，无 name 字段
         if [[ "${type}" == *",20,"* ]]; then
             users=$(echo "${users}" | jq \
@@ -4751,6 +4769,74 @@ initSS2022Config() {
         ss2022ServerKey=$(openssl rand -base64 ${ss2022KeyLen})
         echoContent green " ---> 服务器密钥已自动生成"
     fi
+}
+
+# shadowTlsUserKey PASSWORD → 16 内层 SS2022 的 uPSK（16 字节）。哈希而不是截断：UUID 前 16 个字符只有约 52 比特
+shadowTlsUserKey() {
+    printf '%s' "$1" | openssl dgst -sha256 -binary | head -c 16 | base64
+}
+
+# shadowTlsWithInnerUsers CONFIG_JSON → 内层 users 按外层重写：名字相同，uPSK 由外层密码派生。
+# auth_user 只认内层用户名，内层单密钥时按账号选出口静默失效；两层都按人发，删人也是两层都没了
+shadowTlsWithInnerUsers() {
+    local inner='[]' name password
+    while IFS=$'\t' read -r name password; do
+        inner=$(jq -c --arg n "${name}" --arg p "$(shadowTlsUserKey "${password}")" '. + [{name: $n, password: $p}]' <<<"${inner}") || return 1
+    done < <(jq -r '.inbounds[0].users[] | [.name, .password] | @tsv' <<<"$1")
+    jq --argjson inner "${inner}" '.inbounds[1].users = $inner' <<<"$1"
+}
+
+# shadowTlsInbound PORT TARGET SERVER_KEY USERS_JSON → 16 的配置（内层 users 待填）。内层只听回环、不开 UDP：
+# ShadowTLS 只有 TCP，UDP 靠客户端的 multiplex 走同一条连接，所以 multiplex 不能关
+shadowTlsInbound() {
+    jq -n --argjson port "$1" --arg target "$2" --arg key "$3" --argjson users "$4" '{inbounds: [
+        {type: "shadowtls", listen: "::", tag: "shadowtls-in", listen_port: $port, detour: "shadowtls-ss-in", version: 3, users: $users,
+         handshake: {server: $target, server_port: 443, domain_resolver: "local"}, strict_mode: true},
+        {type: "shadowsocks", tag: "shadowtls-ss-in", listen: "127.0.0.1", network: "tcp", method: "2022-blake3-aes-128-gcm",
+         password: $key, users: [], multiplex: {enabled: true}}]}'
+}
+
+# destSupportsTls13 HOST → 0=目标在 443 上能谈 TLS 1.3。strict 模式只认这种目标，别的目标客户端全部握手失败、也不报错
+destSupportsTls13() {
+    echo | timeout 8 openssl s_client -connect "$1:443" -servername "$1" -tls1_3 2>/dev/null | grep -q 'TLSv1.3'
+}
+
+# initShadowTlsConfig → 定 16 的握手目标与内层服务端密钥，写进 shadowTlsTarget、shadowTlsServerKey。重装时沿用，已发出去的节点才不失效
+initShadowTlsConfig() {
+    local file="${SINGBOX_FRAGMENT_DIR}/$(getProtocolConfigFileName 16)" reuse tries=0
+    shadowTlsTarget=
+    shadowTlsServerKey=
+    if [[ -f "${file}" ]]; then
+        shadowTlsTarget=$(jq -r '.inbounds[0].handshake.server // empty' "${file}")
+        shadowTlsServerKey=$(jq -r '.inbounds[1].password // empty' "${file}")
+        if [[ -n "${shadowTlsTarget}" && -z "${lastInstallationConfig}" ]]; then
+            read -r -p "$(t SHADOWTLS_TARGET_REUSE "${shadowTlsTarget}")" reuse
+            isYesInput "${reuse}" || shadowTlsTarget=
+        fi
+    fi
+    # 试几次还不行就用最后一个并告警：验证连不出去时不能卡死在这里，安装走到这儿服务已经停了
+    while [[ -z "${shadowTlsTarget}" ]]; do
+        tries=$((tries + 1))
+        read -r -p "$(t SHADOWTLS_TARGET_PROMPT)" shadowTlsTarget
+        if [[ -z "${shadowTlsTarget}" ]]; then
+            shadowTlsTarget=$(pickRandomDest)
+        elif ! isValidDomain "${shadowTlsTarget}"; then
+            echoContent red " ---> $(t SHADOWTLS_TARGET_INVALID)"
+            shadowTlsTarget=
+            continue
+        elif ! checkRealityDest "${shadowTlsTarget}"; then
+            shadowTlsTarget=
+            continue
+        fi
+        if ! destSupportsTls13 "${shadowTlsTarget}"; then
+            echoContent yellow " ---> $(t SHADOWTLS_TARGET_NO_TLS13 "${shadowTlsTarget}")"
+            ((tries < 5)) && shadowTlsTarget=
+        fi
+    done
+    [[ -n "${shadowTlsServerKey}" ]] || shadowTlsServerKey=$(openssl rand -base64 16)
+    # 从 Xray 切过来时 singBoxConfigPath 还是空的，它会什么都不写，握手目标就解析不了、sing-box 起不来
+    singBoxConfigPath="${SINGBOX_FRAGMENT_DIR}/" ensureSingBoxLocalDns
+    echoContent green "\n ---> $(t SHADOWTLS_TARGET_CHOSEN "${shadowTlsTarget}")"
 }
 
 # firewalld设置端口跳跃
@@ -6557,6 +6643,18 @@ EOF
         rm ${SINGBOX_FRAGMENT_DIR}/14_ss2022_inbounds.json >/dev/null 2>&1
     fi
 
+    # ShadowTLS v3 + SS2022
+    if echo "${selectCustomInstallType}" | grep -q ",16," || [[ "$1" == "all" ]]; then
+        echoContent yellow "\n================== $(t CONFIG_PROTOCOL_TITLE "ShadowTLS+SS2022") ==================\n"
+        mapfile -t result < <(initSingBoxPort "${singBoxShadowTlsPort}" 16 "${portKeep}")
+        echoContent green "\n ---> ShadowTLS端口：${result[-1]}"
+        initShadowTlsConfig
+        jsonWriteFile "${SINGBOX_FRAGMENT_DIR}/16_shadowtls_inbounds.json" \
+            "$(shadowTlsWithInnerUsers "$(shadowTlsInbound "${result[-1]}" "${shadowTlsTarget}" "${shadowTlsServerKey}" "$(initSingBoxClients 16)")")" false
+    elif [[ -z "${3:-}" ]]; then
+        rm ${SINGBOX_FRAGMENT_DIR}/16_shadowtls_inbounds.json >/dev/null 2>&1
+    fi
+
     if [[ -z "${3:-}" ]]; then
         removeSingBoxConfig wireguard_endpoints_IPv4_route
         removeSingBoxConfig wireguard_endpoints_IPv6_route
@@ -7081,6 +7179,40 @@ EOF
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
         shareQrCode " ---> 二维码 SS2022" "$(tail -n 1 "${SUBSCRIBE_LOCAL_DIR}/default/${user}")"
+
+    elif [[ "${type}" == "shadowtls" ]]; then
+        # 4=外层密码 5=内层 uPSK 6=内层服务端密钥 7=握手目标（也是客户端 SNI）
+        local stUserKey=$5 stServerKey=$6 stSni=$7 stAddr stMethod="2022-blake3-aes-128-gcm"
+        stAddr=$(getPublicIP)
+        local stPassword="${stServerKey}:${stUserKey}"
+        echoContent yellow " ---> $(t ACCOUNT_SHADOWTLS_PLAIN_TITLE)"
+        echoContent green "    $(t ACCOUNT_SHADOWTLS_PLAIN "${stAddr}" "${port}" "${stMethod}" "${stPassword}" "${id}" "${stSni}" "${email}")\n"
+        # 不写通用订阅、不画二维码：v2rayN、mihomo 的链接解析器不认 shadow-tls，会静默丢掉 plugin，把全加密的裸 SS2022 发到这个端口
+        echoContent yellow " ---> $(t ACCOUNT_SHADOWTLS_LINK_WARN)"
+        echoContent green "    ss://$(echo -n "${stMethod}:${stPassword}" | base64 | tr -d '\n')@${stAddr}:${port}/?plugin=shadow-tls%3Bhost%3D${stSni}%3Bpassword%3D${id}%3Bversion%3D3#${email}\n"
+        cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/clashMeta/${user}"
+  - name: "${email}"
+    type: ss
+    server: ${stAddr}
+    port: ${port}
+    cipher: ${stMethod}
+    password: "${stPassword}"
+    udp: true
+    client-fingerprint: chrome
+    plugin: shadow-tls
+    plugin-opts:
+      host: ${stSni}
+      password: "${id}"
+      version: 3
+    smux:
+      enabled: true
+      protocol: h2mux
+EOF
+        singBoxSubscribeLocalConfig=$(jq --arg tag "${email}" --arg addr "${stAddr}" --argjson port "${port}" --arg method "${stMethod}" --arg pw "${stPassword}" \
+            --arg stPw "${id}" --arg sni "${stSni}" '. + [{tag: $tag, type: "shadowsocks", method: $method, password: $pw, detour: ("st-" + $tag), multiplex: {enabled: true}},
+                {tag: ("st-" + $tag), type: "shadowtls", server: $addr, server_port: $port, version: 3, password: $stPw,
+                 tls: {enabled: true, server_name: $sni, utls: {enabled: true, fingerprint: "chrome"}}}]' "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
+        echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
     fi
 
 }
@@ -7360,6 +7492,18 @@ showAccounts() {
                 defaultBase64Code ss2022 "${port}" "$(echo "${user}" | jq -r .name)" "$(echo "${user}" | jq -r .password)" "${serverKey}" "${method}"
             done
         fi
+    fi
+    # ShadowTLS v3 + SS2022
+    if echo ${currentInstallProtocolType} | grep -q ",16,"; then
+        echoContent skyBlue "\n================================ $(t ACCOUNT_TITLE_SHADOWTLS) ================================\n"
+        local stFile="${configPath}16_shadowtls_inbounds.json" stName stPw stKey
+        jq -r '(.inbounds[1].users | map({(.name): .password}) | add) as $inner | .inbounds[0].users[] | [.name, .password, $inner[.name]] | @tsv' "${stFile}" |
+            while IFS=$'\t' read -r stName stPw stKey; do
+                echoContent skyBlue "\n ---> 账号:${stName}"
+                echo
+                defaultBase64Code shadowtls "$(jq -r '.inbounds[0].listen_port' "${stFile}")" "${stName}" "${stPw}" "${stKey}" \
+                    "$(jq -r '.inbounds[1].password' "${stFile}")" "$(jq -r '.inbounds[0].handshake.server' "${stFile}")"
+            done
     fi
 }
 # 移除nginx302配置
@@ -8020,7 +8164,7 @@ applyAccountChangeAllProtocols() {
     for protocolId in ${currentInstallProtocolType//,/ }; do
         # 覆盖面与旧的手写分支一致：2/5/8 已废弃冻结，20 是内部 inbound，12 仅 Xray
         case "${protocolId}" in
-        0 | 1 | 3 | 4 | 6 | 7 | 9 | 10 | 11 | 12 | 13 | 14 | 15) ;;
+        0 | 1 | 3 | 4 | 6 | 7 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16) ;;
         *) continue ;;
         esac
         if [[ "${protocolId}" == "12" && "${coreKind}" != "1" ]]; then
@@ -8075,6 +8219,10 @@ applyAccountChangeAllProtocols() {
             fi
             delFilter="${usersPath}"' |= map(select(((.[$f] // "") | sub("-[^-]*$"; "")) != $key))'
             newContent=$(jq --arg f "${nameField}" --arg key "${arg1}" "${delFilter}" "${targetFile}" 2>/dev/null)
+        fi
+        # 16 有两层用户，registry 只认外层，内层每次跟着重写，不然删掉的人内层还在
+        if [[ "${protocolId}" == "16" && -n "${newContent}" ]]; then
+            newContent=$(shadowTlsWithInnerUsers "${newContent}")
         fi
         if [[ -z "${newContent}" ]] || ! jsonWriteFile "${targetFile}" "${newContent}" false; then
             echoContent red " ---> $(t ACCOUNT_TX_WRITE_FAILED) [$(getProtocolDisplayName "${protocolId}")]"
@@ -17060,6 +17208,7 @@ customSingBoxInstall() {
     echoContent yellow "$(t INSTALL_ITEM_VMESS_HTTPUPGRADE)"
     echoContent yellow "13.AnyTLS"
     echoContent yellow "14.Shadowsocks 2022[无需TLS证书]"
+    echoContent yellow "$(t INSTALL_ITEM_SHADOWTLS)"
 
     read -r -p "请选择[多选]，[例如:1,2,3]:" selectCustomInstallType
     echoContent skyBlue "--------------------------------------------------------------"
@@ -17067,7 +17216,7 @@ customSingBoxInstall() {
         echoContent red " ---> 请使用英文逗号分隔"
         exit 1
     fi
-    if [[ "${selectCustomInstallType}" != "10" ]] && [[ "${selectCustomInstallType}" != "11" ]] && [[ "${selectCustomInstallType}" != "13" ]] && [[ "${selectCustomInstallType}" != "14" ]] && ((${#selectCustomInstallType} >= 2)) && ! echo "${selectCustomInstallType}" | grep -q ","; then
+    if [[ "${selectCustomInstallType}" != "10" ]] && [[ "${selectCustomInstallType}" != "11" ]] && [[ "${selectCustomInstallType}" != "13" ]] && [[ "${selectCustomInstallType}" != "14" ]] && [[ "${selectCustomInstallType}" != "16" ]] && ((${#selectCustomInstallType} >= 2)) && ! echo "${selectCustomInstallType}" | grep -q ","; then
         echoContent red " ---> 多选请使用英文逗号分隔"
         exit 1
     fi
@@ -17078,7 +17227,7 @@ customSingBoxInstall() {
         selectCustomInstallType=",${selectCustomInstallType},"
     fi
 
-    if validateCustomInstallTokens "${selectCustomInstallType}" 0 1 3 4 6 7 9 10 11 13 14; then
+    if validateCustomInstallTokens "${selectCustomInstallType}" 0 1 3 4 6 7 9 10 11 13 14 16; then
         # 走 CDN 的协议提示：sing-box 下每个协议单独监听，随机端口 CDN 不转发
         if echo "${selectCustomInstallType}" | grep -q -E ",1,|,3,|,11,"; then
             echoContent yellow "\n ---> 提示: WS / HTTPUpgrade 只在走 CDN 时才值得用；不走 CDN 选 7（Reality）抗检测更好，但 Reality 不能挂在 CDN 后面"
@@ -18343,7 +18492,7 @@ subscribe() {
                     cp "${SUBSCRIBE_LOCAL_DIR}/sing-box/${email}" "${SUBSCRIBE_DIR}/sing-box_profiles/${emailMd5}"
                     local _singboxFile="${SUBSCRIBE_DIR}/sing-box/${emailMd5}"
                     if [[ -n "${_singboxTpl}" ]] && jq --slurpfile p "${SUBSCRIBE_LOCAL_DIR}/sing-box/${email}" \
-                        '($p[0] | map(.tag)) as $tags | .outbounds |= map(if has("outbounds") then .outbounds += $tags else . end) | .outbounds += $p[0]' \
+                        '($p[0] | map(select(.type != "shadowtls") | .tag)) as $tags | .outbounds |= map(if has("outbounds") then .outbounds += $tags else . end) | .outbounds += $p[0]' \
                         "${_singboxTpl}" >"${_singboxFile}.tmp" && mv "${_singboxFile}.tmp" "${_singboxFile}" && [[ -z "${showStatus}" ]]; then
                         echoContent skyBlue "\n----------sing-box订阅----------\n"
                         echoContent yellow "url:${subscribeType}://${currentDomain}/s/sing-box/${emailMd5}\n"
@@ -18601,13 +18750,32 @@ checkRealityDest() {
 }
 
 # 初始化客户端可用的ServersName
-initRealityClientServersName() {
-    # Reality 默认 serverName 候选列表。不含 Apple/MS 系：TLS 握手行为变化、Reality 伪装失败率高；不含挂在 Cloudflare 代理后面的站（见 checkRealityDest）；
-    # 不含 AWS CloudFront 与 Akamai 托管的站（按服务器上解析到的 IP 归属判）：已有工具能比对它们的 TLS 栈，认出拿它们当目标的 Reality
+# realityDestList → Reality 与 ShadowTLS 握手目标的默认候选，逗号分隔。不含 Apple/MS 系：TLS 握手行为变化、Reality 伪装失败率高；
+# 不含挂在 Cloudflare 代理后面的站（见 checkRealityDest）；不含 AWS CloudFront 与 Akamai 托管的站（按服务器上解析到的 IP 归属判）：
+# 已有工具能比对它们的 TLS 栈，认出拿它们当目标的 Reality
+realityDestList() {
     local realityDestDomainList="download-installer.cdn.mozilla.net,addons.mozilla.org,dl.google.com,www.google-analytics.com,www.python.org,vuejs-jp.org,vuejs.org,zh-hk.vuejs.org,react.dev,cname.vercel-dns.com,vercel-dns.com,www.fom-international.com,github.io"
+    printf '%s\n' "${realityDestDomainList}"
+}
+
+# pickRandomDest → 乱序取第一个没挂在 Cloudflare 后面的候选；全挂着就取乱序后的第一个并返回 1。随机挑的不问用户：问了而用户回车，安装会在服务已停时退出
+pickRandomDest() {
+    local candidate first=
+    while read -r candidate; do
+        [[ -z "${first}" ]] && first=${candidate}
+        if ! realityDestBehindCloudflare "${candidate}"; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done < <(tr ',' '\n' <<<"$(realityDestList)" | awk -v seed="${RANDOM}" 'BEGIN {srand(seed)} {print rand() "\t" $0}' | sort -n | cut -f2-)
+    printf '%s\n' "${first}"
+    return 1
+}
+
+initRealityClientServersName() {
     local realityDestRandom=
     if [[ -n "${realityServerName}" && -z "${lastInstallationConfig}" ]]; then
-        if echo ${realityDestDomainList} | grep -q "${realityServerName}"; then
+        if realityDestList | grep -q "${realityServerName}"; then
             read -r -p "读取到上次安装设置的Reality域名，是否使用？[y/n]:" realityServerNameStatus
             if ! isYesInput "${realityServerNameStatus}"; then
                 realityServerName=
@@ -18642,16 +18810,7 @@ initRealityClientServersName() {
             echoContent yellow "录入示例:addons.mozilla.org:443\n"
             read -r -p "请输入目标域名，[回车]随机域名，默认端口443:" realityServerName
             if [[ -z "${realityServerName}" ]]; then
-                # 随机挑的不问用户：按乱序取第一个没挂在 Cloudflare 后面的。问了而用户回车，安装会在服务已停时退出
-                local candidate
-                while read -r candidate; do
-                    [[ -z "${realityServerName}" ]] && realityServerName=${candidate}
-                    if ! realityDestBehindCloudflare "${candidate}"; then
-                        realityServerName=${candidate}
-                        realityDestRandom=1
-                        break
-                    fi
-                done < <(tr ',' '\n' <<<"${realityDestDomainList}" | awk -v seed="${RANDOM}" 'BEGIN {srand(seed)} {print rand() "\t" $0}' | sort -n | cut -f2-)
+                realityServerName=$(pickRandomDest) && realityDestRandom=1
             else
                 # 验证用户输入的域名（可能包含端口，先提取域名部分验证）
                 local realityDomainCheck="${realityServerName%%:*}"

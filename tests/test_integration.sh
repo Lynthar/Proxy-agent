@@ -1164,9 +1164,9 @@ render_install_status() (
 assert_equals "$(printf '%s\n' '\nCORE_CURRENT_STOPPED' 'PROTOCOLS_INSTALLED:' \
     'VLESS+TCP[TLS_Vision]' 'VLESS+WS[TLS]' 'Trojan+gRPC[TLS]' 'VMess+WS[TLS]' 'Trojan+TCP[TLS]' \
     'VLESS+gRPC[TLS]' 'Hysteria2' 'VLESS+Reality+Vision' 'VLESS+Reality+gRPC' 'Tuic' 'Naive' \
-    'VMess+TLS+HTTPUpgrade' 'VLESS+Reality+XHTTP' 'AnyTLS' 'SS2022' 'VLESS+XHTTP[TLS]' '')" \
-    "$(render_install_status 2 ",0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,")" \
-    "showInstallStatus：全部 16 个协议按 ID 升序、用菜单文案显示"
+    'VMess+TLS+HTTPUpgrade' 'VLESS+Reality+XHTTP' 'AnyTLS' 'SS2022' 'VLESS+XHTTP[TLS]' 'ShadowTLS+SS2022' '')" \
+    "$(render_install_status 2 ",0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,")" \
+    "showInstallStatus：全部 17 个协议按 ID 升序、用菜单文案显示"
 assert_equals "$(printf '%s\n' '\nCORE_CURRENT_STOPPED' 'PROTOCOLS_INSTALLED:' 'VLESS+Reality+Vision' 'Tuic' 'Naive' '')" \
     "$(render_install_status 1 ",10,9,7,")" \
     "showInstallStatus：显示顺序按 ID 数值、与状态串顺序无关"
@@ -1408,6 +1408,35 @@ rm -f "${DOTTED_ROOT}/xray/conf/15_VLESS_XHTTP_TLS_inbounds.json"
 printf '%s\n' '{"inbounds":[{"port":443,"settings":{"clients":[{"id":"a1","email":"alice"},{"id":"b2","email":"bob"}]}}]}' \
     >"${DOTTED_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
 
+# 16 有两层用户：事务只写外层，内层跟着重写，uPSK 由外层密码派生；只删一层的话被删的人还能走另一层的密钥
+ST_ROOT="${MOCK_ROOT}/shadowtls.root"
+rm -rf "${ST_ROOT}" && mkdir -p "${ST_ROOT}/sing-box/conf/config" && : >"${ST_ROOT}/sing-box/sing-box" && : >"${ST_ROOT}/sing-box/conf/config.json"
+printf '%s\n' '{"inbounds":[{"type":"shadowtls","listen_port":443,"users":[{"name":"alice-ShadowTLS","password":"a1"}]},{"type":"shadowsocks","password":"k","users":[]}]}' \
+    >"${ST_ROOT}/sing-box/conf/config/16_shadowtls_inbounds.json"
+ST_FNS="${DOTTED_FNS}"$'\n'"$(sed -n '/^initSingBoxClients() {/,/^}/p;/^shadowTlsUserKey() {/,/^}/p;/^shadowTlsWithInnerUsers() {/,/^}/p' install.sh)"
+run_st() {
+    env PROXY_AGENT_DIR="${ST_ROOT}" ST_FNS="${ST_FNS}" bash -c '
+        source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh
+        eval "${ST_FNS}"
+        singBoxMergeConfig() { return 0; }
+        readInstallType; readInstallProtocolType
+        echo "${currentInstallProtocolType} ${frontingType}"
+        currentClients="$(jq -c .inbounds[0].users "${singBoxConfigPath}16_shadowtls_inbounds.json")"
+        [[ -z "$1" ]] || applyAccountChangeAllProtocols "$@" >/dev/null 2>&1' _ "$@" 2>/dev/null
+}
+ST_FILE="${ST_ROOT}/sing-box/conf/config/16_shadowtls_inbounds.json"
+assert_equals ",16, 16_shadowtls_inbounds" "$(run_st)" "readInstallProtocolType：认出 16，身份源是外层（密码就是 UUID）"
+run_st add c3 carol >/dev/null
+assert_equals '["alice-ShadowTLS","carol-ShadowTLS"]' "$(jq -c '[.inbounds[0].users[].name]' "${ST_FILE}")" "账户事务：加人写进 16 的外层"
+assert_equals '["alice-ShadowTLS","carol-ShadowTLS"]' "$(jq -c '[.inbounds[1].users[].name]' "${ST_FILE}")" "账户事务：内层名字跟外层一样（auth_user 只认内层）"
+assert_equals "$(printf '%s' c3 | openssl dgst -sha256 -binary | head -c 16 | base64)" "$(jq -r '.inbounds[1].users[1].password' "${ST_FILE}")" "账户事务：内层 uPSK 是 16 字节，由外层密码哈希派生"
+run_st delName carol >/dev/null
+assert_equals '["alice-ShadowTLS"]|["alice-ShadowTLS"]' "$(jq -c '[.inbounds[0].users[].name]' "${ST_FILE}")|$(jq -c '[.inbounds[1].users[].name]' "${ST_FILE}")" "账户事务：删人两层都没了"
+# 14 + 16 都在时身份源要是 16：14 的 password 是派生 uPSK，拿它当 UUID 会把所有人的密码换掉
+printf '%s\n' '{"inbounds":[{"listen_port":1,"users":[{"name":"alice-SS2022","password":"derived"}]}]}' >"${ST_ROOT}/sing-box/conf/config/14_ss2022_inbounds.json"
+assert_equals ",14,16, 16_shadowtls_inbounds" "$(run_st)" "readInstallProtocolType：14 与 16 同在时身份源是 16"
+rm -rf "${ST_ROOT}"
+
 # 生成器回归成空数组时，事务必须拒绝提交，而不是把该协议的用户清空再报成功
 env PROXY_AGENT_DIR="${DOTTED_ROOT}" DOTTED_FNS="${DOTTED_FNS}" bash -c '
     source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh
@@ -1447,7 +1476,7 @@ render_clients() (
 
 # 每个内核上该产出用户的协议独立写死（加协议时同步）：删掉一个活分支，产出集合就对不上
 CLIENTS_LIVE_1="0 1 3 4 6 7 9 12 15"
-CLIENTS_LIVE_2="0 1 3 4 6 7 9 10 11 13 14 20"
+CLIENTS_LIVE_2="0 1 3 4 6 7 9 10 11 13 14 16 20"
 REGISTRY_IDS=$(for _pid in $(seq 0 30); do getProtocolConfigFileName "${_pid}" >/dev/null && echo "${_pid}"; done)
 for _core in 1 2; do
     _produced=""
@@ -4180,6 +4209,20 @@ assert_equals "$(printf '%s\n' '  - name: "xt-x"' '    type: vless' '    server:
     '    network: xhttp' '    client-fingerprint: chrome' '    alpn:' '      - h2' '    servername: example.org' '    xhttp-opts:' '      path: /abcdxhttp' '      host: example.org')" \
     "$(cat "${DB_SUB}/clashMeta/xt")" "XHTTP+TLS：Clash 节点没有 reality-opts，SNI 和 Host 是本机域名"
 assert_equals "[]" "$(jq -c . "${DB_SUB}/sing-box/xt")" "XHTTP+TLS：不进 sing-box 订阅"
+# 16：通用订阅一行都不写（v2rayN、mihomo 的链接解析器会丢掉 plugin，退化成裸 SS2022），两种带它的订阅都要有 UDP 通路
+db_reset
+getPublicIP() { echo 203.0.113.9; }; export -f getPublicIP
+_dbOut=$(run_db 2 shadowtls 8443 st-x stpw upsk== srvkey== dl.google.com 2>&1)
+unset -f getPublicIP
+assert_equals "no" "$([[ -s "${DB_SUB}/default/st" ]] && echo yes || echo no)" "ShadowTLS：不进通用订阅"
+assert_contains "${_dbOut}" "plugin=shadow-tls%3Bhost%3Ddl.google.com%3Bpassword%3Dstpw%3Bversion%3D3#st-x" "ShadowTLS：账号页打印分享链接"
+assert_contains "${_dbOut}" "v2rayN" "ShadowTLS：分享链接旁边说明哪些客户端用不了"
+assert_equals "$(printf '%s\n' '  - name: "st-x"' '    type: ss' '    server: 203.0.113.9' '    port: 8443' '    cipher: 2022-blake3-aes-128-gcm' '    password: "srvkey==:upsk=="' '    udp: true' \
+    '    client-fingerprint: chrome' '    plugin: shadow-tls' '    plugin-opts:' '      host: dl.google.com' '      password: "stpw"' '      version: 3' '    smux:' '      enabled: true' '      protocol: h2mux')" \
+    "$(cat "${DB_SUB}/clashMeta/st")" "ShadowTLS：Clash 节点带 plugin 与 smux（没有 smux 时 mihomo 的 UDP 不通）"
+assert_equals '["shadowsocks","st-st-x",true,"srvkey==:upsk=="]' "$(jq -c '.[0] | [.type, .detour, .multiplex.enabled, .password]' "${DB_SUB}/sing-box/st")" "ShadowTLS：sing-box 的 SS 出站经 detour 走外层，开 multiplex（UDP 靠它）"
+assert_equals '["shadowtls","st-st-x","203.0.113.9",8443,3,"stpw","dl.google.com","chrome"]' "$(jq -c '.[1] | [.type, .tag, .server, .server_port, .version, .password, .tls.server_name, .tls.utls.fingerprint]' "${DB_SUB}/sing-box/st")" \
+    "ShadowTLS：sing-box 的外层出站，SNI 是握手目标"
 db_reset
 run_db 1 vmessws 443 vm-x 0f3c8a4e-1b2d-4c5e-8f90-123456789abc example.net /vws >/dev/null 2>&1
 assert_equals "xudp" "$(jq -r '.[0].packet_encoding' "${DB_SUB}/sing-box/vm")" "VMess WS：sing-box 片段的 UDP 用 xudp（packetaddr 只有 sing-box 服务端认，Xray 上 UDP 全丢）"
@@ -4873,7 +4916,7 @@ assert_equals "23456" "$(printf 'abc\n70000\n23456\n\n' | env SS_FN="${SS_FN}" b
     initSS2022Config
     echo "${ss2022Port}"' 2>&1 | tail -n 1)" "SS2022 端口输错重问，不退出"
 
-RDT_FN=$(sed -n '/^realityDestBehindCloudflare() {/,/^}/p;/^checkRealityDest() {/,/^}/p;/^initRealityClientServersName() {/,/^}/p' install.sh)
+RDT_FN=$(sed -n '/^realityDestBehindCloudflare() {/,/^}/p;/^checkRealityDest() {/,/^}/p;/^realityDestList() {/,/^}/p;/^pickRandomDest() {/,/^}/p;/^initRealityClientServersName() {/,/^}/p' install.sh)
 # run_rd_typed INPUT CF_HOSTS → 手输 Reality 目标；打印最后定下的 目标:端口
 run_rd_typed() {
     printf "$1" | env RDT_FN="${RDT_FN}" CF="$2" bash -c '
@@ -4943,7 +4986,7 @@ for f in 06_hysteria2_inbounds 09_tuic_inbounds; do
 done
 
 # --- Reality 回车随机目标：挑到挂在 Cloudflare 后面的就换一个，不问（问了回车即退出，服务已停着） ---
-RD_FN=$(sed -n '/^realityDestBehindCloudflare() {/,/^}/p;/^checkRealityDest() {/,/^}/p;/^initRealityClientServersName() {/,/^}/p' install.sh)
+RD_FN=$(sed -n '/^realityDestBehindCloudflare() {/,/^}/p;/^checkRealityDest() {/,/^}/p;/^realityDestList() {/,/^}/p;/^pickRandomDest() {/,/^}/p;/^initRealityClientServersName() {/,/^}/p' install.sh)
 # run_rd CF_HOSTS → curl 桩：CF_HOSTS 里的域名回 Cloudflare trace；回车选随机 30 次，打印挑中过的目标（去重），
 # 30 次都没被追问、没退出才在末尾打 END（追问后回车会 exit，END 就打不出来）
 run_rd() {
@@ -5025,6 +5068,42 @@ _urWant="location /abcdxhttp/ {|grpc_pass grpc://127.0.0.1:${XHTTP_TLS_LOCAL_POR
 assert_equals "${_urWant}" "$(run_ur "" all)" "15 的 location：全部安装写进 h2 块，路径与端口对得上入站"
 assert_equals "${_urWant}" "$(run_ur ",0,15," "")" "15 的 location：个性化选了 15 也写"
 assert_equals "h1=0" "$(run_ur ",0,1," "")" "15 的 location：没选 15 不写，猜中路径也只看到伪装站"
+
+# --- 16 的配置：内层只听回环、只开 TCP；重装沿用目标与密钥；验证连不出去时不能卡死安装 ---
+SC_FN=$(sed -n '/^shadowTlsUserKey() {/,/^}/p;/^shadowTlsWithInnerUsers() {/,/^}/p;/^shadowTlsInbound() {/,/^}/p;/^initShadowTlsConfig() {/,/^}/p;/^ensureSingBoxLocalDns() {/,/^}/p' install.sh)
+_scConf=$(env SC_FN="${SC_FN}" bash -c 'eval "${SC_FN}"; shadowTlsWithInnerUsers "$(shadowTlsInbound 8443 dl.google.com srvkey '"'"'[{"name":"a-ShadowTLS","password":"p1"}]'"'"')"')
+assert_equals '["shadowtls",8443,"shadowtls-ss-in",3,true,"dl.google.com",443]' "$(jq -c '.inbounds[0] | [.type, .listen_port, .detour, .version, .strict_mode, .handshake.server, .handshake.server_port]' <<<"${_scConf}")" \
+    "16：外层 v3 + strict，detour 给内层"
+assert_equals '["shadowsocks","shadowtls-ss-in","127.0.0.1","tcp",null,true]' "$(jq -c '.inbounds[1] | [.type, .tag, .listen, .network, .listen_port, .multiplex.enabled]' <<<"${_scConf}")" \
+    "16：内层只听回环、只开 TCP，不占固定端口，开 multiplex"
+assert_equals "24" "$(jq -r '.inbounds[1].users[0].password | length' <<<"${_scConf}")" "16：uPSK 是 16 字节的 base64（长度错了 sing-box 起不来）"
+SC_DIR="${MOCK_ROOT}/shadowtlscfg"
+# run_sc LAST TLS13 FILE_JSON INPUT → 跑 initShadowTlsConfig，打印目标与密钥（目标随机时固定是 random.example）
+run_sc() {
+    rm -rf "${SC_DIR}" && mkdir -p "${SC_DIR}"
+    [[ -n "$3" ]] && printf '%s\n' "$3" >"${SC_DIR}/16_shadowtls_inbounds.json"
+    printf '%b' "$4" | env SC_FN="${SC_FN}" SC_DIR="${SC_DIR}" LAST="$1" TLS13="$2" bash -c '
+        eval "${SC_FN}"
+        SINGBOX_FRAGMENT_DIR="${SC_DIR}"; lastInstallationConfig="${LAST}"
+        getProtocolConfigFileName() { echo 16_shadowtls_inbounds.json; }
+        t() { echo "$1"; }; echoContent() { :; }
+        jsonWriteFile() { echo "$2" >"$1"; }
+        isYesInput() { [[ "$1" == "y" ]]; }; isValidDomain() { [[ "$1" != *" "* ]]; }; checkRealityDest() { return 0; }
+        pickRandomDest() { echo random.example; }
+        destSupportsTls13() { [[ "${TLS13}" == yes ]]; }
+        initShadowTlsConfig >/dev/null 2>&1
+        echo "${shadowTlsTarget}|${shadowTlsServerKey}"'
+}
+SC_OLD='{"inbounds":[{"handshake":{"server":"old.example"}},{"password":"oldkey"}]}'
+assert_equals "old.example|oldkey" "$(run_sc y yes "${SC_OLD}" "")" "16：沿用上次配置时不问，目标与密钥都不变（已发出去的节点才不失效）"
+assert_equals "old.example|oldkey" "$(run_sc "" yes "${SC_OLD}" "y\n")" "16：问要不要沿用，答 y"
+assert_equals "new.example|oldkey" "$(run_sc "" yes "${SC_OLD}" "n\nnew.example\n")" "16：换目标时密钥不变"
+assert_equals "random.example" "$(run_sc "" yes "" "\n" | cut -d'|' -f1)" "16：新装回车就随机"
+assert_equals '{"dns":{"servers":[{"type":"local","tag":"local"}]}}' "$(cat "${SC_DIR}/02_dns_local.json" 2>/dev/null)" "16：singBoxConfigPath 还是空的（从 Xray 切过来）时也写出握手目标要用的 local DNS"
+assert_equals "24" "$(run_sc "" yes "" "\n" | cut -d'|' -f2 | tr -d '\n' | wc -c | tr -d ' ')" "16：新装生成 16 字节服务端密钥"
+assert_equals "random.example" "$(run_sc "" no "" "" | cut -d'|' -f1)" "16：TLS 1.3 一直验不过、输入也读完了：试几次后用最后一个，不卡死安装"
+assert_equals "good.example" "$(run_sc "" yes "" "bad domain\ngood.example\n" | cut -d'|' -f1)" "16：输错重问"
+rm -rf "${SC_DIR}"
 
 # --- Clash 的 TUIC 节点按域名发 SNI 并校验证书：mihomo 见 disable-sni 会直接关掉证书校验 ---
 tuicClash=$(sed -n '/^    type: tuic$/,/^EOF$/p' install.sh)
