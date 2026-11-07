@@ -9881,9 +9881,9 @@ rollbackScript() {
                     echoContent green " ---> $(t SCRIPT_ROLLBACK_CONFIG_SAVED "${preRestoreSnapshot}")"
                 fi
 
-                # 释放服务对配置文件的句柄
-                handleXray stop >/dev/null 2>&1
-                handleSingBox stop >/dev/null 2>&1
+                # 释放服务对配置文件的句柄。输出不能吞：停不掉时它们自己 exit 1，吞了回滚就一声不响地断在这里
+                handleXray stop
+                handleSingBox stop
 
                 if restoreConfigSnapshot "${sourcePath}/config"; then
                     echoContent green " ---> $(t SCRIPT_ROLLBACK_CONFIG_RESTORED)"
