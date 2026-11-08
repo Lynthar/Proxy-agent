@@ -3293,12 +3293,18 @@ ensureAlpineProcps() {
     fi
 }
 
+# nginxPids → 本机 nginx 的进程号。按进程名精确匹配：-f 按整条命令行认，root 下会连 "vim nginx.conf" 一起 kill -9；
+# 只认与脚本同一个 PID 命名空间的：宿主上看得到 Docker 容器里的 nginx，混进来的话启动时以为已在跑而跳过、停止时把它们一起杀掉
+nginxPids() {
+    pgrep --ns $$ --nslist pid -x nginx
+}
+
 # 操作Nginx
 handleNginx() {
     ensureAlpineProcps
 
     # 只装 Reality 的安装流程不起 nginx（没有伪装站要它）；订阅这类确实要它的地方传 force
-    if { [[ "$2" == "force" ]] || ! echo "${selectCustomInstallType}" | grep -qwE ",7,|,8,|,7,8,"; } && [[ -z $(pgrep -x "nginx") ]] && [[ "$1" == "start" ]]; then
+    if { [[ "$2" == "force" ]] || ! echo "${selectCustomInstallType}" | grep -qwE ",7,|,8,|,7,8,"; } && [[ -z $(nginxPids) ]] && [[ "$1" == "start" ]]; then
         labelNginxPorts
         if [[ "${release}" == "alpine" ]]; then
             rc-service nginx start
@@ -3308,22 +3314,22 @@ handleNginx() {
 
         sleep 0.5
 
-        if [[ -z $(pgrep -x "nginx") ]]; then
+        if [[ -z $(nginxPids) ]]; then
             echoContent red " ---> Nginx启动失败"
             echoContent red " ---> 请将下方日志反馈给开发者"
             nginx
             # 这条 nginx 能救回 OpenRC 记成 started、进程却没了的情形
-            if [[ -n $(pgrep -x "nginx") ]]; then
+            if [[ -n $(nginxPids) ]]; then
                 echoContent yellow " ---> $(t NGINX_STARTED_DIRECTLY)"
                 return 0
             fi
             # 还是没起来就退出，调用方才不会接着打「成功」
-            [[ -n $(pgrep -x "nginx") ]] || exit 1
+            [[ -n $(nginxPids) ]] || exit 1
         else
             echoContent green " ---> Nginx启动成功"
         fi
 
-    elif [[ -n $(pgrep -x "nginx") ]] && [[ "$1" == "stop" ]]; then
+    elif [[ -n $(nginxPids) ]] && [[ "$1" == "stop" ]]; then
 
         if [[ "${release}" == "alpine" ]]; then
             rc-service nginx stop
@@ -3332,10 +3338,8 @@ handleNginx() {
         fi
         sleep 0.5
 
-        # 必须按进程名精确匹配：pgrep -f "nginx" 按整条命令行子串匹配，
-        # root 下会连 "vim nginx.conf"、"tail -f …/nginx/error.log" 一起 kill -9。
-        if [[ -z ${btDomain} && -n $(pgrep -x "nginx") ]]; then
-            pgrep -x "nginx" | xargs kill -9
+        if [[ -z ${btDomain} && -n $(nginxPids) ]]; then
+            nginxPids | xargs kill -9
         fi
         echoContent green " ---> Nginx关闭成功"
     fi
@@ -3829,14 +3833,24 @@ xrayVersionManageMenu() {
         echoContent yellow " ---> $(t XRAY_UNPINNED_WARN)"
         updateXray
     elif [[ "${selectXrayType}" == "3" ]]; then
-        echoContent yellow "\n1.只可以回退最近的五个版本"
+        local rollbackVersions
+        echoContent yellow "\n$(t XRAY_ROLLBACK_SCOPE "${XRAY_PINNED_VERSION}")"
         echoContent yellow "2.不保证回退后一定可以正常使用"
         echoContent yellow "3.如果回退的版本不支持当前的config，则会无法连接，谨慎操作"
         echoContent skyBlue "------------------------Version-------------------------------"
-        curl -s "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=5" | jq -r ".[]|select (.prerelease==false)|.tag_name" | awk '{print ""NR""":"$0}'
+        # 一页 50 条：前几条常是预发布与高于钉版的新版，只取 5 条时列表可能一个可回退的都没有
+        rollbackVersions=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=50" | xrayRollbackVersions "${XRAY_PINNED_VERSION}")
+        if [[ -z "${rollbackVersions}" ]]; then
+            echoContent red " ---> $(t UPDATE_CORE_VERSION_FAIL)"
+            exit 1
+        fi
+        awk '{print NR ":" $0}' <<<"${rollbackVersions}"
         echoContent skyBlue "--------------------------------------------------------------"
         read -r -p "请输入要回退的版本:" selectXrayVersionType
-        version=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=5" | jq -r ".[]|select (.prerelease==false)|.tag_name" | awk '{print ""NR""":"$0}' | grep "${selectXrayVersionType}:" | awk -F "[:]" '{print $2}')
+        version=
+        if [[ "${selectXrayVersionType}" =~ ^[1-9][0-9]*$ ]]; then
+            version=$(sed -n "${selectXrayVersionType}p" <<<"${rollbackVersions}")
+        fi
         if [[ -n "${version}" ]]; then
             updateXray "${version}"
         else
@@ -7320,6 +7334,8 @@ showAccounts() {
     readInstallProtocolType
     readConfigHostPathUUID
     readSingBoxConfig
+    # 下面的 $(getPublicIP) 都在子 shell 里，缓存写不回来；在本 shell 先取一次，它们才都命中缓存，不再各打一轮外网
+    getPublicIP >/dev/null 2>&1
 
     echo
     echoContent skyBlue "\n进度 $1/${totalProgress} : 账号"
@@ -8063,7 +8079,7 @@ unInstall() {
     fi
     echoContent yellow " ---> 脚本不会删除acme相关配置，删除请手动执行 [rm -rf /root/.acme.sh]"
     handleNginx stop
-    if [[ -z $(pgrep -x "nginx") ]]; then
+    if [[ -z $(nginxPids) ]]; then
         echoContent green " ---> 停止Nginx成功"
     fi
     carpoolXrayServiceEnv off
@@ -9291,7 +9307,7 @@ carpoolRemovePages() {
 # carpoolReloadNginx → 配置已过 nginx -t 之后让它生效：在跑就 reload，没在跑就 start。
 # 起不来只返回非零、不退出：关拼车要接着把账号放回去，菜单启动时升级订阅配置也不能把菜单挡在外面
 carpoolReloadNginx() {
-    if [[ -n $(pgrep -x "nginx") ]]; then
+    if [[ -n $(nginxPids) ]]; then
         nginx -s reload >/dev/null 2>&1 && return 0
     fi
     (handleNginx start)
@@ -9327,7 +9343,7 @@ carpoolSyncUserinfo() {
     # map 里有订阅地址的 md5，mktemp 的 0600 正好；nginx 的 master 是 root，读得到
     tmp=$(mktemp "${SUBSCRIBE_USERINFO_MAP}.XXXXXX") || return 0
     printf '%s' "${body}" >"${tmp}" && mv -f "${tmp}" "${SUBSCRIBE_USERINFO_MAP}"
-    if [[ -n $(pgrep -x "nginx") ]] && nginx -t >/dev/null 2>&1; then
+    if [[ -n $(nginxPids) ]] && nginx -t >/dev/null 2>&1; then
         nginx -s reload >/dev/null 2>&1
     fi
     return 0
@@ -17509,7 +17525,7 @@ installAbortArm() {
     installAbortRunning=
     xrayDaemonRunning && installAbortRunning+=" xray"
     [[ -n $(pgrep -x sing-box) ]] && installAbortRunning+=" singbox"
-    [[ -n $(pgrep -x nginx) ]] && installAbortRunning+=" nginx"
+    [[ -n $(nginxPids) ]] && installAbortRunning+=" nginx"
     trap installAbortRestore EXIT
 }
 
@@ -18032,7 +18048,7 @@ installSubscribe() {
         handleNginx stop
         handleNginx start
     fi
-    if [[ -z $(pgrep -x "nginx") ]]; then
+    if [[ -z $(nginxPids) ]]; then
         handleNginx start
     fi
 }
@@ -18705,6 +18721,15 @@ readSubscribeSalt() {
         fi
     done
 }
+
+# subscribeLocalHasEmptyHost → 0=本地生成的节点里有空地址：取不到公网 IP 时通用链接写成 @:端口，
+# Clash 的 server 与 sing-box 的 "server" 是空的
+subscribeLocalHasEmptyHost() {
+    grep -qsE '@:[0-9]' "${SUBSCRIBE_LOCAL_DIR}"/default/* \
+        || grep -qsE '^[[:space:]]*server:[[:space:]]*$' "${SUBSCRIBE_LOCAL_DIR}"/clashMeta/* \
+        || grep -qsE '"server":[[:space:]]*""' "${SUBSCRIBE_LOCAL_DIR}"/sing-box/*
+}
+
 # 订阅
 subscribe() {
     readInstallProtocolType
@@ -18739,12 +18764,17 @@ subscribe() {
 
         echo "${subscribeSalt}" >${SUBSCRIBE_LOCAL_DIR}/subscribeSalt
 
-        rm -rf ${SUBSCRIBE_DIR}/default/*
-        rm -rf ${SUBSCRIBE_DIR}/clashMeta/*
         rm -rf ${SUBSCRIBE_LOCAL_DIR}/default/*
         rm -rf ${SUBSCRIBE_LOCAL_DIR}/clashMeta/*
         rm -rf ${SUBSCRIBE_LOCAL_DIR}/sing-box/*
         showAccounts >/dev/null
+        # 先在本地生成、查过再动已发布的：取不到公网 IP 时节点地址是空的，发出去客户端一更新就全坏，留着旧的至少还能用
+        if subscribeLocalHasEmptyHost; then
+            echoContent red " ---> $(t SUBSCRIBE_EMPTY_HOST)"
+            return 1
+        fi
+        rm -rf ${SUBSCRIBE_DIR}/default/*
+        rm -rf ${SUBSCRIBE_DIR}/clashMeta/*
         if [[ -n $(ls ${SUBSCRIBE_LOCAL_DIR}/default/) ]]; then
             if [[ -f "${SUBSCRIBE_REMOTE_DIR}/remoteSubscribeUrl" && -n $(cat "${SUBSCRIBE_REMOTE_DIR}/remoteSubscribeUrl") ]]; then
                 if [[ -z "${renewSalt}" ]]; then

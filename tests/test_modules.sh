@@ -140,6 +140,15 @@ assert_equals "hello" "${trimmed}" "trim() 去除空格"
 assert_true "versionGreaterThan '1.2.3' '1.2.0'" "versionGreaterThan('1.2.3', '1.2.0')"
 assert_true "! versionGreaterThan '1.2.0' '1.2.3'" "!versionGreaterThan('1.2.0', '1.2.3')"
 
+# 测试 xrayRollbackVersions：按 GitHub 的顺序给（新的在前、正式版与预发布混着），26.10 要比 26.3 新（不能按字符串比）
+XRV_RELEASES='[{"tag_name":"v26.10.31","prerelease":false},{"tag_name":"v26.10.21","prerelease":false},{"tag_name":"v26.9.30","prerelease":true},
+{"tag_name":"v26.3.27","prerelease":false},{"tag_name":"v26.2.6","prerelease":false},{"tag_name":"nightly","prerelease":false},
+{"tag_name":"v26.1.23","prerelease":false},{"tag_name":"v25.12.8","prerelease":false},{"tag_name":"v25.10.15","prerelease":false},{"tag_name":"v25.9.11","prerelease":false}]'
+assert_equals "v26.3.27 v26.2.6 v26.1.23 v25.12.8 v25.10.15" "$(xrayRollbackVersions v26.3.27 <<<"${XRV_RELEASES}" | paste -sd' ' -)" \
+    "xrayRollbackVersions: 只列不高于钉版的最近五个正式版，跳过预发布与认不出的 tag"
+assert_equals "v25.12.8 v25.10.15 v25.9.11" "$(xrayRollbackVersions v25.12.8 <<<"${XRV_RELEASES}" | paste -sd' ' -)" "xrayRollbackVersions: 不够五个就有几个列几个"
+assert_equals "|0" "$(xrayRollbackVersions v26.3.27 <<<'{"message":"API rate limit exceeded"}' 2>&1)|$?" "xrayRollbackVersions: API 返回错误对象时什么都不列、也不报错"
+
 # 测试 isYesInput - 接受 y/Y/yes/Yes 任意大小写组合
 assert_true "isYesInput 'y'" "isYesInput('y') 返回 true"
 assert_true "isYesInput 'Y'" "isYesInput('Y') 返回 true"

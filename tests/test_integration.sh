@@ -1307,8 +1307,8 @@ assert_equals "" "${JQ_KEYWORD_VARS}" "jq 变量名不用关键字（jq 1.6 不�
 LANG_POSITIONAL=$(grep -nE '%[0-9]+\\?\$' shell/lang/*.sh)
 assert_equals "" "${LANG_POSITIONAL}" "语言文件不用 printf 位置参数"
 
-# nginx 在不在跑只能按进程名精确判：-f 会把 "vim nginx.conf" 当成 nginx。
-# 先去掉引号与反斜杠再比，任何拼法的 pgrep … nginx 都必须正好是 pgrep -x nginx
+# nginx 在不在跑一律经 nginxPids：按进程名精确判（-f 会把 "vim nginx.conf" 当成 nginx），且只认同一 PID 命名空间（不认容器里的）。
+# 先去掉引号与反斜杠再比，任何拼法的 pgrep … nginx 只许出现这一处
 NGINX_PGREP_CALLS=$(awk '
     /^[[:space:]]*#/ { next }
     {
@@ -1322,8 +1322,8 @@ NGINX_PGREP_CALLS=$(awk '
     }
 ' install.sh lib/*.sh)
 assert_not_empty "${NGINX_PGREP_CALLS}" "抽到判 nginx 进程的 pgrep 调用"
-assert_equals "" "$(grep -v ': pgrep -x nginx$' <<< "${NGINX_PGREP_CALLS}")" \
-    "install.sh 与 lib/ 判 nginx 进程一律 pgrep -x，没有 -f 子串匹配"
+assert_equals 'pgrep --ns $$ --nslist pid -x nginx' "$(sed 's/^[^ ]* //' <<< "${NGINX_PGREP_CALLS}")" \
+    "install.sh 与 lib/ 判 nginx 进程只有 nginxPids 一处，按名字精确、限本 PID 命名空间"
 
 # Xray 在不在跑只认服务那条 run -confdir：拼车统计的 api statsquery、配置检查的 run -test 都不算
 XRAY_PGREP_CALLS=$(grep -nE 'pgrep[^|;&]*xray' install.sh lib/*.sh | grep -v '^install.sh:[0-9]*: *\[\[ -n \$(pgrep -f "xray/xray run -confdir") \]\]$')
@@ -1779,7 +1779,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试拼车钩子与 tick ===${NC}"
 
-CP_FN_NAMES="applyAccountChangeAllProtocols carpoolSyncUserinfo xrayConfigTest readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled xrayDaemonRunning carpoolCurrentClientsMap ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolMachineStep carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolGuardAccountMenu carpoolCheckPrerequisites carpoolPickApiPort carpoolApiReady carpoolAllAccounts carpoolFillUuids carpoolRemoveCron removeSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable carpoolHasTty carpoolApply carpoolResetUsage carpoolShowUsage carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolInsertPageBlock carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMembersClean carpoolMembersEditApply carpoolPickMember carpoolAsk carpoolShowProtocolChoices carpoolShowMemberLinks carpoolMemberAdd carpoolMemberEdit carpoolMemberMenu carpoolMenu addUser removeUser cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountStateFile chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget"
+CP_FN_NAMES="applyAccountChangeAllProtocols carpoolSyncUserinfo nginxPids xrayConfigTest readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled xrayDaemonRunning carpoolCurrentClientsMap ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolMachineStep carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolGuardAccountMenu carpoolCheckPrerequisites carpoolPickApiPort carpoolApiReady carpoolAllAccounts carpoolFillUuids carpoolRemoveCron removeSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable carpoolHasTty carpoolApply carpoolResetUsage carpoolShowUsage carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolInsertPageBlock carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMembersClean carpoolMembersEditApply carpoolPickMember carpoolAsk carpoolShowProtocolChoices carpoolShowMemberLinks carpoolMemberAdd carpoolMemberEdit carpoolMemberMenu carpoolMenu addUser removeUser cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountStateFile chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget"
 CP_FNS=$(sed -n "$(for _f in ${CP_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_not_empty "${CP_FNS}" "拼车：抽到 install.sh 原文"
 assert_equals "$(wc -w <<<"${CP_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CP_FNS}")" "拼车：每个函数都抽到了（抽不到说明函数体里出现了顶格的 }）"
@@ -2779,7 +2779,7 @@ assert_equals "CarpoolCollect) carpoolCollectBeforeStop checkForUpdates" \
     "入口：服务停止钩子 CarpoolCollect 在更新检查之前分发（关机途中网络可能已断）"
 assert_equals "ensureCarpoolXray writeXrayChainConfig ensureXrayLocalBlock" "$(grep -oE 'ensureCarpoolXray|writeXrayChainConfig|ensureXrayLocalBlock' <<<"${HANDLE_XRAY_FN}" | paste -sd' ' -)" \
     "handleXray start：拼车之后、本机封锁之前写回链式路由（链式入口重装、开 IPv6 全局后不静默走直连）"
-SUBSCRIBE_FN=$(sed -n '/^subscribe() {/,/^}/p' install.sh)
+SUBSCRIBE_FN=$(sed -n '/^subscribeLocalHasEmptyHost() {/,/^}/p;/^subscribe() {/,/^}/p' install.sh)
 assert_equals "1" "$(grep -c 'carpoolWritePlaceholders' <<<"${SUBSCRIBE_FN}")" "subscribe 末尾给停用成员补占位"
 assert_equals "2" "$(grep -c 'wget -O "${_singboxTpl}" -q --timeout=15' <<<"${SUBSCRIBE_FN}")" "subscribe：sing-box 模板的两处 wget 带超时（cron 下不能挂死）"
 
@@ -2811,6 +2811,29 @@ echo placeholder >"${CP_ROOT}/subscribe/sing-box/${CP_ALICE_MD5}"
 run_cp "${SUBSCRIBE_FN}; ${CP_SUB_STUBS}; wget() { return 4; }; subscribe false true" >/dev/null 2>&1
 assert_equals "placeholder" "$(cat "${CP_ROOT}/subscribe/sing-box/${CP_ALICE_MD5}")" "subscribe：模板拉不到时不动已有的 sing-box 配置"
 assert_equals "proxies:" "$(head -1 "${CP_ROOT}/subscribe/clashMeta/${CP_ALICE_MD5}")" "subscribe：模板拉不到不影响 clashMeta 重建"
+
+# 取不到公网 IP 时节点地址是空的：这次不发布，已发布的原样留着（客户端一更新就全坏，旧的至少还能用）
+cp_eh() {
+    rm -rf "${CP_ROOT}/subscribe_local"; mkdir -p "${CP_ROOT}/subscribe_local/default" "${CP_ROOT}/subscribe_local/clashMeta" "${CP_ROOT}/subscribe_local/sing-box"
+    printf '%s\n' "$2" >"${CP_ROOT}/subscribe_local/$1/alice"
+    run_cp "${SUBSCRIBE_FN}; subscribeLocalHasEmptyHost && echo empty || echo ok" 2>/dev/null
+}
+assert_equals "ok" "$(cp_eh default 'vless://id@1.2.3.4:443?security=reality#a')" "空地址检查：正常的 IPv4 地址不算"
+assert_equals "ok" "$(cp_eh default 'vless://id@[2001:db8::1]:443?security=reality#a')" "空地址检查：IPv6 地址不算"
+assert_equals "empty" "$(cp_eh default 'vless://id@:443?security=reality#a')" "空地址检查：通用链接 @:端口"
+assert_equals "empty" "$(cp_eh default 'ss://bWV0aG9k@:8443#a')" "空地址检查：SS 链接 @:端口"
+assert_equals "empty" "$(cp_eh clashMeta '    server: ')" "空地址检查：Clash 的 server 为空"
+assert_equals "ok" "$(cp_eh clashMeta '    server: 1.2.3.4')" "空地址检查：Clash 的 server 有值不算"
+assert_equals "empty" "$(cp_eh sing-box '[{"tag":"a","server": "","server_port":443}]')" "空地址检查：sing-box 的 server 为空"
+cp_reset_tree
+mkdir -p "${CP_ROOT}/subscribe/clashMetaProfiles"
+echo good-old >"${CP_ROOT}/subscribe/default/${CP_ALICE_MD5}"
+echo good-old-clash >"${CP_ROOT}/subscribe/clashMeta/${CP_ALICE_MD5}"
+CP_SUB_EMPTY='showAccounts() { mkdir -p "${SUBSCRIBE_LOCAL_DIR}/default"; echo "vless://id@:443?security=reality#alice" >"${SUBSCRIBE_LOCAL_DIR}/default/alice"; }'
+_out=$(run_cp "${SUBSCRIBE_FN}; ${CP_SUB_STUBS}; ${CP_SUB_EMPTY}; ${CP_WGET_OK}; subscribe false true; echo rc=\$?" 2>&1)
+assert_equals "rc=1|good-old|good-old-clash" "$(grep -o 'rc=[0-9]*' <<<"${_out}")|$(cat "${CP_ROOT}/subscribe/default/${CP_ALICE_MD5}")|$(cat "${CP_ROOT}/subscribe/clashMeta/${CP_ALICE_MD5}")" \
+    "subscribe：节点地址为空时不发布，已发布的原样留着"
+assert_contains "${_out}" "取不到本机公网 IP" "subscribe：节点地址为空时说明原因"
 
 # --- 用量头：成员的用量写进 subscribe.conf include 的 map；用量变化每小时至多重载一次，成员、配额、到期变了立刻生效 ---
 cp_reset_tree
@@ -4026,6 +4049,31 @@ rm -rf "${DNS_DIR}" "${DNS_DIR}.log"
 
 echo ""
 
+echo -e "${YELLOW}=== 测试 Xray 回退菜单 ===${NC}"
+
+# GitHub 一页的前几条常是高于钉版的新版与预发布：回退只列不高于钉版的，选了哪个就装哪个
+XV_FN=$(sed -n '/^xrayVersionManageMenu() {/,/^}/p' install.sh)
+assert_not_empty "${XV_FN}" "回退菜单：抽到函数原文"
+XV_RELEASES='[{"tag_name":"v26.10.31","prerelease":false},{"tag_name":"v26.10.21","prerelease":false},{"tag_name":"v26.9.30","prerelease":true},{"tag_name":"v26.3.27","prerelease":false},{"tag_name":"v26.2.6","prerelease":false}]'
+run_xv() {
+    printf '%s\n' "$@" | env XV_FN="${XV_FN}" XV_RELEASES="${XV_RELEASES}" bash -c '
+        source lib/utils.sh
+        echoContent() { printf "%s\n" "$2"; }
+        t() { printf "%s\n" "$1"; }
+        coreKind=1; totalProgress=1; XRAY_PINNED_VERSION=v26.3.27
+        curl() { printf "%s" "${XV_RELEASES}"; }
+        updateXray() { echo "updateXray $*"; }
+        eval "${XV_FN}"
+        xrayVersionManageMenu 1' 2>&1
+}
+_out=$(run_xv 3 1)
+assert_contains "${_out}" "updateXray v26.3.27" "回退菜单：第 1 个就是钉住的版本"
+assert_equals "1:v26.3.27|2:v26.2.6" "$(grep -E '^[0-9]+:v' <<<"${_out}" | paste -sd'|' -)" "回退菜单：高于钉版的新版与预发布不在列表里"
+assert_equals "" "$(grep 'updateXray' <<<"$(run_xv 3 9)")" "回退菜单：序号越界不装"
+assert_equals "" "$(grep 'updateXray' <<<"$(run_xv 3 '1;x')")" "回退菜单：序号不是数字不装"
+
+echo ""
+
 echo -e "${YELLOW}=== 测试 ensureAlpineProcps ===${NC}"
 
 PROCPS_FN=$(sed -n '/^ensureAlpineProcps() {/,/^}/p' install.sh)
@@ -4399,7 +4447,7 @@ rm -f "${_subT}"
 # --- 旧模板的 subscribe.conf：进菜单时按原端口、原域名重写 ---
 UPG_ROOT="${MOCK_ROOT}/subscribe-upgrade"
 UPG_CONF="${UPG_ROOT}/nginx/subscribe.conf"
-UPG_FN=$(awk '/^installSubscribe\(\) \{/{f=1} /^unInstallSubscribe\(\) \{/{f=0} f' install.sh; sed -n '/^carpoolReloadNginx() {/,/^}/p;/^carpoolInsertPageBlock() {/,/^}/p' install.sh)
+UPG_FN=$(awk '/^installSubscribe\(\) \{/{f=1} /^unInstallSubscribe\(\) \{/{f=0} f' install.sh; sed -n '/^carpoolReloadNginx() {/,/^}/p;/^carpoolInsertPageBlock() {/,/^}/p;/^nginxPids() {/,/^}/p' install.sh)
 # upg_ensure [nginx -t 的返回码] → 以 UPG_ROOT 为安装根跑 ensureSubscribeConfCurrent，nginx 调用记进 calls；输出它打印的内容
 upg_ensure() {
     : >"${UPG_ROOT}/calls"
@@ -4672,8 +4720,8 @@ _ssCalls=$(env SS_FN="${SS_FN}" bash -c '
 assert_equals "allow 23456|allow 23456 udp" "$(paste -sd'|' - <<<"${_ssCalls}")" "SS2022：端口的 TCP、UDP 都放行（两个都监听，漏了防火墙直接拒连）"
 
 # --- 带域名安装中途退出：起步时在跑的服务按旧配置拉回来；写了新配置之后再退出就不管 ---
-IA_FN=$(sed -n '/^installAbortArm() {/,/^}/p;/^installAbortDisarm() {/,/^}/p;/^installAbortRestore() {/,/^}/p;/^xrayCoreInstall() {/,/^}/p;/^singBoxInstall() {/,/^}/p' install.sh)
-assert_equals "5" "$(grep -c '^[a-zA-Z]*() {$' <<<"${IA_FN}")" "安装中途退出：抽到五个函数原文"
+IA_FN=$(sed -n '/^nginxPids() {/,/^}/p;/^installAbortArm() {/,/^}/p;/^installAbortDisarm() {/,/^}/p;/^installAbortRestore() {/,/^}/p;/^xrayCoreInstall() {/,/^}/p;/^singBoxInstall() {/,/^}/p' install.sh)
+assert_equals "6" "$(grep -c '^[a-zA-Z]*() {$' <<<"${IA_FN}")" "安装中途退出：抽到六个函数原文"
 # run_ia FN FAILAT RUNNING → 桩掉 FN 的每一步、在 FAILAT 那步 exit 1，RUNNING 是起步时在跑的服务；打印 handle* start 的调用
 run_ia() {
     env IA_FN="${IA_FN}" IA_FAIL="$2" IA_RUNNING=" $3 " bash -c '
@@ -4687,7 +4735,7 @@ run_ia() {
         handleSingBox() { [[ "$1" == start ]] && echo singbox-start; return 0; }
         handleNginx() { [[ "$1" == start ]] && echo nginx-start; return 0; }
         xrayDaemonRunning() { [[ "${IA_RUNNING}" == *" xray "* ]]; }
-        pgrep() { [[ "${IA_RUNNING}" == *" $2 "* ]] && echo 42; return 0; }
+        pgrep() { [[ "${IA_RUNNING}" == *" ${*: -1} "* ]] && echo 42; return 0; }
         "$0"' "$1" 2>&1 | paste -sd' ' -
 }
 assert_equals "xray-start singbox-start nginx-start" "$(run_ia xrayCoreInstall initTLSNginxConfig "xray sing-box nginx")" \
@@ -4699,7 +4747,7 @@ assert_equals "xray-start nginx-start" "$(run_ia singBoxInstall installTLS "xray
 assert_equals "" "$(run_ia singBoxInstall initSingBoxConfig "sing-box nginx")" "安装中途退出（sing-box，片段写到一半）：不拉半新半旧的配置"
 
 # --- 只装 Reality 的安装（菜单 19、菜单 2 只选 7）不起 nginx，但开着订阅时收尾得把它起来 ---
-RS_FN=$(sed -n '/^handleNginx() {/,/^}/p;/^refreshSubscribeAfterInstall() {/,/^}/p' install.sh)
+RS_FN=$(sed -n '/^nginxPids() {/,/^}/p;/^handleNginx() {/,/^}/p;/^refreshSubscribeAfterInstall() {/,/^}/p' install.sh)
 RS_DIR="${MOCK_ROOT}/refreshsub"
 # run_rs SELECTION CALL → 桩掉 systemctl 与订阅重建的各步，SELECTION 是本次安装选的协议；打印 systemctl 调用
 run_rs() {
@@ -4723,9 +4771,9 @@ rm -rf "${RS_DIR}"
 
 # --- handleNginx start 起不来一律退出；要收尾、要接着走的调用方用子 shell 接住 ---
 # checkPortOpen 的 heredoc 里有顶格的 }，按下一个函数名截
-NS_FN=$(sed -n '/^handleNginx() {/,/^}/p;/^carpoolReloadNginx() {/,/^}/p;/^updateNginxBlog() {/,/^}/p;/^customSingBoxInstall() {/,/^}/p' install.sh
+NS_FN=$(sed -n '/^nginxPids() {/,/^}/p;/^handleNginx() {/,/^}/p;/^carpoolReloadNginx() {/,/^}/p;/^updateNginxBlog() {/,/^}/p;/^customSingBoxInstall() {/,/^}/p' install.sh
     sed -n '/^checkPortOpen() {/,/^initTLSNginxConfig() {/p' install.sh | sed '$d')
-assert_equals "5" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${NS_FN}")" "nginx 起不来：抽到五个函数原文"
+assert_equals "6" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${NS_FN}")" "nginx 起不来：抽到六个函数原文"
 NS_DIR="${MOCK_ROOT}/nginxstart"
 # run_ns RELEASE MODE CALL → 桩掉服务管理器与 nginx 进程。MODE：ok 服务起得来 · flap 服务报成功、进程却没了 ·
 # dead 都起不来 · manual 只有手动 nginx 起得来 · badconf 配置坏着时起不来、恢复备份后才行

@@ -143,6 +143,14 @@ versionGreaterOrEqual() {
     [[ "$v1" == "$v2" ]] || versionGreaterThan "$v1" "$v2"
 }
 
+# xrayRollbackVersions PIN <releases.json → 不高于 PIN 的最近五个正式版 tag，新的在前，一行一个。
+# 更新的版本不算回退：它们的 Reality 要 ML-KEM，sing-box 客户端连不上；预发布与认不出的 tag 跳过
+xrayRollbackVersions() {
+    jq -r --arg pin "$1" 'def ver: ltrimstr("v") | split(".") | map(tonumber? // 0);
+        [.[]? | objects | select(.prerelease == false) | .tag_name | select(type == "string" and test("^v[0-9]+([.][0-9]+)*$"))
+         | select(ver <= ($pin | ver))] | .[:5][]'
+}
+
 # ============================================================================
 # 时间相关函数
 # ============================================================================
