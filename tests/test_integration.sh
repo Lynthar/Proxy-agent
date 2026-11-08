@@ -1653,6 +1653,23 @@ assert_equals '["alice-ShadowTLS"]|["alice-ShadowTLS"]' "$(jq -c '[.inbounds[0].
 # 14 + 16 都在时身份源要是 16：14 的 password 是派生 uPSK，拿它当 UUID 会把所有人的密码换掉
 printf '%s\n' '{"inbounds":[{"listen_port":1,"users":[{"name":"alice-SS2022","password":"derived"}]}]}' >"${ST_ROOT}/sing-box/conf/config/14_ss2022_inbounds.json"
 assert_equals ",14,16, 16_shadowtls_inbounds" "$(run_st)" "readInstallProtocolType：14 与 16 同在时身份源是 16"
+# 无域名机器的身份源没有 tls 块：currentHost 读成字面 null 时，http 订阅的端口读不回来，每次查看订阅都重配、换端口
+ST_HOST_FN=$(sed -n '/^readConfigHostPathUUID() {/,/^}/p;/^readNginxSubscribe() {/,/^}/p' install.sh)
+mkdir -p "${ST_ROOT}/nginx"
+printf '%s\n' 'server {' '    listen 27900 so_keepalive=on;' '    location ~ "^/s/(default|clashMeta|sing-box)/" {' >"${ST_ROOT}/nginx/subscribe.conf"
+run_st_host() {
+    env PROXY_AGENT_DIR="${ST_ROOT}" ST_FNS="${ST_FNS}"$'\n'"${ST_HOST_FN}" bash -c '
+        source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh
+        eval "${ST_FNS}"
+        nginxConfigPath="${PROXY_AGENT_DIR}/nginx/"
+        readInstallType; readInstallProtocolType; readConfigHostPathUUID; readNginxSubscribe
+        printf "%s|%s|%s\n" "${currentHost}" "${subscribePort}" "${subscribeType}"' 2>/dev/null
+}
+assert_equals "|27900|http" "$(run_st_host)" "无域名（身份源是 16）：currentHost 为空，http 订阅端口照常读回"
+printf '%s\n' '{"inbounds":[{"listen_port":31300,"users":[{"name":"alice-VMess_HTTPUpgrade","uuid":"a1"}],"transport":{"type":"httpupgrade","path":"/p"}}]}' \
+    >"${ST_ROOT}/sing-box/conf/config/11_VMess_HTTPUpgrade_inbounds.json"
+printf '%s\n' 'server {' '    listen 31301;' '    server_name example.com;' >"${ST_ROOT}/nginx/sing_box_VMess_HTTPUpgrade.conf"
+assert_equals "example.com" "$(run_st_host | cut -d'|' -f1)" "身份源是 11（inbound 没有 tls）：域名照旧从 nginx 配置取"
 rm -rf "${ST_ROOT}"
 
 # 生成器回归成空数组时，事务必须拒绝提交，而不是把该协议的用户清空再报成功

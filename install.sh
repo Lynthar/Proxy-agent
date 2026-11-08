@@ -1841,8 +1841,9 @@ readConfigHostPathUUID() {
             currentUUID=$(jq -r .inbounds[0].users[0].uuid ${configPath}${frontingTypeReality}.json)
             currentClients=$(jq -r .inbounds[0].users ${configPath}${frontingTypeReality}.json)
         elif [[ -n "${frontingType}" ]]; then
-            currentHost=$(jq -r .inbounds[0].tls.server_name ${configPath}${frontingType}.json)
-            if echo ${currentInstallProtocolType} | grep -q ",11," && [[ "${currentHost}" == "null" ]]; then
+            # 14 / 16 没有 tls 块：读成字面 null 会被当成域名，订阅每次查看都重配、换端口
+            currentHost=$(jq -r '.inbounds[0].tls.server_name // empty' "${configPath}${frontingType}.json")
+            if echo ${currentInstallProtocolType} | grep -q ",11," && [[ -z "${currentHost}" ]]; then
                 currentHost=$(grep 'server_name' <${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf | awk '{print $2}')
                 currentHost=${currentHost//;/}
             fi
