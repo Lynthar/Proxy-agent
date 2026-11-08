@@ -4323,17 +4323,31 @@ ensureXrayLocalBlock() {
     jsonWriteFile "${routing}" "${updated}" false
 }
 
-# localBlockInject MERGED → sing-box 那半：同一套封锁插到合并结果的路由规则最前。Xray 机上旁挂的 6 / 9 也连得到 Xray 的统计 API，
-# 链式出口收的是入口转来的流量，一样要封；IPv4 映射地址（::ffff:0:0/96）单列，合法客户端不会这样写目标
+# localBlockInject MERGED → sing-box 那半：同一套封锁插到路由最前（旁挂的 6 / 9 连得到 Xray 统计 API、链式出口收入口的流量，一样要封）。
+# 走 direct 类出站的规则与默认出站前再插「没解析就解析、按 IP 拒」：只封字面 IP 时，解析到内网或云元数据地址的域名照通。
+# 解析器照抄该出站拨号时用的（同一份缓存与地址族，不多查一次）；DNS 分流解析过的不重解析，否则分流结果被覆盖
 localBlockInject() {
     local merged=$1 apiPort out
     apiPort=$(localBlockApiPort) || return 1
     out=$(jq --arg ports "${CHAIN_BRIDGE_PORT}:${CHAIN_BRIDGE_PORT_LAST}" --arg api "${apiPort}" --argjson addrs "$(localGlobalAddrs)" '
-        ([{ip_is_private: true, action: "reject"},
-          {ip_cidr: (["0.0.0.0/8", "::ffff:0:0/96"] + $addrs), action: "reject"},
-          {port_range: [$ports], action: "reject"}]
-         + (if $api == "" then [] else [{port: [($api | tonumber)], action: "reject"}] end)) as $block
-        | .route.rules = ($block + (.route.rules // []))' "${merged}") || return 1
+        [{ip_is_private: true, action: "reject"}, {ip_cidr: (["0.0.0.0/8", "::ffff:0:0/96"] + $addrs), action: "reject"}] as $ipBlock
+        | ($ipBlock + [{port_range: [$ports], action: "reject"}]
+           + (if $api == "" then [] else [{port: [($api | tonumber)], action: "reject"}] end)) as $block
+        | ([.outbounds[]? | select(.type == "direct") | {key: .tag, value: .domain_resolver}] | from_entries) as $direct
+        | .route.default_domain_resolver as $fallback
+        | {ip_cidr: ["0.0.0.0/0", "::/0"], invert: true} as $unresolved
+        | def resolveFor($tag): {action: "resolve"} + (($direct[$tag] // $fallback)
+            | if type == "string" then {server: .}
+              elif type == "object" then with_entries(select(.key | . == "server" or . == "strategy" or . == "disable_cache" or . == "rewrite_ttl" or . == "client_subnet"))
+              else {} end);
+          def guard($tag): del(.action, .outbound, .override_address, .override_port, .network_strategy, .network_type, .fallback_network_type,
+                .fallback_delay, .udp_disable_domain_unmapping, .udp_connect, .udp_timeout, .tls_fragment, .tls_fragment_fallback_delay, .tls_record_fragment)
+            | (if . == {} then $unresolved else {type: "logical", mode: "and", rules: [$unresolved, .]} end) + resolveFor($tag);
+          (.route.final // .outbounds[0].tag // "") as $final
+        | .route.rules = $block
+            + [(.route.rules // [])[] | (.outbound // "") as $o
+               | if (.action // "route") == "route" and ($direct | has($o)) then guard($o), $ipBlock[], . else . end]
+            + (if $direct | has($final) then [$unresolved + resolveFor($final)] + $ipBlock else [] end)' "${merged}") || return 1
     jsonWriteFile "${merged}" "${out}" false
 }
 

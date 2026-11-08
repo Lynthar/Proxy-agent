@@ -376,6 +376,12 @@ for localTarget in 127.0.0.1 '[::ffff:127.0.0.1]' 0.0.0.0; do
     assert_equals "000" "$(viaProxyCode --connect-to "${E2E_SNI}:443:${localTarget}:${linkPort}" "https://${E2E_SNI}/")" \
         "经代理连服务端本机 ${localTarget}:${linkPort} 被拦下"
 done
+# 解析到回环的域名：sing-box 在路由里先解析再按 IP 拒；Xray 侧要等解钉后的 freedom 才拦，先不测
+if [[ "${E2E_CORE}" == "singbox" ]]; then
+    assert_equals "127.0.0.1" "$(getent hosts 127-0-0-1.sslip.io | awk '{print $1; exit}')" "对照：127-0-0-1.sslip.io 解析到回环"
+    assert_equals "000" "$(viaProxyCode --connect-to "${E2E_SNI}:443:127-0-0-1.sslip.io:${linkPort}" "https://${E2E_SNI}/")" \
+        "经代理连解析到回环的域名被拦下"
+fi
 # 本机网卡上的公网地址：经代理连它走 lo、绕过 INPUT 防火墙。挂地址要 NET_ADMIN，只有 Debian 腿有。
 # 规则在核心启动时才读网卡，所以先有一条经代理连得到的对照，重启之后才是被拦下，两种结果分得开
 selfAddr=198.51.100.7

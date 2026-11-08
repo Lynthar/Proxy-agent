@@ -3554,7 +3554,35 @@ assert_equals '[{"ip_is_private":true,"action":"reject"},{"ip_cidr":["0.0.0.0/8"
 rm -f "${CA_X}/12_stats_api.json"
 printf '%s\n' '{"outbounds":[{"type":"direct","tag":"direct"}]}' >"${CA_MERGED}"
 run_ca "localBlockInject ${CA_MERGED}" >/dev/null 2>&1
-assert_equals "3|null" "$(jq -r '"\(.route.rules | length)|\(.route.final)"' "${CA_MERGED}")" "本机封锁（sing-box）：没开拼车就没有 API 端口那条；原来没有 route 也只加规则、不设 final"
+assert_equals "6|null" "$(jq -r '"\(.route.rules | length)|\(.route.final)"' "${CA_MERGED}")" \
+    "本机封锁（sing-box）：没开拼车就没有 API 端口那条；没有 route 时默认出站就是 direct，末尾多一组解析后按 IP 拒，不设 final"
+
+# --- 解析到内网的域名：走 direct 类出站的规则与默认出站前「没解析就解析、按 IP 拒」，解析器照抄该出站的；走代理与非路由的规则原样 ---
+LB_U='{"ip_cidr":["0.0.0.0/0","::/0"],"invert":true}'
+LB_IP='{"ip_is_private":true,"action":"reject"},{"ip_cidr":["0.0.0.0/8","::ffff:0:0/96"],"action":"reject"}'
+# lb_rules MERGED_JSON → 跑 localBlockInject，打印最前三条封锁之后的规则
+lb_rules() {
+    ca_reset
+    printf '%s\n' "$1" >"${CA_MERGED}"
+    run_ca "localBlockInject ${CA_MERGED}" >/dev/null 2>&1
+    jq -c '.route.rules[3:]' "${CA_MERGED}"
+}
+LB_SPLIT='{"domain_regex":["netflix"],"action":"resolve","server":"dnsRouting"}'
+assert_equals "[${LB_SPLIT},{\"type\":\"logical\",\"mode\":\"and\",\"rules\":[${LB_U},{\"rule_set\":[\"geosite-openai\"]}],\"action\":\"resolve\",\"server\":\"local\",\"strategy\":\"ipv6_only\"},${LB_IP},{\"rule_set\":[\"geosite-openai\"],\"outbound\":\"IPv6_out\"},${LB_U%\}},\"action\":\"resolve\",\"server\":\"local\"},${LB_IP}]" \
+    "$(lb_rules "{\"outbounds\":[{\"type\":\"direct\",\"tag\":\"direct\"},{\"type\":\"direct\",\"tag\":\"IPv6_out\",\"domain_resolver\":{\"server\":\"local\",\"strategy\":\"ipv6_only\"}}],
+        \"route\":{\"default_domain_resolver\":\"local\",\"rules\":[${LB_SPLIT},{\"rule_set\":[\"geosite-openai\"],\"outbound\":\"IPv6_out\"}]}}")" \
+    "解析后封锁：IPv6 分流规则前照抄 IPv6_out 的解析器与地址族，默认出站照抄 default_domain_resolver；DNS 分流规则原样"
+LB_SRC='{"type":"logical","mode":"and","rules":[{"inbound":["chain_inbound"]},{"source_ip_cidr":["198.51.100.9"],"invert":true}],"action":"reject"}'
+assert_equals "[${LB_SRC},{\"inbound\":[\"chain_acct_in_us\"],\"outbound\":\"us\"},{\"type\":\"logical\",\"mode\":\"and\",\"rules\":[${LB_U},{\"auth_user\":[\"bob-VLESS_TCP\"]}],\"action\":\"resolve\",\"server\":\"google\",\"strategy\":\"prefer_ipv4\"},${LB_IP},{\"auth_user\":[\"bob-VLESS_TCP\"],\"outbound\":\"direct\"}]" \
+    "$(lb_rules "{\"outbounds\":[{\"type\":\"direct\",\"tag\":\"direct\"},{\"type\":\"shadowsocks\",\"tag\":\"us\"}],
+        \"route\":{\"final\":\"us\",\"default_domain_resolver\":{\"server\":\"google\",\"strategy\":\"prefer_ipv4\"},
+        \"rules\":[${LB_SRC},{\"inbound\":[\"chain_acct_in_us\"],\"outbound\":\"us\"},{\"auth_user\":[\"bob-VLESS_TCP\"],\"outbound\":\"direct\"}]}}")" \
+    "解析后封锁（入口）：走链路的规则与默认出站不加（解析留给出口）；标了直连的账号前加，解析器取 default_domain_resolver 对象里的 server 与 strategy"
+LB_EXIT='{"inbound":"chain_inbound","action":"sniff","timeout":"1s"},{"inbound":"chain_inbound","action":"resolve","strategy":"prefer_ipv4"}'
+assert_equals "[${LB_EXIT},{\"type\":\"logical\",\"mode\":\"and\",\"rules\":[${LB_U},{\"inbound\":[\"chain_inbound\"]}],\"action\":\"resolve\",\"server\":\"google\"},${LB_IP},{\"inbound\":[\"chain_inbound\"],\"outbound\":\"direct\"},${LB_U%\}},\"action\":\"resolve\",\"server\":\"google\"},${LB_IP},{\"action\":\"route\",\"outbound\":\"direct\",\"udp_timeout\":\"1m\"}]" \
+    "$(lb_rules "{\"outbounds\":[{\"type\":\"direct\",\"tag\":\"direct\"}],\"route\":{\"final\":\"direct\",\"default_domain_resolver\":\"google\",
+        \"rules\":[${LB_EXIT},{\"inbound\":[\"chain_inbound\"],\"outbound\":\"direct\"},{\"action\":\"route\",\"outbound\":\"direct\",\"udp_timeout\":\"1m\"}]}}" | jq -c '.[:-3]')" \
+    "解析后封锁（出口）：出口自己的 sniff / resolve 原样，直连规则前加；只剩路由选项的规则前直接用「没解析过」当条件"
 
 # --- 本机网卡上的全局地址也封：发往它们的连接经 lo 送达、绕过 INPUT 防火墙。行的形状照 ip -o addr 的原样 ---
 ca_reset
