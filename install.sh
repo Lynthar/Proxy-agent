@@ -4347,6 +4347,17 @@ directOutboundInject() {
     jsonWriteFile "${merged}" "${out}" false
 }
 
+# defaultDomainResolverInject MERGED → 有两个以上 DNS server 又没定 default_domain_resolver 时指向 local（没有就补一个）：
+# sing-box 1.13 起出站拨域名找不到解析器就拒绝启动。已有的值不碰，链式写的 google 靠这一条保住
+defaultDomainResolverInject() {
+    local merged=$1 out
+    out=$(jq 'if ((.dns.servers // []) | length) > 1 and .route.default_domain_resolver == null
+        then (if any(.dns.servers[]; .tag == "local") then . else .dns.servers += [{type: "local", tag: "local"}] end)
+            | .route.default_domain_resolver = "local"
+        else . end' "${merged}") || return 1
+    jsonWriteFile "${merged}" "${out}" false
+}
+
 # xrayDaemonRunning → 0=Xray 服务进程在跑。只认服务那条 `run -confdir` 命令行：拼车统计的 `xray api statsquery`、
 # 配置检查的 `xray run -test` 也含 xray/xray，算进来会把它们当成服务——启动被跳过、停止报失败
 xrayDaemonRunning() {
@@ -5309,6 +5320,33 @@ migrateRetiredRuleSets() {
     fi
 }
 
+# migrateSingBoxDnsSplit DIR → 旧版 DNS / SNI 分流写的 dns.json 改成 addSingBoxDNSConfig 现在的形状；旧版卸载留下的
+# 单个无 tag local 直接删。旧形状自带的 local 与 02_dns_local.json 重名、又缺解析器，sing-box 1.13 起拒绝启动。别的形状不动
+migrateSingBoxDnsSplit() {
+    local file="$1dns.json" out
+    [[ -f "${file}" ]] || return 0
+    if jq -e '. == {dns: {servers: [{type: "local"}]}}' "${file}" >/dev/null 2>&1; then
+        rm -f "${file}"
+        return 0
+    fi
+    jq -e '.dns.servers as $s | .dns.rules as $r
+        | ($s | length) == 2 and $s[0] == {tag: "local", type: "local"}
+        and ($s[1].tag == "dnsRouting" or $s[1].tag == "hosts")
+        and ($r | type) == "array" and ($r | length) > 0 and all($r[]; .server == $s[1].tag)' "${file}" >/dev/null 2>&1 || return 0
+    out=$(jq --arg cache "${SINGBOX_CONF_DIR}/cache.db" '
+        .dns.servers[1] as $srv | .dns.rules as $r
+        | .dns = {servers: [$srv]}
+        | .route.rules = [$r[] | del(.server)
+            | (if (.domain_regex // []) | length > 0 then {domain_regex} else empty end),
+              (if (.rule_set // []) | length > 0 then {rule_set} else empty end)
+            | . + {action: "resolve", server: $srv.tag}]
+        | if ((.route.rule_set // []) | length) > 0 then .experimental.cache_file = {enabled: true, path: $cache} else . end' \
+        "${file}") || return 1
+    jsonWriteFile "${file}" "${out}" false || return 1
+    singBoxConfigPath="$1" ensureSingBoxLocalDns || return 1
+    echoContent yellow " ---> $(t SINGBOX_DNS_SPLIT_MIGRATED)"
+}
+
 addSingBoxOutbound() {
     local tag=$1
     local type="ipv4"
@@ -5657,6 +5695,7 @@ singBoxMergeConfig() {
     fi
 
     migrateRetiredRuleSets "${fragmentDir}"
+    migrateSingBoxDnsSplit "${fragmentDir}"
     normalizeSingBoxRuleSetHttpClient "${fragmentDir}"
 
     # 建在 config.json 同目录：mv 才是同一文件系统里的原子替换，SELinux 下也不会带着 /tmp 的 user_tmp_t 标签过去。
@@ -5696,6 +5735,11 @@ singBoxMergeConfig() {
     fi
     if ! directOutboundInject "${tmpFile}"; then
         echoContent red " ---> $(t SINGBOX_DIRECT_INJECT_FAILED)"
+        rm -f "${tmpFile}"
+        return 1
+    fi
+    if ! defaultDomainResolverInject "${tmpFile}"; then
+        echoContent red " ---> $(t SINGBOX_DNS_RESOLVER_INJECT_FAILED)"
         rm -f "${tmpFile}"
         return 1
     fi
@@ -17208,7 +17252,7 @@ setUnlockSNI() {
     if [[ -n ${setSNIP} ]]; then
         # 验证IP格式
         if ! isValidIP "${setSNIP}"; then
-            echoContent red " ---> IP地址格式无效，请输入正确的IPv4或IPv6地址"
+            echoContent red " ---> $(t ERR_IP_INVALID)"
             exit 1
         fi
         echoContent red "=============================================================="
@@ -17246,7 +17290,10 @@ EOF
                     exit 1
                 fi
             done
-            addSingBoxDNSConfig "${setSNIP}" "${singboxDomainList}" "predefined"
+            if ! addSingBoxDNSConfig "${setSNIP}" "${singboxDomainList}" "predefined"; then
+                echoContent red " ---> $(t SINGBOX_DNS_SPLIT_WRITE_FAILED)"
+                exit 1
+            fi
         fi
         echoContent yellow " ---> SNI反向代理分流成功"
         reloadCore
@@ -17287,114 +17334,79 @@ EOF
     fi
 }
 
-# 添加sing-box dns配置
+# addSingBoxDNSConfig SERVER DOMAIN_CSV [predefined] → 写 dns.json：命中的域名在路由里 resolve 到分流 server
+# （DNS 分流是上游 SERVER，SNI 分流是把域名定到 SERVER 的 hosts）。必须是路由级 resolve：出站拨号只问
+# default_domain_resolver，写成 dns.rules 的分流起得来却不生效
 addSingBoxDNSConfig() {
-    local ip=$1
-    local domainList=$2
-    local actionType=$3
-
-    local rules=
-    rules=$(initSingBoxRules "${domainList}" "dns")
-    # domain精确匹配规则
-    local domainRules=
-    domainRules=$(echo "${rules}" | jq .domainRules)
-
-    # ruleSet规则集
-    local ruleSet=
-    ruleSet=$(echo "${rules}" | jq .ruleSet)
-
-    # ruleSet规则tag
-    local ruleSetTag=[]
-    if [[ "$(echo "${ruleSet}" | jq '.|length')" != "0" ]]; then
-        ruleSetTag=$(echo "${ruleSet}" | jq '.|map(.tag)')
+    local server=$1 domainList=$2 actionType=${3:-} rules serverJson json
+    [[ -n "${singBoxConfigPath}" ]] || return 0
+    rules=$(initSingBoxRules "${domainList}" "dns") || return 1
+    if [[ "${actionType}" == "predefined" ]]; then
+        # hosts 只认精确域名，规则集命中的域名在这里解析不出来，所以只留域名规则
+        rules=$(jq '.ruleSet = []' <<<"${rules}") || return 1
+        serverJson=$(jq -n --arg ip "${server}" --arg list "${domainList}" '{type: "hosts", tag: "hosts",
+            predefined: ($list | split(",") | map(select(length > 0)) | unique | map({key: ., value: $ip}) | from_entries)}') || return 1
+    else
+        serverJson=$(jq -n --arg ip "${server}" '{type: "udp", tag: "dnsRouting", server: $ip}') || return 1
     fi
-    if [[ -n "${singBoxConfigPath}" ]]; then
-        if [[ "${actionType}" == "predefined" ]]; then
-            local predefined={}
-            while read -r line; do
-                predefined=$(echo "${predefined}" | jq --arg d "${line}" --arg ip "${ip}" '.[$d] = $ip')
-            done < <(echo "${domainList}" | tr ',' '\n' | grep -v '^$' | sort -u)
-
-            cat <<EOF >"${singBoxConfigPath}dns.json"
-{
-  "dns": {
-    "servers": [
-        {
-            "tag": "local",
-            "type": "local"
-        },
-        {
-            "tag": "hosts",
-            "type": "hosts",
-            "predefined": ${predefined}
-        }
-    ],
-    "rules": [
-        {
-            "domain_regex":${domainRules},
-            "server":"hosts"
-        }
-    ]
-  }
-}
-EOF
-        else
-            cat <<EOF >"${singBoxConfigPath}dns.json"
-{
-  "dns": {
-    "servers": [
-      {
-        "tag": "local",
-        "type": "local"
-      },
-      {
-        "tag": "dnsRouting",
-        "type": "udp",
-        "server": "${ip}"
-      }
-    ],
-    "rules": [
-      {
-        "rule_set": ${ruleSetTag},
-        "domain_regex": ${domainRules},
-        "server":"dnsRouting"
-      }
-    ]
-  },
-  "route":{
-    "rule_set":${ruleSet}
-  }
-}
-EOF
-        fi
-    fi
+    json=$(jq -n --argjson r "${rules}" --argjson srv "${serverJson}" --arg cache "${SINGBOX_CONF_DIR}/cache.db" '
+        ($r.ruleSet | length) as $remote
+        | {dns: {servers: [$srv]},
+           route: ({rules: ([if ($r.domainRules | length) > 0 then {domain_regex: $r.domainRules} else empty end,
+                             if $remote > 0 then {rule_set: ($r.ruleSet | map(.tag))} else empty end]
+                            | map(. + {action: "resolve", server: $srv.tag}))}
+                   + (if $remote > 0 then {rule_set: $r.ruleSet} else {} end))}
+        + (if $remote > 0 then {experimental: {cache_file: {enabled: true, path: $cache}}} else {} end)') || return 1
+    # local 只由 02_dns_local.json 定义：它排在 dns.json 前面，dns.final 缺省取首个 server 才是 local；这里再写就重名，1.14.3 起拒绝启动
+    ensureSingBoxLocalDns || return 1
+    jsonWriteFile "${singBoxConfigPath}dns.json" "${json}" false
 }
 # 设置dns
 setUnlockDNS() {
+    local setDNS domainList item items=()
     read -r -p "请输入分流的DNS:" setDNS
-    if [[ -n ${setDNS} ]]; then
-        echoContent red "=============================================================="
-        echoContent yellow "录入示例:netflix,disney,hulu"
-        read -r -p "请按照上面示例录入域名:" domainList
-
-        if [[ "${coreKind}" == "1" ]]; then
-            addXrayDNSConfig "${setDNS}" "${domainList}"
-        fi
-
-        if [[ -n "${singBoxConfigPath}" ]]; then
-            ensureDirectOutbound
-            addSingBoxDNSConfig "${setDNS}" "${domainList}"
-        fi
-
-        reloadCore
-
-        echoContent yellow "\n ---> 如还无法观看可以尝试以下两种方案"
-        echoContent yellow " 1.重启vps"
-        echoContent yellow " 2.卸载dns解锁后，修改本地的[/etc/resolv.conf]DNS设置并重启vps\n"
-    else
+    if [[ -z ${setDNS} ]]; then
         echoContent red " ---> dns不可为空"
+        exit 1
     fi
-    exit 1
+    # 地址与域名都会写进核心配置，一个非法值就让配置校验失败、核心停着
+    if ! isValidIP "${setDNS}"; then
+        echoContent red " ---> $(t ERR_IP_INVALID)"
+        exit 1
+    fi
+    echoContent red "=============================================================="
+    echoContent yellow "录入示例:netflix,disney,hulu"
+    read -r -p "请按照上面示例录入域名:" domainList
+    IFS=',' read -r -a items <<<"${domainList}"
+    for item in "${items[@]}"; do
+        if [[ -n "${item}" ]] && ! isValidDomain "${item}"; then
+            echoContent red " ---> $(t ERR_DOMAIN_INVALID): ${item}"
+            exit 1
+        fi
+    done
+    if [[ -z "${domainList//,/}" ]]; then
+        echoContent red " ---> $(t ERR_DOMAIN_EMPTY)"
+        exit 1
+    fi
+
+    if [[ "${coreKind}" == "1" ]]; then
+        addXrayDNSConfig "${setDNS}" "${domainList}"
+    fi
+
+    if [[ -n "${singBoxConfigPath}" ]]; then
+        ensureDirectOutbound
+        if ! addSingBoxDNSConfig "${setDNS}" "${domainList}"; then
+            echoContent red " ---> $(t SINGBOX_DNS_SPLIT_WRITE_FAILED)"
+            exit 1
+        fi
+    fi
+
+    reloadCore
+
+    echoContent yellow "\n ---> 如还无法观看可以尝试以下两种方案"
+    echoContent yellow " 1.重启vps"
+    echoContent yellow " 2.卸载dns解锁后，修改本地的[/etc/resolv.conf]DNS设置并重启vps\n"
+    exit 0
 }
 
 # 移除 DNS分流
@@ -17411,18 +17423,9 @@ removeUnlockDNS() {
 EOF
     fi
 
-    if [[ -n "${singBoxConfigPath}" && -f "${singBoxConfigPath}dns.json" ]]; then
-        cat <<EOF >${singBoxConfigPath}dns.json
-{
-    "dns": {
-        "servers":[
-            {
-                "type":"local"
-            }
-        ]
-    }
-}
-EOF
+    # 整个删掉：留一个无 tag 的 local 会和 02_dns_local.json 凑成两个 server，缺解析器起不来
+    if [[ -n "${singBoxConfigPath}" ]]; then
+        rm -f "${singBoxConfigPath}dns.json"
     fi
 
     reloadCore
@@ -17446,18 +17449,9 @@ removeUnlockSNI() {
 EOF
     fi
 
-    if [[ -n "${singBoxConfigPath}" && -f "${singBoxConfigPath}dns.json" ]]; then
-        cat <<EOF >${singBoxConfigPath}dns.json
-{
-    "dns": {
-        "servers":[
-            {
-                "type":"local"
-            }
-        ]
-    }
-}
-EOF
+    # 同 removeUnlockDNS：整个删掉，不留无 tag 的 local
+    if [[ -n "${singBoxConfigPath}" ]]; then
+        rm -f "${singBoxConfigPath}dns.json"
     fi
 
     reloadCore

@@ -98,6 +98,7 @@ MSG_ROUTING_TOOLS_CHAIN_ENTRY_REFUSED="This machine is an Xray chain entry: all 
 MSG_XRAY_CONF_UNPARSABLE="jq cannot parse %s: this script only reads standard JSON (comments Xray accepts are rejected by jq); remove them or fix the file, then start again"
 MSG_SINGBOX_LOCAL_BLOCK_FAILED="sing-box config merge failed: the rules that keep proxy users off this machine and private networks could not be written (old config kept)"
 MSG_SINGBOX_DIRECT_INJECT_FAILED="sing-box config merge failed: could not add the direct outbound to the merged config"
+MSG_SINGBOX_DNS_RESOLVER_INJECT_FAILED="sing-box config merge failed: could not add the default domain resolver to the merged config"
 
 # =============================================================================
 # Domain Messages
@@ -155,6 +156,7 @@ MSG_ACCOUNT_TROJAN_CLASH_TEST_ONLY="Clash Meta config (not in the subscription, 
 MSG_ACCOUNT_TITLE_VMESS_HTTPUPGRADE="VMess HTTPUpgrade TLS [VMess is deprecated by Xray, move to VLESS WS]"
 MSG_ERR_DOMAIN_EMPTY="Domain cannot be empty"
 MSG_ERR_DOMAIN_INVALID="Invalid domain format or contains unsafe characters"
+MSG_ERR_IP_INVALID="Invalid IP address; enter a valid IPv4 or IPv6 address"
 
 # =============================================================================
 # Reality Messages
@@ -642,6 +644,8 @@ MSG_SUBSCRIBE_CONF_UPGRADE_FAILED="Could not rewrite the subscription config fro
 MSG_SINGBOX_DOMAIN_STRATEGY_MIGRATED="Migrated legacy outbound domain_strategy to domain_resolver (field removed since sing-box 1.14)"
 MSG_SINGBOX_RULESET_HTTP_CLIENT_MIGRATED="Migrated rule_set download_detour to http_client (deprecated since sing-box 1.14, refused from 1.15)"
 MSG_SINGBOX_RULESET_RENAMED="Rule-set %s was removed upstream (sing-box cannot start without a remote rule-set it cannot download); switched to %s"
+MSG_SINGBOX_DNS_SPLIT_MIGRATED="DNS / SNI split now resolves through route rules (newer sing-box would not start with the old form, and the split had no effect)"
+MSG_SINGBOX_DNS_SPLIT_WRITE_FAILED="Failed to write the sing-box split config; nothing was changed"
 MSG_SINGBOX_RULESET_HTTP_CLIENT_STRIPPED="Installed sing-box is older than 1.14; stripped rule_set http_client fields (restored automatically after a core upgrade)"
 MSG_GEOSITE_LIST_DOWNLOAD_FAILED="Failed to download the geosite category list; keeping the local copy, or treating every entry as a plain domain when there is none"
 MSG_TLS_RENEW_ACME_FAILED="acme.sh renewal failed; existing certificate kept and services restarted"

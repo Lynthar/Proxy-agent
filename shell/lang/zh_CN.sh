@@ -98,6 +98,7 @@ MSG_ROUTING_TOOLS_CHAIN_ENTRY_REFUSED="这台是 Xray 链式入口，流量都�
 MSG_XRAY_CONF_UNPARSABLE="jq 读不了 %s：本脚本只认标准 JSON（Xray 能读的注释 jq 不认），去掉注释或改正后再启动"
 MSG_SINGBOX_LOCAL_BLOCK_FAILED="sing-box 配置合并失败：「代理用户不许连本机与内网」的规则没能写进配置（保留旧配置）"
 MSG_SINGBOX_DIRECT_INJECT_FAILED="sing-box 配置合并失败：没能给合并结果补上 direct 出站"
+MSG_SINGBOX_DNS_RESOLVER_INJECT_FAILED="sing-box 配置合并失败：没能给合并结果补上默认域名解析器"
 
 # =============================================================================
 # 域名消息 - Domain Messages
@@ -155,6 +156,7 @@ MSG_ACCOUNT_TROJAN_CLASH_TEST_ONLY="Clash Meta 配置（不进订阅，仅供测
 MSG_ACCOUNT_TITLE_VMESS_HTTPUPGRADE="VMess HTTPUpgrade TLS [VMess 已被 Xray 标为弃用，建议迁到 VLESS WS]"
 MSG_ERR_DOMAIN_EMPTY="域名不可为空"
 MSG_ERR_DOMAIN_INVALID="域名格式不合法或包含不安全字符"
+MSG_ERR_IP_INVALID="IP地址格式无效，请输入正确的IPv4或IPv6地址"
 
 # =============================================================================
 # Reality 消息 - Reality Messages
@@ -642,6 +644,8 @@ MSG_SUBSCRIBE_CONF_UPGRADE_FAILED="订阅配置没能按新版模板重写（ngi
 MSG_SINGBOX_DOMAIN_STRATEGY_MIGRATED="已把旧版 outbound domain_strategy 迁移为 domain_resolver（sing-box 1.14 起移除该字段）"
 MSG_SINGBOX_RULESET_HTTP_CLIENT_MIGRATED="已把 rule_set 的 download_detour 迁移为 http_client（sing-box 1.14 起弃用，1.15 起拒绝启动）"
 MSG_SINGBOX_RULESET_RENAMED="规则集 %s 上游已撤（sing-box 下载不到远程规则集就起不来），已换成 %s"
+MSG_SINGBOX_DNS_SPLIT_MIGRATED="DNS / SNI 分流改成按路由解析（旧写法新版 sing-box 起不来，分流也不生效）"
+MSG_SINGBOX_DNS_SPLIT_WRITE_FAILED="写 sing-box 分流配置失败，没有改动"
 MSG_SINGBOX_RULESET_HTTP_CLIENT_STRIPPED="当前 sing-box 内核低于 1.14，已剥离 rule_set 的 http_client 字段（升级内核后自动恢复）"
 MSG_GEOSITE_LIST_DOWNLOAD_FAILED="geosite 分类清单下载失败，沿用本地旧清单；没有旧清单时录入项一律按普通域名处理"
 MSG_TLS_RENEW_ACME_FAILED="acme.sh 续期失败，保留现有证书并恢复服务"

@@ -3923,24 +3923,106 @@ rm -rf "${PP_ROOT}"
 
 echo ""
 
-echo -e "${YELLOW}=== 测试 addSingBoxDNSConfig predefined ===${NC}"
+echo -e "${YELLOW}=== 测试 sing-box 的 DNS / SNI 分流 ===${NC}"
 
-# 函数体里的 heredoc 有顶格 }，按 sed 范围抽会提前截断；抽到下一个函数定义为止
-DNS_FN=$(awk 'f && /^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{/ {exit} /^addSingBoxDNSConfig\(\) \{/ {f=1} f' install.sh)
-assert_not_empty "${DNS_FN}" "addSingBoxDNSConfig：抽到函数原文"
+DNS_FN=""
+# removeUnlockDNS / removeUnlockSNI 的 Xray 分支有带顶格 } 的 heredoc，按 sed 范围抽会截断；抽到下一个函数定义为止
+for _f in addSingBoxDNSConfig initSingBoxRules ensureSingBoxLocalDns migrateSingBoxDnsSplit defaultDomainResolverInject \
+          removeUnlockDNS removeUnlockSNI setUnlockDNS isValidIP isValidDomain; do
+    _body=$(awk -v n="${_f}() {" 'f && /^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{/ {exit} index($0, n) == 1 {f=1} f' install.sh)
+    assert_not_empty "${_body}" "分流：抽到 ${_f} 原文"
+    DNS_FN+="${_body}"$'\n'
+done
 DNS_DIR="${MOCK_ROOT}/sbdns/"
-mkdir -p "${DNS_DIR}"
-# 子 shell 里跑：桩掉规则生成，只看 predefined 怎么拼
-run_dns_predefined() (
-    initSingBoxRules() { echo '{"domainRules":[],"ruleSet":[]}'; }
+# 子 shell 里跑：$1 是要执行的命令；netflix 当成 geosite 分类
+run_dns() (
+    echoContent() { echo "$2" >>"${DNS_DIR}.log"; }
+    t() { echo "$1"; }
+    geositeCategoryExists() { [[ "$1" == "netflix" ]]; }
+    reloadCore() { echo reload >>"${DNS_DIR}.log"; }
     singBoxConfigPath="${DNS_DIR}"
     eval "${DNS_FN}"
-    addSingBoxDNSConfig "$1" "$2" predefined >/dev/null 2>&1
-    jq -c '.dns.servers[] | select(.tag == "hosts") | .predefined' "${DNS_DIR}dns.json" 2>/dev/null || echo invalid
+    eval "$1"
 )
-assert_equals '{"a.example":"1.2.3.4","b.example":"1.2.3.4"}' "$(run_dns_predefined 1.2.3.4 'a.example,b.example')" "addSingBoxDNSConfig：predefined 按域名映射到 IP"
-assert_equals '{"x\"y":"1.2.3.4"}' "$(run_dns_predefined 1.2.3.4 'x"y')" "addSingBoxDNSConfig：域名只当数据进 jq，带引号也不会改写过滤器"
-rm -rf "${DNS_DIR}"
+dns_reset() { rm -rf "${DNS_DIR}" "${DNS_DIR}.log"; mkdir -p "${DNS_DIR}"; }
+# 按文件名顺序拼出合并后的 DNS server 列表，等同 sing-box merge 对数组的拼接
+dns_merged_servers() { jq -s -c '[.[] | .dns.servers // [] | .[] | .tag // "(untagged)"]' "${DNS_DIR}"*.json; }
+
+dns_reset
+run_dns 'addSingBoxDNSConfig 1.2.3.4 "a.example,b.example" predefined' >/dev/null 2>&1
+assert_equals '{"a.example":"1.2.3.4","b.example":"1.2.3.4"}' "$(jq -c '.dns.servers[] | select(.tag == "hosts") | .predefined' "${DNS_DIR}dns.json" 2>/dev/null)" "SNI 分流：predefined 按域名映射到 IP"
+dns_reset
+run_dns "addSingBoxDNSConfig 1.2.3.4 'x\"y' predefined" >/dev/null 2>&1
+assert_equals '{"x\"y":"1.2.3.4"}' "$(jq -c '.dns.servers[] | select(.tag == "hosts") | .predefined' "${DNS_DIR}dns.json" 2>/dev/null)" "SNI 分流：域名只当数据进 jq，带引号也不会改写过滤器"
+
+# 出站拨号只问 default_domain_resolver，分流必须是路由级 resolve；local 只由 02_dns_local.json 定义，再写就重名。
+# 先放好 02_dns_local.json：装过 16、做过 IPv6 分流的机器上它已经在了，重名就出在这种机器上
+dns_reset
+run_dns 'ensureSingBoxLocalDns; addSingBoxDNSConfig 9.9.9.9 "example.com,netflix"' >/dev/null 2>&1
+assert_equals '["local","dnsRouting"]' "$(dns_merged_servers)" "DNS 分流：合并后恰好一个 local，且排在第一（dns.final 缺省取它）"
+assert_equals '[{"domain_regex":["^([a-zA-Z0-9_-]+\\.)*example\\.com"],"action":"resolve","server":"dnsRouting"},{"rule_set":["netflix_dns"],"action":"resolve","server":"dnsRouting"}]' \
+    "$(jq -c '.route.rules' "${DNS_DIR}dns.json" 2>/dev/null)" "DNS 分流：域名与规则集各一条路由级 resolve，指向分流 server"
+assert_equals '9.9.9.9' "$(jq -r '.dns.servers[0].server' "${DNS_DIR}dns.json" 2>/dev/null)" "DNS 分流：上游地址写进 server"
+assert_equals 'true' "$(jq -c '.experimental.cache_file.enabled' "${DNS_DIR}dns.json" 2>/dev/null)" "DNS 分流：有远程规则集就开 cache_file"
+assert_equals 'null' "$(jq -c '.dns.rules' "${DNS_DIR}dns.json" 2>/dev/null)" "DNS 分流：不再写 dns.rules"
+dns_reset
+run_dns 'ensureSingBoxLocalDns; addSingBoxDNSConfig 1.2.3.4 "example.com,netflix" predefined' >/dev/null 2>&1
+assert_equals '[["domain_regex"],null,null]' "$(jq -c '[[.route.rules[] | keys[] | select(. != "action" and . != "server")], .route.rule_set, .experimental]' "${DNS_DIR}dns.json" 2>/dev/null)" "SNI 分流：hosts 只认精确域名，不带规则集与 cache_file"
+assert_equals '["local","hosts"]' "$(dns_merged_servers)" "SNI 分流：合并后恰好一个 local"
+
+# 旧版写法：DNS 分流（azarm 上旧代码真实写出的）、SNI 分流、卸载留下的单个无 tag local
+DNS_OLD_DNS='{"dns":{"servers":[{"tag":"local","type":"local"},{"tag":"dnsRouting","type":"udp","server":"1.1.1.1"}],"rules":[{"rule_set":[],"domain_regex":["^([a-zA-Z0-9_-]+\\.)*example\\.com"],"server":"dnsRouting"}]},"route":{"rule_set":[]}}'
+DNS_OLD_SNI='{"dns":{"servers":[{"tag":"local","type":"local"},{"tag":"hosts","type":"hosts","predefined":{"example.com":"127.0.0.1"}}],"rules":[{"domain_regex":["^([a-zA-Z0-9_-]+\\.)*example\\.com"],"server":"hosts"}]}}'
+dns_reset
+echo "${DNS_OLD_DNS}" >"${DNS_DIR}dns.json"
+run_dns "ensureSingBoxLocalDns; migrateSingBoxDnsSplit '${DNS_DIR}'" >/dev/null 2>&1
+DNS_MIG1=$(cat "${DNS_DIR}dns.json")
+run_dns "migrateSingBoxDnsSplit '${DNS_DIR}'" >/dev/null 2>&1
+assert_equals '[{"domain_regex":["^([a-zA-Z0-9_-]+\\.)*example\\.com"],"action":"resolve","server":"dnsRouting"}]' "$(jq -c '.route.rules' "${DNS_DIR}dns.json" 2>/dev/null)" "迁移：旧 DNS 分流的 dns.rules 改成路由级 resolve"
+assert_equals '["local","dnsRouting"]' "$(dns_merged_servers)" "迁移：去掉与 02_dns_local.json 重名的 local"
+assert_equals "${DNS_MIG1}" "$(cat "${DNS_DIR}dns.json")" "迁移：再跑一遍不变"
+assert_equals '1' "$(grep -c SINGBOX_DNS_SPLIT_MIGRATED "${DNS_DIR}.log" 2>/dev/null)" "迁移：只在真改了的那次提示"
+dns_reset
+echo "${DNS_OLD_SNI}" >"${DNS_DIR}dns.json"
+run_dns "migrateSingBoxDnsSplit '${DNS_DIR}'" >/dev/null 2>&1
+assert_equals '{"servers":["local","hosts"],"rules":[{"domain_regex":["^([a-zA-Z0-9_-]+\\.)*example\\.com"],"action":"resolve","server":"hosts"}]}' \
+    "$(jq -c -n --argjson s "$(dns_merged_servers)" --slurpfile d "${DNS_DIR}dns.json" '{servers: $s, rules: $d[0].route.rules}')" "迁移：旧 SNI 分流同样改写"
+dns_reset
+echo '{"dns":{"servers":[{"type":"local"}]}}' >"${DNS_DIR}dns.json"
+run_dns "migrateSingBoxDnsSplit '${DNS_DIR}'" >/dev/null 2>&1
+assert_equals 'absent' "$([[ -e "${DNS_DIR}dns.json" ]] && echo present || echo absent)" "迁移：旧版卸载留下的单个无 tag local 整个删掉"
+dns_reset
+DNS_OTHER='{"dns":{"servers":[{"tag":"local","type":"local"},{"tag":"x","type":"udp","server":"8.8.8.8"}]}}'
+echo "${DNS_OTHER}" >"${DNS_DIR}dns.json"
+run_dns "migrateSingBoxDnsSplit '${DNS_DIR}'" >/dev/null 2>&1
+assert_equals "${DNS_OTHER}" "$(cat "${DNS_DIR}dns.json")" "迁移：认不出的形状不动"
+
+# 合并后注入：两个以上 server 又没定 default_domain_resolver 才补 local；已有的值不碰
+dns_inject() { dns_reset; echo "$1" >"${DNS_DIR}m.json"; run_dns "defaultDomainResolverInject '${DNS_DIR}m.json'" >/dev/null 2>&1; jq -c '{s: [.dns.servers[]? | .tag // "-"], r: .route.default_domain_resolver}' "${DNS_DIR}m.json"; }
+assert_equals '{"s":["local","dnsRouting"],"r":"local"}' "$(dns_inject '{"dns":{"servers":[{"tag":"local","type":"local"},{"tag":"dnsRouting","type":"udp","server":"1.1.1.1"}]}}')" "注入：两个 server 缺解析器时指向 local"
+assert_equals '{"s":["google","local"],"r":"google"}' "$(dns_inject '{"dns":{"servers":[{"tag":"google","type":"udp","server":"8.8.8.8"},{"tag":"local","type":"local"}]},"route":{"default_domain_resolver":"google"}}')" "注入：链式写的 google 不碰"
+assert_equals '{"s":["local"],"r":null}' "$(dns_inject '{"dns":{"servers":[{"tag":"local","type":"local"}]}}')" "注入：单个 server 不补"
+assert_equals '{"s":["a","b","local"],"r":"local"}' "$(dns_inject '{"dns":{"servers":[{"tag":"a","type":"udp","server":"8.8.8.8"},{"tag":"b","type":"udp","server":"1.1.1.1"}]}}')" "注入：没有 local 时补一个再指向它"
+
+# 卸载：sing-box 这边整个删 dns.json，02_dns_local.json 留着（IPv6 分流、16 都引用它）
+for _rm in removeUnlockDNS removeUnlockSNI; do
+    dns_reset
+    run_dns 'addSingBoxDNSConfig 9.9.9.9 "example.com"' >/dev/null 2>&1
+    run_dns "coreKind=2; ${_rm}" >/dev/null 2>&1
+    assert_equals 'absent kept' "$([[ -e "${DNS_DIR}dns.json" ]] && echo present || echo absent) $([[ -e "${DNS_DIR}02_dns_local.json" ]] && echo kept || echo gone)" "${_rm}：删 dns.json，留 02_dns_local.json"
+done
+
+# 入口：DNS 地址与域名都会进核心配置，非法值在读入时拒绝，什么都不写
+dns_set() {
+    dns_reset
+    printf '%s\n' "$@" | run_dns 'coreKind=2; ensureDirectOutbound() { :; }; addXrayDNSConfig() { :; }; setUnlockDNS' >/dev/null 2>&1
+    echo "rc=$? $([[ -e "${DNS_DIR}dns.json" ]] && echo written || echo none)"
+}
+assert_equals 'rc=1 none' "$(dns_set '1.1.1.x' 'example.com')" "DNS 分流入口：非法 DNS 地址被拒"
+assert_equals 'rc=1 none' "$(dns_set '1.1.1.1' 'exa(mple.com')" "DNS 分流入口：带正则元字符的域名被拒"
+assert_equals 'rc=1 none' "$(dns_set '1.1.1.1' ',')" "DNS 分流入口：域名为空被拒"
+assert_equals 'rc=0 written' "$(dns_set '1.1.1.1' 'example.com,netflix')" "DNS 分流入口：合法输入写入并以 0 退出"
+rm -rf "${DNS_DIR}" "${DNS_DIR}.log"
 
 echo ""
 
