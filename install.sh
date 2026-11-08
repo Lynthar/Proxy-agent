@@ -2042,7 +2042,7 @@ installTools() {
     else
         if ! command -v nginx >/dev/null 2>&1; then
             echoContent green " ---> 安装nginx"
-            installNginxTools
+            installNginxTools || exit 1
         else
             nginxVersion=$(nginx -v 2>&1)
             nginxVersion=$(echo "${nginxVersion}" | awk -F "[n][g][i][n][x][/]" '{print $2}' | awk -F "[.]" '{print $2}')
@@ -2052,7 +2052,7 @@ installTools() {
                     ${removeType} nginx >/dev/null 2>&1
                     echoContent yellow " ---> nginx卸载完成"
                     echoContent green " ---> 安装nginx"
-                    installNginxTools >/dev/null 2>&1
+                    installNginxTools || exit 1
                 else
                     exit 0
                 fi
@@ -2308,7 +2308,10 @@ EOF
     elif [[ "${release}" == "alpine" ]]; then
         rm "${nginxConfigPath}default.conf"
     fi
-    ${installType} nginx >/dev/null 2>&1
+    if ! ${installType} nginx >/dev/null 2>&1; then
+        echoContent red " ---> $(t NGINX_INSTALL_FAILED)"
+        return 1
+    fi
     bootStartup nginx
 }
 
@@ -4879,16 +4882,10 @@ initShadowTlsConfig() {
     echoContent green "\n ---> $(t SHADOWTLS_TARGET_CHOSEN "${shadowTlsTarget}")"
 }
 
-# firewalld设置端口跳跃
+# addFirewalldPortHopping START END TARGET → 一条区间转发：逐端口加的话 1000 个端口要一分半，删也一样。
+# 本机转发落成 nft 的 redirect，用不着 masquerade；开 masquerade 会顺带打开 ip_forward，把主机变成路由器
 addFirewalldPortHopping() {
-
-    local start=$1
-    local end=$2
-    local targetPort=$3
-    for port in $(seq "$start" "$end"); do
-        firewall-cmd --permanent --add-forward-port=port="${port}":proto=udp:toport="${targetPort}"
-    done
-    firewall-cmd --reload
+    firewall-cmd --permanent --add-forward-port=port="$1-$2":proto=udp:toport="$3" && firewall-cmd --reload
 }
 
 # 端口跳跃
@@ -4938,8 +4935,6 @@ addPortHopping() {
         else
             echoContent green "\n端口范围: ${portHoppingRange}\n"
             if [[ "${release}" == "centos" ]]; then
-                firewall-cmd --permanent --add-masquerade
-                firewall-cmd --reload
                 addFirewalldPortHopping "${portStart}" "${portEnd}" "${targetPort}"
                 if ! firewall-cmd --list-forward-ports | grep -q "toport=${targetPort}"; then
                     echoContent red " ---> 端口跳跃添加失败"
@@ -4961,6 +4956,13 @@ addPortHopping() {
     fi
 }
 
+# firewallForwardPortSpecs TARGET → 转发到本机 TARGET 端口的 udp 规则的源端口，一行一个（30000 或 30000-30999）。
+# 旧版逐端口加、现在一条区间，两种都认；转发到别的主机（toaddr 非空）的不是跳跃规则
+firewallForwardPortSpecs() {
+    [[ -n "$1" ]] || return 0
+    firewall-cmd --list-forward-ports | sed -nE "s/^port=([0-9]+(-[0-9]+)?):proto=udp:toport=$1:toaddr=\$/\1/p"
+}
+
 # 读取端口跳跃的配置
 readPortHopping() {
     local type=$1
@@ -4969,8 +4971,9 @@ readPortHopping() {
     local portHoppingEnd=
 
     if [[ "${release}" == "centos" ]]; then
-        portHoppingStart=$(firewall-cmd --list-forward-ports | grep "toport=${targetPort}:" | head -1 | cut -d ":" -f 1 | cut -d "=" -f 2)
-        portHoppingEnd=$(firewall-cmd --list-forward-ports | grep "toport=${targetPort}:" | tail -n 1 | cut -d ":" -f 1 | cut -d "=" -f 2)
+        read -r portHoppingStart portHoppingEnd < <(firewallForwardPortSpecs "${targetPort}" | awk -F- '
+            { s = $1 + 0; e = (NF > 1 ? $2 : $1) + 0; if (min == "" || s < min) min = s; if (max == "" || e > max) max = e }
+            END { if (min != "") print min, max }')
     else
         if iptables-save | grep -q "Proxy-agent_${type}_portHopping"; then
             local portHopping=
@@ -4997,9 +5000,10 @@ deletePortHoppingRules() {
     local targetPort=$4
 
     if [[ "${release}" == "centos" ]]; then
-        for port in $(seq "${start}" "${end}"); do
-            firewall-cmd --permanent --remove-forward-port=port="${port}":proto=udp:toport="${targetPort}" >/dev/null
-        done
+        local spec
+        while read -r spec; do
+            [[ -n "${spec}" ]] && firewall-cmd --permanent --remove-forward-port=port="${spec}":proto=udp:toport="${targetPort}" >/dev/null
+        done < <(firewallForwardPortSpecs "${targetPort}")
         firewall-cmd --reload >/dev/null
     else
         # 必须按读到的行号降序删：本脚本的规则是 -A 追加在链尾，固定删
@@ -18018,7 +18022,7 @@ installSubscribe() {
             echoContent yellow "未检测到nginx，无法使用订阅服务\n"
             read -r -p "是否安装[y/n]？" installNginxStatus
             if isYesInput "${installNginxStatus}"; then
-                installNginxTools
+                installNginxTools || exit 1
                 nginxVersion=$(nginx -v 2>&1)
             else
                 echoContent red " ---> 放弃安装nginx\n"

@@ -5260,7 +5260,7 @@ assert_equals "finished|rc=0" "$(run_it 0 | paste -sd'|' -)" "已有证书且匹
 assert_equals "rc=1" "$(run_it 1 | paste -sd'|' -)" "已有证书与私钥不匹配：退出（还在保护区间内，旧服务会拉回来）"
 
 # --- 协议卸载带走跳跃规则：iptables 按标记删；firewalld 只能按目标端口认，读不到端口就不动 ---
-RH_FN=$(sed -n '/^readPortHopping() {/,/^}/p;/^deletePortHoppingRules() {/,/^}/p;/^removeProtocolPortHopping() {/,/^}/p' install.sh)
+RH_FN=$(sed -n '/^firewallForwardPortSpecs() {/,/^}/p;/^readPortHopping() {/,/^}/p;/^deletePortHoppingRules() {/,/^}/p;/^removeProtocolPortHopping() {/,/^}/p' install.sh)
 RH_DIR="${MOCK_ROOT}/hoprm"
 mkdir -p "${RH_DIR}"
 echo '{"inbounds":[{"listen_port":443}]}' >"${RH_DIR}/06.json"
@@ -5288,12 +5288,12 @@ assert_equals "iptables -t nat -D PREROUTING 4|iptables -t nat -D PREROUTING 2|p
 assert_equals "" "$(run_rh_ipt tuic "${RH_DIR}/06.json")" "iptables：这个协议没有跳跃规则就什么都不动"
 # run_rh_fw FRAGMENT → firewalld 桩：两条指向 443 的跳跃、一条用户自己指向 4430 的转发；删除调用打到 stderr（真代码把 stdout 丢了）
 run_rh_fw() {
-    env RH_FN="${RH_FN}" bash -c '
+    env RH_FN="${RH_FN}" RH_LIST="${RH_LIST:-port=30000:proto=udp:toport=443:toaddr=\nport=30001:proto=udp:toport=443:toaddr=\nport=8080:proto=tcp:toport=4430:toaddr=\n}" bash -c '
         eval "${RH_FN}"
         systemctl() { return 0; }
         firewall-cmd() {
             case "$*" in
-                --list-forward-ports) printf "port=30000:proto=udp:toport=443:toaddr=\nport=30001:proto=udp:toport=443:toaddr=\nport=8080:proto=tcp:toport=4430:toaddr=\n" ;;
+                --list-forward-ports) printf "%b" "${RH_LIST}" ;;
                 *remove-forward-port*) echo "$*" >&2 ;;
             esac
         }
@@ -5303,6 +5303,27 @@ run_rh_fw() {
 assert_equals "--permanent --remove-forward-port=port=30000:proto=udp:toport=443|--permanent --remove-forward-port=port=30001:proto=udp:toport=443" \
     "$(run_rh_fw "${RH_DIR}/06.json")" "firewalld：只删指向这个协议端口的转发，4430 不是 443"
 assert_equals "" "$(run_rh_fw "${RH_DIR}/missing.json")" "firewalld：读不到目标端口就不动（空端口的 toport= 会匹配到用户自己的转发）"
+# 现在一条区间；转发到别的主机的（toaddr 非空）不是跳跃规则
+assert_equals "--permanent --remove-forward-port=port=30000-30999:proto=udp:toport=443" \
+    "$(RH_LIST='port=30000-30999:proto=udp:toport=443:toaddr=\nport=40000:proto=udp:toport=443:toaddr=10.0.0.2\n' run_rh_fw "${RH_DIR}/06.json")" "firewalld：区间规则一条删掉，转发到别的主机的不动"
+# 加规则：一条区间，不开 masquerade（本机转发用不着，开了还会顺带打开 ip_forward）
+AF_FN=$(sed -n '/^addFirewalldPortHopping() {/,/^}/p' install.sh)
+assert_equals "--permanent --add-forward-port=port=30000-30999:proto=udp:toport=443|--reload" \
+    "$(env AF_FN="${AF_FN}" bash -c 'eval "${AF_FN}"; firewall-cmd() { echo "$*"; }; addFirewalldPortHopping 30000 30999 443' | paste -sd'|' -)" "firewalld 加跳跃：一条区间规则再 reload"
+assert_equals "" "$(grep -n 'add-masquerade' install.sh)" "端口跳跃不开 masquerade"
+# installNginxTools：装不上要返回 1 并说明，不能让安装流程走到起 nginx 时才报「启动失败」
+NT_FN=$(sed -n '/^installNginxTools() {/,/^}/p' install.sh)
+run_nt() {
+    env NT_FN="${NT_FN}" NT_RC="$1" bash -c '
+        eval "${NT_FN}"
+        release=debian; installType=nt_install
+        nt_install() { return "${NT_RC}"; }
+        apt() { :; }; tee() { cat >/dev/null; }; curl() { :; }; mv() { :; }; lsb_release() { echo bookworm; }
+        echoContent() { echo "$2"; }; t() { echo "$1"; }; bootStartup() { echo "bootStartup $1"; }
+        installNginxTools; echo "rc=$?"' 2>&1 | paste -sd'|' -
+}
+assert_equals " ---> NGINX_INSTALL_FAILED|rc=1" "$(run_nt 100)" "installNginxTools：包没装上返回 1 并说明，不设开机自启"
+assert_equals "bootStartup nginx|rc=0" "$(run_nt 0)" "installNginxTools：装上了照常设开机自启"
 
 # --- 卸载收回带标记的放行：没标记的是用户自己的；ufw、firewalld 认不出，列出来不动 ---
 RF_FN=$(sed -n '/^sshListenPorts() {/,/^}/p;/^isOwnRuleOnSshPort() {/,/^}/p;/^removeOwnFirewallRules() {/,/^}/p' install.sh)
