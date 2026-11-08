@@ -38,6 +38,8 @@ readme)
     wget -qO /tmp/bundle.tgz "${REPO_URL}/releases/download/${latestTag}/lib_bundle.tar.gz"
     assert_equals "" "$(tar -tzf /tmp/bundle.tgz | grep -E '\.sh$' | grep -v 'loader\.sh$' | while read -r f; do [[ -s "${INSTALL_ROOT}/${f#./}" ]] || echo "${f}"; done)" \
         "只下了 install.sh，lib/ 与 shell/lang/ 由 Release 的 lib_bundle 补齐（loader.sh 只为老版本的更新流程留在 tag 上，装机不用）"
+    assert_equals "" "$(find "${INSTALL_ROOT}/lib" "${INSTALL_ROOT}/shell/lang" "${INSTALL_ROOT}/VERSION" ! -uid 0 -o ! -gid 0 2>&1)" \
+        "自举补齐的文件都归 root（root 每次运行都 source 它们，归了别的 uid 那个账号就能以 root 执行）"
     assert_equals "active" "$(systemctl is-active xray 2>/dev/null)" "Xray 在跑"
     ;;
 update)
@@ -60,6 +62,8 @@ update)
     V2RAY_LANG=en pasly topo --out /tmp/smoke-topo.html >>"${LOG}" 2>&1
     assert_equals "0" "$?" "自更新后新模块补齐：pasly topo 退出码 0"
     assert_contains "$(cat /tmp/smoke-topo.html 2>/dev/null)" "<svg" "自更新后 pasly topo 生成了页面"
+    assert_equals "" "$(find "${INSTALL_ROOT}/lib" "${INSTALL_ROOT}/shell/lang" -name '*.sh' ! -name loader.sh \( ! -uid 0 -o ! -gid 0 \) 2>&1)" \
+        "自更新后模块与语言文件都归 root"
     listing=$(printf '22\n2\n0\n' | V2RAY_LANG=en pasly 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
     idx=$(sed -n "s/^\([0-9][0-9]*\)\. ${OLD_TAG} (GitHub)$/\1/p" <<<"${listing}")
     assert_not_empty "${idx}" "回滚菜单列出 ${OLD_TAG}（GitHub）"

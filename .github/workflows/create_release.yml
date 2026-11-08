@@ -63,11 +63,9 @@ jobs:
       - name: Build lib_bundle.tar.gz + SHA256
         if: ${{ steps.version.outputs.file_version != steps.latest.outputs.result }}
         run: |
-          # Bundle lib/, shell/lang/, and VERSION into a single tarball that
-          # install.sh's _bootstrap_libs can fetch when lib/ is missing locally.
-          # SHA256 is published alongside so bootstrap can do strong verification
-          # (matches the install.sh.sha256 pattern above).
-          tar czf lib_bundle.tar.gz lib/ shell/lang/ VERSION
+          # What install.sh's _bootstrap_libs fetches when lib/ is missing, with its SHA256 alongside.
+          # Owned by root: root's tar restores the archived owner, and the runner's uid would own scripts root sources.
+          tar --owner=0 --group=0 --numeric-owner -czf lib_bundle.tar.gz lib/ shell/lang/ VERSION
           BUNDLE_HASH=$(sha256sum lib_bundle.tar.gz | awk '{print $1}')
           echo "${BUNDLE_HASH}  lib_bundle.tar.gz" > lib_bundle.tar.gz.sha256
           echo "Bundle SHA256: ${BUNDLE_HASH}"

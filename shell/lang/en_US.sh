@@ -641,6 +641,7 @@ MSG_SUBSCRIBE_CONF_UPGRADED="Subscription config rewritten from the new template
 MSG_SUBSCRIBE_CONF_UPGRADE_FAILED="Could not rewrite the subscription config from the new template (nginx -t failed); %s left as it was"
 MSG_SINGBOX_DOMAIN_STRATEGY_MIGRATED="Migrated legacy outbound domain_strategy to domain_resolver (field removed since sing-box 1.14)"
 MSG_SINGBOX_RULESET_HTTP_CLIENT_MIGRATED="Migrated rule_set download_detour to http_client (deprecated since sing-box 1.14, refused from 1.15)"
+MSG_SINGBOX_RULESET_RENAMED="Rule-set %s was removed upstream (sing-box cannot start without a remote rule-set it cannot download); switched to %s"
 MSG_SINGBOX_RULESET_HTTP_CLIENT_STRIPPED="Installed sing-box is older than 1.14; stripped rule_set http_client fields (restored automatically after a core upgrade)"
 MSG_GEOSITE_LIST_DOWNLOAD_FAILED="Failed to download the geosite category list; keeping the local copy, or treating every entry as a plain domain when there is none"
 MSG_TLS_RENEW_ACME_FAILED="acme.sh renewal failed; existing certificate kept and services restarted"

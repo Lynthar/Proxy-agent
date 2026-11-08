@@ -979,6 +979,38 @@ env SB_BAK_DIR="${SB_BAK_DIR}" SB_BAK_FN="$(sed -n '/^ensureSingBoxLocalDns() {/
 assert_equals "null|null" "$(jq -r '.route.rule_set[0] | "\(.download_detour)|\(.http_client)"' "${SB_BAK_DIR}r.json")" "sing-box 片段的 rule_set 迁移走了一个来回（1.14 迁入、更早的内核去掉）"
 assert_equals "" "$(ls "${SB_BAK_DIR}" | grep '\.bak')" "sing-box 片段目录：补写与迁移都不留 .bak 文件"
 rm -rf "${SB_BAK_DIR}"
+# 旧版「开发者」预设写进片段的 stackoverflow 上游已撤（404），sing-box 拉不到就起不来；合并前换成 stackexchange
+RS_DIR=$(mktemp -d)/
+RS_BASE=https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite
+jq -n --arg b "${RS_BASE}" '{route: {rule_set: (["github", "gitlab", "stackoverflow"] | map({tag: "geosite-\(.)", type: "remote", format: "binary", url: "\($b)/\(.).srs"})),
+    rules: [{action: "sniff"}, {rule_set: ["geosite-github", "geosite-gitlab", "geosite-stackoverflow"], outbound: "chain_a"}, {inbound: ["in"], outbound: "direct"}]}}' >"${RS_DIR}chain_route.json"
+jq -n --arg b "${RS_BASE}" '{route: {rule_set: (["stackoverflow", "stackexchange"] | map({tag: "geosite-\(.)", type: "remote", format: "binary", url: "\($b)/\(.).srs"})),
+    rules: [{rule_set: ["geosite-stackexchange", "geosite-stackoverflow"], outbound: "chain_b"}, {rule_set: "geosite-stackoverflow", outbound: "chain_c"}]}}' >"${RS_DIR}both.json"
+printf '%s\n' '{"outbounds":[{"type":"direct","tag":"direct"}]}' >"${RS_DIR}plain.json"
+RS_PLAIN_BEFORE=$(cat "${RS_DIR}plain.json")
+RS_FN=$(sed -n '/^migrateRetiredRuleSets() {/,/^}/p' install.sh)
+assert_not_empty "${RS_FN}" "migrateRetiredRuleSets：抽到函数原文"
+rs_run() {
+    env RS_FN="${RS_FN}" RS_DIR="${RS_DIR}" V2RAY_LANG=en bash -c '
+        source lib/i18n.sh; source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh
+        echoContent() { printf "%s\n" "$2"; }
+        eval "${RS_FN}"; migrateRetiredRuleSets "${RS_DIR}"' 2>&1
+}
+_out=$(rs_run)
+assert_contains "${_out}" "geosite-stackoverflow" "旧规则集迁移：换了就提示一次"
+assert_equals "geosite-github geosite-gitlab geosite-stackexchange|${RS_BASE}/stackexchange.srs" \
+    "$(jq -r '([.route.rule_set[].tag] | join(" ")) + "|" + (.route.rule_set[] | select(.tag == "geosite-stackexchange") | .url)' "${RS_DIR}chain_route.json")" \
+    "旧规则集迁移：定义的名字与地址都换成 stackexchange"
+assert_equals '[{"action":"sniff"},{"rule_set":["geosite-github","geosite-gitlab","geosite-stackexchange"],"outbound":"chain_a"},{"inbound":["in"],"outbound":"direct"}]' \
+    "$(jq -c '.route.rules' "${RS_DIR}chain_route.json")" "旧规则集迁移：引用它的规则跟着换，其余规则不动"
+assert_equals 'geosite-stackexchange|["geosite-stackexchange"]|geosite-stackexchange' \
+    "$(jq -r '([.route.rule_set[].tag] | join(" ")) + "|" + (.route.rules[0].rule_set | tojson) + "|" + .route.rules[1].rule_set' "${RS_DIR}both.json")" \
+    "旧规则集迁移：新旧都在时合成一个，不留重复的 tag（sing-box 拒绝重复）"
+assert_equals "${RS_PLAIN_BEFORE}" "$(cat "${RS_DIR}plain.json")" "旧规则集迁移：没有它的片段原样不动"
+assert_equals "" "$(rs_run)" "旧规则集迁移：迁过一次之后不再改、不再提示"
+assert_equals "" "$(ls "${RS_DIR}" | grep -v '^\(chain_route\|both\|plain\)\.json$')" "旧规则集迁移：片段目录不留备份与临时文件"
+rm -rf "${RS_DIR}"
+unset -f rs_run
 assert_equals "0" "$(jq '[.http_clients[]? | select(has("detour"))] | length' docs/sing-box.json)" \
     "docs/sing-box.json：客户端模板的 http_clients 不带 detour（指向空 direct 时 1.14 客户端启动即 FATAL）"
 
@@ -1747,7 +1779,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试拼车钩子与 tick ===${NC}"
 
-CP_FN_NAMES="applyAccountChangeAllProtocols carpoolSyncUserinfo xrayConfigTest readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled xrayDaemonRunning carpoolCurrentClientsMap ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolMachineStep carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolGuardAccountMenu carpoolCheckPrerequisites carpoolPickApiPort carpoolApiReady carpoolAllAccounts carpoolFillUuids carpoolRemoveCron carpoolRemoveSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable carpoolHasTty carpoolApply carpoolResetUsage carpoolShowUsage carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolInsertPageBlock carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMembersClean carpoolMembersEditApply carpoolPickMember carpoolAsk carpoolShowProtocolChoices carpoolShowMemberLinks carpoolMemberAdd carpoolMemberEdit carpoolMemberMenu carpoolMenu addUser removeUser cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountStateFile chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget"
+CP_FN_NAMES="applyAccountChangeAllProtocols carpoolSyncUserinfo xrayConfigTest readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled xrayDaemonRunning carpoolCurrentClientsMap ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolMachineStep carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolGuardAccountMenu carpoolCheckPrerequisites carpoolPickApiPort carpoolApiReady carpoolAllAccounts carpoolFillUuids carpoolRemoveCron removeSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable carpoolHasTty carpoolApply carpoolResetUsage carpoolShowUsage carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolInsertPageBlock carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMembersClean carpoolMembersEditApply carpoolPickMember carpoolAsk carpoolShowProtocolChoices carpoolShowMemberLinks carpoolMemberAdd carpoolMemberEdit carpoolMemberMenu carpoolMenu addUser removeUser cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountStateFile chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget"
 CP_FNS=$(sed -n "$(for _f in ${CP_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_not_empty "${CP_FNS}" "拼车：抽到 install.sh 原文"
 assert_equals "$(wc -w <<<"${CP_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CP_FNS}")" "拼车：每个函数都抽到了（抽不到说明函数体里出现了顶格的 }）"
@@ -2397,8 +2429,8 @@ _out=$(run_cp 'jq ".enabled = false" "${CARPOOL_STATE_FILE}" > "${CARPOOL_STATE_
 assert_contains "${_out}" "拼车未开启" "应用（没开）：提示"
 cp_reset_tree
 for _d in default clashMeta clashMetaProfiles sing-box sing-box_profiles carpool; do mkdir -p "${CP_ROOT}/subscribe/${_d}"; echo x >"${CP_ROOT}/subscribe/${_d}/${CP_ALICE_MD5}"; done
-run_cp 'carpoolRemoveSubscriptionFiles alice' >/dev/null 2>&1
-assert_equals "${CP_ROOT}/subscribe/carpool/${CP_ALICE_MD5}" "$(ls "${CP_ROOT}"/subscribe/*/"${CP_ALICE_MD5}" 2>/dev/null)" "carpoolRemoveSubscriptionFiles：五个订阅目录都删，页面目录不归它管"
+run_cp 'removeSubscriptionFiles alice' >/dev/null 2>&1
+assert_equals "${CP_ROOT}/subscribe/carpool/${CP_ALICE_MD5}" "$(ls "${CP_ROOT}"/subscribe/*/"${CP_ALICE_MD5}" 2>/dev/null)" "removeSubscriptionFiles：五个订阅目录都删，页面目录不归它管"
 
 # --- 清零 ---
 cp_reset_tree
@@ -3988,15 +4020,10 @@ run_cron UpdateGeo 0 >/dev/null; assert_equals "0" "$?" "cronFunction UpdateGeo�
 assert_equals "1" "$(grep -c 'geo更新日期' "${CRON_ROOT}/crontab_updateGeoSite.log")" \
     "cronFunction UpdateGeo：更新成功时日志里写一行「更新日期」"
 assert_equals "0" "$(run_cron RenewTLS 0 | grep -c fell-through)" "cronFunction：认出 cron 任务名后进程一定退出"
-# Debian / RHEL 的 cron 只给任务 PATH=/usr/bin:/bin（2026-10-31 实测）；任务里要能找到 sbin 下的 nginx、rc-service
-CRON_JOB_PATH=$(env -i PATH=/usr/bin:/bin PROXY_AGENT_DIR="${CRON_ROOT}" CRON_FN="${CRON_FN}" "${BASH}" -c '
-    cronName=CarpoolTick
-    carpoolTick() { printf "%s\n" "${PATH}" >&3; }
-    carpoolTickExitTrap() { :; }
-    eval "${CRON_FN}"
-    cronFunction' 3>&1 >/dev/null 2>&1)
-assert_contains ":${CRON_JOB_PATH}:" ":/usr/sbin:" "cron 任务在 PATH=/usr/bin:/bin 下启动，跑到任务时 PATH 含 /usr/sbin"
-assert_contains ":${CRON_JOB_PATH}:" ":/sbin:" "cron 任务在 PATH=/usr/bin:/bin 下启动，跑到任务时 PATH 含 /sbin"
+# Debian / RHEL 的 cron 只给任务 PATH=/usr/bin:/bin（2026-10-31 实测）；定时任务要找 sbin 下的 nginx、rc-service，doctor 要找 iptables、getenforce
+CRON_JOB_PATH=$(env -i PATH=/usr/bin:/bin PROXY_AGENT_DIR="${CRON_ROOT}" "${BASH}" -c 'source ./install.sh >/dev/null 2>&1 || exit 1; printf "%s\n" "${PATH}"')
+assert_contains ":${CRON_JOB_PATH}:" ":/usr/sbin:" "install.sh 在 PATH=/usr/bin:/bin 下启动，分发到任何入口（定时任务、doctor）之前 PATH 已含 /usr/sbin"
+assert_contains ":${CRON_JOB_PATH}:" ":/sbin:" "install.sh 在 PATH=/usr/bin:/bin 下启动，分发到任何入口之前 PATH 已含 /sbin"
 
 DNS_FN=$(sed -n '/^checkDNSIP() {/,/^}/p' install.sh)
 assert_not_empty "${DNS_FN}" "checkDNSIP：抽到函数原文"
@@ -4709,7 +4736,7 @@ ah_src() {
         awk -v n="${n}" 'f && /^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{/ {exit} index($0, n "() {") == 1 {f=1} f' install.sh
     done
 }
-AH_NAMES="testChainConnection getExternalNodeById initExternalNodeFile updateChainKey configureProtocolChainRouting applyProtocolChainRouting generateProtocolChainRoute saveProtocolRoutingPreference writeChainEntryRoute writeChainInfoAtomic multiChainRestoreAccounts chainAccountAssignPorts chainAccountReadState chainAccountStateFile setupMultiChainEntry removeUser shareQrCode"
+AH_NAMES="testChainConnection getExternalNodeById initExternalNodeFile updateChainKey configureProtocolChainRouting applyProtocolChainRouting generateProtocolChainRoute saveProtocolRoutingPreference writeChainEntryRoute writeChainInfoAtomic multiChainRestoreAccounts chainAccountAssignPorts chainAccountReadState chainAccountStateFile setupMultiChainEntry removeUser shareQrCode removeSubscriptionFiles carpoolSubscribeMd5"
 AH_FN=$(ah_src ${AH_NAMES})
 assert_equals "$(wc -w <<<"${AH_NAMES}" | tr -d ' ')" "$(grep -cE '^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{$' <<<"${AH_FN}")" "链式与账号菜单：函数都抽到了"
 AH_ROOT="${MOCK_ROOT}/ah.root"
@@ -4723,7 +4750,7 @@ ah_reset() {
 # run_ah CALL → 跑 CALL，stdin 照传；AH_MERGE_FAIL=1 让合并失败
 run_ah() {
     env PROXY_AGENT_DIR="${AH_ROOT}" AH_FN="${AH_FN}" V2RAY_LANG=zh_CN AH_MERGE_FAIL="${AH_MERGE_FAIL:-}" bash -c '
-        source lib/i18n.sh; source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh
+        source lib/i18n.sh; source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh; source lib/carpool.sh
         eval "${AH_FN}"
         echoContent() { printf "%s\n" "$2"; }
         _chainTCPProbe() { echo "PROBE $1:$2"; return 1; }
@@ -4836,6 +4863,34 @@ assert_equals "0" "$(grep -c APPLY <<<"${_out}")" "删除用户（没有输入�
 _out=$(printf '1\ny\n' | run_ah "${AH_RM}")
 assert_contains "${_out}" "APPLY delName alice" "删除用户（答 y）：按名字删"
 assert_contains "$(printf '1\ny\n' | run_ah 'read -r -p "$(t REMOVE_USER_CONFIRM alice)" x; printf "%s" "$(t REMOVE_USER_CONFIRM alice)"')" "确认删除用户 alice" "删除用户：确认提示点名"
+# 删掉的人五种格式的订阅文件都要没（subscribe 只清 default/ 与 clashMeta/）；文件按名字第一段命名，还有人用这一段就不删
+ah_rm_subs() {
+    local n d
+    mkdir -p "${AH_ROOT}/subscribe_local/default"
+    printf 'salt1\n' >"${AH_ROOT}/subscribe_local/subscribeSalt"
+    for n in "$@"; do
+        : >"${AH_ROOT}/subscribe_local/default/${n}"
+        for d in default clashMeta clashMetaProfiles sing-box sing-box_profiles; do
+            mkdir -p "${AH_ROOT}/subscribe/${d}"
+            echo x >"${AH_ROOT}/subscribe/${d}/$(printf '%s%s\n' "${n}" salt1 | md5sum | awk '{print $1}')"
+        done
+    done
+}
+ah_subs_of() { find "${AH_ROOT}/subscribe" -name "$(printf '%s%s\n' "$1" salt1 | md5sum | awk '{print $1}')" | wc -l | tr -d ' '; }
+ah_rm_with_sub() {
+    printf '%s\ny\n' "$1" | run_ah "carpoolGuardAccountMenu() { return 1; }; applyAccountChangeAllProtocols() { :; }; chainAccountForget() { :; }; readNginxSubscribe() { subscribePort=443; }; subscribe() { rm -f \"\${SUBSCRIBE_LOCAL_DIR}/default/$2\"; }; manageAccount() { :; }; configPath=\"\${XRAY_CONF_DIR}/\" coreKind=1 frontingType=02_VLESS_TCP_inbounds; removeUser" >/dev/null
+}
+ah_reset
+jq -n '{inbounds: [{settings: {clients: [{id: "u1", email: "alice-VLESS_TCP"}, {id: "u2", email: "bob-VLESS_TCP"}]}}]}' >"${AH_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
+ah_rm_subs alice bob
+ah_rm_with_sub 1 alice
+assert_equals "0|5" "$(ah_subs_of alice)|$(ah_subs_of bob)" "删除用户：他的五个订阅文件都删了（sing-box 与 Clash 的不再按老地址给），别人的不动"
+ah_reset
+jq -n '{inbounds: [{settings: {clients: [{id: "u1", email: "alice-VLESS_TCP"}, {id: "u2", email: "alice-2-VLESS_TCP"}]}}]}' >"${AH_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
+ah_rm_subs alice
+ah_rm_with_sub 2 nobody
+assert_equals "5" "$(ah_subs_of alice)" "删除用户：删 alice-2 时 alice 还在用同一个订阅文件，不删"
+unset -f ah_rm_subs ah_subs_of ah_rm_with_sub
 
 # 二维码只在本机生成，分享链接不发给第三方
 assert_equals "0" "$(grep -c 'qrserver' install.sh)" "二维码：脚本里没有第三方二维码服务"

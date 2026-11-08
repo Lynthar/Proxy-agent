@@ -641,6 +641,7 @@ MSG_SUBSCRIBE_CONF_UPGRADED="订阅配置已按新版模板重写，订阅地址
 MSG_SUBSCRIBE_CONF_UPGRADE_FAILED="订阅配置没能按新版模板重写（nginx -t 不通过），%s 保持原样"
 MSG_SINGBOX_DOMAIN_STRATEGY_MIGRATED="已把旧版 outbound domain_strategy 迁移为 domain_resolver（sing-box 1.14 起移除该字段）"
 MSG_SINGBOX_RULESET_HTTP_CLIENT_MIGRATED="已把 rule_set 的 download_detour 迁移为 http_client（sing-box 1.14 起弃用，1.15 起拒绝启动）"
+MSG_SINGBOX_RULESET_RENAMED="规则集 %s 上游已撤（sing-box 下载不到远程规则集就起不来），已换成 %s"
 MSG_SINGBOX_RULESET_HTTP_CLIENT_STRIPPED="当前 sing-box 内核低于 1.14，已剥离 rule_set 的 http_client 字段（升级内核后自动恢复）"
 MSG_GEOSITE_LIST_DOWNLOAD_FAILED="geosite 分类清单下载失败，沿用本地旧清单；没有旧清单时录入项一律按普通域名处理"
 MSG_TLS_RENEW_ACME_FAILED="acme.sh 续期失败，保留现有证书并恢复服务"

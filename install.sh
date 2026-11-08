@@ -9,6 +9,10 @@ export LANG=en_US.UTF-8
 # ============================================================================
 set -o pipefail
 
+# Debian / RHEL 的 cron 给任务的 PATH 只有 /usr/bin:/bin，nginx、iptables、getenforce、rc-service 都在 sbin，
+# 不补就当成没装：定时任务起不了 nginx，cron 里跑的 doctor 报假的「没有防火墙」
+PATH="/usr/local/sbin:/usr/sbin:/sbin:${PATH}"
+
 # Bash 4.3+ 硬要求：用到 nameref（local -n）与负数组下标 ${arr[-1]}，CentOS 7 的
 # 4.2.46 会在这些路径上静默失败。守卫自身只用 4.3 以前的语法。
 if [[ -z "${BASH_VERSINFO:-}" ]] || (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then
@@ -178,7 +182,8 @@ if [[ -z "${_lib_health_ok}" && -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
                 return 1
             fi
 
-            if ! tar -xzf "${bundleFile}" -C "${tmpDir}" 2>/dev/null; then
+            # 不还原包里的属主：root 解包默认照搬，旧版 Release 的包归 CI runner 的 uid，root 要 source 的脚本就归了它
+            if ! tar --no-same-owner -xzf "${bundleFile}" -C "${tmpDir}" 2>/dev/null; then
                 printf '\033[31m[bootstrap] 解压 tarball 失败\033[0m\n' >&2
                 return 1
             fi
@@ -5281,6 +5286,29 @@ normalizeSingBoxRuleSetHttpClient() {
     fi
 }
 
+# 片段里上游已撤的规则集换成替代名：sing-box 下载远程规则集 404 就拒绝启动，而旧版「开发者」预设写过 stackoverflow。
+# 链路状态只存预设名，不改片段的话要等下次链路改动重新生成才换掉
+migrateRetiredRuleSets() {
+    local fragmentDir="$1" file changed=0
+    for file in "${fragmentDir}"*.json; do
+        [[ -f "${file}" ]] || continue
+        jq -e 'any(.route.rule_set[]?; .tag == "geosite-stackoverflow")' "${file}" >/dev/null 2>&1 || continue
+        if jsonModifyFile "${file}" '
+            def rename: if . == "geosite-stackoverflow" then "geosite-stackexchange" else . end;
+            .route.rule_set |= (map(if .tag == "geosite-stackoverflow"
+                then .tag = "geosite-stackexchange" | .url |= sub("/stackoverflow[.]srs$"; "/stackexchange.srs")
+                else . end) | unique_by(.tag))
+            | if .route.rules then .route.rules |= map(if has("rule_set")
+                then .rule_set |= (if type == "array" then map(rename) | unique else rename end)
+                else . end) else . end' false; then
+            changed=1
+        fi
+    done
+    if [[ ${changed} -eq 1 ]]; then
+        echoContent yellow " ---> $(t SINGBOX_RULESET_RENAMED geosite-stackoverflow geosite-stackexchange)"
+    fi
+}
+
 addSingBoxOutbound() {
     local tag=$1
     local type="ipv4"
@@ -5628,6 +5656,7 @@ singBoxMergeConfig() {
         echoContent yellow " ---> $(t SINGBOX_DOMAIN_STRATEGY_MIGRATED)"
     fi
 
+    migrateRetiredRuleSets "${fragmentDir}"
     normalizeSingBoxRuleSetHttpClient "${fragmentDir}"
 
     # 建在 config.json 同目录：mv 才是同一文件系统里的原子替换，SELinux 下也不会带着 /tmp 的 user_tmp_t 标签过去。
@@ -8361,6 +8390,10 @@ removeUser() {
         if [[ -n "${subscribePort}" ]]; then
             subscribe false
         fi
+        # 订阅文件按名字第一段命名，剩下的账号还有同一段时那份文件是它的，不能删
+        if [[ ! -e "${SUBSCRIBE_LOCAL_DIR}/default/$(carpoolSubscribeKey "${delUserKey}")" ]]; then
+            removeSubscriptionFiles "${delUserKey}"
+        fi
     fi
     manageAccount 1
 }
@@ -8871,8 +8904,9 @@ carpoolRemoveCron() {
     crontab - <<<"${remaining}" || echoContent yellow " ---> $(t CRON_REMOVE_FAILED)"
 }
 
-# carpoolRemoveSubscriptionFiles NAME → 删掉该成员的五个订阅文件（含占位）；成员页由 carpoolRenderPages 按期望集合清掉
-carpoolRemoveSubscriptionFiles() {
+# removeSubscriptionFiles NAME → 删掉这个账号的五个订阅文件（含拼车占位）；拼车成员页由 carpoolRenderPages 按期望集合清掉。
+# subscribe 发布前只清 default/ 与 clashMeta/，删掉的账号不走这里，另外三种格式就一直按老地址给出去
+removeSubscriptionFiles() {
     local md5 dir
     md5=$(carpoolSubscribeMd5 "$1") || return 0
     for dir in default clashMeta clashMetaProfiles sing-box sing-box_profiles; do
@@ -9127,7 +9161,7 @@ carpoolApply() {
     fi
     carpoolUnlock
     for name in $(jq -r '.removed[]' <<<"${diff}"); do
-        carpoolRemoveSubscriptionFiles "${name}"
+        removeSubscriptionFiles "${name}"
         if ! chainAccountForget "${name}"; then
             echoContent red " ---> $(t CHAIN_ACCOUNT_FORGET_FAILED "${name}")"
         fi
@@ -10446,6 +10480,8 @@ updateV2RayAgent() {
             echoContent yellow " ---> VERSION 文件下载失败，保留旧版本号"
         fi
     fi
+    # 覆盖写不改属主，旧版自举装上的 VERSION 归 CI runner 的 uid
+    chown 0:0 "${installDir}/VERSION" 2>/dev/null
 
     # 读取新版本号
     local version=""
@@ -17904,8 +17940,6 @@ coreVersionManageMenu() {
 }
 # 定时任务检查
 cronFunction() {
-    # Debian / RHEL 系的 cron 交给任务的 PATH 只有 /usr/bin:/bin，nginx、rc-service 在 sbin 里，不补就找不到
-    PATH="/usr/local/sbin:/usr/sbin:/sbin:${PATH}"
     if [[ "${cronName}" == "RenewTLS" ]]; then
         renewalTLS
         exit $?
