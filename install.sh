@@ -2273,7 +2273,6 @@ installNginxTools() {
         echo "deb https://nginx.org/packages/mainline/debian $(lsb_release -cs) nginx" | tee /etc/apt/sources.list.d/nginx.list >/dev/null 2>&1
         echo -e "Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900\n" | tee /etc/apt/preferences.d/99nginx >/dev/null 2>&1
         curl -o /tmp/nginx_signing.key https://nginx.org/keys/nginx_signing.key >/dev/null 2>&1
-        # gpg --dry-run --quiet --import --import-options import-show /tmp/nginx_signing.key
         mv /tmp/nginx_signing.key /etc/apt/trusted.gpg.d/nginx_signing.asc
         apt update >/dev/null 2>&1
 
@@ -2282,7 +2281,6 @@ installNginxTools() {
         echo "deb https://nginx.org/packages/mainline/ubuntu $(lsb_release -cs) nginx" | tee /etc/apt/sources.list.d/nginx.list >/dev/null 2>&1
         echo -e "Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900\n" | tee /etc/apt/preferences.d/99nginx >/dev/null 2>&1
         curl -o /tmp/nginx_signing.key https://nginx.org/keys/nginx_signing.key >/dev/null 2>&1
-        # gpg --dry-run --quiet --import --import-options import-show /tmp/nginx_signing.key
         mv /tmp/nginx_signing.key /etc/apt/trusted.gpg.d/nginx_signing.asc
         apt update >/dev/null 2>&1
 
@@ -8126,6 +8124,9 @@ reportUninstallLeftovers() {
     if command -v nginx >/dev/null 2>&1; then
         lines+=("$(t UNINSTALL_LEFT_NGINX)")
     fi
+    if [[ -d "${HOME}/.acme.sh" ]]; then
+        lines+=("$(t UNINSTALL_LEFT_ACME "${HOME}/.acme.sh" "${HOME}/.acme.sh" "${HOME}/.acme.sh")")
+    fi
     [[ ${#lines[@]} -gt 0 ]] || return 0
     echoContent yellow "\n ---> $(t UNINSTALL_LEFTOVERS_TITLE)"
     local line
@@ -8143,7 +8144,6 @@ unInstall() {
         menu
         exit 0
     fi
-    echoContent yellow " ---> 脚本不会删除acme相关配置，删除请手动执行 [rm -rf /root/.acme.sh]"
     handleNginx stop
     if [[ -z $(nginxPids) ]]; then
         echoContent green " ---> 停止Nginx成功"

@@ -5503,6 +5503,9 @@ assert_contains "$(run_rl "firewalld masq")" "UNINSTALL_LEFT_MASQUERADE" "卸载
 assert_contains "$(run_rl "semanage")" "UNINSTALL_LEFT_SELINUX" "卸载结尾：SELinux 里登记过就列出来"
 assert_contains "$(run_rl "nginx")" "UNINSTALL_LEFT_NGINX" "卸载结尾：nginx 软件包还在就说一声"
 assert_equals "no" "$(run_rl "" | grep -qE 'UFW|FIREWALLD|MASQUERADE|SELINUX|LEFT_NGINX( |$)' && echo yes || echo no)" "卸载结尾：没有的东西不列"
+mkdir -p "${MOCK_ROOT}/rl-home/.acme.sh"
+assert_contains "$(HOME="${MOCK_ROOT}/rl-home" run_rl "")" "UNINSTALL_LEFT_ACME" "卸载结尾：装过 acme.sh 才列它（先 --uninstall 再删，只 rm -rf 会留下 .bashrc 那行）"
+assert_equals "no" "$(HOME="${MOCK_ROOT}/rl-nohome" run_rl "" | grep -q ACME && echo yes || echo no)" "卸载结尾：没装过 acme.sh（只装 Reality）不提它"
 
 # --- 安装走到这些提示时服务已停，输错要重问：退出会把整机留在断线状态 ---
 RA_FN=$(sed -n '/^readInstallAccount() {/,/^}/p' install.sh)

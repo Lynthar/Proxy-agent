@@ -877,7 +877,7 @@ apt-key del <fingerprint>
 
 走**菜单 20**，确认后开始。所有配置和数据都会删除，带 `(Proxy-agent)` 注释的 iptables / nft 放行与端口跳跃规则也一起收回（sshd 在用的端口除外，收了它，默认拒绝的机器上 SSH 就连不上了）。
 
-认不出是不是你自己配的东西脚本不动，卸载结尾会列出还留着的（只列确实存在的）：ufw 与 firewalld 的端口放行、firewalld 的 masquerade、SELinux 的登记、nginx.org 的软件源、nginx 软件包。acme.sh 也留着，要删就执行 `rm -rf /root/.acme.sh`。
+认不出是不是你自己配的东西脚本不动，卸载结尾会列出还留着的（只列确实存在的）：ufw 与 firewalld 的端口放行、firewalld 的 masquerade、SELinux 的登记、nginx.org 的软件源（Debian / Ubuntu 上连同它的签名钥）、nginx 软件包、acme.sh。acme.sh 要删，先执行 `/root/.acme.sh/acme.sh --uninstall` 撤掉它的定时任务和 `.bashrc` 里那行，再 `rm -rf /root/.acme.sh`；只删目录的话，root 每次登录都会报找不到 acme.sh。以后还在这台机器装就留着。
 
 ---
 
