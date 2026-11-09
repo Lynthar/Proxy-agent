@@ -228,7 +228,7 @@ pasly doctor
 
 ### 部署时要注意的事
 
-**云厂商的安全组要自己放行。** 脚本只管本机防火墙（ufw、firewalld、iptables）。云厂商面板里的安全组或防火墙要自己开：80（HTTP 验证申请证书）、各协议的端口、订阅端口；Hysteria2 和 TUIC 开 UDP。
+**云厂商的安全组要自己放行。** 脚本只管本机防火墙（ufw、firewalld、nftables、iptables）。用 nftables 的机器上，脚本加的放行写在开机加载的配置（Debian 是 `/etc/nftables.conf`）末尾 `# Proxy-agent begin` 到 `# Proxy-agent end` 那一段，其余内容不动。云厂商面板里的安全组或防火墙要自己开：80（HTTP 验证申请证书）、各协议的端口、订阅端口；Hysteria2 和 TUIC 开 UDP。
 
 **默认端口怎么来的。** 看起来像 HTTPS 的协议，端口提示处直接回车取 443：VLESS Vision、Trojan、Reality、Reality XHTTP、Naive、HTTPUpgrade、AnyTLS、ShadowTLS。443 已被占，就依次取 8443、2053、2083、2087、2096 里第一个空着的，这几个也是 Cloudflare 会转发的 HTTPS 端口；六个全被占才回落随机端口。Hysteria2 与 TUIC 走 UDP，同样从 443/udp 起取，和 TCP 的 443 互不冲突，两个一起装时 Hysteria2 先拿。sing-box 内核上的 VLESS WS、VMess WS 与 Shadowsocks 2022 默认随机端口；Xray 内核上的 1、3、4 和 0 共用一个端口，不单独问。
 
@@ -875,7 +875,7 @@ apt-key del <fingerprint>
 
 ### 卸载
 
-走**菜单 20**，确认后开始。所有配置和数据都会删除，带 `(Proxy-agent)` 注释的 iptables / nft 放行与端口跳跃规则也一起收回（sshd 在用的端口除外，收了它，默认拒绝的机器上 SSH 就连不上了）。
+走**菜单 20**，确认后开始。所有配置和数据都会删除，带 `(Proxy-agent)` 注释的 iptables / ip6tables / nft 放行与端口跳跃规则也一起收回，nftables 配置里的那一段跟着去掉（sshd 在用的端口除外，收了它，默认拒绝的机器上 SSH 就连不上了）。
 
 认不出是不是你自己配的东西脚本不动，卸载结尾会列出还留着的（只列确实存在的）：ufw 与 firewalld 的端口放行、firewalld 的 masquerade、SELinux 的登记、nginx.org 的软件源（Debian / Ubuntu 上连同它的签名钥）、nginx 软件包、acme.sh。acme.sh 要删，先执行 `/root/.acme.sh/acme.sh --uninstall` 撤掉它的定时任务和 `.bashrc` 里那行，再 `rm -rf /root/.acme.sh`；只删目录的话，root 每次登录都会报找不到 acme.sh。以后还在这台机器装就留着。
 

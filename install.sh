@@ -1588,19 +1588,17 @@ check1Panel() {
         fi
     fi
 }
-# 检查防火墙
+# allowPort PORT [TYPE] [SOURCE_IP] → 按在用的防火墙放行 PORT（a:b 是区间），TYPE 默认 tcp；SOURCE_IP 是单个地址，地址族在这里选，
+# 调用方不拼 /32（IPv6 拼上就成了整段网段）。放行失败 exit 1
 allowPort() {
-    local type=$2
-    local sourceRange=$3
-    if [[ -z "${type}" ]]; then
-        type=tcp
-    fi
+    local type=${2:-tcp}
+    local sourceIP=$3
     # 如果防火墙启动状态则添加相应的开放端口
     if command -v dpkg >/dev/null 2>&1 && dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+ufw"; then
         if ufw status | grep -q "Status: active"; then
             # 不先 grep 查重（ufw 自己跳过已有的同一条）：443/tcp 是 8443/tcp 的子串，按子串查会把没放行的端口当成已放行
-            if [[ -n "${sourceRange}" && "${sourceRange}" != "0.0.0.0/0" ]]; then
-                ufw allow from "${sourceRange}" to any port "$1" proto "${type}"
+            if [[ -n "${sourceIP}" ]]; then
+                ufw allow from "${sourceIP}" to any port "$1" proto "${type}"
             else
                 ufw allow "$1/${type}"
             fi
@@ -1609,8 +1607,10 @@ allowPort() {
     elif systemctl status firewalld 2>/dev/null | grep -q "active (running)"; then
         # 不写 --zone：加、查、检查都落在默认区。写死 public 的话，默认区不是 public 的机器上规则全落进没挂网卡的区，一条不生效
         local updateFirewalldStatus=
-        if [[ -n "${sourceRange}" && "${sourceRange}" != "0.0.0.0/0" ]]; then
-            local richRule="rule family=\"ipv4\" source address=\"${sourceRange}\" port protocol=\"${type}\" port=\"$1\" accept"
+        if [[ -n "${sourceIP}" ]]; then
+            local family=ipv4
+            [[ "${sourceIP}" == *:* ]] && family=ipv6
+            local richRule="rule family=\"${family}\" source address=\"${sourceIP}\" port protocol=\"${type}\" port=\"$1\" accept"
             if ! firewall-cmd --permanent --query-rich-rule="${richRule}" >/dev/null 2>&1; then
                 updateFirewalldStatus=true
                 firewall-cmd --permanent --add-rich-rule="${richRule}"
@@ -1636,37 +1636,96 @@ allowPort() {
         fi
     elif command -v nft >/dev/null 2>&1 && systemctl is-active --quiet nftables 2>/dev/null; then
         if nft list chain inet filter input >/dev/null 2>&1; then
-            local nftComment="allow $1/${type}(Proxy-agent)"
-            local nftSourceRange="${sourceRange:-0.0.0.0/0}"
-            local nftRules
-            local updateNftablesStatus=
-            nftRules=$(nft list chain inet filter input)
-            if ! echo "${nftRules}" | grep -q "${nftComment}" || ! echo "${nftRules}" | grep -q "${nftSourceRange}"; then
-                updateNftablesStatus=true
-                # nft 的端口区间写 a-b，不认 iptables 的 a:b
-                nft add rule inet filter input ip saddr "${nftSourceRange}" ${type} dport "${1/:/-}" counter accept comment "${nftComment}"
-            fi
-
-            if echo "${updateNftablesStatus}" | grep -q "true"; then
-                nft list ruleset >/etc/nftables.conf
-                systemctl reload nftables >/dev/null 2>&1 || nft -f /etc/nftables.conf
-            fi
+            allowPortNft "$1" "${type}" "${sourceIP}"
         fi
     elif command -v dpkg >/dev/null 2>&1 && dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+netfilter-persistent" && systemctl status netfilter-persistent 2>/dev/null | grep -q "active (exited)"; then
-        local updateFirewalldStatus=
-        if [[ -n "${sourceRange}" && "${sourceRange}" != "0.0.0.0/0" ]]; then
-            if ! iptables -C INPUT -p ${type} -s "${sourceRange}" --dport "$1" -m comment --comment "allow $1/${type}(Proxy-agent)" -j ACCEPT 2>/dev/null; then
-                updateFirewalldStatus=true
-                iptables -I INPUT -p ${type} -s "${sourceRange}" --dport "$1" -m comment --comment "allow $1/${type}(Proxy-agent)" -j ACCEPT
-            fi
-        elif ! iptables -C INPUT -p ${type} --dport "$1" -m comment --comment "allow $1/${type}(Proxy-agent)" -j ACCEPT 2>/dev/null; then
-            updateFirewalldStatus=true
-            iptables -I INPUT -p ${type} --dport "$1" -m comment --comment "allow $1/${type}(Proxy-agent)" -j ACCEPT
-        fi
+        allowPortIptables "$1" "${type}" "${sourceIP}"
+    fi
+}
 
-        if echo "${updateFirewalldStatus}" | grep -q "true"; then
-            netfilter-persistent save
+# allowPortNft PORT TYPE [SOURCE_IP] → 在 inet filter input 最前面插一条带 (Proxy-agent) 注释的放行，再写回开机加载的配置。
+# 不限来源就不写 saddr（ip saddr 只匹配 IPv4）；注释要套一层引号，nft 把参数拼成一行再解析，带空格的注释没引号就是语法错误
+allowPortNft() {
+    local comment="allow $1/$2(Proxy-agent)" match=() line addr
+    if [[ -n "$3" ]]; then
+        match=(ip saddr "$3")
+        [[ "$3" == *:* ]] && match=(ip6 saddr "$3")
+    fi
+    # 同端口同协议、来源一致的已有就不加；nft 把 /32 打成裸地址、IPv6 打成压缩形式，IPv6 按 ipv6Hex 比
+    while read -r line; do
+        [[ "${line}" == *"comment \"${comment}\""* ]] || continue
+        addr=$(sed -nE 's/.*ip6? saddr ([^ ]+).*/\1/p' <<<"${line}")
+        [[ -z "$3" && -z "${addr}" ]] && return 0
+        [[ -n "$3" && "${addr}" == "$3" ]] && return 0
+        [[ "$3" == *:* && "${addr}" == *:* && "$(ipv6Hex "${addr}")" == "$(ipv6Hex "$3")" ]] && return 0
+    done < <(nft list chain inet filter input)
+    if ! nft insert rule inet filter input "${match[@]}" "$2" dport "${1/:/-}" counter accept comment "\"${comment}\""; then
+        echoContent red " ---> $1端口开放失败"
+        exit 1
+    fi
+    echoContent green " ---> $1端口开放成功"
+    nftSaveOwnRules
+}
+
+# nftablesConfFile → nftables.service 开机加载的那份配置（Debian /etc/nftables.conf，RHEL /etc/sysconfig/nftables.conf），没有返回 1
+nftablesConfFile() {
+    local conf
+    conf=$(systemctl show -p ExecStart --value nftables 2>/dev/null | grep -oE -- '-f [^ ;]+' | head -n 1 | cut -d' ' -f2)
+    conf=${conf:-/etc/nftables.conf}
+    [[ -f "${conf}" ]] && echo "${conf}"
+}
+
+# nftSaveOwnRules → 把 inet filter input 里带 (Proxy-agent) 的规则重写成配置末尾的标记段，管理员的其余内容一字不动。
+# nft -f 是原子的：段里一条加载不了，开机时整套规则都起不来，所以先 nft -c 校验，不过就不写（这次开机内规则照样生效）
+nftSaveOwnRules() {
+    local conf rules tmp
+    if ! conf=$(nftablesConfFile); then
+        echoContent yellow " ---> $(t NFT_PERSIST_NO_CONF)"
+        return 0
+    fi
+    rules=$(nft list chain inet filter input | grep -F '(Proxy-agent)' |
+        sed -E 's/^[[:space:]]+//; s/counter packets [0-9]+ bytes [0-9]+/counter/; s/^/insert rule inet filter input /')
+    tmp=$(mktemp "${conf}.XXXXXX") || return 0
+    {
+        sed '/^# Proxy-agent begin$/,/^# Proxy-agent end$/d' "${conf}"
+        if [[ -n "${rules}" ]]; then
+            printf '%s\n' '# Proxy-agent begin' "${rules}" '# Proxy-agent end'
         fi
+    } >"${tmp}"
+    if nft -c -f "${tmp}" >/dev/null 2>&1; then
+        cat "${tmp}" >"${conf}"
+    else
+        echoContent yellow " ---> $(t NFT_PERSIST_CHECK_FAILED "${conf}")"
+    fi
+    rm -f "${tmp}"
+}
+
+# allowPortIptables PORT TYPE [SOURCE_IP] → INPUT 最前面插一条带注释的放行。不限来源时 iptables、ip6tables 各一条
+# （IPv6 归 ip6tables 的策略管），限来源时按地址族只加一边
+allowPortIptables() {
+    local tool updated= src=() tools=(iptables ip6tables) rule
+    if [[ -n "$3" ]]; then
+        src=(-s "$3")
+        tools=(iptables)
+        [[ "$3" == *:* ]] && tools=(ip6tables)
+    fi
+    for tool in "${tools[@]}"; do
+        command -v "${tool}" >/dev/null 2>&1 || continue
+        # 不限来源的 IPv6 那条尽力而为：有的 VPS 内核没有 IPv6 的 netfilter 模块，ip6tables 一条都下不了，不该让整个安装停下
+        if [[ "${tool}" == ip6tables && -z "$3" ]] && ! ip6tables -L INPUT -n >/dev/null 2>&1; then
+            echoContent yellow " ---> $(t IPT6_UNAVAILABLE "$1")"
+            continue
+        fi
+        rule=(INPUT -p "$2" "${src[@]}" --dport "$1" -m comment --comment "allow $1/$2(Proxy-agent)" -j ACCEPT)
+        "${tool}" -C "${rule[@]}" 2>/dev/null && continue
+        if ! "${tool}" -I "${rule[@]}"; then
+            echoContent red " ---> $1端口开放失败"
+            exit 1
+        fi
+        updated=true
+    done
+    if [[ -n "${updated}" ]]; then
+        netfilter-persistent save
     fi
 }
 
@@ -5848,13 +5907,14 @@ singBoxMergeConfig() {
 }
 
 # initSingBoxPort OLD_PORT [ID KEEP] → 端口打到最后一行。带 ID 按协议取默认端口并查重（KEEP 同 configuredPorts），
-# 不带 ID 的是订阅端口，回车随机
+# 防火墙只放该协议实际监听的网络；不带 ID 的是订阅端口（nginx，只放 TCP），回车随机
 initSingBoxPort() {
-    local port=$1
+    local port=$1 network
     if [[ -n "${2:-}" ]]; then
         port=$(pickInboundPort "$2" "${port}" "${SINGBOX_FRAGMENT_DIR}" "${3:-}" "")
-        allowPort "${port}"
-        allowPort "${port}" "udp"
+        network=$(getProtocolListenNetwork "$2") || network=both
+        [[ "${network}" == "udp" ]] || allowPort "${port}"
+        [[ "${network}" == "tcp" ]] || allowPort "${port}" "udp"
         echo "${port}"
         return 0
     fi
@@ -5872,7 +5932,6 @@ initSingBoxPort() {
         # 本函数跑在 <(...) 里，exit 只退子 shell、调用方会把报错当端口写进配置；输错就重问
         until readValidPort '请输入自定义端口[需合法]，端口不可重复，[回车]随机端口:' port "RANDOM" 10000 60000 >&2; do :; done
         allowPort "${port}"
-        allowPort "${port}" "udp"
         echo "${port}"
     fi
 }
@@ -7979,9 +8038,11 @@ addCorePort() {
                     hysteriaFileName="${configPath}02_dokodemodoor_inbounds_hysteria_${port}.json"
                 fi
 
-                # 开放端口
+                # UDP 只转给 Hysteria2，没装它就只放 TCP
                 allowPort "${port}"
-                allowPort "${port}" "udp"
+                if [[ -n "${hysteriaFileName}" ]]; then
+                    allowPort "${port}" "udp"
+                fi
 
                 local settingsPort
                 settingsPort=$(corePortTarget) || settingsPort=443
@@ -8071,9 +8132,10 @@ isOwnRuleOnSshPort() {
 # removeOwnFirewallRules → 收回 allowPort 留下的放行，只认带 (Proxy-agent) 注释的（iptables、nft），sshd 在用的端口除外。
 # ufw、firewalld 的放行没有标记，认不出是不是用户自己加的，不动，由 reportUninstallLeftovers 列出来
 removeOwnFirewallRules() {
-    local line changed= sshPorts
+    local line changed= sshPorts tool
     sshPorts=$(sshListenPorts)
-    if command -v iptables >/dev/null 2>&1; then
+    for tool in iptables ip6tables; do
+        command -v "${tool}" >/dev/null 2>&1 || continue
         # 行号降序删：升序删一条，后面的行号就前移一位
         while read -r line; do
             [[ -n "${line}" ]] || continue
@@ -8081,11 +8143,11 @@ removeOwnFirewallRules() {
                 echoContent yellow " ---> $(t UNINSTALL_KEEP_SSH_RULE)"
                 continue
             fi
-            iptables -D INPUT "${line%% *}" && changed=true
-        done < <(iptables -L INPUT -n --line-numbers 2>/dev/null | grep -F '(Proxy-agent)' | sort -rn)
-        if [[ -n "${changed}" ]] && command -v netfilter-persistent >/dev/null 2>&1; then
-            netfilter-persistent save >/dev/null 2>&1
-        fi
+            "${tool}" -D INPUT "${line%% *}" && changed=true
+        done < <("${tool}" -L INPUT -n --line-numbers 2>/dev/null | grep -F '(Proxy-agent)' | sort -rn)
+    done
+    if [[ -n "${changed}" ]] && command -v netfilter-persistent >/dev/null 2>&1; then
+        netfilter-persistent save >/dev/null 2>&1
     fi
     changed=
     if command -v nft >/dev/null 2>&1 && nft list chain inet filter input >/dev/null 2>&1; then
@@ -8098,7 +8160,7 @@ removeOwnFirewallRules() {
             nft delete rule inet filter input handle "${line##* }" && changed=true
         done < <(nft -a list chain inet filter input | grep -F '(Proxy-agent)')
         if [[ -n "${changed}" ]] && systemctl is-active --quiet nftables 2>/dev/null; then
-            nft list ruleset >/etc/nftables.conf
+            nftSaveOwnRules
         fi
     fi
 }
@@ -11953,7 +12015,7 @@ EOF
 
     # 开放防火墙端口
     if [[ -n "${allowedIP}" ]]; then
-        allowPort "${chainPort}" "tcp" "${allowedIP}/32"
+        allowPort "${chainPort}" "tcp" "${allowedIP}"
         echoContent green " ---> $(t CHAIN_EXIT_SOURCE_LIMITED "${chainPort}" "${allowedIP}")"
         if ! firewallDefaultDenies; then
             echoContent yellow " ---> $(t CHAIN_EXIT_PORT_VISIBLE "${chainPort}")"
@@ -19279,7 +19341,6 @@ initXrayRealityPort() {
 initXrayXHTTPort() {
     xHTTPort=$(pickInboundPort 12 "${xrayVLESSRealityXHTTPort}" "${XRAY_CONF_DIR}" "$@")
     allowPort "${xHTTPort}"
-    allowPort "${xHTTPort}" "udp"
     echoContent yellow "\n ---> 端口: ${xHTTPort}"
 }
 

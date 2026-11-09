@@ -738,6 +738,21 @@ assert_equals "8443" "$(run_cpt 'corePortTarget')" "corePortTarget：装了 0 �
 rm -f "${CPT_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json" "${CPT_ROOT}/xray/conf/07_VLESS_vision_reality_inbounds.json"
 assert_equals "1" "$(run_cpt 'corePortTarget' >/dev/null 2>&1; echo $?)" "corePortTarget：0 与 7 都没有时返回 1（addCorePort 回落 443，启动前的钩子什么都不改）"
 assert_contains "$(sed -n '/^handleXray() {/,/^}/p' install.sh)" "ensureCorePortTargets" "handleXray start 前挂了附加端口改指"
+
+# 附加端口的 UDP 只转给 Hysteria2：没装它就只放 TCP。函数里有顶格 } 的 heredoc JSON，抽到下一个函数定义为止
+ACP_FN=$(awk '/^addCorePort\(\) \{/{f=1; print; next} f && /^[a-zA-Z0-9_]+\(\) \{/{exit} f' install.sh)
+assert_contains "${ACP_FN}" 'allowPort "${port}" "udp"' "addCorePort：抽到了放行那段"
+run_acp() {
+    rm -rf "${MOCK_ROOT}/acp" && mkdir -p "${MOCK_ROOT}/acp"
+    printf '2\n2087\n\n' | env ACP_FN="${ACP_FN}" ACP_DIR="${MOCK_ROOT}/acp/" ACP_HP="$1" bash -c '
+        eval "${ACP_FN}"
+        coreKind=1 configPath="${ACP_DIR}" hysteriaPort="${ACP_HP}" totalProgress=1
+        echoContent() { :; }; removeCorePortFiles() { :; }; corePortTarget() { echo 443; }; reloadCore() { :; }
+        allowPort() { echo "allow $*"; }
+        addCorePort' 2>/dev/null | paste -sd'|' -
+}
+assert_equals "allow 2087" "$(run_acp "")" "附加端口：没装 Hysteria2 只放 TCP"
+assert_equals "allow 2087|allow 2087 udp" "$(run_acp 41000)" "附加端口：装了 Hysteria2 才放 UDP"
 assert_contains "$(sed -n '/^addCorePort() {/,/^}/p' install.sh)" 'settingsPort=$(corePortTarget)' "addCorePort：新加的端口按同一个取法定目标（装了 Reality 时不再写死 443）"
 rm -rf "${CPT_ROOT}"
 
@@ -4842,6 +4857,28 @@ _ssCalls=$(env SS_FN="${SS_FN}" bash -c '
     initSS2022Config </dev/null' 2>&1)
 assert_equals "allow 23456|allow 23456 udp" "$(paste -sd'|' - <<<"${_ssCalls}")" "SS2022：端口的 TCP、UDP 都放行（两个都监听，漏了防火墙直接拒连）"
 
+# --- 防火墙只放协议实际监听的网络：多放的那种没进程听，探测时回 RST / ICMP 而不是静默丢弃，平白多个特征 ---
+ISP_FN=$(sed -n '/^initSingBoxPort() {/,/^}/p' install.sh)
+# run_isp ARGS… → initSingBoxPort 的放行调用，用 | 连起来
+run_isp() {
+    env ISP_FN="${ISP_FN}" bash -c '
+        source lib/i18n.sh; source lib/constants.sh; source lib/utils.sh; source lib/protocol-registry.sh
+        eval "${ISP_FN}"
+        allowPort() { echo "allow $*" >&2; }
+        pickInboundPort() { echo 23456; }
+        readValidPort() { printf -v "$2" %s 23456; }
+        initSingBoxPort "$@" </dev/null' _ "$@" 2>&1 >/dev/null | paste -sd'|' -
+}
+assert_equals "allow 23456" "$(run_isp "" 0 "")" "端口放行：0（TCP）不放 UDP"
+assert_equals "allow 23456" "$(run_isp "" 16 "")" "端口放行：16（TCP）不放 UDP"
+assert_equals "allow 23456 udp" "$(run_isp "" 6 "")" "端口放行：Hysteria2 只放 UDP"
+assert_equals "allow 23456 udp" "$(run_isp "" 9 "")" "端口放行：TUIC 只放 UDP"
+assert_equals "allow 23456|allow 23456 udp" "$(run_isp "" 10 "")" "端口放行：naive 两种都听，两种都放"
+assert_equals "allow 23456" "$(run_isp "")" "端口放行：订阅端口（nginx）只放 TCP"
+XH_FN=$(sed -n '/^initXrayXHTTPort() {/,/^}/p' install.sh)
+assert_equals "allow 23456" "$(env XH_FN="${XH_FN}" bash -c 'eval "${XH_FN}"; allowPort() { echo "allow $*"; }; pickInboundPort() { echo 23456; }; echoContent() { :; }; initXrayXHTTPort' 2>&1)" \
+    "端口放行：Xray 的 12（Reality 上的 XHTTP，TCP）不放 UDP"
+
 # --- 带域名安装中途退出：起步时在跑的服务按旧配置拉回来；写了新配置之后再退出就不管 ---
 IA_FN=$(sed -n '/^nginxPids() {/,/^}/p;/^installAbortArm() {/,/^}/p;/^installAbortDisarm() {/,/^}/p;/^installAbortRestore() {/,/^}/p;/^xrayCoreInstall() {/,/^}/p;/^singBoxInstall() {/,/^}/p' install.sh)
 assert_equals "6" "$(grep -c '^[a-zA-Z]*() {$' <<<"${IA_FN}")" "安装中途退出：抽到六个函数原文"
@@ -5180,7 +5217,7 @@ assert_equals "9/9" "${_prog}" "sing-box 全量安装：最后一步是 9/9，�
 rm -rf "${AH_ROOT}"
 
 # --- 防火墙放行按「端口/协议」整条比对：443 是 8443 的子串，按子串查会把没放行的端口当成已放行 ---
-AP_FN=$(sed -n '/^allowPort() {/,/^}/p;/^checkUFWAllowPort() {/,/^}/p' install.sh)
+AP_FN=$(sed -n '/^allowPort() {/,/^}/p;/^allowPortIptables() {/,/^}/p;/^checkUFWAllowPort() {/,/^}/p' install.sh)
 AP_DIR="${MOCK_ROOT}/allowport"
 # run_ap FIREWALL EXISTING PORT [TYPE] → 桩出 ufw 或 iptables（netfilter-persistent）防火墙，EXISTING 是已放行的「端口/协议」；
 # 打印 allowPort 真正下的放行命令与它的退出码。nftables 装着但没在跑（nft 在 PATH 里、服务 inactive）
@@ -5212,15 +5249,19 @@ run_ap() {
                 echo "$2" >>"${AP_DIR}/rules"
             fi
         }
-        iptables() {
-            local spec="$*"
-            [[ "$1" == -C ]] && { grep -qx -- "${spec#-C }" "${AP_DIR}/iptables" 2>/dev/null; return; }
-            [[ "$1" == -L ]] && { sed "s/^/ACCEPT /" "${AP_DIR}/iptables" 2>/dev/null; return 0; }
-            [[ "$1" == -I ]] && { echo "iptables $*"; echo "${spec#-I }" >>"${AP_DIR}/iptables"; }
+        ipt() {
+            local tool=$1 spec
+            shift
+            spec="$*"
+            [[ "$1" == -C ]] && { grep -qx -- "${spec#-C }" "${AP_DIR}/${tool}" 2>/dev/null; return; }
+            [[ "$1" == -L ]] && { sed "s/^/ACCEPT /" "${AP_DIR}/${tool}" 2>/dev/null; return 0; }
+            [[ "$1" == -I ]] && { echo "${tool} $*"; echo "${spec#-I }" >>"${AP_DIR}/${tool}"; }
             return 0
         }
+        iptables() { ipt iptables "$@"; }
+        ip6tables() { ipt ip6tables "$@"; }
         while read -r r; do
-            [[ "${FW}" == iptables ]] && echo "INPUT -p ${r#*/} --dport ${r%/*} -m comment --comment allow ${r}(Proxy-agent) -j ACCEPT" >>"${AP_DIR}/iptables"
+            [[ "${FW}" == iptables ]] && echo "INPUT -p ${r#*/} --dport ${r%/*} -m comment --comment allow ${r}(Proxy-agent) -j ACCEPT" | tee -a "${AP_DIR}/iptables" >>"${AP_DIR}/ip6tables"
         done <"${AP_DIR}/rules"
         allowPort "$0" "$1"
         echo "rc=$?"' "$3" "${4:-}" 2>&1 | paste -sd'|' -
@@ -5228,8 +5269,8 @@ run_ap() {
 assert_equals "ufw allow 443/tcp|rc=0" "$(run_ap ufw "8443/tcp" 443)" "ufw：已放行 8443/tcp 时照样放行 443/tcp"
 assert_equals "ufw allow 443/udp|rc=0" "$(run_ap ufw "8443/udp 443/tcp" 443 udp)" "ufw：已放行 8443/udp 与 443/tcp 时照样放行 443/udp"
 assert_equals "ufw allow 30000:30020/udp|rc=0" "$(run_ap ufw "" 30000:30020 udp)" "ufw：端口区间照常放行"
-assert_equals "iptables -I INPUT -p tcp --dport 443 -m comment --comment allow 443/tcp(Proxy-agent) -j ACCEPT|rc=0" \
-    "$(run_ap iptables "8443/tcp" 443)" "iptables：已放行 8443/tcp 时照样放行 443/tcp（nftables 装着没在跑，不走它）"
+assert_equals "iptables -I INPUT -p tcp --dport 443 -m comment --comment allow 443/tcp(Proxy-agent) -j ACCEPT|ip6tables -I INPUT -p tcp --dport 443 -m comment --comment allow 443/tcp(Proxy-agent) -j ACCEPT|rc=0" \
+    "$(run_ap iptables "8443/tcp" 443)" "iptables：已放行 8443/tcp 时照样放行 443/tcp（nftables 装着没在跑，不走它）；IPv4、IPv6 各一条"
 assert_equals "rc=0" "$(run_ap iptables "443/tcp" 443)" "iptables：同一条规则已在就不重复加"
 
 # --- 装了 ufw 的机器不装 iptables-persistent：两包互斥，apt -y 会卸掉 ufw，整机防火墙失效 ---
@@ -5452,13 +5493,14 @@ assert_equals "bootStartup nginx|rc=0" "$(run_nt 0)" "installNginxTools：装上
 RF_FN=$(sed -n '/^sshListenPorts() {/,/^}/p;/^isOwnRuleOnSshPort() {/,/^}/p;/^removeOwnFirewallRules() {/,/^}/p' install.sh)
 # run_rf IPT_LIST NFT_LIST [SSH_LISTEN] [SSH_CONFIG] [SSH_CONNECTION] → 桩掉 iptables / nft / ss / sshd，打印删除、保存与保留提示
 run_rf() {
-    env -u SSH_CONNECTION RF_FN="${RF_FN}" IPT="$1" NFT="$2" SSH_LISTEN="${3:-}" SSH_CONFIG="${4:-}" ${5:+SSH_CONNECTION="$5"} bash -c '
+    env -u SSH_CONNECTION RF_FN="${RF_FN}" IPT="$1" IPT6="${IPT6:-}" NFT="$2" SSH_LISTEN="${3:-}" SSH_CONFIG="${4:-}" ${5:+SSH_CONNECTION="$5"} bash -c '
         eval "${RF_FN}"
         t() { echo "$1"; }
         echoContent() { echo "$2"; }
         ss() { [[ -n "${SSH_LISTEN}" ]] && echo "LISTEN 0 128 0.0.0.0:${SSH_LISTEN} 0.0.0.0:* users:((\"sshd\",pid=1,fd=3))"; echo "LISTEN 0 128 0.0.0.0:443 0.0.0.0:* users:((\"xray\",pid=2,fd=3))"; }
         sshd() { [[ -n "${SSH_CONFIG}" ]] && printf "port %s\naddressfamily any\n" "${SSH_CONFIG}"; return 0; }
         iptables() { if [[ "$*" == *--line-numbers* ]]; then printf "%b" "${IPT}"; else echo "iptables $*"; fi; }
+        ip6tables() { if [[ "$*" == *--line-numbers* ]]; then printf "%b" "${IPT6:-}"; else echo "ip6tables $*"; fi; }
         exec 3>&1
         netfilter-persistent() { echo "persist $*" >&3; }
         nft() {
@@ -5482,6 +5524,72 @@ RF_KEEP="iptables -D INPUT 3|iptables -D INPUT 2| ---> UNINSTALL_KEEP_SSH_RULE|p
 assert_equals "${RF_KEEP}" "$(run_rf "${RF_IPT_SSH}" "${RF_NFT_SSH}" 2222)" "卸载：sshd 在听的端口的放行留着（只留 tcp），其余照收"
 assert_equals "${RF_KEEP}" "$(run_rf "${RF_IPT_SSH}" "${RF_NFT_SSH}" "" 2222)" "卸载：ss 看不到 sshd（ssh.socket）时按 sshd -T 认"
 assert_equals "${RF_KEEP}" "$(run_rf "${RF_IPT_SSH}" "${RF_NFT_SSH}" "" "" "1.2.3.4 5555 10.0.0.1 2222")" "卸载：这条 SSH 连接自己的端口也算"
+assert_equals "iptables -D INPUT 4|iptables -D INPUT 2|ip6tables -D INPUT 1|persist save" \
+    "$(IPT6='num target\n1 ACCEPT tcp dpt:443 /* allow 443/tcp(Proxy-agent) */\n' run_rf "${RF_IPT}" "")" "卸载：ip6tables 里带标记的放行也收回"
+
+# --- allowPort 的 nft 与 iptables 分支 ---
+FW_FNS=$(sed -n '/^allowPortNft() {/,/^}/p;/^nftSaveOwnRules() {/,/^}/p;/^nftablesConfFile() {/,/^}/p;/^allowPortIptables() {/,/^}/p;/^ipv6Hex() {/,/^}/p' install.sh)
+assert_equals "5" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${FW_FNS}")" "allowPort：抽到 nft、iptables 两个分支的五个函数"
+FW_DIR="${MOCK_ROOT}/allowport-nft"
+FW_CONF="${FW_DIR}/nftables.conf"
+# run_fw LIVE CHECK_RC CMD → 桩掉 nft（list 打印 LIVE、-c 返回 CHECK_RC、其余逐个参数记下）、iptables / ip6tables、netfilter-persistent
+run_fw() {
+    env FW_FNS="${FW_FNS}" FW_CONF="${FW_CONF}" LIVE="$1" CHECK_RC="$2" FW_CMD="$3" bash -c '
+        eval "${FW_FNS}"
+        t() { echo "$1"; }
+        echoContent() { [[ "$1" != yellow ]] || echo "$2"; }
+        systemctl() { echo "{ path=/usr/sbin/nft ; argv[]=/usr/sbin/nft -f ${FW_CONF} ; ignore_errors=no }"; }
+        nft() {
+            case "$1 $2" in
+                "list chain") printf "%b" "${LIVE}" ;;
+                "-c -f") return "${CHECK_RC}" ;;
+                *) printf "nft"; printf " [%s]" "$@"; echo ;;
+            esac
+        }
+        iptables() { [[ "$1" == -C ]] && return 1; echo "iptables $*"; }
+        ip6tables() { [[ "$1" == -C ]] && return 1; echo "ip6tables $*"; }
+        netfilter-persistent() { echo "persist $*"; }
+        eval "${FW_CMD}"' 2>&1 | grep -v '^$' | paste -sd'|' -
+}
+rm -rf "${FW_DIR}" && mkdir -p "${FW_DIR}"
+FW_ADMIN=$'flush ruleset\n# admin\ntable inet filter {\n\tchain input {\n\t\ttype filter hook input priority filter; policy drop;\n\t}\n}'
+printf '%s\n' "${FW_ADMIN}" >"${FW_CONF}"
+assert_equals 'nft [insert] [rule] [inet] [filter] [input] [tcp] [dport] [8443] [counter] [accept] [comment] ["allow 8443/tcp(Proxy-agent)"]' \
+    "$(run_fw "" 0 'allowPortNft 8443 tcp')" "nft：注释套了引号（不套 nft 报语法错误），不限来源不写 saddr（ip saddr 只匹配 IPv4）"
+assert_contains "$(run_fw "" 0 'allowPortNft 9443 tcp 2001:DB8::1')" "[ip6] [saddr] [2001:DB8::1] [tcp]" "nft：IPv6 来源用 ip6 saddr"
+assert_contains "$(run_fw "" 0 'allowPortNft 9443 tcp 1.2.3.4')" "[ip] [saddr] [1.2.3.4] [tcp]" "nft：IPv4 来源用 ip saddr，不拼 /32"
+assert_contains "$(run_fw "" 0 'allowPortNft 20000:30000 udp')" "[udp] [dport] [20000-30000]" "nft：端口区间写成 a-b"
+FW_LIVE_V6='\t\tip6 saddr 2001:db8::1 tcp dport 9443 counter packets 3 bytes 180 accept comment "allow 9443/tcp(Proxy-agent)"\n'
+assert_equals "" "$(run_fw "${FW_LIVE_V6}" 0 'allowPortNft 9443 tcp 2001:0DB8:0:0:0:0:0:1')" "nft：同来源换种写法（nft 打成压缩形式）不重复加"
+assert_contains "$(run_fw "${FW_LIVE_V6}" 0 'allowPortNft 9443 tcp')" "[insert]" "nft：已有的是限来源的，不限来源的照加"
+assert_equals "" "$(run_fw '\t\ttcp dport 9443 counter packets 0 bytes 0 accept comment "allow 9443/tcp(Proxy-agent)"\n' 0 'allowPortNft 9443 tcp')" "nft：不限来源的已有就不加"
+printf '%s\n' "${FW_ADMIN}" '# Proxy-agent begin' 'insert rule inet filter input tcp dport 1 counter accept comment "allow 1/tcp(Proxy-agent)"' '# Proxy-agent end' >"${FW_CONF}"
+FW_LIVE='\t\ttcp dport 22 accept comment "mine"\n\t\ttcp dport 8443 counter packets 9 bytes 540 accept comment "allow 8443/tcp(Proxy-agent)"\n\t\tip saddr 1.2.3.4 udp dport 9443 counter packets 0 bytes 0 accept comment "allow 9443/udp(Proxy-agent)"\n'
+run_fw "${FW_LIVE}" 0 'nftSaveOwnRules' >/dev/null
+assert_equals "${FW_ADMIN}"$'\n# Proxy-agent begin\ninsert rule inet filter input tcp dport 8443 counter accept comment "allow 8443/tcp(Proxy-agent)"\ninsert rule inet filter input ip saddr 1.2.3.4 udp dport 9443 counter accept comment "allow 9443/udp(Proxy-agent)"\n# Proxy-agent end' \
+    "$(cat "${FW_CONF}")" "nft 写回：标记段按现有的自己的规则重写（计数清掉），管理员的内容与规则一字不动"
+_fwBefore=$(cat "${FW_CONF}")
+assert_contains "$(run_fw '\t\ttcp dport 7 counter accept comment "allow 7/tcp(Proxy-agent)"\n' 1 'nftSaveOwnRules')" "NFT_PERSIST_CHECK_FAILED" "nft 写回：nft -c 不过就提示"
+assert_equals "${_fwBefore}" "$(cat "${FW_CONF}")" "nft 写回：nft -c 不过就不写（段里一条加载不了，开机时整套规则都起不来）"
+run_fw '\t\ttcp dport 22 accept comment "mine"\n' 0 'nftSaveOwnRules' >/dev/null
+assert_equals "${FW_ADMIN}" "$(cat "${FW_CONF}")" "nft 写回：自己的规则都没了就去掉整段"
+rm -f "${FW_CONF}"
+assert_contains "$(run_fw "" 0 'nftSaveOwnRules')" "NFT_PERSIST_NO_CONF" "nft 写回：找不到开机加载的配置就提示，不新建"
+assert_equals "iptables -I INPUT -p tcp --dport 8443 -m comment --comment allow 8443/tcp(Proxy-agent) -j ACCEPT|ip6tables -I INPUT -p tcp --dport 8443 -m comment --comment allow 8443/tcp(Proxy-agent) -j ACCEPT|persist save" \
+    "$(run_fw "" 0 'allowPortIptables 8443 tcp')" "iptables：不限来源时 IPv4、IPv6 各放一条（IPv6 归 ip6tables 的策略管）"
+assert_equals "iptables -I INPUT -p tcp --dport 8443 -m comment --comment allow 8443/tcp(Proxy-agent) -j ACCEPT| ---> IPT6_UNAVAILABLE|persist save|rc=0" \
+    "$(run_fw "" 0 'ip6tables() { return 1; }; allowPortIptables 8443 tcp; echo rc=$?')" "iptables：内核没有 IPv6 防火墙时只放 IPv4、提示一句，不让安装停下"
+assert_equals "ip6tables -I INPUT -p tcp -s 2001:db8::1 --dport 9443 -m comment --comment allow 9443/tcp(Proxy-agent) -j ACCEPT|persist save" \
+    "$(run_fw "" 0 'allowPortIptables 9443 tcp 2001:db8::1')" "iptables：IPv6 来源只进 ip6tables（iptables -s 不认 IPv6）"
+assert_equals "iptables -I INPUT -p tcp -s 1.2.3.4 --dport 9443 -m comment --comment allow 9443/tcp(Proxy-agent) -j ACCEPT|persist save" \
+    "$(run_fw "" 0 'allowPortIptables 9443 tcp 1.2.3.4')" "iptables：IPv4 来源只进 iptables"
+FW_AP_FN=$(sed -n '/^allowPort() {/,/^}/p' install.sh)
+assert_contains "$(env FW_AP_FN="${FW_AP_FN}" bash -c 'eval "${FW_AP_FN}"
+    systemctl() { echo "active (running)"; }; dpkg() { :; }; checkFirewalldAllowPort() { :; }
+    firewall-cmd() { echo "firewall-cmd $*"; [[ "$1" != --permanent || "$2" != --query-rich-rule=* ]]; }
+    allowPort 9443 tcp 2001:db8::1' 2>&1)" 'rule family="ipv6" source address="2001:db8::1" port protocol="tcp" port="9443" accept' \
+    "firewalld：IPv6 来源的 rich rule 写 family=ipv6（写死 ipv4 加不上）"
+assert_equals "0" "$(grep -c 'allowedIP}/32' install.sh)" "链式出口按入口 IP 限来源时传裸地址，地址族由 allowPort 选（拼 /32 遇到 IPv6 就成了整段网段）"
 
 RL_FN=$(sed -n '/^reportUninstallLeftovers() {/,/^}/p' install.sh)
 # run_rl HAVE → HAVE 里的工具算装着 / 在跑；打印列出来的键。nginx 源的两个路径没法桩，这里只看其余几项
