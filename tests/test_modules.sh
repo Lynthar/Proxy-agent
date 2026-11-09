@@ -261,26 +261,6 @@ scanRes2=$(scanInstalledProtocols "${_scanTmp2}")
 assert_empty "${scanRes2//,/}" "scanInstalledProtocols excludes dokodemo port-hopping file"
 rm -rf "${_scanTmp1}" "${_scanTmp2}"
 
-# 测试 SS2022 uPSK 长度契约（回归 finding B：uPSK 解码长度必须等于方法密钥长度，
-# 镜像 install.sh initSingBoxClients id-14 的派生 head -c {16|32} | base64）
-_ss2022Uuid="9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
-_ss2022Len16=$(echo -n "${_ss2022Uuid}" | head -c 16 | base64 | base64 -d | wc -c | tr -d ' ')
-_ss2022Len32=$(echo -n "${_ss2022Uuid}" | head -c 32 | base64 | base64 -d | wc -c | tr -d ' ')
-assert_equals "16" "${_ss2022Len16}" "SS2022 aes-128-gcm uPSK decodes to 16 bytes"
-assert_equals "32" "${_ss2022Len32}" "SS2022 aes-256-gcm/chacha20 uPSK decodes to 32 bytes"
-
-# uPSK 直通判定契约（回归 N-4：来自 ss2022 inbound 的 password 已是派生 uPSK，
-# 二次派生会静默改写存量密码；镜像 install.sh initSingBoxClients id-14 的直通正则）
-_upskDetect() {
-    [[ "$1" =~ ^[A-Za-z0-9+/]{22}==$ || "$1" =~ ^[A-Za-z0-9+/]{43}=$ ]] && echo pass || echo derive
-}
-_upsk16=$(echo -n "${_ss2022Uuid}" | head -c 16 | base64)
-_upsk32=$(echo -n "${_ss2022Uuid}" | head -c 32 | base64)
-assert_equals "pass" "$(_upskDetect "${_upsk16}")" "uPSK passthrough matches 16-byte derived key"
-assert_equals "pass" "$(_upskDetect "${_upsk32}")" "uPSK passthrough matches 32-byte derived key"
-assert_equals "derive" "$(_upskDetect "${_ss2022Uuid}")" "uPSK passthrough rejects raw 36-char UUID"
-assert_equals "derive" "$(_upskDetect "short")" "uPSK passthrough rejects short strings"
-
 # domain_strategy → domain_resolver 迁移过滤器语义（回归 N-3：sing-box 1.14 移除该字段，
 # 镜像 install.sh singBoxMergeConfig 的迁移 jq）
 _dsFilter='.outbounds |= map(if has("domain_strategy") then .domain_resolver = {server: "local", strategy: .domain_strategy} | del(.domain_strategy) else . end)'

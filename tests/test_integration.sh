@@ -1691,6 +1691,8 @@ assert_equals "$(ss_old "${SS_U1}" 16)|$(ss_new "${SS_U2}" 16)" "$(run_ss 2022-b
     "14 的 uPSK：存量用户沿用旧密钥（不用重新导入），新账号用 UUID 的哈希"
 assert_equals "$(ss_old "${SS_U1}" 16)" "$(run_ss 2022-blake3-aes-128-gcm "[{\"password\":\"$(ss_old "${SS_U1}" 16)\",\"name\":\"alice-SS2022\"}]")" \
     "14 的 uPSK：身份源是 14 自己时，读到的已是密钥，原样沿用"
+assert_equals "$(ss_new "${SS_U1}" 32)" "$(run_ss 2022-blake3-aes-256-gcm "[{\"password\":\"$(ss_new "${SS_U1}" 32)\",\"name\":\"alice-SS2022\"}]")" \
+    "14 的 uPSK：32 字节的密钥同样原样沿用"
 assert_equals "$(ss_new "${SS_U2}" 32)" "$(run_ss 2022-blake3-aes-256-gcm '[]' "${SS_U2}" bob)" "14 的 uPSK：256 位方法的新账号是 32 字节的哈希"
 rm -f "${SS_FILE}"
 assert_equals "$(ss_new "${SS_U1}" 16)" "$(run_ss 2022-blake3-aes-128-gcm "[{\"uuid\":\"${SS_U1}\",\"name\":\"alice-VLESS\"}]")" \
