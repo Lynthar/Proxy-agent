@@ -7349,6 +7349,8 @@ EOF
         # 4=外层密码 5=内层 uPSK 6=内层服务端密钥 7=握手目标（也是客户端 SNI）
         local stUserKey=$5 stServerKey=$6 stSni=$7 stAddr stMethod="2022-blake3-aes-128-gcm"
         stAddr=$(getPublicIP)
+        # 通用订阅不收 16，但 subscribe 按 default/ 列账号：只装 16 时没有这个空文件，Clash 与 sing-box 订阅一份都不生成
+        : >>"${SUBSCRIBE_LOCAL_DIR}/default/${user}"
         local stPassword="${stServerKey}:${stUserKey}"
         echoContent yellow " ---> $(t ACCOUNT_SHADOWTLS_PLAIN_TITLE)"
         echoContent green "    $(t ACCOUNT_SHADOWTLS_PLAIN "${stAddr}" "${port}" "${stMethod}" "${stPassword}" "${id}" "${stSni}" "${email}")\n"
@@ -18368,7 +18370,8 @@ addOtherSubscribe() {
         subscribe
     fi
 }
-# clashMeta配置文件
+# clashMetaConfig URL MD5 → 写 Clash 配置；provider 名与缓存路径用订阅地址的 md5，不能用 salt：
+# 配置发给每个 Clash 用户，有了 salt 再知道别人的用户名，就能算出别人的订阅地址
 clashMetaConfig() {
     local url=$1
     local id=$2
@@ -18445,9 +18448,9 @@ dns:
       - https://dns.alidns.com/dns-query
 
 proxy-providers:
-  ${subscribeSalt}_provider:
+  ${id}_provider:
     type: http
-    path: ./${subscribeSalt}_provider.yaml
+    path: ./${id}_provider.yaml
     url: ${url}
     interval: 3600
     proxy: DIRECT
@@ -18460,7 +18463,7 @@ proxy-groups:
   - name: 手动切换
     type: select
     use:
-      - ${subscribeSalt}_provider
+      - ${id}_provider
     proxies: null
   - name: 自动选择
     type: url-test
@@ -18468,13 +18471,13 @@ proxy-groups:
     interval: 36000
     tolerance: 50
     use:
-      - ${subscribeSalt}_provider
+      - ${id}_provider
     proxies: null
 
   - name: 全球代理
     type: select
     use:
-      - ${subscribeSalt}_provider
+      - ${id}_provider
     proxies:
       - 手动切换
       - 自动选择
@@ -18482,7 +18485,7 @@ proxy-groups:
   - name: 流媒体
     type: select
     use:
-      - ${subscribeSalt}_provider
+      - ${id}_provider
     proxies:
       - 手动切换
       - 自动选择
@@ -18490,7 +18493,7 @@ proxy-groups:
   - name: DNS_Proxy
     type: select
     use:
-      - ${subscribeSalt}_provider
+      - ${id}_provider
     proxies:
       - 自动选择
       - 手动切换
@@ -18499,14 +18502,14 @@ proxy-groups:
   - name: Telegram
     type: select
     use:
-      - ${subscribeSalt}_provider
+      - ${id}_provider
     proxies:
       - 手动切换
       - 自动选择
   - name: Google
     type: select
     use:
-      - ${subscribeSalt}_provider
+      - ${id}_provider
     proxies:
       - 手动切换
       - 自动选择
@@ -18514,14 +18517,14 @@ proxy-groups:
   - name: YouTube
     type: select
     use:
-      - ${subscribeSalt}_provider
+      - ${id}_provider
     proxies:
       - 手动切换
       - 自动选择
   - name: Netflix
     type: select
     use:
-      - ${subscribeSalt}_provider
+      - ${id}_provider
     proxies:
       - 流媒体
       - 手动切换
@@ -18529,7 +18532,7 @@ proxy-groups:
   - name: Spotify
     type: select
     use:
-      - ${subscribeSalt}_provider
+      - ${id}_provider
     proxies:
       - 流媒体
       - 手动切换
@@ -18538,7 +18541,7 @@ proxy-groups:
   - name: HBO
     type: select
     use:
-      - ${subscribeSalt}_provider
+      - ${id}_provider
     proxies:
       - 流媒体
       - 手动切换
@@ -18546,7 +18549,7 @@ proxy-groups:
   - name: Bing
     type: select
     use:
-      - ${subscribeSalt}_provider
+      - ${id}_provider
     proxies:
       - 手动切换
       - 自动选择
@@ -18555,7 +18558,7 @@ proxy-groups:
   - name: OpenAI
     type: select
     use:
-      - ${subscribeSalt}_provider
+      - ${id}_provider
     proxies:
       - 手动切换
       - 自动选择
@@ -18563,7 +18566,7 @@ proxy-groups:
   - name: ClaudeAI
     type: select
     use:
-      - ${subscribeSalt}_provider
+      - ${id}_provider
     proxies:
       - 手动切换
       - 自动选择
@@ -18571,7 +18574,7 @@ proxy-groups:
   - name: Disney
     type: select
     use:
-      - ${subscribeSalt}_provider
+      - ${id}_provider
     proxies:
       - 流媒体
       - 手动切换
@@ -18579,7 +18582,7 @@ proxy-groups:
   - name: GitHub
     type: select
     use:
-      - ${subscribeSalt}_provider
+      - ${id}_provider
     proxies:
       - 手动切换
       - 自动选择
@@ -18588,20 +18591,20 @@ proxy-groups:
   - name: 国内媒体
     type: select
     use:
-      - ${subscribeSalt}_provider
+      - ${id}_provider
     proxies:
       - DIRECT
   - name: 本地直连
     type: select
     use:
-      - ${subscribeSalt}_provider
+      - ${id}_provider
     proxies:
       - DIRECT
       - 自动选择
   - name: 漏网之鱼
     type: select
     use:
-      - ${subscribeSalt}_provider
+      - ${id}_provider
     proxies:
       - DIRECT
       - 手动切换
@@ -18762,17 +18765,9 @@ rules:
 EOF
 
 }
-# 随机salt - 使用更安全的随机源
+# initRandomSalt → 32 位十六进制（128 bit）。拿到自己订阅地址的人能离线穷举 salt（md5 很快），短了就能算出别人的地址
 initRandomSalt() {
-    local chars="abcdefghijklmnopqrtuxyz"
-    local initCustomPath=
-    local charLen=${#chars}
-    for i in {1..10}; do
-        local idx
-        idx=$(randomNum 0 $((charLen - 1)))
-        initCustomPath+="${chars:idx:1}"
-    done
-    echo "${initCustomPath}"
+    od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
 }
 # 读取自定义 salt：回车走随机，<8 位拒绝重询。
 # 订阅 URL 由 md5(email+salt) 派生且 nginx 侧无鉴权，弱 salt 会让 URL 可枚举、泄漏完整节点配置。
@@ -18831,8 +18826,6 @@ subscribe() {
         fi
         echoContent yellow "\n ---> Salt: ${subscribeSalt}"
 
-        echo "${subscribeSalt}" >${SUBSCRIBE_LOCAL_DIR}/subscribeSalt
-
         rm -rf ${SUBSCRIBE_LOCAL_DIR}/default/*
         rm -rf ${SUBSCRIBE_LOCAL_DIR}/clashMeta/*
         rm -rf ${SUBSCRIBE_LOCAL_DIR}/sing-box/*
@@ -18842,6 +18835,12 @@ subscribe() {
             echoContent red " ---> $(t SUBSCRIBE_EMPTY_HOST)"
             return 1
         fi
+        # 换了 salt 旧地址整个作废；平时这三个目录按人覆盖、不整清（模板拉不到时留着能用的旧配置）
+        if [[ "$(cat "${SUBSCRIBE_LOCAL_DIR}/subscribeSalt" 2>/dev/null)" != "${subscribeSalt}" ]]; then
+            rm -rf "${SUBSCRIBE_DIR}"/sing-box/* "${SUBSCRIBE_DIR}"/sing-box_profiles/* "${SUBSCRIBE_DIR}"/clashMetaProfiles/*
+        fi
+        # salt 到这里才落盘：上面没发布就返回时若已写了新 salt，下次比对以为没换过，旧地址的文件永远留着
+        echo "${subscribeSalt}" >"${SUBSCRIBE_LOCAL_DIR}/subscribeSalt"
         rm -rf ${SUBSCRIBE_DIR}/default/*
         rm -rf ${SUBSCRIBE_DIR}/clashMeta/*
         if [[ -n $(ls ${SUBSCRIBE_LOCAL_DIR}/default/) ]]; then
@@ -18893,7 +18892,8 @@ subscribe() {
                     if [[ "${subscribeType}" == "http" ]]; then
                         currentDomain="$(getPublicIP):${subscribePort}"
                     else
-                        currentDomain="${currentHost}:${subscribePort}"
+                        # 只剩 14 / 16 时入站里没有域名，用订阅自己的 server_name，否则链接成了 https://:端口
+                        currentDomain="${currentHost:-${subscribeDomain}}:${subscribePort}"
                     fi
                 fi
                 # 三种格式的文件不管打不打印都要重建：上面已经删光了 clashMeta，只建 default 会让所有人的 Clash 订阅 404

@@ -2829,6 +2829,25 @@ run_cp "${SUBSCRIBE_FN}; ${CP_SUB_STUBS}; wget() { return 4; }; subscribe false 
 assert_equals "placeholder" "$(cat "${CP_ROOT}/subscribe/sing-box/${CP_ALICE_MD5}")" "subscribe：模板拉不到时不动已有的 sing-box 配置"
 assert_equals "proxies:" "$(head -1 "${CP_ROOT}/subscribe/clashMeta/${CP_ALICE_MD5}")" "subscribe：模板拉不到不影响 clashMeta 重建"
 
+# 只装 16：通用订阅不收它，Clash 与 sing-box 订阅照常生成；入站里没有域名，链接用订阅自己的 server_name
+DEFAULT_B64_FN=$(sed -n '/^defaultBase64Code() {/,/^}/p' install.sh)
+CP_ST_ONLY='showAccounts() {
+        mkdir -p "${SUBSCRIBE_LOCAL_DIR}/default" "${SUBSCRIBE_LOCAL_DIR}/clashMeta" "${SUBSCRIBE_LOCAL_DIR}/sing-box"
+        defaultBase64Code shadowtls 8443 alice outerpw upsk serverkey www.example.org
+    }
+    readNginxSubscribe() { subscribePort=12345; subscribeType=https; subscribeDomain=sub.example.com; }
+    currentHost='
+cp_reset_tree
+mkdir -p "${CP_ROOT}/subscribe/clashMetaProfiles"
+run_cp "${SUBSCRIBE_FN}; ${DEFAULT_B64_FN}; ${CP_SUB_STUBS}; ${CP_ST_ONLY}; ${CP_WGET_OK}; subscribe false true" >/dev/null 2>&1
+assert_equals "yes|0" "$([[ -f "${CP_ROOT}/subscribe/default/${CP_ALICE_MD5}" ]] && echo yes || echo no)|$(base64 -d <"${CP_ROOT}/subscribe/default/${CP_ALICE_MD5}" 2>/dev/null | grep -c .)" \
+    "只装 16：通用订阅有这个地址、内容为空（解析器不认 shadow-tls）"
+assert_equals '["shadowsocks","shadowtls"]' "$(jq -c '[.outbounds[] | select(.type == "shadowsocks" or .type == "shadowtls") | .type]' "${CP_ROOT}/subscribe/sing-box/${CP_ALICE_MD5}" 2>/dev/null)" \
+    "只装 16：sing-box 订阅照常生成，节点带 detour"
+assert_contains "$(cat "${CP_ROOT}/subscribe/clashMeta/${CP_ALICE_MD5}" 2>/dev/null)" "plugin: shadow-tls" "只装 16：Clash 节点文件照常生成"
+assert_equals "https://sub.example.com:12345/s/clashMeta/${CP_ALICE_MD5}" "$(cat "${CP_ROOT}/subscribe/clashMetaProfiles/${CP_ALICE_MD5}" 2>/dev/null)" \
+    "只装 16：Clash 配置引用的地址用订阅的域名，不是 https://:端口"
+
 # 取不到公网 IP 时节点地址是空的：这次不发布，已发布的原样留着（客户端一更新就全坏，旧的至少还能用）
 cp_eh() {
     rm -rf "${CP_ROOT}/subscribe_local"; mkdir -p "${CP_ROOT}/subscribe_local/default" "${CP_ROOT}/subscribe_local/clashMeta" "${CP_ROOT}/subscribe_local/sing-box"
@@ -2920,6 +2939,39 @@ assert_equals "testsalt" "$(run_salt '\n')" "查看订阅：回车沿用 salt"
 assert_equals "testsalt" "$(run_salt 'y\n')" "查看订阅：答 y 沿用 salt"
 assert_equals "newsaltvalue" "$(run_salt 'n\n')" "查看订阅：答 n 才换 salt"
 assert_equals "newsaltvalue" "$(run_salt 'N\n')" "查看订阅：大写 N 也算"
+
+# 换 salt 是为了作废旧地址：平时按人覆盖的三个目录这时也要清，否则旧地址照样取到能连的配置
+run_salt_stale() {
+    local d stale=0123456789abcdef0123456789abcdef
+    cp_reset_tree
+    mkdir -p "${CP_ROOT}/subscribe/clashMetaProfiles"
+    for d in sing-box sing-box_profiles clashMetaProfiles; do echo old >"${CP_ROOT}/subscribe/${d}/${stale}"; done
+    printf "$1" | run_cp "${SUBSCRIBE_FN}; ${CP_SUB_STUBS}; ${CP_WGET_OK}; readSubscribeSalt() { subscribeSalt=newsaltvalue; }; subscribe" >/dev/null 2>&1
+    for d in sing-box sing-box_profiles clashMetaProfiles; do [[ -f "${CP_ROOT}/subscribe/${d}/${stale}" ]] && printf 'kept ' || printf 'gone '; done
+}
+assert_equals "gone gone gone " "$(run_salt_stale 'n\n')" "换 salt：旧地址的 sing-box、sing-box_profiles、clashMetaProfiles 一起删掉"
+assert_equals "kept kept kept " "$(run_salt_stale '\n')" "沿用 salt：这三个目录不整清（模板拉不到时旧配置还要用）"
+cp_reset_tree
+_out=$(printf 'n\n' | run_cp "${SUBSCRIBE_FN}; ${CP_SUB_STUBS}; ${CP_SUB_EMPTY}; readSubscribeSalt() { subscribeSalt=newsaltvalue; }; subscribe; echo rc=\$?" 2>&1)
+assert_equals "rc=1|testsalt" "$(grep -o 'rc=[0-9]*' <<<"${_out}")|$(cat "${CP_ROOT}/subscribe_local/subscribeSalt")" \
+    "换 salt 但这次没发布：新 salt 不落盘，下次还认得出换过"
+
+# Clash 配置发给每个用户：里面不能有 salt，有了它和别人的用户名就能算出别人的订阅地址
+CMC_FN=$(sed -n '/^clashMetaConfig() {/,/^}/p' install.sh)
+cp_reset_tree
+mkdir -p "${CP_ROOT}/subscribe/clashMetaProfiles"
+run_cp "${CMC_FN}; subscribeSalt=secretsalt42; clashMetaConfig https://sub.example.com:12345/s/clashMeta/${CP_ALICE_MD5} ${CP_ALICE_MD5}" >/dev/null 2>&1
+_cmc=$(cat "${CP_ROOT}/subscribe/clashMetaProfiles/${CP_ALICE_MD5}" 2>/dev/null)
+assert_equals "0|${CP_ALICE_MD5}_provider|./${CP_ALICE_MD5}_provider.yaml" \
+    "$(grep -c secretsalt42 <<<"${_cmc}")|$(sed -n '/^proxy-providers:/{n;s/[ :]//g;p;}' <<<"${_cmc}")|$(awk '/^proxy-providers:/{f=1} f && $1 == "path:" {print $2; exit}' <<<"${_cmc}")" \
+    "Clash 配置：provider 名与缓存路径用订阅地址的 md5，不带 salt"
+assert_equals "$(grep -c '^    use:' <<<"${_cmc}")" "$(grep -A1 '^    use:' <<<"${_cmc}" | grep -c "^      - ${CP_ALICE_MD5}_provider$")" "Clash 配置：每个分组引用的都是这个 provider"
+
+IRS_FN=$(sed -n '/^initRandomSalt() {/,/^}/p' install.sh)
+_salt1=$(bash -c "${IRS_FN}; initRandomSalt")
+_salt2=$(bash -c "${IRS_FN}; initRandomSalt")
+assert_equals "yes" "$([[ "${_salt1}" =~ ^[0-9a-f]{32}$ && "${_salt1}" != "${_salt2}" ]] && echo yes || echo no)" \
+    "随机 salt：32 位十六进制（128 bit），拿到自己地址的人离线穷举不出来"
 
 rm -rf "${CP_ROOT}" "${_snap}" "${CP_TABLE}" "${CP_CALLS}" "${CP_STATS}"
 echo ""
