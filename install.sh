@@ -4286,6 +4286,51 @@ localGlobalAddrs() {
     { ip -o addr show scope global 2>/dev/null || true; } | awk '{ sub(/\/.*/, "", $4); print $4 }' | jq -Rsc 'split("\n") | map(select(length > 0)) | unique'
 }
 
+# ipv6Hex IP → 32 位小写十六进制（展开 ::、补齐前导零），不是恰好 8 段时返回 1
+ipv6Hex() {
+    local ip=${1,,} part out="" n i head=() tail=()
+    if [[ "${ip}" == *::* ]]; then
+        IFS=: read -r -a head <<<"${ip%%::*}"
+        IFS=: read -r -a tail <<<"${ip#*::}"
+        n=$((8 - ${#head[@]} - ${#tail[@]}))
+        ((n >= 1)) || return 1
+        for ((i = 0; i < n; i++)); do head+=(0); done
+        head+=("${tail[@]}")
+    else
+        IFS=: read -r -a head <<<"${ip}"
+    fi
+    ((${#head[@]} == 8)) || return 1
+    for part in "${head[@]}"; do
+        [[ "${part}" =~ ^[0-9a-f]{1,4}$ ]] || return 1
+        out+=$(printf '%04x' "$((16#${part}))")
+    done
+    echo "${out}"
+}
+
+# isLocalBlockedIP IP → 0 = sing-box 本机封锁按 IP 拒的地址：ip_is_private（私网、回环、组播、链路本地、未指定）、0.0.0.0/8、
+# IPv4-mapped、本机网卡地址。必须与 localBlockInject 的 $ipBlock 同一套，否则输入时放过的地址经代理照样不通
+isLocalBlockedIP() {
+    local ip=$1 a b c d hex="" addr
+    if [[ "${ip}" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
+        a=$((10#${BASH_REMATCH[1]})) b=$((10#${BASH_REMATCH[2]})) c=$((10#${BASH_REMATCH[3]})) d=$((10#${BASH_REMATCH[4]}))
+        ((a == 0 || a == 10 || a == 127 || (a >= 224 && a <= 239))) && return 0
+        ((a == 169 && b == 254 || a == 172 && b >= 16 && b <= 31 || a == 192 && b == 168)) && return 0
+        ip="${a}.${b}.${c}.${d}"
+    elif hex=$(ipv6Hex "${ip}"); then
+        [[ "${hex}" =~ ^(0{31}[01]|0{20}ffff|f[cd]|fe[89ab]|ff) ]] && return 0
+    else
+        return 1
+    fi
+    while read -r addr; do
+        if [[ "${addr}" == *:* ]]; then
+            [[ -n "${hex}" && "$(ipv6Hex "${addr}")" == "${hex}" ]] && return 0
+        elif [[ "${addr}" == "${ip}" ]]; then
+            return 0
+        fi
+    done < <(localGlobalAddrs | jq -r '.[]')
+    return 1
+}
+
 # ensureXrayLocalBlock → Xray 启动前把「代理用户不许连本机与内网」放到 09_routing.json 最前（幂等）：
 # 统计 API 端口与桥端口段按端口封（写成域名、DNS rebinding 都绕不过），回环 / 私网 / 链路本地 / 未指定 / 本机网卡地址按字面 IP 封。
 # 不封的话成员能经代理连到统计 API 清零自己的计数。09_routing.json 有好几个写入者，所以每次启动前补，不在写入处补
@@ -17288,6 +17333,11 @@ setUnlockSNI() {
         # 验证IP格式
         if ! isValidIP "${setSNIP}"; then
             echoContent red " ---> $(t ERR_IP_INVALID)"
+            exit 1
+        fi
+        # Xray 的本机封锁只认字面 IP，hosts 映射到内网的照通；sing-box 解析后按 IP 拒，写进去也连不上
+        if [[ "${coreKind}" == 2 ]] && isLocalBlockedIP "${setSNIP}"; then
+            echoContent red " ---> $(t SNI_IP_LOCAL_BLOCKED)"
             exit 1
         fi
         echoContent red "=============================================================="

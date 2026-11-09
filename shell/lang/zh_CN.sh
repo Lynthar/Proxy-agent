@@ -648,6 +648,7 @@ MSG_SINGBOX_RULESET_HTTP_CLIENT_MIGRATED="已把 rule_set 的 download_detour �
 MSG_SINGBOX_RULESET_RENAMED="规则集 %s 上游已撤（sing-box 下载不到远程规则集就起不来），已换成 %s"
 MSG_SINGBOX_DNS_SPLIT_MIGRATED="DNS / SNI 分流改成按路由解析（旧写法新版 sing-box 起不来，分流也不生效）"
 MSG_SINGBOX_DNS_SPLIT_WRITE_FAILED="写 sing-box 分流配置失败，没有改动"
+MSG_SNI_IP_LOCAL_BLOCKED="sing-box 上 SNI IP 不能是本机或内网地址：经代理连这些地址会被本机封锁拦下，请填公网地址"
 MSG_SINGBOX_RULESET_HTTP_CLIENT_STRIPPED="当前 sing-box 内核低于 1.14，已剥离 rule_set 的 http_client 字段（升级内核后自动恢复）"
 MSG_GEOSITE_LIST_DOWNLOAD_FAILED="geosite 分类清单下载失败，沿用本地旧清单；没有旧清单时录入项一律按普通域名处理"
 MSG_TLS_RENEW_ACME_FAILED="acme.sh 续期失败，保留现有证书并恢复服务"

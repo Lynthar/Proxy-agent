@@ -3996,7 +3996,8 @@ echo -e "${YELLOW}=== 测试 sing-box 的 DNS / SNI 分流 ===${NC}"
 DNS_FN=""
 # removeUnlockDNS / removeUnlockSNI 的 Xray 分支有带顶格 } 的 heredoc，按 sed 范围抽会截断；抽到下一个函数定义为止
 for _f in addSingBoxDNSConfig initSingBoxRules ensureSingBoxLocalDns migrateSingBoxDnsSplit defaultDomainResolverInject \
-          removeUnlockDNS removeUnlockSNI setUnlockDNS isValidIP isValidDomain; do
+          removeUnlockDNS removeUnlockSNI setUnlockDNS setUnlockSNI isValidIP isValidDomain isLocalBlockedIP ipv6Hex \
+          xrayDomainRuleValue; do
     _body=$(awk -v n="${_f}() {" 'f && /^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{/ {exit} index($0, n) == 1 {f=1} f' install.sh)
     assert_not_empty "${_body}" "分流：抽到 ${_f} 原文"
     DNS_FN+="${_body}"$'\n'
@@ -4008,6 +4009,7 @@ run_dns() (
     t() { echo "$1"; }
     geositeCategoryExists() { [[ "$1" == "netflix" ]]; }
     reloadCore() { echo reload >>"${DNS_DIR}.log"; }
+    localGlobalAddrs() { echo '["203.0.113.9","2001:db8::9"]'; }
     singBoxConfigPath="${DNS_DIR}"
     eval "${DNS_FN}"
     eval "$1"
@@ -4090,6 +4092,30 @@ assert_equals 'rc=1 none' "$(dns_set '1.1.1.x' 'example.com')" "DNS 分流入口
 assert_equals 'rc=1 none' "$(dns_set '1.1.1.1' 'exa(mple.com')" "DNS 分流入口：带正则元字符的域名被拒"
 assert_equals 'rc=1 none' "$(dns_set '1.1.1.1' ',')" "DNS 分流入口：域名为空被拒"
 assert_equals 'rc=0 written' "$(dns_set '1.1.1.1' 'example.com,netflix')" "DNS 分流入口：合法输入写入并以 0 退出"
+
+# sing-box 本机封锁按 IP 拒的地址：输入检查与 localBlockInject 的 ip_is_private + 0.0.0.0/8 + IPv4-mapped + 本机网卡地址一致
+for _ip in 0.1.2.3 10.0.0.1 010.0.0.1 127.0.0.1 169.254.169.254 172.16.0.1 172.31.255.255 192.168.1.1 224.0.0.1 239.255.255.255 \
+           :: ::1 fd00::1 FC00::1 fe80::1 febf::1 ff02::1 ::ffff:7f00:1 ::ffff:808:808 203.0.113.9 2001:DB8:0:0:0:0:0:9; do
+    assert_equals 'blocked' "$(run_dns "isLocalBlockedIP '${_ip}'" >/dev/null 2>&1 && echo blocked || echo open)" "本机封锁地址：${_ip} 算封锁"
+done
+for _ip in 1.1.1.1 172.15.255.255 172.32.0.1 192.169.0.1 169.255.0.1 100.64.0.1 2606:4700::1111 fec0::1 64:ff9b::808:808 2001:db8::8; do
+    assert_equals 'open' "$(run_dns "isLocalBlockedIP '${_ip}'" >/dev/null 2>&1 && echo blocked || echo open)" "本机封锁地址：${_ip} 不算"
+done
+
+# SNI 分流入口：sing-box 主核上本机与内网地址在读入时拒绝、什么都不写；Xray 的封锁只认字面 IP，hosts 映射过去照通，不拦
+sni_set() {
+    local core=$1 sb=$2
+    shift 2
+    dns_reset
+    printf '%s\n' "$@" | run_dns "coreKind=${core}; configPath='${DNS_DIR}'; singBoxConfigPath='${sb}'; setUnlockSNI" >/dev/null 2>&1
+    echo "rc=$? $([[ -e "${DNS_DIR}dns.json" ]] && echo sb || echo -) $([[ -e "${DNS_DIR}11_dns.json" ]] && echo xray || echo -)"
+}
+assert_equals 'rc=1 - -' "$(sni_set 2 "${DNS_DIR}" 127.0.0.1 example.com)" "SNI 分流入口：sing-box 上回环地址被拒"
+assert_equals 'rc=1 - -' "$(sni_set 2 "${DNS_DIR}" 10.1.2.3 example.com)" "SNI 分流入口：sing-box 上内网地址被拒"
+assert_equals 'rc=1 - -' "$(sni_set 2 "${DNS_DIR}" 203.0.113.9 example.com)" "SNI 分流入口：sing-box 上本机网卡地址被拒"
+assert_equals 'rc=0 sb -' "$(sni_set 2 "${DNS_DIR}" 1.2.3.4 example.com)" "SNI 分流入口：sing-box 上公网地址照常写入"
+assert_equals 'rc=0 - xray' "$(sni_set 1 '' 127.0.0.1 example.com)" "SNI 分流入口：Xray 上内网地址照常写入"
+assert_equals 'rc=0 sb xray' "$(sni_set 1 "${DNS_DIR}" 10.1.2.3 example.com example.com)" "SNI 分流入口：Xray 带旁挂时两边都写，不拦"
 rm -rf "${DNS_DIR}" "${DNS_DIR}.log"
 
 echo ""

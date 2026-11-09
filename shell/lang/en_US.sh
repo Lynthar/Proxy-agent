@@ -648,6 +648,7 @@ MSG_SINGBOX_RULESET_HTTP_CLIENT_MIGRATED="Migrated rule_set download_detour to h
 MSG_SINGBOX_RULESET_RENAMED="Rule-set %s was removed upstream (sing-box cannot start without a remote rule-set it cannot download); switched to %s"
 MSG_SINGBOX_DNS_SPLIT_MIGRATED="DNS / SNI split now resolves through route rules (newer sing-box would not start with the old form, and the split had no effect)"
 MSG_SINGBOX_DNS_SPLIT_WRITE_FAILED="Failed to write the sing-box split config; nothing was changed"
+MSG_SNI_IP_LOCAL_BLOCKED="On sing-box the SNI IP can't be a local or private address: connections through the proxy to such addresses are blocked. Use a public address"
 MSG_SINGBOX_RULESET_HTTP_CLIENT_STRIPPED="Installed sing-box is older than 1.14; stripped rule_set http_client fields (restored automatically after a core upgrade)"
 MSG_GEOSITE_LIST_DOWNLOAD_FAILED="Failed to download the geosite category list; keeping the local copy, or treating every entry as a plain domain when there is none"
 MSG_TLS_RENEW_ACME_FAILED="acme.sh renewal failed; existing certificate kept and services restarted"
