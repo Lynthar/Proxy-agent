@@ -1646,7 +1646,7 @@ ST_ROOT="${MOCK_ROOT}/shadowtls.root"
 rm -rf "${ST_ROOT}" && mkdir -p "${ST_ROOT}/sing-box/conf/config" && : >"${ST_ROOT}/sing-box/sing-box" && : >"${ST_ROOT}/sing-box/conf/config.json"
 printf '%s\n' '{"inbounds":[{"type":"shadowtls","listen_port":443,"users":[{"name":"alice-ShadowTLS","password":"a1"}]},{"type":"shadowsocks","password":"k","users":[]}]}' \
     >"${ST_ROOT}/sing-box/conf/config/16_shadowtls_inbounds.json"
-ST_FNS="${DOTTED_FNS}"$'\n'"$(sed -n '/^initSingBoxClients() {/,/^}/p;/^shadowTlsUserKey() {/,/^}/p;/^shadowTlsWithInnerUsers() {/,/^}/p' install.sh)"
+ST_FNS="${DOTTED_FNS}"$'\n'"$(sed -n '/^initSingBoxClients() {/,/^}/p;/^ssUserKey() {/,/^}/p;/^shadowTlsWithInnerUsers() {/,/^}/p' install.sh)"
 run_st() {
     env PROXY_AGENT_DIR="${ST_ROOT}" ST_FNS="${ST_FNS}" bash -c '
         source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh
@@ -1668,6 +1668,33 @@ assert_equals '["alice-ShadowTLS"]|["alice-ShadowTLS"]' "$(jq -c '[.inbounds[0].
 # 14 + 16 都在时身份源要是 16：14 的 password 是派生 uPSK，拿它当 UUID 会把所有人的密码换掉
 printf '%s\n' '{"inbounds":[{"listen_port":1,"users":[{"name":"alice-SS2022","password":"derived"}]}]}' >"${ST_ROOT}/sing-box/conf/config/14_ss2022_inbounds.json"
 assert_equals ",14,16, 16_shadowtls_inbounds" "$(run_st)" "readInstallProtocolType：14 与 16 同在时身份源是 16"
+
+# 14 的 uPSK：文件里还是旧派生（UUID 截断，约 52 比特）的存量用户沿用，新账号用 UUID 的哈希，长度跟方法走
+SS_ROOT="${MOCK_ROOT}/ss2022.root"
+SS_FNS=$(sed -n '/^initSingBoxClients() {/,/^}/p;/^ssUserKey() {/,/^}/p' install.sh)
+SS_FILE="${SS_ROOT}/sing-box/conf/config/14_ss2022_inbounds.json"
+SS_U1=11111111-1111-4111-8111-111111111111
+SS_U2=22222222-2222-4222-8222-222222222222
+# run_ss METHOD CLIENTS [NEW_UUID NEW_NAME] → initSingBoxClients 14 给出的 14 用户密码，用 | 连起来
+run_ss() {
+    env PROXY_AGENT_DIR="${SS_ROOT}" SS_FNS="${SS_FNS}" bash -c '
+        source lib/constants.sh
+        eval "${SS_FNS}"
+        ss2022Method=$1 currentClients=$2
+        initSingBoxClients 14 "${3:-}" "${4:-}"' _ "$@" 2>/dev/null | jq -r '[.[] | select(.name | endswith("-SS2022")) | .password] | join("|")'
+}
+ss_old() { printf '%s' "$1" | head -c "$2" | base64; }
+ss_new() { printf '%s' "$1" | openssl dgst -sha256 -binary | head -c "$2" | base64; }
+rm -rf "${SS_ROOT}" && mkdir -p "${SS_ROOT}/sing-box/conf/config"
+jq -n --arg p "$(ss_old "${SS_U1}" 16)" '{inbounds: [{users: [{name: "alice-SS2022", password: $p}]}]}' >"${SS_FILE}"
+assert_equals "$(ss_old "${SS_U1}" 16)|$(ss_new "${SS_U2}" 16)" "$(run_ss 2022-blake3-aes-128-gcm "[{\"uuid\":\"${SS_U1}\",\"name\":\"alice-VLESS\"}]" "${SS_U2}" bob)" \
+    "14 的 uPSK：存量用户沿用旧密钥（不用重新导入），新账号用 UUID 的哈希"
+assert_equals "$(ss_old "${SS_U1}" 16)" "$(run_ss 2022-blake3-aes-128-gcm "[{\"password\":\"$(ss_old "${SS_U1}" 16)\",\"name\":\"alice-SS2022\"}]")" \
+    "14 的 uPSK：身份源是 14 自己时，读到的已是密钥，原样沿用"
+assert_equals "$(ss_new "${SS_U2}" 32)" "$(run_ss 2022-blake3-aes-256-gcm '[]' "${SS_U2}" bob)" "14 的 uPSK：256 位方法的新账号是 32 字节的哈希"
+rm -f "${SS_FILE}"
+assert_equals "$(ss_new "${SS_U1}" 16)" "$(run_ss 2022-blake3-aes-128-gcm "[{\"uuid\":\"${SS_U1}\",\"name\":\"alice-VLESS\"}]")" \
+    "14 的 uPSK：新装（没有旧文件）一律用哈希"
 # 无域名机器的身份源没有 tls 块：currentHost 读成字面 null 时，http 订阅的端口读不回来，每次查看订阅都重配、换端口
 ST_HOST_FN=$(sed -n '/^readConfigHostPathUUID() {/,/^}/p;/^readNginxSubscribe() {/,/^}/p' install.sh)
 mkdir -p "${ST_ROOT}/nginx"
@@ -5813,7 +5840,7 @@ assert_equals "${_urWant}" "$(run_ur ",0,15," "")" "15 的 location：个性化�
 assert_equals "h1=0" "$(run_ur ",0,1," "")" "15 的 location：没选 15 不写，猜中路径也只看到伪装站"
 
 # --- 16 的配置：内层只听回环、只开 TCP；重装沿用目标与密钥；验证连不出去时不能卡死安装 ---
-SC_FN=$(sed -n '/^shadowTlsUserKey() {/,/^}/p;/^shadowTlsWithInnerUsers() {/,/^}/p;/^shadowTlsInbound() {/,/^}/p;/^initShadowTlsConfig() {/,/^}/p;/^ensureSingBoxLocalDns() {/,/^}/p' install.sh)
+SC_FN=$(sed -n '/^ssUserKey() {/,/^}/p;/^shadowTlsWithInnerUsers() {/,/^}/p;/^shadowTlsInbound() {/,/^}/p;/^initShadowTlsConfig() {/,/^}/p;/^ensureSingBoxLocalDns() {/,/^}/p' install.sh)
 _scConf=$(env SC_FN="${SC_FN}" bash -c 'eval "${SC_FN}"; shadowTlsWithInnerUsers "$(shadowTlsInbound 8443 dl.google.com srvkey '"'"'[{"name":"a-ShadowTLS","password":"p1"}]'"'"')"')
 assert_equals '["shadowtls",8443,"shadowtls-ss-in",3,true,"dl.google.com",443]' "$(jq -c '.inbounds[0] | [.type, .listen_port, .detour, .version, .strict_mode, .handshake.server, .handshake.server_port]' <<<"${_scConf}")" \
     "16：外层 v3 + strict，detour 给内层"

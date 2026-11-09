@@ -4762,7 +4762,12 @@ initSingBoxClients() {
             if [[ "${uuid}" =~ ^[A-Za-z0-9+/]{22}==$ || "${uuid}" =~ ^[A-Za-z0-9+/]{43}=$ ]]; then
                 ss2022UserKey="${uuid}"
             else
+                # 文件里还是旧派生（UUID 截断）的存量用户沿用，免得所有人重新导入；新账号与换过 UUID 的用哈希
                 ss2022UserKey=$(echo -n "${uuid}" | head -c "${ss2022UserKeyLen}" | base64)
+                if ! jq -e --arg p "${ss2022UserKey}" 'any(.inbounds[0].users[]?; .password == $p)' \
+                    "${SINGBOX_FRAGMENT_DIR}/14_ss2022_inbounds.json" >/dev/null 2>&1; then
+                    ss2022UserKey=$(ssUserKey "${uuid}" "${ss2022UserKeyLen}")
+                fi
             fi
             users=$(echo "${users}" | jq \
                 --arg password "${ss2022UserKey}" \
@@ -4931,9 +4936,10 @@ initSS2022Config() {
     fi
 }
 
-# shadowTlsUserKey PASSWORD → 16 内层 SS2022 的 uPSK（16 字节）。哈希而不是截断：UUID 前 16 个字符只有约 52 比特
-shadowTlsUserKey() {
-    printf '%s' "$1" | openssl dgst -sha256 -binary | head -c 16 | base64
+# ssUserKey PASSWORD [BYTES] → SS2022 的 uPSK：PASSWORD 的 SHA-256 取前 BYTES（默认 16）字节再 base64。
+# 不能截断 UUID：前 16 个字符只有约 52 比特，路径上抓到一条连接就能离线试
+ssUserKey() {
+    printf '%s' "$1" | openssl dgst -sha256 -binary | head -c "${2:-16}" | base64
 }
 
 # shadowTlsWithInnerUsers CONFIG_JSON → 内层 users 按外层重写：名字相同，uPSK 由外层密码派生。
@@ -4941,7 +4947,7 @@ shadowTlsUserKey() {
 shadowTlsWithInnerUsers() {
     local inner='[]' name password
     while IFS=$'\t' read -r name password; do
-        inner=$(jq -c --arg n "${name}" --arg p "$(shadowTlsUserKey "${password}")" '. + [{name: $n, password: $p}]' <<<"${inner}") || return 1
+        inner=$(jq -c --arg n "${name}" --arg p "$(ssUserKey "${password}")" '. + [{name: $n, password: $p}]' <<<"${inner}") || return 1
     done < <(jq -r '.inbounds[0].users[] | [.name, .password] | @tsv' <<<"$1")
     jq --argjson inner "${inner}" '.inbounds[1].users = $inner' <<<"$1"
 }
@@ -6838,6 +6844,9 @@ EOF
         echoContent skyBlue "\n开始配置Shadowsocks 2022协议"
         echo
         initSS2022Config
+        # 先算 users 再写文件：沿用存量 uPSK 要读的就是这份旧文件
+        local ss2022Users
+        ss2022Users=$(initSingBoxClients 14)
         cat <<EOF >${SINGBOX_FRAGMENT_DIR}/14_ss2022_inbounds.json
 {
     "inbounds": [
@@ -6848,7 +6857,7 @@ EOF
             "listen_port": ${ss2022Port},
             "method": "${ss2022Method}",
             "password": "${ss2022ServerKey}",
-            "users": $(initSingBoxClients 14),
+            "users": ${ss2022Users},
             "multiplex": {
                 "enabled": true
             }
