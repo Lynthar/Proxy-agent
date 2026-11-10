@@ -58,13 +58,16 @@ fi
 # 先全下到 mktemp、校验通过才原子 mv，失败时目标位置零污染。
 # 旁路：PROXY_AGENT_NO_BOOTSTRAP / PROXY_AGENT_BOOTSTRAP_REF / PROXY_AGENT_BOOTSTRAP_MODE。
 _lib_health_ok=1
+_lib_missing=()
 if [[ -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" || "${BASH_SOURCE[0]}" != "$0" ]]; then
     for _f in i18n constants utils json-utils system-detect protocol-registry carpool topo; do
         if [[ ! -f "${_LIB_DIR}/${_f}.sh" ]] || ! bash -n "${_LIB_DIR}/${_f}.sh" 2>/dev/null; then
-            _lib_health_ok=
-            break
+            _lib_missing+=("${_f}.sh")
         fi
     done
+    if [[ ${#_lib_missing[@]} -gt 0 ]]; then
+        _lib_health_ok=
+    fi
 fi
 # source 只加载完整的本地库；自动修复会下载或删除文件，必须留给直接执行。
 if [[ "${BASH_SOURCE[0]}" != "$0" && -z "${_lib_health_ok}" ]]; then
@@ -102,7 +105,12 @@ if [[ -z "${_lib_health_ok}" && -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
             return 1
         fi
 
-        printf '\033[36m[bootstrap] lib/ 不存在，开始拉取依赖文件（mode=%s）...\033[0m\n' "${mode}" >&2
+        if [[ -d "${_LIB_DIR}" ]]; then
+            printf '\033[36m[bootstrap] lib/ 缺 %s 个模块（%s），开始拉取依赖文件（mode=%s）...\033[0m\n' \
+                "${#_lib_missing[@]}" "${_lib_missing[*]}" "${mode}" >&2
+        else
+            printf '\033[36m[bootstrap] lib/ 不存在，开始拉取依赖文件（mode=%s）...\033[0m\n' "${mode}" >&2
+        fi
 
         if ! tmpDir="$(mktemp -d -t proxy-agent-bootstrap-XXXXXX 2>/dev/null)"; then
             printf '\033[31m[FATAL] 无法创建临时目录用于自举下载\033[0m\n' >&2
@@ -364,7 +372,7 @@ if [[ ${#_missing_lib_fns[@]} -gt 0 ]]; then
 fi
 
 # 清理临时变量
-unset _LIB_DIR _LIB_FALLBACK_DIR _LANG_FALLBACK_DIR _SCRIPT_PATH _module _fn _required_lib_fns _missing_lib_fns _lib_health_ok _f
+unset _LIB_DIR _LIB_FALLBACK_DIR _LANG_FALLBACK_DIR _SCRIPT_PATH _module _fn _required_lib_fns _missing_lib_fns _lib_health_ok _lib_missing _f
 
 # ============================================================================
 # 版本号来源优先级：VERSION 文件 > GitHub Release > 硬编码默认值
@@ -13513,6 +13521,26 @@ showRelayChainCode() {
     echoContent skyBlue "${chainCode}"
 }
 
+# singBoxProbeExitIP OUTBOUNDS_JSON TAG → 经 TAG 这个出站真取一次出口 IP，打到 stdout；取不到返回 1。
+# 端口通不等于链路通（密钥错、出口限源照样连得上），所以要真走一趟。只起一次性的 tools fetch，不碰在跑的 sing-box；
+# TAG 的 detour 要在 OUTBOUNDS_JSON 里。带凭据的临时配置用完即删
+singBoxProbeExitIP() {
+    local probeConf outIP rc
+    probeConf=$(mktemp) || return 1
+    chmod 600 "${probeConf}"
+    if ! jq -n --argjson obs "$1" '{log: {level: "error"}, dns: {servers: [{type: "local", tag: "local"}]},
+            outbounds: [$obs[] | del(.domain_resolver)], route: {default_domain_resolver: "local"}}' >"${probeConf}" 2>/dev/null; then
+        rm -f "${probeConf}"
+        return 1
+    fi
+    # tools fetch 只要拿到响应就退出 0（不看状态码），握手或认证失败才非零；没有超时，靠 timeout 兜住
+    outIP=$(timeout 15 "${SINGBOX_BIN}" tools fetch -c "${probeConf}" -o "$2" https://api.ipify.org 2>/dev/null)
+    rc=$?
+    rm -f "${probeConf}"
+    [[ ${rc} -eq 0 && "${outIP}" =~ ^[0-9a-fA-F.:]+$ ]] || return 1
+    printf '%s\n' "${outIP}"
+}
+
 # 测试链路连通性
 testChainConnection() {
     # 检测多链路模式，使用专用测试函数
@@ -13597,7 +13625,7 @@ testChainConnection() {
     fi
 
     # 测试2 走链路访问外网：必须经 sing-box 出口，直 curl 量到的是本机直连出口会假阳性。
-    # entry+Xray 走本机 SOCKS5 桥接口；entry 无 Xray 与 relay 都无法在本机端到端测。
+    # entry+Xray 走本机 SOCKS5 桥接口，测的是在跑的 sing-box；没有桥的入口与中继经 chain_outbound.json 里的出站取
     echoContent yellow "测试2: 链路转发测试..."
 
     # 检查 sing-box 是否运行
@@ -13642,11 +13670,23 @@ testChainConnection() {
         echoContent green "链路测试通过！"
         echoContent green "=============================================================="
     else
-        echoContent yellow "  ⚠️  本节点未启用 Xray 桥接（或为中继角色），脚本无法从本机直接发起经链测试"
-        echoContent yellow "     首跳 TCP 已可达；端到端连通性请在客户端连接入口节点后验证"
+        local probeTag=chain_outbound outIP startTime took
+        if [[ "${role}" == "entry" && "$(jq -r '.mode // empty' "${CHAIN_ENTRY_INFO}" 2>/dev/null)" == "external_single" ]]; then
+            probeTag=chain_external_outbound
+        fi
+        startTime=$(date +%s%N)
+        if outIP=$(singBoxProbeExitIP "$(jq -c '.outbounds' "${SINGBOX_FRAGMENT_DIR}/chain_outbound.json" 2>/dev/null)" "${probeTag}"); then
+            took=$(( ($(date +%s%N) - startTime) / 1000000 ))
+            echoContent green "  ✅ 链路转发正常"
+            echoContent green "  $(t CHAIN_TEST_PROBE_OK "${outIP}" "${took}")"
+        else
+            echoContent red "  ❌ 链路转发失败"
+            echoContent red "  请检查各节点配置和网络"
+            return 1
+        fi
 
         echoContent green "\n=============================================================="
-        echoContent green "链路基础测试完成（端到端测试需客户端验证）"
+        echoContent green "链路测试通过！"
         echoContent green "=============================================================="
     fi
 }
@@ -14048,6 +14088,12 @@ configureProtocolChainRouting() {
     # 检查是否运行 sing-box 核心
     if [[ ! -f "${SINGBOX_BIN}" ]]; then
         echoContent red " ---> $(t CHAIN_PROTOCOL_SINGBOX_ONLY)"
+        return 1
+    fi
+
+    # 多链路入口没有 chain_entry_info.json，不先判就会落进下面「不是入口节点」那句
+    if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
+        echoContent red " ---> $(t CHAIN_PROTOCOL_MULTI_UNSUPPORTED)"
         return 1
     fi
 
@@ -14970,19 +15016,19 @@ addRuleToConfig() {
 }
 
 # chainReadRule [later] → 交互选一条分流规则，结果放在 chainRuleType（none / preset / custom / ip_cidr / geoip / default）与 chainRuleValue。
-# 传 later 时第一项是「稍后统一配置」。输错或留空就重问，不静默落成没有规则——那样流量全走默认出口、看不出配错了。读不到输入返回 1
+# 传 later 时多一项 0「稍后统一配置」，1–5 与不传时相同：向导与规则菜单共用这份编号，错一位就会选成别的。
+# 输错或留空就重问，不静默落成没有规则——那样流量全走默认出口、看不出配错了。读不到输入返回 1
 chainReadRule() {
-    local later=$1 base=0 choice sub value sets
+    local later=$1 choice sub value sets
     chainRuleType=
     chainRuleValue=
-    [[ -n "${later}" ]] && base=1
     while true; do
-        [[ -n "${later}" ]] && echoContent yellow "1.$(t CHAIN_RULE_LATER)"
-        echoContent yellow "$((base + 1)).$(t CHAIN_RULE_PRESET)"
-        echoContent yellow "$((base + 2)).$(t CHAIN_RULE_CUSTOM_DOMAIN)"
-        echoContent yellow "$((base + 3)).$(t CHAIN_RULE_IP_CIDR)"
-        echoContent yellow "$((base + 4)).$(t CHAIN_RULE_GEOIP)"
-        echoContent yellow "$((base + 5)).$(t CHAIN_RULE_DEFAULT)"
+        [[ -n "${later}" ]] && echoContent yellow "0.$(t CHAIN_RULE_LATER)"
+        echoContent yellow "1.$(t CHAIN_RULE_PRESET)"
+        echoContent yellow "2.$(t CHAIN_RULE_CUSTOM_DOMAIN)"
+        echoContent yellow "3.$(t CHAIN_RULE_IP_CIDR)"
+        echoContent yellow "4.$(t CHAIN_RULE_GEOIP)"
+        echoContent yellow "5.$(t CHAIN_RULE_DEFAULT)"
         read -r -p "$(t PROMPT_SELECT): " choice || return 1
         if [[ "${choice}" =~ ^[0-9]{1,3}$ ]]; then
             choice=$((10#${choice}))
@@ -14990,7 +15036,7 @@ chainReadRule() {
             choice=-1
         fi
         value=
-        case $((choice - base)) in
+        case ${choice} in
             0)
                 if [[ -n "${later}" ]]; then
                     chainRuleType=none
@@ -15609,19 +15655,13 @@ testMultiChainConnection() {
         ip=$(echo "${chain}" | jq -r '.ip')
         port=$(echo "${chain}" | jq -r '.port')
 
-        # 端口通不等于链路通：密钥不对、出口限源、经中继的链路照样连得上出口端口。按链路自己的出站真取一次出口 IP，不碰在跑的 sing-box
+        # 按链路自己的出站真取一次出口 IP（只看出口端口的话，密钥不对、经中继的链路照样报通）
         (
-            local result="fail" took="" outIP="" probeConf="${tmpDir}/probe_${index}.json" startTime
-            if jq '{log: {level: "error"}, dns: {servers: [{type: "local", tag: "local"}]},
-                    outbounds: [.outbounds[] | del(.domain_resolver)], route: {default_domain_resolver: "local"}}' \
-                "${SINGBOX_FRAGMENT_DIR}/chain_outbound_${name}.json" >"${probeConf}" 2>/dev/null; then
-                startTime=$(date +%s%N)
-                # tools fetch 只要拿到响应就退出 0，握手或认证失败才非零；没有超时，靠 timeout 兜住
-                if outIP=$(timeout 15 "${SINGBOX_BIN}" tools fetch -c "${probeConf}" -o "${name}" https://api.ipify.org 2>/dev/null) \
-                    && [[ "${outIP}" =~ ^[0-9a-fA-F.:]+$ ]]; then
-                    result="pass"
-                    took=$(( ($(date +%s%N) - startTime) / 1000000 ))
-                fi
+            local result="fail" took="" outIP="" startTime
+            startTime=$(date +%s%N)
+            if outIP=$(singBoxProbeExitIP "$(jq -c '.outbounds' "${SINGBOX_FRAGMENT_DIR}/chain_outbound_${name}.json" 2>/dev/null)" "${name}"); then
+                result="pass"
+                took=$(( ($(date +%s%N) - startTime) / 1000000 ))
             fi
             echo "${name}|${ip}:${port}|${result}|${took}|${outIP}" > "${tmpDir}/result_${index}"
         ) &
@@ -17151,20 +17191,12 @@ testExternalNodeConnection() {
         echoContent yellow " ---> $(t EXT_PROBE_NO_SINGBOX)"
         return 0
     fi
-    local outbound probeConf outIP
-    if ! outbound=$(generateExternalOutboundConfig "$(jq -r '.id' <<<"${node}")" probe) || [[ -z "${outbound}" ]] \
-        || ! probeConf=$(mktemp); then
+    local outbound outIP
+    if ! outbound=$(generateExternalOutboundConfig "$(jq -r '.id' <<<"${node}")" probe) || [[ -z "${outbound}" ]]; then
         echoContent red " ---> $(t EXT_CONFIG_FAILED)"
         return 1
     fi
-    chmod 600 "${probeConf}"
-    jq -n --argjson ob "${outbound}" '{log: {level: "error"}, dns: {servers: [{type: "local", tag: "local"}]},
-        outbounds: [$ob], route: {default_domain_resolver: "local"}}' >"${probeConf}"
-    # tools fetch 只要拿到响应就退出 0（不看状态码），握手或认证失败才非零；没有超时，靠 timeout 兜住
-    outIP=$(timeout 15 "${SINGBOX_BIN}" tools fetch -c "${probeConf}" -o probe https://api.ipify.org 2>/dev/null)
-    local rc=$?
-    rm -f "${probeConf}"
-    if [[ ${rc} -eq 0 && "${outIP}" =~ ^[0-9a-fA-F.:]+$ ]]; then
+    if outIP=$(singBoxProbeExitIP "$(jq -cn --argjson ob "${outbound}" '[$ob]')" probe); then
         echoContent green " ---> $(t EXT_PROBE_OK "${outIP}")"
     else
         echoContent red " ---> $(t EXT_PROBE_FAILED)"

@@ -3150,7 +3150,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试按账号选出口 ===${NC}"
 
-CA_FN_NAMES="localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs ensureXrayLocalBlock localBlockInject directOutboundInject chainAccountStateFile chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountCarry chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod setupExternalAsSingleExit chainExternalSingleOnXray generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig"
+CA_FN_NAMES="singBoxProbeExitIP localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs ensureXrayLocalBlock localBlockInject directOutboundInject chainAccountStateFile chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountCarry chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod setupExternalAsSingleExit chainExternalSingleOnXray generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig"
 CA_FNS=$(sed -n "$(for _f in ${CA_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_equals "$(wc -w <<<"${CA_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CA_FNS}")" "按账号选出口：每个函数都抽到了"
 CA_ROOT="${MOCK_ROOT}/chainacct.root"
@@ -3361,14 +3361,20 @@ assert_equals "no|us,hk" "$([[ -f "${CA_F}/chain_outbound_jp.json" ]] && echo ye
 
 # --- 分流规则的选择：两个向导与规则菜单共用，输错重问，不静默落成没有规则 ---
 _caRule() { printf "$2" | run_ca "chainReadRule $1; echo \"rc=\$?|\${chainRuleType}|\${chainRuleValue}|\$(chainRuleLabel \"\${chainRuleType}\" \"\${chainRuleValue}\")\"" 2>/dev/null | grep -o 'rc=.*'; }
-assert_equals "rc=0|none||待配置" "$(_caRule later '1\n')" "选规则（向导）：1 是稍后统一配置"
-assert_equals "rc=0|preset|ai|AI服务 (OpenAI/Bing/...)" "$(_caRule later '2\n2\n')" "选规则（向导）：2 进预设的二级菜单，再选 2 是 AI"
-assert_equals "rc=0|preset|streaming|流媒体 (Netflix/Disney+/YouTube/...)" "$(_caRule later '2b\n2\n9\n2\n1\n')" \
-    "选规则：旧写法 2b 与二级菜单里越界的 9 都重问，不落成没有规则"
-assert_equals "rc=0|ip_cidr|10.0.0.0/8|IP CIDR" "$(_caRule later '4\n\n4\n10.0.0.0/33\n4\n10.0.0.0/8\n')" "选规则：IP CIDR 留空或不合法都重问"
-assert_equals "rc=0|geoip|kr|geoip-kr" "$(_caRule later '5\n8\nKR\n')" "选规则：自定义 GeoIP 转小写"
-assert_equals "rc=0|default||所有未匹配流量" "$(_caRule later '5\n8\nk r\n6\n')" "选规则：GeoIP 代码带空格之类的字符重问；6 是设为默认链路"
+assert_equals "rc=0|none||待配置" "$(_caRule later '0\n')" "选规则（向导）：0 是稍后统一配置"
+assert_equals "rc=0|preset|ai|AI服务 (OpenAI/Bing/...)" "$(_caRule later '1\n2\n')" "选规则（向导）：1 进预设的二级菜单，再选 2 是 AI"
+assert_equals "rc=0|preset|streaming|流媒体 (Netflix/Disney+/YouTube/...)" "$(_caRule later '1b\n1\n9\n1\n1\n')" \
+    "选规则：1b 这种带字母的写法与二级菜单里越界的 9 都重问，不落成没有规则"
+assert_equals "rc=0|ip_cidr|10.0.0.0/8|IP CIDR" "$(_caRule later '3\n\n3\n10.0.0.0/33\n3\n10.0.0.0/8\n')" "选规则：IP CIDR 留空或不合法都重问"
+assert_equals "rc=0|geoip|kr|geoip-kr" "$(_caRule later '4\n8\nKR\n')" "选规则：自定义 GeoIP 转小写"
+assert_equals "rc=0|default||所有未匹配流量" "$(_caRule later '4\n8\nk r\n5\n')" "选规则：GeoIP 代码带空格之类的字符重问；5 是设为默认链路"
 assert_equals "rc=0|custom|a.com,b.org|自定义域名" "$(_caRule '' '2\n\n2\na.com,b.org\n')" "选规则（规则菜单，没有稍后配置）：2 是自定义域名，留空重问"
+_caSame=
+for _k in '1\n1\n|preset' '2\na.com\n|custom' '3\n10.0.0.0/8\n|ip_cidr' '4\n1\n|geoip' '5\n|default'; do
+    [[ "$(_caRule later "${_k%|*}" | cut -d'|' -f2)|$(_caRule '' "${_k%|*}" | cut -d'|' -f2)" == "${_k#*|}|${_k#*|}" ]] || _caSame+=" ${_k#*|}"
+done
+assert_equals "" "${_caSame}" "选规则：向导与规则菜单的 1–5 是同一组选项，按一处的记忆输到另一处不会选错"
+assert_equals "rc=0|default|" "$(_caRule '' '0\n5\n' | cut -d'|' -f1-3)" "选规则（规则菜单）：没有稍后配置，0 算选错、重问"
 assert_equals "rc=1||" "$(_caRule later '' | cut -d'|' -f1-3)" "选规则：读不到输入就返回 1，不空转"
 
 # --- 多链路汇总：每种规则都有名字，IP CIDR 的链路不显示成待配置 ---
@@ -3415,13 +3421,13 @@ assert_equals "rc=1|routeConfig bridge xray 31111 merge singbox stop singbox sta
 
 # --- 规则集预检：预设与 GeoIP 选中时就 HEAD 一遍，上游没有的（404）或连不上的重问，不写进配置 ---
 ca_reset
-assert_equals "rc=0|preset|developer|开发者 (GitHub/GitLab/...)" "$(_caRule later '2\n4\n')" "选规则：开发者预设的规则集上游都在"
+assert_equals "rc=0|preset|developer|开发者 (GitHub/GitLab/...)" "$(_caRule later '1\n4\n')" "选规则：开发者预设的规则集上游都在"
 assert_contains "$(cat "${CA_CALLS}")" "geo/geosite/stackexchange.srs" "选规则：预检 HEAD 的是写进配置的那个地址，开发者预设用 stackexchange"
 assert_equals "0" "$(grep -c stackoverflow "${CA_CALLS}")" "选规则：不再引用上游没有的 stackoverflow"
-assert_equals "rc=0|default||所有未匹配流量" "$(CA_HTTP=404 _caRule later '2\n4\n6\n')" "选规则：规则集 404 时重问，没有落成预设规则"
-_out=$(printf '2\n4\n6\n' | CA_HTTP=404 run_ca 'chainReadRule later' 2>&1)
+assert_equals "rc=0|default||所有未匹配流量" "$(CA_HTTP=404 _caRule later '1\n4\n5\n')" "选规则：规则集 404 时重问，没有落成预设规则"
+_out=$(printf '1\n4\n5\n' | CA_HTTP=404 run_ca 'chainReadRule later' 2>&1)
 assert_contains "${_out}" "规则集 geosite-github 在上游不存在" "选规则：404 的报文点名规则集"
-_out=$(printf '5\n8\nkr\n6\n' | CA_HTTP=000 run_ca 'chainReadRule later; echo "rc=$?|${chainRuleType}"' 2>&1)
+_out=$(printf '4\n8\nkr\n5\n' | CA_HTTP=000 run_ca 'chainReadRule later; echo "rc=$?|${chainRuleType}"' 2>&1)
 assert_contains "${_out}" "规则集 geoip-kr 现在下载不到（HTTP 000）" "选规则：连不上也拒，报文带 HTTP 码"
 assert_contains "${_out}" "rc=0|default" "选规则：连不上时重问，之后选默认照常"
 
@@ -5104,7 +5110,7 @@ ah_src() {
         awk -v n="${n}" 'f && /^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{/ {exit} index($0, n "() {") == 1 {f=1} f' install.sh
     done
 }
-AH_NAMES="testChainConnection getExternalNodeById initExternalNodeFile updateChainKey configureProtocolChainRouting applyProtocolChainRouting generateProtocolChainRoute saveProtocolRoutingPreference writeChainEntryRoute writeChainInfoAtomic multiChainRestoreAccounts chainAccountAssignPorts chainAccountReadState chainAccountStateFile setupMultiChainEntry removeUser shareQrCode removeSubscriptionFiles carpoolSubscribeMd5"
+AH_NAMES="singBoxProbeExitIP testChainConnection getExternalNodeById initExternalNodeFile updateChainKey configureProtocolChainRouting applyProtocolChainRouting generateProtocolChainRoute saveProtocolRoutingPreference writeChainEntryRoute writeChainInfoAtomic multiChainRestoreAccounts chainAccountAssignPorts chainAccountReadState chainAccountStateFile setupMultiChainEntry removeUser shareQrCode removeSubscriptionFiles carpoolSubscribeMd5"
 AH_FN=$(ah_src ${AH_NAMES})
 assert_equals "$(wc -w <<<"${AH_NAMES}" | tr -d ' ')" "$(grep -cE '^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{$' <<<"${AH_FN}")" "链式与账号菜单：函数都抽到了"
 AH_ROOT="${MOCK_ROOT}/ah.root"
@@ -5142,6 +5148,43 @@ _out=$(run_ah 'testChainConnection; echo "rc=$?"' </dev/null)
 assert_contains "${_out}" "节点未找到" "外部节点唯一出口（测链路，节点已删）：说明找不到节点"
 assert_equals "rc=1|0" "$(tail -n 1 <<<"${_out}")|$(grep -c 'PROBE' <<<"${_out}")" "外部节点唯一出口（测链路，节点已删）：返回 1，不去探测"
 
+# 没有 Xray 桥的入口与中继：经 chain_outbound.json 里的出站真取出口 IP，不再只测首跳 TCP
+# 假 sing-box（tools fetch -c CONF -o TAG URL）：选中的出站密码对、detour 也在、解析器是本地的，才「取到」出口 IP
+ah_fake_singbox() {
+    printf '%s\n' '#!/bin/bash' \
+        'jq -e --arg t "$6" "(.outbounds[] | select(.tag == \$t)) as \$o | \$o.password == \"right\" and \$o.domain_resolver == null
+            and ((\$o.detour // null) == null or any(.outbounds[]; .tag == \$o.detour)) and .route.default_domain_resolver == \"local\"" "$4" >/dev/null \
+            && echo 203.0.113.5' >"${AH_ROOT}/sing-box/sing-box"
+    chmod +x "${AH_ROOT}/sing-box/sing-box"
+    mkdir -p "${AH_ROOT}/tmp"
+}
+AH_PROBE='export TMPDIR="${PROXY_AGENT_DIR}/tmp"; _chainTCPProbe() { return 0; }; singBoxDaemonRunning() { return 0; }; timeout() { shift; "$@"; }; date() { echo 1000000000; }; testChainConnection; echo "rc=$?"'
+ah_reset
+ah_fake_singbox
+printf '%s\n' '{"role":"entry","mode":"single_hop","exit_ip":"198.51.100.7","exit_port":5000}' >"${AH_CONF}/chain_entry_info.json"
+printf '%s\n' '{"outbounds":[{"type":"shadowsocks","tag":"chain_outbound","server":"198.51.100.7","server_port":5000,"password":"right","domain_resolver":"google"}]}' >"${AH_FRAG}/chain_outbound.json"
+_out=$(run_ah "${AH_PROBE}" </dev/null)
+assert_contains "${_out}" "经链路取到出口 IP 203.0.113.5" "测链路（sing-box 内核单链路入口）：经链路取到出口 IP"
+assert_equals "rc=0|0" "$(tail -n 1 <<<"${_out}")|$(grep -c '客户端' <<<"${_out}")" "测链路（sing-box 内核单链路入口）：返回 0，不再叫人去客户端验证"
+assert_equals "" "$(ls -A "${AH_ROOT}/tmp")" "测链路：带密钥的临时配置用完即删"
+jq -c '.outbounds[0].password = "wrong"' "${AH_FRAG}/chain_outbound.json" >"${AH_FRAG}/x" && mv "${AH_FRAG}/x" "${AH_FRAG}/chain_outbound.json"
+_out=$(run_ah "${AH_PROBE}" </dev/null)
+assert_equals "rc=1|1" "$(tail -n 1 <<<"${_out}")|$(grep -c '链路转发失败' <<<"${_out}")" "测链路（密钥不对）：首跳 TCP 通也报失败、返回 1"
+ah_reset
+ah_fake_singbox
+printf '%s\n' '{"role":"relay","downstream_hops":[{"ip":"198.51.100.8","port":6000},{"ip":"198.51.100.9","port":6001}]}' >"${AH_CONF}/chain_relay_info.json"
+printf '%s\n' '{"outbounds":[{"type":"shadowsocks","tag":"chain_hop_1","server":"198.51.100.8","server_port":6000,"password":"right"},
+    {"type":"shadowsocks","tag":"chain_outbound","server":"198.51.100.9","server_port":6001,"password":"right","detour":"chain_hop_1"}]}' >"${AH_FRAG}/chain_outbound.json"
+_out=$(run_ah "${AH_PROBE}" </dev/null)
+assert_equals "rc=0|1" "$(tail -n 1 <<<"${_out}")|$(grep -c '经链路取到出口 IP 203.0.113.5' <<<"${_out}")" "测链路（中继，下游两跳）：带着中间那一跳一起拨，取到出口 IP"
+ah_reset
+ah_fake_singbox
+printf '%s\n' '{"role":"entry","mode":"external_single","external_node_id":"n1"}' >"${AH_CONF}/chain_entry_info.json"
+printf '%s\n' '{"nodes":[{"id":"n1","name":"hk","server":"node.example","server_port":8388}]}' >"${AH_CONF}/external_node_info.json"
+printf '%s\n' '{"outbounds":[{"type":"shadowsocks","tag":"chain_external_outbound","server":"node.example","server_port":8388,"password":"right"}]}' >"${AH_FRAG}/chain_outbound.json"
+_out=$(run_ah "${AH_PROBE}" </dev/null)
+assert_equals "rc=0|1" "$(tail -n 1 <<<"${_out}")|$(grep -c '经链路取到出口 IP 203.0.113.5' <<<"${_out}")" "测链路（外部节点唯一出口）：经节点的出站取到出口 IP"
+
 # 中继上更新密钥：说清楚怎么换，不说没配置
 ah_reset
 printf '%s\n' '{"role":"relay"}' >"${AH_CONF}/chain_relay_info.json"
@@ -5159,6 +5202,11 @@ printf '%s\n' '{"role":"entry","mode":"external_single"}' >"${AH_CONF}/chain_ent
 _out=$(run_ah 'configureProtocolChainRouting; echo "rc=$?"' </dev/null)
 assert_contains "${_out}" "外部节点当唯一出口时不支持按协议分流" "按协议分流（外部节点唯一出口）：拒绝并说明"
 assert_equals "rc=1|no" "$(tail -n 1 <<<"${_out}")|$([[ -f "${AH_FRAG}/chain_route.json" ]] && echo yes || echo no)" "按协议分流（外部节点唯一出口）：返回 1，不写路由"
+ah_reset
+jq -n '{role: "entry", mode: "multi_chain", chains: [{name: "a"}], rules: [], default_chain: "a"}' >"${AH_CONF}/chain_multi_info.json"
+_out=$(run_ah 'configureProtocolChainRouting; echo "rc=$?"' </dev/null)
+assert_contains "${_out}" "多链路模式不支持按协议分流" "按协议分流（多链路入口）：说清楚是多链路不支持，并指到分流规则与按账号选出口"
+assert_equals "rc=1|0" "$(tail -n 1 <<<"${_out}")|$(grep -c '不是入口节点' <<<"${_out}")" "按协议分流（多链路入口）：返回 1，不再说「不是入口节点」"
 
 ah_routing_setup() {
     ah_reset

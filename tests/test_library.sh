@@ -52,4 +52,26 @@ for noBootstrap in '' 1; do
     [[ "$(cat "$WORK/failure.err")" == '[Proxy-agent] source requires a complete local lib/ directory.' ]]
     [[ -f "$WORK/incomplete/lib/constants.sh" && ! -e "$WORK/output" ]]
 done
-echo '6 library loading cases passed'
+# 直接执行时自举的提示要分得出「整个 lib/ 不在」与「缺了几个」；curl、wget 是立刻失败的桩，自举失败后模块自检以 1 退出
+mkdir -p "$WORK/nolib"
+cp "$ROOT/install.sh" "$WORK/nolib/"
+for case in incomplete nolib; do
+    if LIBRARY_TEST_CALLS="$WORK/calls-$case" PROXY_AGENT_DIR="$WORK/output" \
+        bash "$WORK/$case/install.sh" </dev/null >/dev/null 2>"$WORK/boot-$case.err"; then
+        echo "$case install.sh unexpectedly ran" >&2
+        exit 1
+    fi
+done
+missing='i18n.sh utils.sh json-utils.sh system-detect.sh protocol-registry.sh carpool.sh topo.sh'
+if ! grep -qF "[bootstrap] lib/ 缺 7 个模块（${missing}）" "$WORK/boot-incomplete.err" \
+    || grep -qF 'lib/ 不存在' "$WORK/boot-incomplete.err"; then
+    echo 'bootstrap with a partial lib/ should name the missing modules' >&2
+    cat "$WORK/boot-incomplete.err" >&2
+    exit 1
+fi
+if ! grep -qF '[bootstrap] lib/ 不存在' "$WORK/boot-nolib.err"; then
+    echo 'bootstrap without lib/ should say it does not exist' >&2
+    cat "$WORK/boot-nolib.err" >&2
+    exit 1
+fi
+echo '8 library loading cases passed'
