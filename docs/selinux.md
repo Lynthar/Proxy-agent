@@ -23,7 +23,7 @@ sestatus
 
 ## 解决方案 / Solutions
 
-### 方案 1: 临时禁用 (推荐测试用) / Option 1: Temporary Disable (For Testing)
+### 方案 1: 临时切到宽容模式 (推荐) / Option 1: Switch to Permissive Temporarily (Recommended)
 
 ```bash
 # 临时切换到宽容模式，重启后恢复
@@ -33,7 +33,7 @@ sudo setenforce 0
 
 重启后 SELinux 回到 Enforcing。脚本在 SELinux 没禁用时会把 Xray / sing-box 两个二进制登记成 `bin_t`（需要 `semanage`，没有时自动装 `policycoreutils-python-utils`，装不上就退回 `chcon`），并把 nginx 监听的端口（订阅口、伪装站与回落用的本机端口等）登记成 `http_port_t`（装了 VLESS+XHTTP+TLS 或 VMess+HTTPUpgrade 时还有它们转发到的本机端口，并开启 `httpd_can_network_relay`），所以重启后代理本身照常工作，定时任务（证书续期、geo 更新、拼车统计）也照常跑，证书不会到期续不上。`pasly` 菜单在 Enforcing 下仍然会退出，要改配置时先执行一次 `setenforce 0`，或者选方案 2。
 
-After a reboot SELinux is back to Enforcing. While SELinux is not disabled the script registers the Xray / sing-box binaries as `bin_t` (via `semanage`, installing `policycoreutils-python-utils` if missing, falling back to `chcon`) and the ports nginx listens on (the subscription port, the fake site and the local fallback ports) as `http_port_t` (with VLESS+XHTTP+TLS or VMess+HTTPUpgrade also the local port they forward to, plus enabling `httpd_can_network_relay`), so the proxies themselves keep working after a reboot; but the `pasly` menu and the cron jobs (certificate renewal, carpool metering) exit at startup under Enforcing, and certificates will expire unrenewed. For long-term use pick Option 2, or run `setenforce 0` again after every reboot.
+After a reboot SELinux is back to Enforcing. While SELinux is not disabled the script registers the Xray / sing-box binaries as `bin_t` (via `semanage`, installing `policycoreutils-python-utils` if missing, falling back to `chcon`) and the ports nginx listens on (the subscription port, the fake site and the local fallback ports) as `http_port_t` (with VLESS+XHTTP+TLS or VMess+HTTPUpgrade also the local port they forward to, plus enabling `httpd_can_network_relay`), so the proxies themselves keep working after a reboot, and so do the cron jobs (certificate renewal, geo updates, carpool metering): certificates do not expire unrenewed. The `pasly` menu still exits under Enforcing: run `setenforce 0` once before changing the configuration, or pick Option 2.
 
 ### 方案 2: 永久禁用 / Option 2: Permanent Disable
 

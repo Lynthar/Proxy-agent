@@ -10,7 +10,7 @@ MSG_SYS_NOT_SUPPORTED="本脚本不支持此系统，请将下方日志反馈给
 MSG_SYS_CPU_NOT_SUPPORTED="不支持此 CPU 架构"
 MSG_SYS_CPU_DEFAULT_AMD64="无法识别 CPU 架构，默认使用 amd64/x86_64"
 MSG_SYS_ROOT_REQUIRED="此操作需要 root 权限，请使用 sudo 或切换到 root 用户后重试"
-MSG_SYS_SELINUX_NOTICE="检测到 SELinux 已启用，请手动禁用（在 /etc/selinux/config 设置 SELINUX=disabled 并重启）"
+MSG_SYS_SELINUX_NOTICE="SELinux 处于 Enforcing，菜单要先执行 setenforce 0 再进（重启后自动恢复；装好的代理与定时任务在 Enforcing 下照常工作）。其他做法见："
 
 # =============================================================================
 # 菜单 - Menu
@@ -531,9 +531,12 @@ MSG_NFT_PERSIST_CHECK_FAILED="放行已生效，但写进 %s 后 nft 校验不�
 MSG_IPT6_UNAVAILABLE="ip6tables 用不了（内核可能没有 IPv6 防火墙模块），%s 只放行了 IPv4"
 MSG_UNINSTALL_LEFTOVERS_TITLE="下面这些还留在系统里（认不出是不是你自己的配置，脚本不动），需要的话自己处理："
 MSG_UNINSTALL_LEFT_UFW="ufw 的端口放行：ufw status numbered 查看，ufw delete 编号 删除"
-MSG_UNINSTALL_LEFT_FIREWALLD="firewalld 的端口放行：firewall-cmd --list-ports 查看，--permanent --remove-port 删除"
+MSG_UNINSTALL_LEFT_FIREWALLD="firewalld 的端口放行：firewall-cmd --list-ports 查看，--permanent --remove-port 删除；限了来源的在 --list-rich-rules 里，用 --permanent --remove-rich-rule 删"
 MSG_UNINSTALL_LEFT_MASQUERADE="firewalld 的 masquerade（端口跳跃打开的）：firewall-cmd --permanent --remove-masquerade 关闭"
 MSG_UNINSTALL_LEFT_SELINUX="SELinux 的登记：xray、sing-box 的 bin_t 文件标签（semanage fcontext -d）与 nginx 端口的 http_port_t（semanage port -d）"
+MSG_UNINSTALL_LEFT_SELINUX_RELAY="SELinux 布尔值 httpd_can_network_relay 开着（nginx 转发 XHTTP / HTTPUpgrade 要它）：不需要就 setsebool -P httpd_can_network_relay off"
+MSG_UNINSTALL_LEFT_EPEL="EPEL 软件源（epel-release 包，装依赖时加的）：不需要就 dnf remove epel-release"
+MSG_UNINSTALL_LEFT_RPM_KEYS="rpm 库里 nginx.org 与 EPEL 的签名钥 %s（对所有源都生效）：不需要就 rpm -e 逐个删"
 MSG_UNINSTALL_LEFT_NGINX_REPO="nginx.org 的软件源（Debian / Ubuntu 还有签名钥 /etc/apt/trusted.gpg.d/nginx_signing.asc 与 /etc/apt/preferences.d/99nginx 的优先级设置；签名钥对所有 apt 源都生效）"
 MSG_UNINSTALL_LEFT_ACME="acme.sh 与它签过的证书（%s）：要删先运行 %s/acme.sh --uninstall 撤掉它的定时任务和 shell 配置里那行，再 rm -rf %s；以后还在这台机器装就留着"
 MSG_UNINSTALL_LEFT_NGINX="nginx 软件包；安装时删掉的默认站不会恢复"

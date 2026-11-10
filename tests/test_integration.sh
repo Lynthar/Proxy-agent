@@ -969,6 +969,17 @@ assert_equals "chain_outbound|-" "$(hops_json '[{"ip":"192.0.2.1","port":1001,"k
     "chainHopOutbounds：单跳直接就是 chain_outbound"
 assert_equals "1" "$(hops_json '[]' >/dev/null 2>&1; [[ $? -ne 0 ]] && echo 1 || echo 0)" "chainHopOutbounds：没有跳时失败"
 
+# 加链路时设为默认：路由只看 default_chain，列表与状态按 is_default 标 [默认]，旧的不清就两条都标
+ADD_CHAIN_DIR=$(mktemp -d)
+mkdir -p "${ADD_CHAIN_DIR}/sing-box/conf/config"
+printf '%s\n' '{"default_chain":"old","chains":[{"name":"old","is_default":true}]}' >"${ADD_CHAIN_DIR}/sing-box/conf/chain_multi_info.json"
+env PROXY_AGENT_DIR="${ADD_CHAIN_DIR}" ADD_FN="${HOPS_FN}"$'\n'"$(sed -n '/^addChainToConfig() {/,/^}/p' install.sh)" bash -c '
+    source lib/constants.sh; eval "${ADD_FN}"
+    addChainToConfig new 192.0.2.9 1009 k 2022-blake3-aes-128-gcm true' >/dev/null 2>&1
+assert_equals "new|new" "$(jq -r '[.default_chain, ([.chains[] | select(.is_default) | .name] | join(","))] | join("|")' "${ADD_CHAIN_DIR}/sing-box/conf/chain_multi_info.json")" \
+    "addChainToConfig：设为默认时旧默认链路不再标默认"
+rm -rf "${ADD_CHAIN_DIR}"
+
 HTTP_CLIENT_FN=$(sed -n '/^ensureSingBoxHttpClient() {/,/^}/p' install.sh)
 assert_not_empty "${HTTP_CLIENT_FN}" "ensureSingBoxHttpClient：抽到函数原文"
 HTTP_CLIENT_DIR=$(mktemp -d)/
@@ -1271,7 +1282,7 @@ echo ""
 
 echo -e "${BLUE}[showInstallStatus] 协议显示行${NC}"
 
-SHOW_STATUS_FN=$(sed -n '/^showInstallStatus() {/,/^}/p;/^xrayDaemonRunning() {/,/^}/p' install.sh)
+SHOW_STATUS_FN=$(sed -n '/^showInstallStatus() {/,/^}/p;/^xrayDaemonRunning() {/,/^}/p;/^singBoxDaemonPid() {/,/^}/p;/^singBoxDaemonRunning() {/,/^}/p' install.sh)
 assert_not_empty "${SHOW_STATUS_FN}" "showInstallStatus：抽到函数原文"
 
 # 子 shell 里跑：桩掉进程探测与重扫盘，echoContent 只留文本并去掉行尾 \c，t 只留键名
@@ -1361,6 +1372,43 @@ assert_equals "no" "$(xray_alive_with api statsquery -s 127.0.0.1:31211 -reset)"
 assert_equals "no" "$(xray_alive_with run -test -confdir /x/conf)" "xrayDaemonRunning：配置检查的 run -test 不算服务在跑"
 assert_equals "yes" "$(xray_alive_with run -confdir /x/conf)" "xrayDaemonRunning：服务那条 run -confdir 算在跑"
 rm -rf "${XRAY_ALIVE_DIR}"
+
+# sing-box 在不在跑只认服务那条 run -c <合并配置>：同机另一个叫 sing-box 的进程（客户端、第二个实例）不算
+SB_PGREP_CALLS=$(grep -nE 'pgrep[^|;&]*sing' install.sh lib/*.sh | grep -v '^install.sh:[0-9]*: *pgrep -f "^${SINGBOX_BIN} run -c ${SINGBOX_MERGED_CONFIG}"$')
+assert_equals "" "${SB_PGREP_CALLS}" "install.sh 与 lib/ 判 sing-box 进程一律经 singBoxDaemonPid"
+SB_ALIVE_FN=$(sed -n '/^singBoxDaemonPid() {/,/^}/p;/^singBoxDaemonRunning() {/,/^}/p' install.sh)
+SB_ALIVE_DIR=$(mktemp -d)
+SB_CONF="${SB_ALIVE_DIR}/sing-box/conf/config.json"
+mkdir -p "${SB_ALIVE_DIR}/sing-box/conf" "${SB_ALIVE_DIR}/other"
+# 装着的那个用 exec -a 让命令行以二进制路径开头（真服务就是这样）；另一个是进程名也叫 sing-box 的脚本
+printf '#!/bin/bash\nexec -a "$0 $*" sleep 300\n' >"${SB_ALIVE_DIR}/sing-box/sing-box"
+printf '#!/bin/sh\nwhile :; do sleep 1; done\n' >"${SB_ALIVE_DIR}/other/sing-box"
+chmod +x "${SB_ALIVE_DIR}/sing-box/sing-box" "${SB_ALIVE_DIR}/other/sing-box"
+# sb_with BIN CODE ARGS... → 起一个带这串参数的假 sing-box，在装在 SB_ALIVE_DIR 的环境里跑 CODE
+sb_with() {
+    local pid bin=$1 code=$2
+    shift 2
+    "${bin}" "$@" &
+    pid=$!
+    sleep 0.3
+    env PROXY_AGENT_DIR="${SB_ALIVE_DIR}" SB_FNS="${SB_ALIVE_FN}"$'\n'"$(sed -n '/^handleSingBox() {/,/^}/p' install.sh)" bash -c '
+        source lib/constants.sh; eval "${SB_FNS}"
+        ensureAlpineProcps() { :; }; labelCoreBinary() { :; }; sleep() { :; }; echoContent() { echo "$2"; }
+        '"${code}" 2>&1
+    kill "${pid}" 2>/dev/null; wait "${pid}" 2>/dev/null
+}
+SB_ALIVE='singBoxDaemonRunning && echo yes || echo no'
+assert_equals "no" "$(sb_with "${SB_ALIVE_DIR}/other/sing-box" "${SB_ALIVE}" run -c /root/client.json)" \
+    "singBoxDaemonRunning：同机另一个叫 sing-box 的进程不算服务在跑"
+assert_equals "no" "$(sb_with "${SB_ALIVE_DIR}/sing-box/sing-box" "${SB_ALIVE}" check -c "${SB_CONF}")" \
+    "singBoxDaemonRunning：配置检查不算服务在跑"
+assert_equals "yes" "$(sb_with "${SB_ALIVE_DIR}/sing-box/sing-box" "${SB_ALIVE}" run -c "${SB_CONF}")" \
+    "singBoxDaemonRunning：服务那条 run -c 合并配置算在跑"
+assert_equals "no" "$(sb_with /bin/bash "${SB_ALIVE}" -c "sleep 5; : ${SB_ALIVE_DIR}/sing-box/sing-box run -c ${SB_CONF}")" \
+    "singBoxDaemonRunning：命令行里只是含着这串（bash -c、grep）不算"
+assert_equals "rc=0" "$(sb_with "${SB_ALIVE_DIR}/other/sing-box" 'handleSingBox stop; echo "rc=$?"' run -c /root/client.json | tail -1)" \
+    "handleSingBox stop：同机另有 sing-box 进程时照常报停好，不退出"
+rm -rf "${SB_ALIVE_DIR}"
 
 # nginxBlog：目录里有用户自己的东西时先问、默认保留；nginx 包自带的页面不算
 NGINX_BLOG_FN=$(sed -n '/^nginxStaticHasForeignContent() {/,/^}/p;/^nginxBlog() {/,/^}/p' install.sh)
@@ -3058,8 +3106,8 @@ echo ""
 
 echo -e "${YELLOW}=== 测试 reloadCore 的分派 ===${NC}"
 
-RELOAD_FN=$(sed -n '/^singBoxFragmentsHaveInbounds() {/,/^}/p;/^reloadCore() {/,/^}/p' install.sh)
-assert_equals "2" "$(grep -c '^[a-zA-Z]*() {$' <<<"${RELOAD_FN}")" "reloadCore：抽到两个函数原文"
+RELOAD_FN=$(sed -n '/^singBoxFragmentsHaveInbounds() {/,/^}/p;/^reloadCore() {/,/^}/p;/^singBoxDaemonPid() {/,/^}/p;/^singBoxDaemonRunning() {/,/^}/p' install.sh)
+assert_equals "4" "$(grep -c '^[a-zA-Z]*() {$' <<<"${RELOAD_FN}")" "reloadCore：抽到四个函数原文"
 RELOAD_DIR="${MOCK_ROOT}/reload"
 
 # run_reload CORE SIDECAR6_9 RUNNING → 在干净 bash 里以 RELOAD_DIR 为安装根跑 reloadCore，打印启停调用序列（空格分隔）
@@ -3102,7 +3150,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试按账号选出口 ===${NC}"
 
-CA_FN_NAMES="localBlockApiPort localGlobalAddrs ensureXrayLocalBlock localBlockInject directOutboundInject chainAccountStateFile chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountCarry chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod setupExternalAsSingleExit chainExternalSingleOnXray generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig"
+CA_FN_NAMES="localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs ensureXrayLocalBlock localBlockInject directOutboundInject chainAccountStateFile chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountCarry chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod setupExternalAsSingleExit chainExternalSingleOnXray generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig"
 CA_FNS=$(sed -n "$(for _f in ${CA_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_equals "$(wc -w <<<"${CA_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CA_FNS}")" "按账号选出口：每个函数都抽到了"
 CA_ROOT="${MOCK_ROOT}/chainacct.root"
@@ -3357,7 +3405,7 @@ ca_reset
 ca_multi '{"default_chain": "us"}'
 echo '{"inbounds":[]}' >"${CA_X}/07_VLESS_vision_reality_inbounds.json"
 _caFin='multiChainRestoreAccounts() { :; }; writeChainBridgeInbound() { echo bridge >>"${CA_CALLS}"; }; configureXrayForMultiChain() { echo "xray $1" >>"${CA_CALLS}"; }
-    handleSingBox() { echo "singbox $1" >>"${CA_CALLS}"; }; pgrep() { [[ -z "${CA_SB_DOWN:-}" ]]; }; showMultiChainSummary() { echo summary >>"${CA_CALLS}"; }
+    handleSingBox() { echo "singbox $1" >>"${CA_CALLS}"; }; pgrep() { [[ -z "${CA_SB_DOWN:-}" ]] && echo 4242; }; showMultiChainSummary() { echo summary >>"${CA_CALLS}"; }
     testMultiChainConnection() { echo test >>"${CA_CALLS}"; }; sleep() { :; }; finalizeMultiChainConfig; echo rc=$?'
 _out=$(run_ca "${_caFin}" 2>&1)
 assert_equals "rc=0|routeConfig bridge xray 31111 merge singbox stop singbox start summary test" "$(grep -o 'rc=[0-9]' <<<"${_out}")|$(paste -sd ' ' - <"${CA_CALLS}")" "向导收尾：Xray 接线在 sing-box 启动之前"
@@ -4924,6 +4972,7 @@ run_ia() {
         handleSingBox() { [[ "$1" == start ]] && echo singbox-start; return 0; }
         handleNginx() { [[ "$1" == start ]] && echo nginx-start; return 0; }
         xrayDaemonRunning() { [[ "${IA_RUNNING}" == *" xray "* ]]; }
+        singBoxDaemonRunning() { [[ "${IA_RUNNING}" == *" sing-box "* ]]; }
         pgrep() { [[ "${IA_RUNNING}" == *" ${*: -1} "* ]] && echo 42; return 0; }
         "$0"' "$1" 2>&1 | paste -sd' ' -
 }
@@ -5625,13 +5674,23 @@ RL_FN=$(sed -n '/^reportUninstallLeftovers() {/,/^}/p' install.sh)
 run_rl() {
     env RL_FN="${RL_FN}" HAVE=" $1 " bash -c '
         eval "${RL_FN}"
-        t() { echo "$1"; }
+        t() { echo "$*"; }
         echoContent() { echo "$2"; }
         command() { [[ "${HAVE}" == *" $2 "* ]]; }
         ufw() { echo "Status: active"; }
         systemctl() { [[ "${HAVE}" == *" firewalld "* ]]; }
         firewall-cmd() { [[ "${HAVE}" == *" masq "* ]]; }
         semanage() { echo "/etc/Proxy-agent/xray/xray all files bin_t"; }
+        getsebool() { [[ "${HAVE}" == *" relay "* ]] && echo "$1 --> on" || echo "$1 --> off"; }
+        rpm() {
+            case "$2" in
+                epel-release) [[ "${HAVE}" == *" epel "* ]] ;;
+                gpg-pubkey) [[ "${HAVE}" == *" keys "* ]] && printf "%s\n" \
+                    "gpg-pubkey-350d275d-6279464b Rocky Enterprise Software Foundation - Release key 2022 <releng@rockylinux.org> public key" \
+                    "gpg-pubkey-7bd9bf62-4e4e3262 nginx signing key <signing-key@nginx.com> public key" \
+                    "gpg-pubkey-3228467c-613798eb Fedora (epel9) <epel@fedoraproject.org> public key" ;;
+            esac
+        }
         reportUninstallLeftovers' 2>&1 | paste -sd' ' -
 }
 assert_contains "$(run_rl "ufw")" "UNINSTALL_LEFT_UFW" "卸载结尾：ufw 在用就列出它的放行"
@@ -5639,7 +5698,13 @@ assert_contains "$(run_rl "firewalld masq")" "UNINSTALL_LEFT_FIREWALLD" "卸载�
 assert_contains "$(run_rl "firewalld masq")" "UNINSTALL_LEFT_MASQUERADE" "卸载结尾：masquerade 开着就列出来"
 assert_contains "$(run_rl "semanage")" "UNINSTALL_LEFT_SELINUX" "卸载结尾：SELinux 里登记过就列出来"
 assert_contains "$(run_rl "nginx")" "UNINSTALL_LEFT_NGINX" "卸载结尾：nginx 软件包还在就说一声"
-assert_equals "no" "$(run_rl "" | grep -qE 'UFW|FIREWALLD|MASQUERADE|SELINUX|LEFT_NGINX( |$)' && echo yes || echo no)" "卸载结尾：没有的东西不列"
+assert_contains "$(run_rl "getsebool relay")" "UNINSTALL_LEFT_SELINUX_RELAY" "卸载结尾：httpd_can_network_relay 开着就列出来"
+assert_equals "no" "$(run_rl "getsebool" | grep -q SELINUX_RELAY && echo yes || echo no)" "卸载结尾：httpd_can_network_relay 关着不提"
+assert_contains "$(run_rl "rpm epel")" "UNINSTALL_LEFT_EPEL" "卸载结尾：RHEL 上装着 epel-release 就列出来"
+assert_contains "$(run_rl "rpm keys")" "UNINSTALL_LEFT_RPM_KEYS gpg-pubkey-7bd9bf62-4e4e3262 gpg-pubkey-3228467c-613798eb" \
+    "卸载结尾：rpm 库里 nginx.org 与 EPEL 的签名钥逐个点名，发行版自己的钥不列"
+assert_equals "no" "$(run_rl "rpm" | grep -qE 'EPEL|RPM_KEYS' && echo yes || echo no)" "卸载结尾：没有 EPEL 与那几把钥时不提"
+assert_equals "no" "$(run_rl "" | grep -qE 'UFW|FIREWALLD|MASQUERADE|SELINUX|LEFT_NGINX( |$)|EPEL|RPM_KEYS' && echo yes || echo no)" "卸载结尾：没有的东西不列"
 mkdir -p "${MOCK_ROOT}/rl-home/.acme.sh"
 assert_contains "$(HOME="${MOCK_ROOT}/rl-home" run_rl "")" "UNINSTALL_LEFT_ACME" "卸载结尾：装过 acme.sh 才列它（先 --uninstall 再删，只 rm -rf 会留下 .bashrc 那行）"
 assert_equals "no" "$(HOME="${MOCK_ROOT}/rl-nohome" run_rl "" | grep -q ACME && echo yes || echo no)" "卸载结尾：没装过 acme.sh（只装 Reality）不提它"
@@ -5910,6 +5975,27 @@ done
 assert_equals "" "$(run_se "")" "SELinux Enforcing：菜单照旧退出"
 assert_equals "" "$(run_se "--dry-run")" "SELinux Enforcing：别的入口照旧退出"
 rm -rf "${SE_STUB}"
+
+# doctor 的 SELinux 一行：Enforcing 下核心二进制都是 bin_t 就算通过（代理与定时任务照常跑），没登记上的才警告并点名
+DSE_FN=$(sed -n '/^_doctorCheckSystem() {/,/^}/p' install.sh)
+DSE_DIR=$(mktemp -d)
+mkdir -p "${DSE_DIR}/xray" "${DSE_DIR}/sing-box"
+: >"${DSE_DIR}/xray/xray"
+# run_dse XRAY_CTX SB_CTX → stat 报两个二进制的上下文；打印 SELinux 那一行的「状态|说明」
+run_dse() {
+    env PROXY_AGENT_DIR="${DSE_DIR}" DSE_FN="${DSE_FN}" XC="$1" SC="$2" bash -c '
+        source lib/constants.sh; eval "${DSE_FN}"
+        t() { echo "$1"; }; _doctorSection() { :; }
+        _doctorRow() { [[ "$1" == DOCTOR_CHECK_SELINUX ]] && echo "$2|$3"; return 0; }
+        getenforce() { echo Enforcing; }
+        stat() { [[ "$3" == */xray ]] && echo "${XC}" || echo "${SC}"; }
+        _doctorCheckSystem' 2>/dev/null
+}
+assert_contains "$(run_dse system_u:object_r:bin_t:s0 "")" "pass|Enforcing (core binaries labeled bin_t" "doctor：Enforcing 下只装 Xray 且已是 bin_t，算通过"
+: >"${DSE_DIR}/sing-box/sing-box"
+assert_equals "warn|Enforcing, not labeled bin_t: sing-box (restart the core once to label it)" \
+    "$(run_dse system_u:object_r:bin_t:s0 unconfined_u:object_r:etc_t:s0)" "doctor：Enforcing 下有核心二进制没登记成 bin_t，警告并点名"
+rm -rf "${DSE_DIR}"
 
 # --- 路由总览：采集器在 mock 树上跑。断言画出来的走向，也断言密钥进不了模型和页面 ---
 TP_FN_NAMES="topoInbounds topoDirectExit topoPlainExit topoRoutingPlain topoRoutingMulti topoRoutingEntry topoRouting topoCoreStart topoIssues topoCoresText topoCollect topoServe topoCommand chainRuleLabel getPresetDisplayName chainExternalSingleOnXray carpoolEnabled singBoxFragmentsHaveInbounds"

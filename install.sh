@@ -1979,7 +1979,7 @@ showInstallStatus() {
             fi
 
         elif [[ "${coreKind}" == 2 ]]; then
-            if [[ -n $(pgrep -f "sing-box/sing-box") ]]; then
+            if singBoxDaemonRunning; then
                 echoContent yellow "\n$(t CORE_CURRENT_RUNNING "sing-box")"
             else
                 echoContent yellow "\n$(t CORE_CURRENT_STOPPED "sing-box")"
@@ -2408,8 +2408,8 @@ checkDNSIP() {
 }
 # 检查端口实际开放状态
 checkPortOpen() {
-    handleSingBox stop >/dev/null 2>&1
-    handleXray stop >/dev/null 2>&1
+    handleSingBox stop
+    handleXray stop
 
     local port=$1
     local domain=$2
@@ -3339,7 +3339,7 @@ nginxBlog() {
 }
 
 # 修改http_port_t端口
-# BusyBox 的 pgrep -x 比对的是 argv[0] 而非进程名，认不出 nginx 与 sing-box，服务启停判定全靠它。
+# BusyBox 的 pgrep -x 比对的是 argv[0] 而非进程名，认不出 nginx，nginx 的启停判定全靠它。
 # 自更新不跑 installTools，所以服务控制函数也调一次，旧版装的 Alpine 机器更新后同样补上
 ensureAlpineProcps() {
     # 一次运行只试一次：离线时 apk 装不上，不该让每次启停服务都再连一遍软件源
@@ -4086,7 +4086,7 @@ checkGFWStatue() {
     echoContent skyBlue "\n进度 $1/${totalProgress} : 验证服务启动状态"
     if [[ "${coreKind}" == "1" ]] && xrayDaemonRunning; then
         echoContent green " ---> 服务启动成功"
-    elif [[ "${coreKind}" == "2" ]] && [[ -n $(pgrep -f "sing-box/sing-box") ]]; then
+    elif [[ "${coreKind}" == "2" ]] && singBoxDaemonRunning; then
         echoContent green " ---> 服务启动成功"
     else
         echoContent red " ---> 服务启动失败，请检查终端是否有日志打印"
@@ -4200,11 +4200,11 @@ handleSingBox() {
     if [[ -f "/etc/systemd/system/sing-box.service" ]]; then
         if [[ "$1" == "start" ]]; then
             # 先确保停止旧进程
-            if [[ -n $(pgrep -x "sing-box") ]]; then
+            if singBoxDaemonRunning; then
                 systemctl stop sing-box.service
                 # 等待进程完全退出
                 local waitCount=0
-                while [[ -n $(pgrep -x "sing-box") ]] && [[ ${waitCount} -lt 10 ]]; do
+                while singBoxDaemonRunning && [[ ${waitCount} -lt 10 ]]; do
                     sleep 0.5
                     ((waitCount++))
                 done
@@ -4215,11 +4215,11 @@ handleSingBox() {
                 exit 1
             fi
             systemctl start sing-box.service || startResult=$?
-        elif [[ "$1" == "stop" ]] && [[ -n $(pgrep -x "sing-box") ]]; then
+        elif [[ "$1" == "stop" ]] && singBoxDaemonRunning; then
             systemctl stop sing-box.service
             # 等待进程完全退出
             local waitCount=0
-            while [[ -n $(pgrep -x "sing-box") ]] && [[ ${waitCount} -lt 10 ]]; do
+            while singBoxDaemonRunning && [[ ${waitCount} -lt 10 ]]; do
                 sleep 0.5
                 ((waitCount++))
             done
@@ -4227,10 +4227,10 @@ handleSingBox() {
     elif [[ -f "/etc/init.d/sing-box" ]]; then
         if [[ "$1" == "start" ]]; then
             # 先确保停止旧进程
-            if [[ -n $(pgrep -x "sing-box") ]]; then
+            if singBoxDaemonRunning; then
                 rc-service sing-box stop
                 local waitCount=0
-                while [[ -n $(pgrep -x "sing-box") ]] && [[ ${waitCount} -lt 10 ]]; do
+                while singBoxDaemonRunning && [[ ${waitCount} -lt 10 ]]; do
                     sleep 0.5
                     ((waitCount++))
                 done
@@ -4241,10 +4241,10 @@ handleSingBox() {
                 exit 1
             fi
             rc-service sing-box start || startResult=$?
-        elif [[ "$1" == "stop" ]] && [[ -n $(pgrep -x "sing-box") ]]; then
+        elif [[ "$1" == "stop" ]] && singBoxDaemonRunning; then
             rc-service sing-box stop
             local waitCount=0
-            while [[ -n $(pgrep -x "sing-box") ]] && [[ ${waitCount} -lt 10 ]]; do
+            while singBoxDaemonRunning && [[ ${waitCount} -lt 10 ]]; do
                 sleep 0.5
                 ((waitCount++))
             done
@@ -4256,7 +4256,7 @@ handleSingBox() {
         # 用 -x（comm 精确匹配）而非 -f（命令行子串）。-f "sing-box" 会误匹配
         # 命令行里含该字符串的任意进程（例如 install.sh 自己派生的 sing-box 子调用），
         # 导致 sing-box 实际未起来时误报"启动成功"。stop 路径上方已统一用 -x。
-        if [[ -n $(pgrep -x "sing-box") ]]; then
+        if singBoxDaemonRunning; then
             echoContent green " ---> sing-box启动成功"
         else
             echoContent red "sing-box启动失败 (systemctl 返回码: ${startResult})"
@@ -4271,7 +4271,7 @@ handleSingBox() {
             exit 1
         fi
     elif [[ "$1" == "stop" ]]; then
-        if [[ -z $(pgrep -x "sing-box") ]]; then
+        if ! singBoxDaemonRunning; then
             echoContent green " ---> sing-box关闭成功"
         else
             echoContent red " ---> sing-box关闭失败"
@@ -4490,6 +4490,16 @@ defaultDomainResolverInject() {
             | .route.default_domain_resolver = "local"
         else . end' "${merged}") || return 1
     jsonWriteFile "${merged}" "${out}" false
+}
+
+# singBoxDaemonPid → sing-box 服务的进程号。只认以 `<二进制> run -c <合并配置>` 开头的命令行：按名字认会把同机别的 sing-box
+# （客户端、第二个实例）当成服务，不锚行首会把含这串的 bash -c、grep 算进来——停止报失败退出、服务停着不再拉起
+singBoxDaemonPid() {
+    pgrep -f "^${SINGBOX_BIN} run -c ${SINGBOX_MERGED_CONFIG}"
+}
+
+singBoxDaemonRunning() {
+    [[ -n $(singBoxDaemonPid) ]]
 }
 
 # xrayDaemonRunning → 0=Xray 服务进程在跑。只认服务那条 `run -confdir` 命令行：拼车统计的 `xray api statsquery`、
@@ -8189,8 +8199,17 @@ reportUninstallLeftovers() {
     if command -v semanage >/dev/null 2>&1 && semanage fcontext -l -C 2>/dev/null | grep -qE 'xray|sing-box'; then
         lines+=("$(t UNINSTALL_LEFT_SELINUX)")
     fi
+    if command -v getsebool >/dev/null 2>&1 && getsebool httpd_can_network_relay 2>/dev/null | grep -q -- '--> on'; then
+        lines+=("$(t UNINSTALL_LEFT_SELINUX_RELAY)")
+    fi
     if [[ -f /etc/apt/sources.list.d/nginx.list || -f /etc/yum.repos.d/nginx.repo ]]; then
         lines+=("$(t UNINSTALL_LEFT_NGINX_REPO)")
+    fi
+    if command -v rpm >/dev/null 2>&1; then
+        local rpmKeys
+        rpm -q epel-release >/dev/null 2>&1 && lines+=("$(t UNINSTALL_LEFT_EPEL)")
+        rpmKeys=$(rpm -q gpg-pubkey --qf '%{NAME}-%{VERSION}-%{RELEASE} %{SUMMARY}\n' 2>/dev/null | grep -iE 'nginx|epel' | cut -d' ' -f1 | paste -sd' ' -)
+        [[ -n "${rpmKeys}" ]] && lines+=("$(t UNINSTALL_LEFT_RPM_KEYS "${rpmKeys}")")
     fi
     if command -v nginx >/dev/null 2>&1; then
         lines+=("$(t UNINSTALL_LEFT_NGINX)")
@@ -12038,10 +12057,10 @@ EOF
     if ! singBoxMergeConfig; then
         return 1
     fi
-    handleSingBox stop >/dev/null 2>&1
+    handleSingBox stop
     handleSingBox start
     sleep 1
-    if ! pgrep -x "sing-box" >/dev/null 2>&1; then
+    if ! singBoxDaemonRunning; then
         echoContent red " ---> sing-box 启动失败"
         echoContent yellow "请手动执行: ${SINGBOX_BIN} run -c ${SINGBOX_MERGED_CONFIG}"
         return 1
@@ -12625,12 +12644,12 @@ EOF
     if ! singBoxMergeConfig; then
         return 1
     fi
-    handleSingBox stop >/dev/null 2>&1
+    handleSingBox stop
     handleSingBox start
 
     # 验证启动成功
     sleep 1
-    if ! pgrep -x "sing-box" >/dev/null 2>&1; then
+    if ! singBoxDaemonRunning; then
         echoContent red " ---> sing-box 启动失败"
         echoContent yellow "请手动执行: ${SINGBOX_BIN} run -c ${SINGBOX_MERGED_CONFIG}"
         return 1
@@ -13091,12 +13110,12 @@ EOF
 
     # 启动 sing-box
     echoContent yellow "正在启动 sing-box..."
-    handleSingBox stop >/dev/null 2>&1
+    handleSingBox stop
     handleSingBox start
 
     # 验证 sing-box 启动成功
     sleep 1
-    if ! pgrep -x "sing-box" >/dev/null 2>&1; then
+    if ! singBoxDaemonRunning; then
         echoContent red " ---> sing-box 启动失败"
         echoContent yellow "请手动执行: ${SINGBOX_BIN} run -c ${SINGBOX_MERGED_CONFIG}"
         return 1
@@ -13110,7 +13129,7 @@ EOF
 
         # 重启 Xray
         echoContent yellow "正在重启 Xray..."
-        handleXray stop >/dev/null 2>&1
+        handleXray stop
         handleXray start
 
         sleep 1
@@ -13258,12 +13277,12 @@ EOF
 
     # 启动 sing-box
     echoContent yellow "正在启动 sing-box..."
-    handleSingBox stop >/dev/null 2>&1
+    handleSingBox stop
     handleSingBox start
 
     # 验证 sing-box 启动成功
     sleep 1
-    if ! pgrep -x "sing-box" >/dev/null 2>&1; then
+    if ! singBoxDaemonRunning; then
         echoContent red " ---> sing-box 启动失败"
         echoContent yellow "请手动执行: ${SINGBOX_BIN} run -c ${SINGBOX_MERGED_CONFIG}"
         return 1
@@ -13277,7 +13296,7 @@ EOF
 
         # 重启 Xray
         echoContent yellow "正在重启 Xray..."
-        handleXray stop >/dev/null 2>&1
+        handleXray stop
         handleXray start
 
         sleep 1
@@ -13331,7 +13350,7 @@ showChainStatus() {
         allowedIP=$(jq -r '.allowed_ip' ${CHAIN_EXIT_INFO})
 
         # 检查 sing-box 是否运行
-        if pgrep -x "sing-box" >/dev/null 2>&1; then
+        if singBoxDaemonRunning; then
             status="✅ 运行中"
         else
             status="❌ 未运行"
@@ -13361,7 +13380,7 @@ showChainStatus() {
         downstreamHops=$(jq -r '.downstream_hops' ${CHAIN_RELAY_INFO})
 
         # 检查 sing-box 是否运行
-        if pgrep -x "sing-box" >/dev/null 2>&1; then
+        if singBoxDaemonRunning; then
             status="✅ 运行中"
         else
             status="❌ 未运行"
@@ -13403,7 +13422,7 @@ showChainStatus() {
         mode=$(jq -r '.mode // "single_hop"' ${CHAIN_ENTRY_INFO})
 
         # 检查 sing-box 是否运行
-        if pgrep -x "sing-box" >/dev/null 2>&1; then
+        if singBoxDaemonRunning; then
             status="✅ 运行中"
         else
             status="❌ 未运行"
@@ -13582,7 +13601,7 @@ testChainConnection() {
     echoContent yellow "测试2: 链路转发测试..."
 
     # 检查 sing-box 是否运行
-    if ! pgrep -x "sing-box" >/dev/null 2>&1; then
+    if ! singBoxDaemonRunning; then
         echoContent red "  ❌ sing-box 未运行"
         return 1
     fi
@@ -13926,7 +13945,7 @@ removeChainProxy() {
         fi
 
         # 重启 Xray
-        handleXray stop >/dev/null 2>&1
+        handleXray stop
         handleXray start
     fi
 
@@ -14768,7 +14787,7 @@ addExternalChainToConfig() {
     if [[ "${isDefault}" == "true" ]]; then
         tmpFile=$(mktemp)
         chmod 600 "${tmpFile}"
-        jq --arg name "${name}" '.default_chain = $name' "${infoFile}" > "${tmpFile}"
+        jq --arg name "${name}" '.default_chain = $name | .chains |= map(.is_default = (.name == $name))' "${infoFile}" > "${tmpFile}"
         mv "${tmpFile}" "${infoFile}"
     fi
 
@@ -14918,7 +14937,7 @@ addChainToConfig() {
     if [[ "${isDefault}" == "true" ]]; then
         tmpFile=$(mktemp)
         chmod 600 "${tmpFile}"
-        jq --arg name "${name}" '.default_chain = $name' "${infoFile}" > "${tmpFile}"
+        jq --arg name "${name}" '.default_chain = $name | .chains |= map(.is_default = (.name == $name))' "${infoFile}" > "${tmpFile}"
         mv "${tmpFile}" "${infoFile}"
     fi
 
@@ -15275,12 +15294,12 @@ finalizeMultiChainConfig() {
 
     # 启动 sing-box
     echoContent yellow "$(t CHAIN_STARTING_SINGBOX)"
-    handleSingBox stop >/dev/null 2>&1
+    handleSingBox stop
     handleSingBox start
 
     # 验证 sing-box 启动成功
     sleep 1
-    if ! pgrep -x "sing-box" >/dev/null 2>&1; then
+    if ! singBoxDaemonRunning; then
         echoContent red " ---> $(t CHAIN_SINGBOX_START_FAILED)"
         echoContent yellow "$(t CHAIN_SINGBOX_DEBUG) ${SINGBOX_BIN} run -c ${SINGBOX_MERGED_CONFIG}"
         return 1
@@ -15467,7 +15486,7 @@ configureXrayForMultiChain() {
 
     # 重启 Xray
     echoContent yellow "$(t CHAIN_RESTARTING_XRAY)"
-    handleXray stop >/dev/null 2>&1
+    handleXray stop
     handleXray start
 
     sleep 1
@@ -15658,7 +15677,7 @@ showMultiChainStatus() {
     fi
 
     local status="❌ $(t CHAIN_STATUS_STOPPED)"
-    if pgrep -x "sing-box" >/dev/null 2>&1; then
+    if singBoxDaemonRunning; then
         status="✅ $(t CHAIN_STATUS_RUNNING)"
     fi
 
@@ -17341,7 +17360,7 @@ reloadCore() {
         handleSingBox start
         singBoxAutostart on
     elif [[ "${coreKind}" == "1" ]]; then
-        if [[ -n $(pgrep -x "sing-box") ]]; then
+        if singBoxDaemonRunning; then
             handleSingBox stop
         fi
         singBoxAutostart off
@@ -17666,7 +17685,7 @@ syncSidecarTlsDomain() {
 installAbortArm() {
     installAbortRunning=
     xrayDaemonRunning && installAbortRunning+=" xray"
-    [[ -n $(pgrep -x sing-box) ]] && installAbortRunning+=" singbox"
+    singBoxDaemonRunning && installAbortRunning+=" singbox"
     [[ -n $(nginxPids) ]] && installAbortRunning+=" nginx"
     trap installAbortRestore EXIT
 }
@@ -19633,7 +19652,17 @@ _doctorCheckSystem() {
                 _doctorRow "$(t DOCTOR_CHECK_SELINUX)" pass "${sel}"
                 ;;
             Enforcing)
-                _doctorRow "$(t DOCTOR_CHECK_SELINUX)" warn "${sel} (may block proxy ports — see checkCentosSELinux)"
+                # 二进制登记成 bin_t 后代理与定时任务在 Enforcing 下照常跑，只有菜单要先 setenforce 0；没登记上的才是问题
+                local bin unlabeled=""
+                for bin in "${XRAY_BIN}" "${SINGBOX_BIN}"; do
+                    [[ -f "${bin}" ]] || continue
+                    [[ "$(stat -c %C "${bin}" 2>/dev/null)" == *:bin_t:* ]] || unlabeled+=" ${bin##*/}"
+                done
+                if [[ -z "${unlabeled}" ]]; then
+                    _doctorRow "$(t DOCTOR_CHECK_SELINUX)" pass "${sel} (core binaries labeled bin_t; the pasly menu needs setenforce 0 first, see docs/selinux.md)"
+                else
+                    _doctorRow "$(t DOCTOR_CHECK_SELINUX)" warn "${sel}, not labeled bin_t:${unlabeled} (restart the core once to label it)"
+                fi
                 ;;
             *)
                 _doctorRow "$(t DOCTOR_CHECK_SELINUX)" warn "${sel}"
@@ -19698,7 +19727,7 @@ _doctorCheckCore() {
         return
     fi
 
-    # 判活与 handle* 同一口径：Xray 用 xrayDaemonRunning，sing-box 用 pgrep -x sing-box
+    # 判活与 handle* 同一口径：Xray 用 xrayDaemonRunning，sing-box 用 singBoxDaemonRunning
     local coreName binaryPath serviceName running=
     if [[ "${coreKind}" == "1" ]]; then
         coreName="Xray-core"
@@ -19747,7 +19776,7 @@ _doctorCheckCore() {
 
     if [[ "${coreKind}" == "1" ]]; then
         xrayDaemonRunning && running=1
-    elif pgrep -x sing-box >/dev/null 2>&1; then
+    elif singBoxDaemonRunning; then
         running=1
     fi
     if [[ -n "${running}" ]]; then
@@ -20458,7 +20487,7 @@ topoIssues() {
         fi
     fi
     if [[ "${coreKind}" == "2" ]] || singBoxFragmentsHaveInbounds; then
-        pid=$(pgrep -x sing-box | head -n 1)
+        pid=$(singBoxDaemonPid | head -n 1)
         if [[ -z "${pid}" ]]; then
             issues=$(jq -c --arg s "$(t TOPO_ISSUE_NOT_RUNNING sing-box)" '. + [$s]' <<<"${issues}")
         else

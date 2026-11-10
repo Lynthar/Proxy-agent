@@ -10,7 +10,7 @@ MSG_SYS_NOT_SUPPORTED="This script does not support this system. Please provide 
 MSG_SYS_CPU_NOT_SUPPORTED="This CPU architecture is not supported"
 MSG_SYS_CPU_DEFAULT_AMD64="Unable to identify CPU architecture, defaulting to amd64/x86_64"
 MSG_SYS_ROOT_REQUIRED="This operation requires root privileges. Please run as root or with sudo and try again."
-MSG_SYS_SELINUX_NOTICE="SELinux is enabled. Please disable it manually (set SELINUX=disabled in /etc/selinux/config and reboot)"
+MSG_SYS_SELINUX_NOTICE="SELinux is Enforcing: run setenforce 0 before opening the menu (it reverts on reboot; installed proxies and cron jobs keep working under Enforcing). Other options:"
 
 # =============================================================================
 # Menu
@@ -531,9 +531,12 @@ MSG_NFT_PERSIST_CHECK_FAILED="The rule is active, but %s fails nft's check with 
 MSG_IPT6_UNAVAILABLE="ip6tables isn't usable (the kernel may lack IPv6 firewall support), so %s is only open over IPv4"
 MSG_UNINSTALL_LEFTOVERS_TITLE="These stay on the system (they may be your own settings, so the script leaves them); remove them yourself if you want:"
 MSG_UNINSTALL_LEFT_UFW="ufw port rules: list with ufw status numbered, remove with ufw delete NUM"
-MSG_UNINSTALL_LEFT_FIREWALLD="firewalld open ports: list with firewall-cmd --list-ports, remove with --permanent --remove-port"
+MSG_UNINSTALL_LEFT_FIREWALLD="firewalld open ports: list with firewall-cmd --list-ports, remove with --permanent --remove-port; source-limited ones are in --list-rich-rules, remove with --permanent --remove-rich-rule"
 MSG_UNINSTALL_LEFT_MASQUERADE="firewalld masquerade (turned on by port hopping): turn off with firewall-cmd --permanent --remove-masquerade"
 MSG_UNINSTALL_LEFT_SELINUX="SELinux entries: bin_t file labels for xray and sing-box (semanage fcontext -d) and http_port_t for nginx ports (semanage port -d)"
+MSG_UNINSTALL_LEFT_SELINUX_RELAY="SELinux boolean httpd_can_network_relay is on (nginx needs it to forward XHTTP / HTTPUpgrade): turn off with setsebool -P httpd_can_network_relay off"
+MSG_UNINSTALL_LEFT_EPEL="The EPEL package source (epel-release, added for dependencies): remove with dnf remove epel-release"
+MSG_UNINSTALL_LEFT_RPM_KEYS="Signing keys of nginx.org and EPEL in the rpm database: %s (trusted for every source): remove each with rpm -e"
 MSG_UNINSTALL_LEFT_NGINX_REPO="The nginx.org package source (on Debian / Ubuntu also its signing key /etc/apt/trusted.gpg.d/nginx_signing.asc, which apt trusts for every source, and the pin in /etc/apt/preferences.d/99nginx)"
 MSG_UNINSTALL_LEFT_ACME="acme.sh and the certificates it issued (%s): to remove, run %s/acme.sh --uninstall first (drops its cron job and the line in your shell profile), then rm -rf %s; keep it if you'll install on this machine again"
 MSG_UNINSTALL_LEFT_NGINX="The nginx package; the default site removed at install time is not restored"
