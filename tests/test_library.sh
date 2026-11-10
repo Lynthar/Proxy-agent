@@ -12,7 +12,7 @@ cp "$ROOT/install.sh" "$WORK/incomplete/"
 cp "$ROOT/lib/constants.sh" "$WORK/incomplete/lib/"
 cat > "$WORK/blocked/command" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "${0##*/}" >> "$LIBRARY_TEST_CALLS"
+printf '%s %s\n' "${0##*/}" "$(umask)" >> "$LIBRARY_TEST_CALLS"
 exit 87
 SH
 chmod 755 "$WORK/blocked/command"
@@ -27,8 +27,10 @@ for arg in '' doctor --dry-run RenewTLS; do
 set -eo pipefail
 currentClients=preserved
 trap 'printf "caller-trap\n"' EXIT
+umask 077
 # shellcheck source=/dev/null
 source "$1" "$2"
+[[ "$(umask)" == 0077 ]]
 [[ "$currentClients" == preserved ]]
 [[ "$XRAY_CONF_DIR" == "$PROXY_AGENT_DIR/xray/conf" ]]
 declare -F initXrayConfig initSingBoxConfig initVar >/dev/null
@@ -56,8 +58,8 @@ done
 mkdir -p "$WORK/nolib"
 cp "$ROOT/install.sh" "$WORK/nolib/"
 for case in incomplete nolib; do
-    if LIBRARY_TEST_CALLS="$WORK/calls-$case" PROXY_AGENT_DIR="$WORK/output" \
-        bash "$WORK/$case/install.sh" </dev/null >/dev/null 2>"$WORK/boot-$case.err"; then
+    if (umask 077; LIBRARY_TEST_CALLS="$WORK/calls-$case" PROXY_AGENT_DIR="$WORK/output" \
+        bash "$WORK/$case/install.sh" </dev/null >/dev/null 2>"$WORK/boot-$case.err"); then
         echo "$case install.sh unexpectedly ran" >&2
         exit 1
     fi
@@ -74,4 +76,10 @@ if ! grep -qF '[bootstrap] lib/ 不存在' "$WORK/boot-nolib.err"; then
     cat "$WORK/boot-nolib.err" >&2
     exit 1
 fi
-echo '8 library loading cases passed'
+# 直接执行时统一成 umask 022（root 的 umask 严时 nginx 读不到新建的订阅），子进程看到的就是它
+if [[ ! -s "$WORK/calls-nolib" ]] || awk '$2 != "0022"' "$WORK/calls-nolib" | grep -q .; then
+    echo 'executed install.sh should run with umask 022' >&2
+    cat "$WORK/calls-nolib" >&2
+    exit 1
+fi
+echo '9 library loading cases passed'

@@ -13,6 +13,10 @@ set -o pipefail
 # 不补就当成没装：定时任务起不了 nginx，cron 里跑的 doctor 报假的「没有防火墙」
 PATH="/usr/local/sbin:/usr/sbin:/sbin:${PATH}"
 
+# root 的 umask 是 027 / 077 时，新建的订阅、伪装站文件 nginx 的 worker 读不到。私密文件靠 700 的目录与显式 chmod 收住，
+# 不靠 umask，所以直接执行时统一成 022；被 source 时不动调用方的
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then umask 022; fi
+
 # Bash 4.3+ 硬要求：用到 nameref（local -n）与负数组下标 ${arr[-1]}，CentOS 7 的
 # 4.2.46 会在这些路径上静默失败。守卫自身只用 4.3 以前的语法。
 if [[ -z "${BASH_VERSINFO:-}" ]] || (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then
@@ -2078,6 +2082,10 @@ mkdirTools() {
     mkdir -p ${SUBSCRIBE_DIR}/sing-box
     mkdir -p ${SUBSCRIBE_DIR}/sing-box_profiles
     mkdir -p ${SUBSCRIBE_LOCAL_DIR}/sing-box
+    # nginx 的 worker 不是 root：要进得了安装根、读得到 subscribe/ 下的文件，否则订阅与拼车页一律 403。
+    # umask 严的机器以前建出来的是 700 / 600，这里只补读与进入，不收任何权限
+    chmod a+x "${PROXY_AGENT_DIR}"
+    chmod -R a+rX "${SUBSCRIBE_DIR}"
 
     # Xray配置目录 - 设置适当权限
     mkdir -p ${XRAY_CONF_DIR}
@@ -3414,39 +3422,65 @@ handleNginx() {
     fi
 }
 
+# crontabHas MARKER → crontab 里有含 MARKER（定长串）的行；没有 crontab 算没有
+crontabHas() {
+    local current
+    current=$(crontab -l 2>/dev/null) || return 1
+    grep -q -F -e "$1" <<<"${current}"
+}
+
+# crontabReplace LINE MARKER... → 删掉含任一 MARKER（定长串）的行，LINE 非空就补在末尾，再装回。
+# 别的行原样保留；本来没有 crontab、又只是删行时什么都不写，不凭空建一张空表
+crontabReplace() {
+    local line=$1 current kept= marker
+    local -a patterns=()
+    shift
+    if ! current=$(crontab -l 2>/dev/null); then
+        [[ -n "${line}" ]] || return 0
+        current=
+    fi
+    for marker in "$@"; do patterns+=(-e "${marker}"); done
+    if [[ -n "${current}" ]]; then
+        kept=$(grep -v -F "${patterns[@]}" <<<"${current}" || true)
+    fi
+    {
+        if [[ -n "${kept}" ]]; then printf '%s\n' "${kept}"; fi
+        if [[ -n "${line}" ]]; then printf '%s\n' "${line}"; fi
+    } | crontab -
+}
+
 # 定时任务更新tls证书。cron 行带 PROXY_AGENT_DIR 前缀：脚本不记住安装根，非默认根的机器 cron 里才找得到自己
 installCronTLS() {
     if [[ -z "${btDomain}" ]]; then
         echoContent skyBlue "\n进度 $1/${totalProgress} : 添加定时维护证书"
         # 只换掉自己的 RenewTLS 行与 v2ray-agent / acme.sh 的遗留行，别的行（含 UpdateGeo）原样保留
-        {
-            crontab -l 2>/dev/null | grep -v -F -e "${PROXY_AGENT_DIR}/install.sh RenewTLS" -e "v2ray-agent" -e "acme.sh"
-            echo "30 1 * * * PROXY_AGENT_DIR=${PROXY_AGENT_DIR} /bin/bash ${PROXY_AGENT_DIR}/install.sh RenewTLS >> ${PROXY_AGENT_DIR}/crontab_tls.log 2>&1"
-        } >${PROXY_AGENT_DIR}/backup_crontab.cron
-        crontab ${PROXY_AGENT_DIR}/backup_crontab.cron
+        if ! crontabReplace "30 1 * * * PROXY_AGENT_DIR=${PROXY_AGENT_DIR} /bin/bash ${PROXY_AGENT_DIR}/install.sh RenewTLS >> ${PROXY_AGENT_DIR}/crontab_tls.log 2>&1" \
+            "${PROXY_AGENT_DIR}/install.sh RenewTLS" "v2ray-agent" "acme.sh"; then
+            echoContent yellow " ---> $(t CRON_ADD_FAILED)"
+            return 0
+        fi
         echoContent green "\n ---> 添加定时维护证书成功"
     fi
 }
 # 定时任务更新geo文件
 installCronUpdateGeo() {
     if [[ "${coreKind}" == "1" ]]; then
-        if crontab -l | grep -q "UpdateGeo"; then
+        if crontabHas "${PROXY_AGENT_DIR}/install.sh UpdateGeo"; then
             echoContent red "\n ---> 已添加自动更新定时任务，请不要重复添加"
             exit 1
         fi
         echoContent skyBlue "\n进度 1/1 : 添加定时更新geo文件"
-        crontab -l >${PROXY_AGENT_DIR}/backup_crontab.cron
-        echo "35 1 * * * PROXY_AGENT_DIR=${PROXY_AGENT_DIR} /bin/bash ${PROXY_AGENT_DIR}/install.sh UpdateGeo >> ${PROXY_AGENT_DIR}/crontab_tls.log 2>&1" >>${PROXY_AGENT_DIR}/backup_crontab.cron
-        crontab ${PROXY_AGENT_DIR}/backup_crontab.cron
+        if ! crontabReplace "35 1 * * * PROXY_AGENT_DIR=${PROXY_AGENT_DIR} /bin/bash ${PROXY_AGENT_DIR}/install.sh UpdateGeo >> ${PROXY_AGENT_DIR}/crontab_tls.log 2>&1" \
+            "${PROXY_AGENT_DIR}/install.sh UpdateGeo"; then
+            echoContent red " ---> $(t CRON_ADD_FAILED)"
+            exit 1
+        fi
         echoContent green "\n ---> 添加定时更新geo文件成功"
     fi
 }
 # 删掉 crontab 里指向本安装根 install.sh 的全部定时任务；卸载后它们只会指向一个不存在的脚本
 removeOwnCronEntries() {
-    local current remaining
-    current=$(crontab -l 2>/dev/null) || return 0
-    remaining=$(grep -v -F "${PROXY_AGENT_DIR}/install.sh" <<<"${current}" || true)
-    if ! crontab - <<<"${remaining}"; then
+    if ! crontabReplace "" "${PROXY_AGENT_DIR}/install.sh"; then
         echoContent yellow " ---> $(t CRON_REMOVE_FAILED)"
         return 1
     fi
@@ -8669,13 +8703,9 @@ carpoolCurrentClientsMap() {
 
 # ensureCarpoolCron → crontab 里确保有一条 CarpoolTick；按 "install.sh CarpoolTick" 子串判重，车主改过间隔的行不会被再加一条
 ensureCarpoolCron() {
-    local current
-    current=$(crontab -l 2>/dev/null)
-    grep -q -F "${PROXY_AGENT_DIR}/install.sh CarpoolTick" <<<"${current}" && return 0
-    {
-        if [[ -n "${current}" ]]; then printf '%s\n' "${current}"; fi
-        echo "*/5 * * * * PROXY_AGENT_DIR=${PROXY_AGENT_DIR} /bin/bash ${PROXY_AGENT_DIR}/install.sh CarpoolTick >> ${CARPOOL_LOG_FILE} 2>&1"
-    } | crontab - || echoContent yellow " ---> $(t CARPOOL_CRON_FAILED)"
+    crontabHas "${PROXY_AGENT_DIR}/install.sh CarpoolTick" && return 0
+    crontabReplace "*/5 * * * * PROXY_AGENT_DIR=${PROXY_AGENT_DIR} /bin/bash ${PROXY_AGENT_DIR}/install.sh CarpoolTick >> ${CARPOOL_LOG_FILE} 2>&1" \
+        "${PROXY_AGENT_DIR}/install.sh CarpoolTick" || echoContent yellow " ---> $(t CARPOOL_CRON_FAILED)"
 }
 
 # carpoolXrayServiceEnv on|off → Xray 服务带不带 XRAY_BUF_SPLICE=disable 与停止钩子；systemd 写 drop-in（有改动才 daemon-reload），OpenRC 写 conf.d。
@@ -9121,11 +9151,7 @@ carpoolFillUuids() {
 
 # carpoolRemoveCron → 删掉 CarpoolTick 的 cron 行
 carpoolRemoveCron() {
-    local current remaining
-    current=$(crontab -l 2>/dev/null) || return 0
-    # CarpoolTick 是唯一一行时 grep -v 没有输出、返回 1，接在管道里会把成功报成失败
-    remaining=$(grep -v -F "${PROXY_AGENT_DIR}/install.sh CarpoolTick" <<<"${current}" || true)
-    crontab - <<<"${remaining}" || echoContent yellow " ---> $(t CRON_REMOVE_FAILED)"
+    crontabReplace "" "${PROXY_AGENT_DIR}/install.sh CarpoolTick" || echoContent yellow " ---> $(t CRON_REMOVE_FAILED)"
 }
 
 # removeSubscriptionFiles NAME → 删掉这个账号的五个订阅文件（含拼车占位）；拼车成员页由 carpoolRenderPages 按期望集合清掉。

@@ -1888,7 +1888,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试拼车钩子与 tick ===${NC}"
 
-CP_FN_NAMES="applyAccountChangeAllProtocols carpoolSyncUserinfo nginxPids xrayConfigTest readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled xrayDaemonRunning carpoolCurrentClientsMap ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolMachineStep carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolGuardAccountMenu carpoolCheckPrerequisites carpoolPickApiPort carpoolApiReady carpoolAllAccounts carpoolFillUuids carpoolRemoveCron removeSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable carpoolHasTty carpoolApply carpoolResetUsage carpoolShowUsage carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolInsertPageBlock carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMembersClean carpoolMembersEditApply carpoolPickMember carpoolAsk carpoolShowProtocolChoices carpoolShowMemberLinks carpoolMemberAdd carpoolMemberEdit carpoolMemberMenu carpoolMenu addUser removeUser cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountStateFile chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget"
+CP_FN_NAMES="applyAccountChangeAllProtocols carpoolSyncUserinfo nginxPids xrayConfigTest readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled xrayDaemonRunning carpoolCurrentClientsMap crontabHas crontabReplace ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolMachineStep carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolGuardAccountMenu carpoolCheckPrerequisites carpoolPickApiPort carpoolApiReady carpoolAllAccounts carpoolFillUuids carpoolRemoveCron removeSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable carpoolHasTty carpoolApply carpoolResetUsage carpoolShowUsage carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolInsertPageBlock carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMembersClean carpoolMembersEditApply carpoolPickMember carpoolAsk carpoolShowProtocolChoices carpoolShowMemberLinks carpoolMemberAdd carpoolMemberEdit carpoolMemberMenu carpoolMenu addUser removeUser cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountStateFile chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget"
 CP_FNS=$(sed -n "$(for _f in ${CP_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_not_empty "${CP_FNS}" "拼车：抽到 install.sh 原文"
 assert_equals "$(wc -w <<<"${CP_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CP_FNS}")" "拼车：每个函数都抽到了（抽不到说明函数体里出现了顶格的 }）"
@@ -3768,10 +3768,24 @@ echo ""
 # cron 行的卫生：installCronTLS 只换自己的行、unInstall 清掉指向本根的行、crond 真的被拉起
 # ============================================================================
 
+echo -e "${YELLOW}=== 测试 umask 严时 nginx 进得了安装根、读得到订阅（mkdirTools） ===${NC}"
+
+MKDIR_FN=$(sed -n '/^mkdirTools() {/,/^}/p' install.sh)
+assert_not_empty "${MKDIR_FN}" "mkdirTools：抽到函数原文"
+MK_ROOT="${MOCK_ROOT}/mkdir.root"
+rm -rf "${MK_ROOT}"
+(umask 077 && mkdir -p "${MK_ROOT}/subscribe/default" && echo node >"${MK_ROOT}/subscribe/default/abc")
+env PROXY_AGENT_DIR="${MK_ROOT}" MKDIR_FN="${MKDIR_FN}" bash -c 'umask 077; source lib/constants.sh; eval "${MKDIR_FN}"; mkdirTools' >/dev/null 2>&1
+assert_equals "711|755|755|644" \
+    "$(stat -c %a "${MK_ROOT}")|$(stat -c %a "${MK_ROOT}/subscribe")|$(stat -c %a "${MK_ROOT}/subscribe/sing-box")|$(stat -c %a "${MK_ROOT}/subscribe/default/abc")" \
+    "mkdirTools：umask 077 下建的安装根补上进入、订阅目录与文件补上读，旧文件也补"
+assert_equals "700|700|700" "$(stat -c %a "${MK_ROOT}/tls")|$(stat -c %a "${MK_ROOT}/subscribe_local")|$(stat -c %a "${MK_ROOT}/xray/conf")" \
+    "mkdirTools：证书、本地订阅与核心配置目录仍只有 root 进得去"
+
 echo -e "${YELLOW}=== 测试 cron 行与 cron 守护进程 ===${NC}"
 
-CRON_FNS=$(sed -n '/^installCronTLS() {/,/^}/p;/^removeOwnCronEntries() {/,/^}/p;/^ensureCronService() {/,/^}/p;/^bootStartup() {/,/^}/p' install.sh)
-assert_not_empty "${CRON_FNS}" "cron：抽到四个函数原文"
+CRON_FNS=$(sed -n '/^crontabHas() {/,/^}/p;/^crontabReplace() {/,/^}/p;/^installCronTLS() {/,/^}/p;/^installCronUpdateGeo() {/,/^}/p;/^removeOwnCronEntries() {/,/^}/p;/^ensureCronService() {/,/^}/p;/^bootStartup() {/,/^}/p' install.sh)
+assert_equals "7" "$(grep -c '^[a-zA-Z]*() {$' <<<"${CRON_FNS}")" "cron：七个函数原文都抽到了"
 CRON_FAKE_ROOT="${MOCK_ROOT}/cron.root"
 mkdir -p "${CRON_FAKE_ROOT}"
 CRON_TABLE="${MOCK_ROOT}/fake_crontab"
@@ -3812,6 +3826,38 @@ assert_equals "$(printf '%s\n' '0 0 * * * /usr/local/bin/backup.sh' '30 1 * * * 
 rm -f "${CRON_TABLE}"
 run_cron_fn removeOwnCronEntries
 assert_equals "no" "$([[ -e "${CRON_TABLE}" ]] && echo yes || echo no)" "removeOwnCronEntries：本来没有 crontab 时不会凭空建一张"
+run_cron_fn installCronTLS
+assert_equals "1|30 1" "$(grep -c '' "${CRON_TABLE}")|$(head -c 4 "${CRON_TABLE}")" "installCronTLS：本来没有 crontab 时只写这一行，前面没有空行"
+
+# 同一套桩，但打出提示与退出码；第二个参数非空时写表失败、表不动
+run_cron_rc() (
+    env PROXY_AGENT_DIR="${CRON_FAKE_ROOT}" CRON_FNS="${CRON_FNS}" CRON_TABLE="${CRON_TABLE}" CRON_WRITE_FAIL="${2:-}" bash -c '
+        set -o pipefail
+        source lib/constants.sh
+        eval "${CRON_FNS}"
+        crontab() {
+            case "$1" in
+                -l) cat "${CRON_TABLE}" 2>/dev/null ;;
+                -) if [[ -n "${CRON_WRITE_FAIL}" ]]; then cat >/dev/null; return 1; fi; cat >"${CRON_TABLE}" ;;
+            esac
+        }
+        echoContent() { echo "$2"; }; t() { echo "$1"; }
+        btDomain=; totalProgress=1; coreKind=1
+        ("$1"); echo "rc=$?"' _ "$1" 2>&1
+)
+printf '%s\n' "0 0 * * * /usr/local/bin/backup.sh" \
+    "35 1 * * * PROXY_AGENT_DIR=/opt/other-root /bin/bash /opt/other-root/install.sh UpdateGeo" >"${CRON_TABLE}"
+_out=$(run_cron_rc installCronUpdateGeo)
+assert_contains "${_out}" "rc=0" "installCronUpdateGeo：别的安装根的 UpdateGeo 行不算已添加"
+assert_equals "35 1 * * * PROXY_AGENT_DIR=${CRON_FAKE_ROOT} /bin/bash ${CRON_FAKE_ROOT}/install.sh UpdateGeo >> ${CRON_FAKE_ROOT}/crontab_tls.log 2>&1" \
+    "$(tail -n 1 "${CRON_TABLE}")" "installCronUpdateGeo：自己的行补在末尾"
+assert_equals "3" "$(grep -c '' "${CRON_TABLE}")" "installCronUpdateGeo：原有两行保留"
+_sig=$(cat "${CRON_TABLE}")
+_out=$(run_cron_rc installCronUpdateGeo)
+assert_equals "rc=1|${_sig}" "$(tail -n 1 <<<"${_out}")|$(cat "${CRON_TABLE}")" "installCronUpdateGeo：自己的行已在时拒绝重复添加，表不动"
+_out=$(run_cron_rc installCronTLS fail)
+assert_contains "${_out}" "CRON_ADD_FAILED" "installCronTLS：写表失败时明说没加上"
+assert_equals "no|${_sig}" "$([[ "${_out}" == *"添加定时维护证书成功"* ]] && echo yes || echo no)|$(cat "${CRON_TABLE}")" "installCronTLS：写表失败时不报成功，表不动"
 
 # 桩服务管理器：记录每次调用；守护进程是否在跑由 $2 决定，其余子命令一律成功
 run_cron_service() (
