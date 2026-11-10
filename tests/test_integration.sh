@@ -5534,18 +5534,25 @@ assert_equals "" "$(run_mt manageTuic)" "TUIC 菜单：没有端口跳跃入口�
 assert_equals "hop hysteria2" "$(run_mt manageHysteria)" "Hysteria2 菜单：端口跳跃入口还在"
 
 AH_FN=$(sed -n '/^addPortHopping() {/,/^}/p' install.sh)
-ahOut=$(env AH_FN="${AH_FN}" bash -c '
-    eval "${AH_FN}"
-    echoContent() { :; }
-    t() { :; }
-    allowPort() { echo "allowPort $*"; }
-    iptables() { echo "iptables $*"; }
-    iptables-save() { echo "Proxy-agent_hysteria2_portHopping"; }
-    netfilter-persistent() { :; }
-    release=debian
-    echo 30000-30010 | addPortHopping hysteria2 443' 2>&1)
-assert_equals "iptables -t nat -A PREROUTING -p udp --dport 30000:30010 -m comment --comment Proxy-agent_hysteria2_portHopping -j DNAT --to-destination :443" \
-    "${ahOut}" "加端口跳跃：只写 DNAT，不放行区间"
+# run_ah [NO_V6] → 桩掉 iptables / ip6tables，打印加规则的调用；NO_V6 非空时 ip6tables 的 nat 表不可用
+run_ah() {
+    env AH_FN="${AH_FN}" NO_V6="${1:-}" bash -c '
+        eval "${AH_FN}"
+        echoContent() { if [[ "$2" == *NO_IPV6* ]]; then echo "notice ${2##* }"; fi; return 0; }
+        t() { echo "$1"; }
+        allowPort() { echo "allowPort $*"; }
+        iptables() { echo "iptables $*"; }
+        ip6tables() { if [[ "$*" == "-t nat -S PREROUTING" ]]; then [[ -z "${NO_V6}" ]]; else echo "ip6tables $*"; fi; }
+        iptables-save() { echo "Proxy-agent_hysteria2_portHopping"; }
+        netfilter-persistent() { :; }
+        release=debian
+        echo 30000-30010 | addPortHopping hysteria2 443' 2>&1
+}
+_hopRule="PREROUTING -p udp --dport 30000:30010 -m addrtype --dst-type LOCAL -m comment --comment Proxy-agent_hysteria2_portHopping -j REDIRECT --to-ports 443"
+assert_equals "iptables -t nat -A ${_hopRule}|ip6tables -t nat -A ${_hopRule}" "$(run_ah | paste -sd'|' -)" \
+    "加端口跳跃：IPv4、IPv6 各一条，只改发给本机的包，不放行区间"
+assert_equals "iptables -t nat -A ${_hopRule}|notice PORT_HOPPING_NO_IPV6" "$(run_ah no | paste -sd'|' -)" \
+    "加端口跳跃：ip6tables 的 nat 表用不了时只加 IPv4，并明说"
 
 mkdir -p "${AP_DIR}/bin" && printf '#!/bin/sh\nexit 0\n' >"${AP_DIR}/bin/iptables" && chmod +x "${AP_DIR}/bin/iptables"
 phType=$(env PH_FN="${PH_FN}" PATH="${AP_DIR}/bin:${PATH}" bash -c '
@@ -5600,11 +5607,12 @@ RH_FN=$(sed -n '/^firewallForwardPortSpecs() {/,/^}/p;/^readPortHopping() {/,/^}
 RH_DIR="${MOCK_ROOT}/hoprm"
 mkdir -p "${RH_DIR}"
 echo '{"inbounds":[{"listen_port":443}]}' >"${RH_DIR}/06.json"
-# run_rh_ipt TYPE FRAGMENT → iptables 桩：第 2、4 条是 hysteria2 的跳跃规则；打印删除与保存的调用
+# run_rh_ipt TYPE FRAGMENT [SAVED] → iptables 第 2、4 条、ip6tables 第 1 条是 hysteria2 的跳跃规则；打印删除与保存的调用。
+# SAVED 是 iptables-save 里那条规则，默认是旧版的 DNAT 写法
 run_rh_ipt() {
-    env RH_FN="${RH_FN}" bash -c '
+    env RH_FN="${RH_FN}" RH_SAVED="${3:--A PREROUTING -p udp -m udp --dport 30000:30010 -m comment --comment Proxy-agent_hysteria2_portHopping -j DNAT --to-destination :443}" bash -c '
         eval "${RH_FN}"
-        iptables-save() { echo "-A PREROUTING -p udp -m udp --dport 30000:30010 -m comment --comment Proxy-agent_hysteria2_portHopping -j DNAT --to-destination :443"; }
+        iptables-save() { echo "${RH_SAVED}"; }
         iptables() {
             if [[ "$*" == *--line-numbers* ]]; then
                 printf "1 DNAT mine\n2 DNAT /* Proxy-agent_hysteria2_portHopping */\n3 DNAT mine\n4 DNAT /* Proxy-agent_hysteria2_portHopping */\n"
@@ -5612,25 +5620,36 @@ run_rh_ipt() {
                 echo "iptables $*"
             fi
         }
+        ip6tables() {
+            if [[ "$*" == *--line-numbers* ]]; then
+                printf "1 REDIRECT /* Proxy-agent_hysteria2_portHopping */\n2 DNAT mine\n"
+            else
+                echo "ip6tables $*"
+            fi
+        }
         exec 3>&1
         netfilter-persistent() { echo "persist $*" >&3; }
         release=debian
         removeProtocolPortHopping "$0" "$1"' "$1" "$2" 2>&1 | paste -sd'|' -
 }
-assert_equals "iptables -t nat -D PREROUTING 4|iptables -t nat -D PREROUTING 2|persist save" "$(run_rh_ipt hysteria2 "${RH_DIR}/06.json")" \
-    "iptables：只删带标记的跳跃规则，行号降序，再保存"
-assert_equals "iptables -t nat -D PREROUTING 4|iptables -t nat -D PREROUTING 2|persist save" "$(run_rh_ipt hysteria2 "${RH_DIR}/missing.json")" \
+_rhDel="iptables -t nat -D PREROUTING 4|iptables -t nat -D PREROUTING 2|ip6tables -t nat -D PREROUTING 1|persist save"
+assert_equals "${_rhDel}" "$(run_rh_ipt hysteria2 "${RH_DIR}/06.json")" \
+    "iptables：IPv4、IPv6 都只删带标记的跳跃规则，行号降序，再保存一次"
+assert_equals "${_rhDel}" "$(run_rh_ipt hysteria2 "${RH_DIR}/missing.json")" \
     "iptables：片段没了也能按标记收"
+assert_equals "${_rhDel}" "$(run_rh_ipt hysteria2 "${RH_DIR}/06.json" "-A PREROUTING -p udp -m udp --dport 30000:30010 -m addrtype --dst-type LOCAL -m comment --comment Proxy-agent_hysteria2_portHopping -j REDIRECT --to-ports 443")" \
+    "iptables：新写法（多了 addrtype）的区间也读得出来"
 assert_equals "" "$(run_rh_ipt tuic "${RH_DIR}/06.json")" "iptables：这个协议没有跳跃规则就什么都不动"
 # run_rh_fw FRAGMENT → firewalld 桩：两条指向 443 的跳跃、一条用户自己指向 4430 的转发；删除调用打到 stderr（真代码把 stdout 丢了）
 run_rh_fw() {
-    env RH_FN="${RH_FN}" RH_LIST="${RH_LIST:-port=30000:proto=udp:toport=443:toaddr=\nport=30001:proto=udp:toport=443:toaddr=\nport=8080:proto=tcp:toport=4430:toaddr=\n}" bash -c '
+    env RH_FN="${RH_FN}" RH_RICH="${RH_RICH:-}" RH_LIST="${RH_LIST:-port=30000:proto=udp:toport=443:toaddr=\nport=30001:proto=udp:toport=443:toaddr=\nport=8080:proto=tcp:toport=4430:toaddr=\n}" bash -c '
         eval "${RH_FN}"
         systemctl() { return 0; }
         firewall-cmd() {
             case "$*" in
                 --list-forward-ports) printf "%b" "${RH_LIST}" ;;
-                *remove-forward-port*) echo "$*" >&2 ;;
+                --list-rich-rules) printf "%b" "${RH_RICH}" ;;
+                *remove-forward-port* | *remove-rich-rule*) echo "$*" >&2 ;;
             esac
         }
         release=centos
@@ -5642,10 +5661,20 @@ assert_equals "" "$(run_rh_fw "${RH_DIR}/missing.json")" "firewalld：读不到�
 # 现在一条区间；转发到别的主机的（toaddr 非空）不是跳跃规则
 assert_equals "--permanent --remove-forward-port=port=30000-30999:proto=udp:toport=443" \
     "$(RH_LIST='port=30000-30999:proto=udp:toport=443:toaddr=\nport=40000:proto=udp:toport=443:toaddr=10.0.0.2\n' run_rh_fw "${RH_DIR}/06.json")" "firewalld：区间规则一条删掉，转发到别的主机的不动"
+# IPv6 那条是富规则：只删指向这个协议端口、没有 to-addr 的
+_rich='rule family="ipv6" forward-port port="30000-30999" protocol="udp" to-port="443"'
+assert_equals "--permanent --remove-forward-port=port=30000-30999:proto=udp:toport=443|--permanent --remove-rich-rule=${_rich}" \
+    "$(RH_LIST='port=30000-30999:proto=udp:toport=443:toaddr=\n' RH_RICH="${_rich}"'\nrule family="ipv6" forward-port port="40000-40009" protocol="udp" to-port="443" to-addr="fd00::2"\nrule family="ipv6" forward-port port="50000-50009" protocol="udp" to-port="4430"\n' run_rh_fw "${RH_DIR}/06.json")" \
+    "firewalld：IPv6 富规则一起删，转发到别的主机的、指向别的端口的不动"
 # 加规则：一条区间，不开 masquerade（本机转发用不着，开了还会顺带打开 ip_forward）
-AF_FN=$(sed -n '/^addFirewalldPortHopping() {/,/^}/p' install.sh)
-assert_equals "--permanent --add-forward-port=port=30000-30999:proto=udp:toport=443|--reload" \
-    "$(env AF_FN="${AF_FN}" bash -c 'eval "${AF_FN}"; firewall-cmd() { echo "$*"; }; addFirewalldPortHopping 30000 30999 443' | paste -sd'|' -)" "firewalld 加跳跃：一条区间规则再 reload"
+AF_FN=$(sed -n '/^addFirewalldPortHopping() {/,/^}/p;/^firewallHopRichRule() {/,/^}/p' install.sh)
+assert_equals "--permanent --add-forward-port=port=30000-30999:proto=udp:toport=443|--permanent --add-rich-rule=${_rich}|--reload" \
+    "$(env AF_FN="${AF_FN}" bash -c 'eval "${AF_FN}"; firewall-cmd() { echo "$*"; }; addFirewalldPortHopping 30000 30999 443' | paste -sd'|' -)" "firewalld 加跳跃：IPv4 一条区间、IPv6 一条富规则，再 reload"
+assert_equals "--permanent --add-forward-port=port=30000-30999:proto=udp:toport=443|notice PORT_HOPPING_NO_IPV6|--reload|rc=0" \
+    "$(env AF_FN="${AF_FN}" bash -c 'eval "${AF_FN}"
+        firewall-cmd() { [[ "$*" == *add-rich-rule* ]] && return 1; echo "$*"; }
+        echoContent() { echo "notice ${2##* }"; }; t() { echo "$1"; }
+        addFirewalldPortHopping 30000 30999 443; echo "rc=$?"' | paste -sd'|' -)" "firewalld 加跳跃：IPv6 富规则加不上时明说，IPv4 的照常生效"
 assert_equals "" "$(grep -n 'add-masquerade' install.sh)" "端口跳跃不开 masquerade"
 # installNginxTools：装不上要返回 1 并说明，不能让安装流程走到起 nginx 时才报「启动失败」
 NT_FN=$(sed -n '/^installNginxTools() {/,/^}/p' install.sh)

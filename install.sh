@@ -5059,8 +5059,18 @@ initShadowTlsConfig() {
 
 # addFirewalldPortHopping START END TARGET → 一条区间转发：逐端口加的话 1000 个端口要一分半，删也一样。
 # 本机转发落成 nft 的 redirect，用不着 masquerade；开 masquerade 会顺带打开 ip_forward，把主机变成路由器
+# forward-port 只管 IPv4，IPv6 用富规则另加一条；那条尽力而为，加不上不该连 IPv4 的跳跃也丢掉
 addFirewalldPortHopping() {
-    firewall-cmd --permanent --add-forward-port=port="$1-$2":proto=udp:toport="$3" && firewall-cmd --reload
+    firewall-cmd --permanent --add-forward-port=port="$1-$2":proto=udp:toport="$3" || return 1
+    if ! firewall-cmd --permanent --add-rich-rule="$(firewallHopRichRule "$1" "$2" "$3")"; then
+        echoContent yellow " ---> $(t PORT_HOPPING_NO_IPV6)"
+    fi
+    firewall-cmd --reload
+}
+
+# firewallHopRichRule START END TARGET → IPv6 跳跃的富规则，写法与 firewall-cmd --list-rich-rules 的输出逐字相同（删除按原文匹配）
+firewallHopRichRule() {
+    printf 'rule family="ipv6" forward-port port="%s-%s" protocol="udp" to-port="%s"' "$1" "$2" "$3"
 }
 
 # 端口跳跃
@@ -5116,10 +5126,16 @@ addPortHopping() {
                     exit 1
                 fi
             else
-                iptables -t nat -A PREROUTING -p udp --dport "${portStart}:${portEnd}" -m comment --comment "Proxy-agent_${type}_portHopping" -j DNAT --to-destination ":${targetPort}"
+                # 只改发给本机地址的包：本机替 Docker、WireGuard 转发出去的同段 UDP 不能被截到 Hysteria2 上
+                local hopRule=(PREROUTING -p udp --dport "${portStart}:${portEnd}" -m addrtype --dst-type LOCAL
+                    -m comment --comment "Proxy-agent_${type}_portHopping" -j REDIRECT --to-ports "${targetPort}")
+                iptables -t nat -A "${hopRule[@]}"
                 if ! iptables-save | grep -q "Proxy-agent_${type}_portHopping"; then
                     echoContent red " ---> 端口跳跃添加失败"
                     exit 1
+                fi
+                if ! ip6tables -t nat -S PREROUTING >/dev/null 2>&1 || ! ip6tables -t nat -A "${hopRule[@]}"; then
+                    echoContent yellow " ---> $(t PORT_HOPPING_NO_IPV6)"
                 fi
                 # 没有 netfilter-persistent（装了 ufw 的机器不装它）规则只活到重启，要明说，不能只报成功
                 if ! command -v netfilter-persistent >/dev/null 2>&1 || ! netfilter-persistent save >/dev/null 2>&1; then
@@ -5175,21 +5191,28 @@ deletePortHoppingRules() {
     local targetPort=$4
 
     if [[ "${release}" == "centos" ]]; then
-        local spec
+        local spec rule
         while read -r spec; do
             [[ -n "${spec}" ]] && firewall-cmd --permanent --remove-forward-port=port="${spec}":proto=udp:toport="${targetPort}" >/dev/null
         done < <(firewallForwardPortSpecs "${targetPort}")
+        # IPv6 那条富规则按原文删；带 to-addr 的是转发到别的主机，不是跳跃
+        while read -r rule; do
+            [[ -n "${rule}" ]] && firewall-cmd --permanent --remove-rich-rule="${rule}" >/dev/null
+        done < <(firewall-cmd --list-rich-rules | grep -xE "rule family=\"ipv6\" forward-port port=\"[0-9]+-[0-9]+\" protocol=\"udp\" to-port=\"${targetPort}\"")
         firewall-cmd --reload >/dev/null
     else
         # 必须按读到的行号降序删：本脚本的规则是 -A 追加在链尾，固定删
         # PREROUTING 1 删的是别人的规则；升序删则每删一条后面的行号就前移一位。
-        local hoppingLines line
-        hoppingLines=$(iptables -t nat -L PREROUTING --line-numbers | grep "Proxy-agent_${type}_portHopping" | awk '{print $1}' | sort -rn)
-        if [[ -n "${hoppingLines}" ]]; then
+        local hoppingLines line tool changed=
+        for tool in iptables ip6tables; do
+            command -v "${tool}" >/dev/null 2>&1 || continue
+            hoppingLines=$("${tool}" -t nat -L PREROUTING --line-numbers 2>/dev/null | grep -F "Proxy-agent_${type}_portHopping" | awk '{print $1}' | sort -rn)
             while read -r line; do
-                iptables -t nat -D PREROUTING "${line}"
+                [[ -n "${line}" ]] && "${tool}" -t nat -D PREROUTING "${line}" && changed=true
             done <<<"${hoppingLines}"
-            command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1
+        done
+        if [[ -n "${changed}" ]] && command -v netfilter-persistent >/dev/null 2>&1; then
+            netfilter-persistent save >/dev/null 2>&1
         fi
     fi
 }

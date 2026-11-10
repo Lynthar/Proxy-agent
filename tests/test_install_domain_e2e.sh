@@ -411,8 +411,8 @@ assert_equals "1" "$(jq '.nodes | length' "${INSTALL_ROOT}/sing-box/conf/externa
 echo ""
 echo -e "${YELLOW}=== 菜单 4 → 3：端口跳跃，再 4 → 2 卸掉 Hysteria2（拼车不计量 sing-box 里的协议，开拼车前要拿掉）===${NC}"
 runMenu "4\n3\n1\n30000-30010\n" >/dev/null
-assert_equals "1" "$(iptables -t nat -S PREROUTING | grep -c 'Proxy-agent_hysteria2_portHopping')" "加了端口跳跃：有一条 DNAT"
-assert_equals "" "$(iptables -S INPUT | grep -F '30000:30010' || true)" "加端口跳跃不放行区间（INPUT 看到的是 DNAT 之后的目标端口）"
+assert_equals "1" "$(iptables -t nat -S PREROUTING | grep -c 'Proxy-agent_hysteria2_portHopping')" "加了端口跳跃：IPv4 有一条 NAT 规则"
+assert_equals "" "$(iptables -S INPUT | grep -F '30000:30010' || true)" "加端口跳跃不放行区间（INPUT 看到的是 NAT 之后的目标端口）"
 s6Out=$(runMenu "4\n2\n")
 assert_equals "0" "$?" "卸 Hysteria2 退出码 0"
 assert_equals "0" "$(iptables -t nat -S PREROUTING | grep -c 'Proxy-agent_hysteria2_portHopping')" "卸 Hysteria2 带走它的跳跃规则"
