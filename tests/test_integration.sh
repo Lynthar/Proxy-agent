@@ -5533,11 +5533,11 @@ run_mt() {
 assert_equals "" "$(run_mt manageTuic)" "TUIC 菜单：没有端口跳跃入口（三种订阅都带不了区间，服务端 DNAT 白开）"
 assert_equals "hop hysteria2" "$(run_mt manageHysteria)" "Hysteria2 菜单：端口跳跃入口还在"
 
-AH_FN=$(sed -n '/^addPortHopping() {/,/^}/p' install.sh)
-# run_ah [NO_V6] → 桩掉 iptables / ip6tables，打印加规则的调用；NO_V6 非空时 ip6tables 的 nat 表不可用
-run_ah() {
-    env AH_FN="${AH_FN}" NO_V6="${1:-}" bash -c '
-        eval "${AH_FN}"
+HOP_ADD_FN=$(sed -n '/^addPortHopping() {/,/^}/p' install.sh)
+# run_hop_add [NO_V6] → 桩掉 iptables / ip6tables，打印加规则的调用；NO_V6 非空时 ip6tables 的 nat 表不可用
+run_hop_add() {
+    env HOP_ADD_FN="${HOP_ADD_FN}" NO_V6="${1:-}" bash -c '
+        eval "${HOP_ADD_FN}"
         echoContent() { if [[ "$2" == *NO_IPV6* ]]; then echo "notice ${2##* }"; fi; return 0; }
         t() { echo "$1"; }
         allowPort() { echo "allowPort $*"; }
@@ -5549,9 +5549,9 @@ run_ah() {
         echo 30000-30010 | addPortHopping hysteria2 443' 2>&1
 }
 _hopRule="PREROUTING -p udp --dport 30000:30010 -m addrtype --dst-type LOCAL -m comment --comment Proxy-agent_hysteria2_portHopping -j REDIRECT --to-ports 443"
-assert_equals "iptables -t nat -A ${_hopRule}|ip6tables -t nat -A ${_hopRule}" "$(run_ah | paste -sd'|' -)" \
+assert_equals "iptables -t nat -A ${_hopRule}|ip6tables -t nat -A ${_hopRule}" "$(run_hop_add | paste -sd'|' -)" \
     "加端口跳跃：IPv4、IPv6 各一条，只改发给本机的包，不放行区间"
-assert_equals "iptables -t nat -A ${_hopRule}|notice PORT_HOPPING_NO_IPV6" "$(run_ah no | paste -sd'|' -)" \
+assert_equals "iptables -t nat -A ${_hopRule}|notice PORT_HOPPING_NO_IPV6" "$(run_hop_add no | paste -sd'|' -)" \
     "加端口跳跃：ip6tables 的 nat 表用不了时只加 IPv4，并明说"
 
 mkdir -p "${AP_DIR}/bin" && printf '#!/bin/sh\nexit 0\n' >"${AP_DIR}/bin/iptables" && chmod +x "${AP_DIR}/bin/iptables"
