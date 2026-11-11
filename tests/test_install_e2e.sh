@@ -451,6 +451,16 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
         "$(crontab -l 2>/dev/null | grep -F 'install.sh UpdateGeo')" "crontab 里的 UpdateGeo 行带安装根前缀"
 fi
 
+# 菜单 7 → 4 / 7 → 5：从菜单加一个账号再删掉，账户事务在两种内核上都真走一遍（加完、删完菜单再读到 EOF 算选择错误，退出码不看）
+echo ""
+echo -e "${YELLOW}=== 菜单 7 → 4 / 7 → 5：添加、删除用户 ===${NC}"
+accountNames() { jq -r '[.inbounds[] | (.settings.clients // .users)[]? | (.email // .name) | sub("-[^-]*$"; "")] | join(" ")' "${realityConf}" 2>/dev/null; }
+addOut=$(printf '7\n4\n1\n33333333-4444-5555-6666-777777777777\ne2eadd\n' | V2RAY_LANG=en pasly 2>&1)
+assert_equals "${E2E_USER} e2eadd" "$(accountNames)" "菜单添加用户：新账号写进 Reality 入站"
+assert_equals "" "$(grep -F 'None of the installed protocols' <<<"${addOut}" || true)" "菜单添加用户：没有误报「没有带账号的协议」"
+printf '7\n5\n2\ny\n' | V2RAY_LANG=en pasly >/dev/null 2>&1
+assert_equals "${E2E_USER}" "$(accountNames)" "菜单删除用户：按编号删掉刚加的那个，原账号还在"
+
 # listenAddrs PORT → 该 TCP 端口上 LISTEN 的本地地址（/proc/net/tcp{,6} 的十六进制形式），每行一个
 listenAddrs() {
     awk -v p=":$(printf '%04X' "$1")" '$4 == "0A" && substr($2, length($2) - 4) == p { split($2, a, ":"); print a[1] }' \

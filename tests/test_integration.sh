@@ -1662,6 +1662,19 @@ env PROXY_AGENT_DIR="${DOTTED_ROOT}" DOTTED_FNS="${DOTTED_FNS}" bash -c '
 assert_equals "1" "$?" "账户事务：旧的按下标 del 动作被拒绝"
 assert_equals '["a1","c3"]' "$(jq -c '[.inbounds[0].settings.clients[].id]' "${DOTTED_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json")" \
     "账户事务：被拒绝的动作不碰文件"
+# 一个带账号的协议都没装（只剩 20）：加、删都什么都没写，不能报成功，否则菜单打「添加完成」
+run_tx_none() {
+    env PROXY_AGENT_DIR="${DOTTED_ROOT}" DOTTED_FNS="${DOTTED_FNS}" V2RAY_LANG=zh_CN bash -c '
+        source lib/i18n.sh; source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh
+        eval "${DOTTED_FNS}"
+        readInstallType; readInstallProtocolType; currentInstallProtocolType=",20,"
+        applyAccountChangeAllProtocols "$@"; echo "rc=$?"' _ "$@" 2>&1
+}
+_out=$(run_tx_none add d4 dave)
+assert_equals "rc=1|1" "$(grep -o 'rc=[0-9]*' <<<"${_out}")|$(grep -c '已装的协议里没有带账号的' <<<"${_out}")" "账户事务 add：没有带账号的协议时返回 1 并说明"
+assert_equals "rc=1" "$(run_tx_none delName alice | grep -o 'rc=[0-9]*')" "账户事务 delName：没有带账号的协议时返回 1"
+assert_equals '["a1","c3"]' "$(jq -c '[.inbounds[0].settings.clients[].id]' "${DOTTED_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json")" \
+    "账户事务：没有带账号的协议时一个文件都不碰"
 rm -f "${DOTTED_ROOT}/xray/conf/03_VLESS_WS_inbounds.json"
 printf '%s\n' '{"inbounds":[{"port":443,"settings":{"clients":[{"id":"a1","email":"alice"},{"id":"b2","email":"bob"}]}}]}' \
     >"${DOTTED_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
@@ -1888,7 +1901,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试拼车钩子与 tick ===${NC}"
 
-CP_FN_NAMES="applyAccountChangeAllProtocols carpoolSyncUserinfo nginxPids xrayConfigTest readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled xrayDaemonRunning carpoolCurrentClientsMap crontabHas crontabReplace ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolMachineStep carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolGuardAccountMenu carpoolCheckPrerequisites carpoolPickApiPort carpoolApiReady carpoolAllAccounts carpoolFillUuids carpoolRemoveCron removeSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable carpoolHasTty carpoolApply carpoolResetUsage carpoolShowUsage carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolInsertPageBlock carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMembersClean carpoolMembersEditApply carpoolPickMember carpoolAsk carpoolShowProtocolChoices carpoolShowMemberLinks carpoolMemberAdd carpoolMemberEdit carpoolMemberMenu carpoolMenu addUser removeUser cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountStateFile chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget"
+CP_FN_NAMES="applyAccountChangeAllProtocols carpoolUserinfoUsageDropped carpoolSyncUserinfo nginxPids xrayConfigTest readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled xrayDaemonRunning carpoolCurrentClientsMap crontabHas crontabReplace ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolMachineStep carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolGuardAccountMenu carpoolCheckPrerequisites carpoolPickApiPort carpoolApiReady carpoolAllAccounts carpoolFillUuids carpoolRemoveCron removeSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable carpoolHasTty carpoolApply carpoolResetUsage carpoolShowUsage carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolInsertPageBlock carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMembersClean carpoolMembersEditApply carpoolPickMember carpoolAsk carpoolShowProtocolChoices carpoolShowMemberLinks carpoolMemberAdd carpoolMemberEdit carpoolMemberMenu carpoolMenu addUser removeUser cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountStateFile chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget"
 CP_FNS=$(sed -n "$(for _f in ${CP_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_not_empty "${CP_FNS}" "拼车：抽到 install.sh 原文"
 assert_equals "$(wc -w <<<"${CP_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CP_FNS}")" "拼车：每个函数都抽到了（抽不到说明函数体里出现了顶格的 }）"
@@ -2987,6 +3000,30 @@ touch -t 202001010000 "${CP_UI_FILE}"
 run_cp 'carpoolSyncUserinfo' >/dev/null 2>&1
 assert_contains "$(cat "${CP_UI_FILE}")" "$(CP_ALICE_LINE 1000 "${cp_alice_total}" 0)" "用量头：过了一小时写进新用量（billing=both 算 2 倍，全记在 download）"
 assert_equals "nginx -t|nginx -s reload" "$(grep -E '^nginx' "${CP_CALLS}" | paste -sd'|' -)" "用量头：过了一小时才重载"
+# 用量变少（清零、新一期）不等一小时：车主清完、成员刷新订阅看到的还是旧数字，会以为没清
+cp_ui_set() { jq "$1" "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/state.json.t" && cat "${CP_ROOT}/carpool/state.json.t" >"${CP_ROOT}/carpool/state.json"; }
+: >"${CP_CALLS}"
+cp_ui_set '.members.alice.downBytes = 0'
+run_cp 'carpoolSyncUserinfo' >/dev/null 2>&1
+assert_contains "$(cat "${CP_UI_FILE}")" "$(CP_ALICE_LINE 0 "${cp_alice_total}" 0)" "用量头：用量变少一小时内也写进去"
+assert_equals "nginx -t|nginx -s reload" "$(grep -E '^nginx' "${CP_CALLS}" | paste -sd'|' -)" "用量头：用量变少立刻重载"
+cp_ui_set '.members.alice.downBytes = 500'
+: >"${CP_CALLS}"
+run_cp 'carpoolSyncUserinfo' >/dev/null 2>&1
+assert_equals "$(CP_ALICE_LINE 0 "${cp_alice_total}" 0)|" "$(grep -F "${CP_ALICE_MD5}" "${CP_UI_FILE}")|$(cat "${CP_CALLS}")" "用量头：清零之后再涨，照样限成一小时一次"
+touch -t 202001010000 "${CP_UI_FILE}" && run_cp 'carpoolSyncUserinfo' >/dev/null 2>&1
+# map 内容没变时同步不重写，时间戳还留在 2020 年；摸成刚写过，才是「一小时内」
+touch "${CP_UI_FILE}"
+printf '1\n' | run_cp 'carpoolResetUsage' >/dev/null 2>&1
+assert_equals "0|$(CP_ALICE_LINE 0 "${cp_alice_total}" 0)" "$(cp_state '.members.alice.downBytes')|$(grep -F "${CP_ALICE_MD5}" "${CP_UI_FILE}")" "用量头：菜单里全员清零，map 跟着归零"
+cp_ui_set '.members.alice.downBytes = 500'
+touch -t 202001010000 "${CP_UI_FILE}" && run_cp 'carpoolSyncUserinfo' >/dev/null 2>&1
+touch "${CP_UI_FILE}"
+echo '{"stat": []}' >"${CP_STATS}"
+cp_ui_set '.period = "2000-01-01"'
+run_cp 'carpoolTick' >/dev/null 2>&1
+assert_equals "0|$(CP_ALICE_LINE 0 "${cp_alice_total}" 0)" "$(cp_state '.members.alice.downBytes')|$(grep -F "${CP_ALICE_MD5}" "${CP_UI_FILE}")" "用量头：tick 换了新一期，map 跟着归零"
+cp_ui_set '.members.alice.downBytes = 500'
 : >"${CP_CALLS}"
 jq '.members.alice.quotaBytes = 2048 | .members.alice.expire = "2026-11-04"' "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/state.json.t" && cat "${CP_ROOT}/carpool/state.json.t" >"${CP_ROOT}/carpool/state.json"
 run_cp 'carpoolSyncUserinfo' >/dev/null 2>&1
@@ -5353,6 +5390,11 @@ ah_rm_subs alice
 ah_rm_with_sub 2 nobody
 assert_equals "5" "$(ah_subs_of alice)" "删除用户：删 alice-2 时 alice 还在用同一个订阅文件，不删"
 unset -f ah_rm_subs ah_subs_of ah_rm_with_sub
+# 查看账号前三个本地目录都清空：各协议按人追加，改过端口后旧链接留在 default/ 里，照着复制拿到的是旧端口
+for d in default clashMeta sing-box; do mkdir -p "${AH_ROOT}/subscribe_local/${d}" && echo "vless://old@1.2.3.4:443" >"${AH_ROOT}/subscribe_local/${d}/alice"; done
+env PROXY_AGENT_DIR="${AH_ROOT}" FN="$(sed -n '/^initSubscribeLocalConfig() {/,/^}/p' install.sh)" bash -c 'source lib/constants.sh; eval "${FN}"; initSubscribeLocalConfig'
+assert_equals "0" "$(find "${AH_ROOT}/subscribe_local" -type f -path '*/default/*' -o -type f -path '*/clashMeta/*' -o -type f -path '*/sing-box/*' | wc -l | tr -d ' ')" \
+    "查看账号前：default、clashMeta、sing-box 三个本地目录都清空"
 
 # 二维码只在本机生成，分享链接不发给第三方
 assert_equals "0" "$(grep -c 'qrserver' install.sh)" "二维码：脚本里没有第三方二维码服务"
@@ -5882,6 +5924,26 @@ assert_equals "ok.example:443" "$(run_rd_typed 'cf.example\nn\nok.example\n' "cf
 assert_equals "ok.example:8443" "$(run_rd_typed 'cf.example:9443\nn\nok.example:8443\n' "cf.example")" "Reality 目标：重问后端口跟新输入走，不留上一次的"
 assert_equals "cf.example:443" "$(run_rd_typed 'cf.example\ny\n' "cf.example")" "Reality 目标：挂 Cloudflare 答是照用"
 assert_equals "no" "$(run_rd_typed 'cf.example\n' "cf.example" | grep -q '^cf\.example:' && echo yes || echo no)" "Reality 目标：确认时 stdin 关了算答否，回车随机不空转"
+# run_rd_prev NAME PORT DEST_HOST INPUT [LAST] → 带着上次的目标重装；打印「定下的 目标:端口|提示过不在列表里」。
+# read -p 不在终端上不打提示，问没问沿用看输入被谁吃掉：没问的话第一行就被当成新目标
+run_rd_prev() {
+    printf "$4" | env RDT_FN="${RDT_FN}" P_NAME="$1" P_PORT="$2" P_HOST="$3" P_LAST="${5:-}" bash -c '
+        eval "${RDT_FN}"
+        echoContent() { [[ "$2" != *REALITY_DEST_NOT_IN_LIST* ]] || hint=1; return 0; }
+        t() { echo "$1"; }
+        isYesInput() { [[ "${1,,}" == y ]]; }
+        isValidDomain() { return 0; }
+        curl() { return 0; }
+        realityServerName=${P_NAME} realityDomainPort=${P_PORT} realityDestHost=${P_HOST} domain= lastInstallationConfig=${P_LAST}
+        initRealityClientServersName >/dev/null 2>&1
+        echo "${realityServerName}:${realityDomainPort}|${hint:-0}"' 2>&1
+}
+assert_equals "my.example:8443|1" "$(run_rd_prev my.example 8443 '' 'y\n')" "重装：上次自己输的目标也问沿用，答 y 连端口一起留着，并提示不在默认列表里"
+assert_equals "ok.example:443|1" "$(run_rd_prev my.example 8443 '' 'n\nok.example\n')" "重装：上次自己输的目标答 n 就重新输"
+assert_equals "www.python.org:443|0" "$(run_rd_prev www.python.org 443 '' 'y\n')" "重装：默认列表里的目标照旧问沿用，不提示"
+assert_equals "ok.example:443|0" "$(run_rd_prev a.example 31305 127.0.0.1 'ok.example\n')" "重装：上次是本机域名不问沿用（换了域名会指向没证书的旧域名）"
+assert_equals "my.example:8443|0" "$(run_rd_prev my.example 8443 '' '' 1)" "重装：选了沿用上次配置就不问也不提示"
+assert_equals "no" "$(run_rd_prev my.example 8443 '' '' | grep -qE '^(my\.example)?:' && echo yes || echo no)" "重装：问沿用时 stdin 关了算答否，随机挑一个不空转"
 
 # --- Xray 机上卸 Hysteria2：片段里还有链式的入站就留着 sing-box，不能把链式的片段、状态文件连二进制一起删 ---
 US_FN=$(sed -n '/^unInstallSingBox() {/,/^}/p;/^singBoxFragmentsHaveInbounds() {/,/^}/p' install.sh)

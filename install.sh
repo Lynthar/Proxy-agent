@@ -6987,9 +6987,9 @@ EOF
 EOF
     fi
 }
-# 初始化 sing-box订阅配置
+# 每次查看账号都整份重写：各协议按人往文件里追加，不清的话端口改过之后旧链接一直留着
 initSubscribeLocalConfig() {
-    rm -rf ${SUBSCRIBE_LOCAL_DIR}/sing-box/*
+    rm -rf "${SUBSCRIBE_LOCAL_DIR}"/default/* "${SUBSCRIBE_LOCAL_DIR}"/clashMeta/* "${SUBSCRIBE_LOCAL_DIR}"/sing-box/*
 }
 # shareQrCode TITLE LINK → 在终端里画分享链接的二维码。只在本机生成：链接含 UUID，交给第三方网站就是把凭据发出去。
 # stdout 不是终端（订阅重建把账号输出丢进 /dev/null，每个成员每个协议画一遍是白耗）或没有 qrencode 时什么都不打
@@ -8561,6 +8561,14 @@ applyAccountChangeAllProtocols() {
         fi
     done
 
+    # add / delName 一个协议都没碰到就是什么都没写（只剩 20 或协议都卸了），报成功菜单会打「添加完成」；
+    # set 不查：拼车对账给的载荷里可以只有没装的协议
+    if [[ "${action}" != "set" && -z "${touchedXray}${touchedSingBox}" ]]; then
+        echoContent red " ---> $(t ACCOUNT_TX_NO_PROTOCOL)"
+        jsonTxRollback
+        return 1
+    fi
+
     # 提交前内核级校验，失败即回滚。先 xray（-test 无副作用）后 sing-box（merge 会写 config.json，
     # 但 handleSingBox start 每次重新 merge，回滚后的下一次启动会覆盖掉它）
     if [[ -n "${touchedXray}" && "${coreKind}" == "1" ]] && ! xrayConfigTest; then
@@ -9537,8 +9545,18 @@ carpoolInsertPageBlock() {
     return "${rc}"
 }
 
-# carpoolSyncUserinfo → 成员用量写进 map，订阅响应才带 subscription-userinfo。用量每个 tick 都变，重载限成每小时至多一次；成员、配额、到期变了立刻生效。
-# 只读 state，不拿锁。不用 carpoolReloadNginx：它会拉起没在跑的 nginx，tick 撞上安装流程停服的窗口会抢走 80 端口
+# carpoolUserinfoUsageDropped BODY MAP_FILE → 0 = 有人的用量比 map 里的少（清零、新一期）。两边按行对齐比，调用方先确认只差 download
+carpoolUserinfoUsageDropped() {
+    local now before
+    while IFS=$'\t' read -r now before; do
+        ((${now:-0} < ${before:-0})) && return 0
+    done < <(paste <(grep -oE 'download=[0-9]+' <<<"$1" | cut -d= -f2) <(grep -oE 'download=[0-9]+' "$2" 2>/dev/null | cut -d= -f2))
+    return 1
+}
+
+# carpoolSyncUserinfo → 成员用量写进 map，订阅响应才带 subscription-userinfo。用量上涨每个 tick 都有，重载限成每小时至多一次；
+# 用量变少（清零、新一期）与成员、配额、到期变了立刻生效。只读 state，不拿锁。
+# 不用 carpoolReloadNginx：它会拉起没在跑的 nginx，tick 撞上安装流程停服的窗口会抢走 80 端口
 carpoolSyncUserinfo() {
     local conf="${nginxConfigPath}subscribe.conf" state name value md5 body= tmp
     [[ -f "${conf}" ]] && grep -q 'paSubUserinfo' "${conf}" || return 0
@@ -9550,7 +9568,8 @@ carpoolSyncUserinfo() {
     done < <(carpoolUserinfoTable "${state}")
     [[ "${body%$'\n'}" == "$(cat "${SUBSCRIBE_USERINFO_MAP}" 2>/dev/null)" ]] && return 0
     if [[ "$(sed -E 's/download=[0-9]+//' <<<"${body%$'\n'}")" == "$(sed -E 's/download=[0-9]+//' "${SUBSCRIBE_USERINFO_MAP}" 2>/dev/null)" ]] \
-        && [[ -z "$(find "${SUBSCRIBE_USERINFO_MAP}" -mmin +59 2>/dev/null)" ]]; then
+        && [[ -z "$(find "${SUBSCRIBE_USERINFO_MAP}" -mmin +59 2>/dev/null)" ]] \
+        && ! carpoolUserinfoUsageDropped "${body}" "${SUBSCRIBE_USERINFO_MAP}"; then
         return 0
     fi
     # map 里有订阅地址的 md5，mktemp 的 0600 正好；nginx 的 master 是 root，读得到
@@ -19378,15 +19397,19 @@ pickRandomDest() {
 initRealityClientServersName() {
     local realityDestRandom=
     if [[ -n "${realityServerName}" && -z "${lastInstallationConfig}" ]]; then
-        if realityDestList | grep -q "${realityServerName}"; then
+        # 上次是本机域名（目标在回环上）不问沿用，下面按当前域名重问：换了域名再沿用，目标就指向没有证书的旧域名
+        if [[ -n "${realityDestHost}" ]]; then
+            realityServerName=
+            realityDomainPort=
+        else
+            if ! tr ',' '\n' <<<"$(realityDestList)" | grep -qxF "${realityServerName}"; then
+                echoContent yellow " ---> $(t REALITY_DEST_NOT_IN_LIST "${realityServerName}")"
+            fi
             read -r -p "读取到上次安装设置的Reality域名，是否使用？[y/n]:" realityServerNameStatus
             if ! isYesInput "${realityServerNameStatus}"; then
                 realityServerName=
                 realityDomainPort=
             fi
-        else
-            realityServerName=
-            realityDomainPort=
         fi
     fi
 
@@ -19466,7 +19489,14 @@ manageReality() {
     fi
 
     if [[ "${coreKind}" == "1" ]]; then
+        # 12 也有一份 Reality 目标，只重配 7 的话两者共用的目标被封时 12 只能重装。
+        # 要拼成 ,7,,12,：handleNginx 用 grep -w 认 ,7,，写成 ,7,12, 就认不出只有 Reality、会去拉起 nginx
         selectCustomInstallType=",7,"
+        if echo "${currentInstallProtocolType}" | grep -q ",12,"; then
+            selectCustomInstallType="${selectCustomInstallType},12,"
+            # 12 的 path 按 customPath 写、链接按 currentPath 拼，这里不问 path：不带上就写成 /xHTTP，手里的链接全断
+            customPath=${currentPath}
+        fi
         initXrayConfig custom 1 true
     elif [[ "${coreKind}" == "2" ]]; then
         if echo "${currentInstallProtocolType}" | grep -q ",7,"; then
