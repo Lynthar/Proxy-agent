@@ -276,6 +276,7 @@ MSG_SELINUX_LABEL_CHCON_ONLY="没有 semanage，只用 chcon 把 %s 标成了 bi
 MSG_SELINUX_LABEL_FAILED="没能把 %s 标成 bin_t：SELinux Enforcing 下核心会连不出去，见 docs/selinux.md"
 MSG_ACCOUNT_SUB_KEY_TAKEN="%s 与已有账号 %s 的第一段（- 之前）相同：订阅文件按第一段分，两个账号会共用一份订阅、互相看到对方的凭据，请换个名字"
 MSG_REALITY_LOCAL_DEST_NO_CERT="没有 %s 的证书，不能把本机域名当 Reality 目标，改用别的目标域名"
+MSG_REALITY_LOCAL_DEST_RELOAD_FAILED="nginx 没能加载 %s，以本机域名为目标的 Reality 握手会失败；先修好 nginx -t 报的错，再走一次菜单 5"
 MSG_REALITY_DEST_NOT_IN_LIST="上次的目标 %s 不在现在的默认列表里：可能是自己输的，也可能已从列表撤下，沿用前确认它还合适"
 MSG_CHAIN_ACCOUNT_CARRY_KEPT="已带上 %s 个账号的出口设置"
 MSG_CHAIN_ACCOUNT_CARRY_DROPPED="这些账号指向的链路已不在，改回跟随默认：%s"

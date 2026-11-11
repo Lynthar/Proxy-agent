@@ -19487,6 +19487,13 @@ manageReality() {
         echoContent red "\n ---> 请先安装Reality协议，并确认已配置可用的 serverName/公钥。"
         exit 1
     fi
+    # 本机有域名（TLS 入站的证书，或上次自偷的目标）就和安装流程一样问要不要拿它当目标；不问的话，自偷的机器走一次菜单 5 就回不去了
+    domain=${currentHost}
+    if [[ -z "${domain}" && -n "${realityDestHost}" ]]; then
+        domain=${realityServerName}
+    fi
+    local destConf="${nginxConfigPath}reality_dest.conf" destBefore
+    destBefore=$(cat "${destConf}" 2>/dev/null)
 
     if [[ "${coreKind}" == "1" ]]; then
         # 12 也有一份 Reality 目标，只重配 7 的话两者共用的目标被封时 12 只能重装。
@@ -19506,6 +19513,10 @@ manageReality() {
             selectCustomInstallType="${selectCustomInstallType},8,"
         fi
         initSingBoxConfig custom 1 true
+    fi
+    # 选了本机域名而 reality_dest.conf 是新写的，nginx 要重新读：Reality 每次握手都去连目标，回环上没人听就全失败
+    if [[ -f "${destConf}" && "$(cat "${destConf}")" != "${destBefore}" ]] && ! { nginx -t >/dev/null 2>&1 && carpoolReloadNginx; }; then
+        echoContent red " ---> $(t REALITY_LOCAL_DEST_RELOAD_FAILED "${destConf}")"
     fi
 
     reloadCore

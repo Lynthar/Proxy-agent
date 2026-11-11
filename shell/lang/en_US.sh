@@ -276,6 +276,7 @@ MSG_SELINUX_LABEL_CHCON_ONLY="semanage is missing, so %s was labelled bin_t with
 MSG_SELINUX_LABEL_FAILED="Could not label %s as bin_t: under SELinux Enforcing the core cannot connect out, see docs/selinux.md"
 MSG_ACCOUNT_SUB_KEY_TAKEN="%s has the same first segment (before -) as existing account %s: subscription files are split by that segment, so both would share one subscription and see each other's credentials. Pick another name"
 MSG_REALITY_LOCAL_DEST_NO_CERT="No certificate for %s, so it cannot be the Reality target; pick another target domain"
+MSG_REALITY_LOCAL_DEST_RELOAD_FAILED="nginx could not load %s, so Reality handshakes on your own domain will fail; fix what nginx -t reports and run menu 5 again"
 MSG_REALITY_DEST_NOT_IN_LIST="The previous target %s is not in the current default list: you may have typed it, or it was dropped from the list. Check it still suits before reusing it"
 MSG_CHAIN_ACCOUNT_CARRY_KEPT="Kept the exit settings of %s accounts"
 MSG_CHAIN_ACCOUNT_CARRY_DROPPED="These accounts pointed at chains that are gone and now follow the default: %s"

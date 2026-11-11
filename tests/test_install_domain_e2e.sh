@@ -314,7 +314,7 @@ probeSub "加了 Hysteria2" "${WORK}/sub-sb.json"
 assert_equals "hysteria2 trojan vless vless vless vmess" "${probedTypes}" "订阅里多了 Hysteria2 节点（装协议后订阅跟着重建）"
 
 # ============================================================================
-# 菜单 5：换 Reality 目标，7 与 12 一起换、端口与密钥沿用。菜单 5 不读本机域名、换不回自偷，后面几步的回答按自偷排，换完还原两份配置
+# 菜单 5：换 Reality 目标，7 与 12 一起换、端口密钥 path 沿用；再用菜单 5 换回本机域名（换回前删掉 reality_dest.conf，当它没用过自偷）
 # ============================================================================
 
 echo ""
@@ -327,11 +327,10 @@ realityTargets() {
 realityPortsKeys() {
     jq -r '.inbounds[0].port, ([.inbounds[] | .streamSettings | .realitySettings.privateKey, .xhttpSettings.path | values] | join(" "))' "${realityFiles[@]}" 2>/dev/null | paste -sd' ' -
 }
-mkdir -p "${WORK}/reality-before" && cp "${realityFiles[@]}" "${WORK}/reality-before/"
 realityBefore=$(realityTargets)
 realityPortsKeysBefore=$(realityPortsKeys)
-# 账号沿用 · 12 端口沿用 · 输目标 · 12 密钥沿用 · 7 端口沿用 · 7 沿用刚定的目标 · 7 密钥沿用
-r1Out=$(runMenu "5\ny\ny\ndl.google.com:443\ny\ny\ny\ny\n")
+# 账号沿用 · 12 端口沿用 · 不用本机域名 · 输目标 · 12 密钥沿用 · 7 端口沿用 · 7 沿用刚定的目标 · 7 密钥沿用
+r1Out=$(runMenu "5\ny\ny\nn\ndl.google.com:443\ny\ny\ny\ny\n")
 r1Rc=$?
 [[ ${r1Rc} -ne 0 ]] && tail -n 20 <<<"${r1Out}"
 assert_equals "0" "${r1Rc}" "菜单 5 换目标退出码 0"
@@ -345,9 +344,20 @@ assert_equals "200" "$(fetchSub "${DOMAIN_A}" 'v2rayN/7.0' "${WORK}/sub-default.
 xhttpLink=$(base64 -d "${WORK}/sub-default.txt" 2>/dev/null | grep -m1 'security=reality.*type=xhttp')
 assert_contains "${xhttpLink}" "sni=dl.google.com" "菜单 5：通用订阅里 XHTTP 的链接带上新目标"
 assert_equals "204" "$(probeXhttpLink "${xhttpLink}")" "菜单 5：按新目标的 XHTTP 链接经服务端访问外网"
-cp "${WORK}/reality-before/"* "${XRAY_CONF_DIR}/" && systemctl restart xray
-sleep 1
-assert_equals "${realityBefore}|active" "$(realityTargets)|$(systemctl is-active xray)" "菜单 5 之后还原成本机域名的两份配置，Xray 照常起来"
+rm -f /etc/nginx/conf.d/reality_dest.conf && nginx -s reload
+# 账号沿用 · 12 端口沿用 · 不沿用 dl.google.com · 用本机域名 · 12 密钥沿用 · 7 端口沿用 · 用本机域名 · 7 密钥沿用
+r2Out=$(runMenu "5\ny\ny\nn\ny\ny\ny\ny\ny\n")
+r2Rc=$?
+[[ ${r2Rc} -ne 0 ]] && tail -n 20 <<<"${r2Out}"
+assert_equals "0" "${r2Rc}" "菜单 5 换回本机域名退出码 0"
+assert_equals "${realityBefore}" "$(realityTargets)" "菜单 5：7 与 12 都换回本机域名（目标在回环上）"
+assert_equals "${realityPortsKeysBefore}" "$(realityPortsKeys)" "菜单 5 换回之后端口、密钥与 path 仍是原来的"
+assert_contains "$(cat /etc/nginx/conf.d/reality_dest.conf 2>/dev/null)" "server_name ${DOMAIN_A};" "菜单 5：选了本机域名时重写 reality_dest.conf"
+assert_equals "200" "$(fetchSub "${DOMAIN_A}" 'sing-box 1.14.4' "${WORK}/sub-sb.json")" "换回之后取 sing-box 订阅 200"
+probeSub "换回本机域名" "${WORK}/sub-sb.json"
+assert_equals "200" "$(fetchSub "${DOMAIN_A}" 'v2rayN/7.0' "${WORK}/sub-default.txt")" "换回之后取通用订阅 200"
+assert_equals "204" "$(probeXhttpLink "$(base64 -d "${WORK}/sub-default.txt" 2>/dev/null | grep -m1 'security=reality.*type=xhttp')")" \
+    "换回本机域名后 XHTTP 照样能用（nginx 重读了新写的 reality_dest.conf）"
 
 # ============================================================================
 # 装到一半退出：端口自检已经停了三个服务，却连不回本机（云防火墙没放行时就是这样），起步时在跑的都要拉回来
