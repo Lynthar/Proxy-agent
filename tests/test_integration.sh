@@ -600,6 +600,64 @@ assert_equals "freedom|z_direct_outbound" "$(jq -r '.outbounds[0] | "\(.protocol
 assert_contains "$(sed -n '/^handleXray() {/,/^}/p' install.sh)" "ensureXrayDirectStrategy" "handleXray start 前挂了直连策略修正（存量机器靠它补上）"
 rm -rf "${DS_ROOT}"
 
+# 内核由哪一版脚本起：起成功才记版本，入口与 doctor 据此提示自更新后还没用上的启动前修正（原文执行，进程、服务与重启桩掉）
+CS_ROOT="${MOCK_ROOT}/core-started.root"
+CS_FNS=$(sed -n '/^markCoreStarted() {/,/^}/p;/^coresStartedByOtherVersion() {/,/^}/p;/^stdinIsTty() {/,/^}/p;/^offerCoreRestart() {/,/^}/p;/^handleXray() {/,/^}/p;/^_doctorRow() {/,/^}/p;/^_doctorSection() {/,/^}/p;/^_doctorCheckCore() {/,/^}/p' install.sh)
+assert_equals "8" "$(grep -cE '^(markCoreStarted|coresStartedByOtherVersion|stdinIsTty|offerCoreRestart|handleXray|_doctorRow|_doctorSection|_doctorCheckCore)\(\) \{' <<<"${CS_FNS}")" "抽到内核启动版本相关的 8 个函数原文"
+# run_cs XRAY SB 片段 → XRAY / SB 为 up 时对应内核在跑，记过的版本写在 xray.ver / sb.ver（none 不建），跑片段并打印输出；reloadCore 打 RELOAD
+run_cs() {
+    rm -rf "${CS_ROOT}" && mkdir -p "${CS_ROOT}/xray/conf" "${CS_ROOT}/sing-box"
+    [[ "$1" == up ]] && touch "${CS_ROOT}/xray.up"
+    [[ "$2" == up ]] && touch "${CS_ROOT}/sb.up"
+    [[ "${CS_XRAY_VER:-none}" == none ]] || printf '%s\n' "${CS_XRAY_VER}" >"${CS_ROOT}/xray/started_version"
+    [[ "${CS_SB_VER:-none}" == none ]] || printf '%s\n' "${CS_SB_VER}" >"${CS_ROOT}/sing-box/started_version"
+    env PROXY_AGENT_DIR="${CS_ROOT}" CS_FNS="${CS_FNS}" V2RAY_LANG=en bash -c '
+        source lib/i18n.sh; source lib/constants.sh; source lib/utils.sh
+        SCRIPT_VERSION=v9.9.9
+        echoContent() { printf "%s\n" "$2"; }
+        isDryRun() { [[ -n "${DRY_RUN:-}" ]]; }
+        xrayDaemonRunning() { [[ -f "${PROXY_AGENT_DIR}/xray.up" ]]; }
+        singBoxDaemonRunning() { [[ -f "${PROXY_AGENT_DIR}/sb.up" ]]; }
+        reloadCore() { echo RELOAD; }
+        for f in labelCoreBinary removeLegacyAllowInsecure ensureRealityMinClientVer ensureXrayDirectStrategy ensureCorePortTargets \
+            ensureCarpoolXray ensureXrayLocalBlock carpoolCollectBeforeStop sleep; do eval "$f() { :; }"; done
+        find() { echo found; }
+        systemctl() { [[ "$1" == start ]] && touch "${PROXY_AGENT_DIR}/xray.up"; return 0; }
+        eval "${CS_FNS}"
+        '"$3"
+}
+run_cs down down 'handleXray start' >/dev/null 2>&1
+assert_equals "v9.9.9" "$(cat "${CS_ROOT}/xray/started_version" 2>/dev/null)" "handleXray start 把 Xray 起来了：记下本版脚本的版本"
+CS_XRAY_VER=v1.0.0 run_cs up down 'handleXray start' >/dev/null 2>&1
+assert_equals "v1.0.0" "$(cat "${CS_ROOT}/xray/started_version")" "handleXray start 时 Xray 已经在跑：进程没换、没读到这次的修正，不改记的版本"
+assert_contains "$(sed -n '/^handleSingBox() {/,/^}/p' install.sh | grep -A1 'sing-box启动成功')" 'markCoreStarted "${SINGBOX_STARTED_VERSION_FILE}"' \
+    "handleSingBox start（总是先停再合并、再起）起成功后记版本"
+assert_equals "Xray" "$(run_cs up down 'coresStartedByOtherVersion')" "在跑的 Xray 没记过版本（旧版脚本起的）：列出来"
+assert_equals "" "$(CS_XRAY_VER=v9.9.9 run_cs up down 'coresStartedByOtherVersion')" "在跑的 Xray 是本版起的：不列"
+assert_equals "sing-box" "$(CS_XRAY_VER=v9.9.9 CS_SB_VER=v1.5.5 run_cs up up 'coresStartedByOtherVersion')" "只有旁挂的 sing-box 是旧版起的：只列它"
+assert_equals "" "$(CS_XRAY_VER=v1.5.5 run_cs down down 'coresStartedByOtherVersion')" "内核没在跑：不列（下次脚本起它时就用上本版的修正）"
+_out=$(run_cs up up 'offerCoreRestart; echo "rc=$?"' 2>&1 </dev/null)
+assert_contains "${_out}" "Xray / sing-box was started by an older version of this script" "入口：两个内核都是旧版起的，一起说明"
+assert_contains "${_out}" "Open pasly in a terminal" "入口：不是终端只提示怎么办"
+assert_equals "0" "$(grep -c RELOAD <<<"${_out}")" "入口：不是终端不重启，也不读输入（管道喂给菜单的输入不能被吃掉）"
+assert_contains "${_out}" "rc=0" "入口：提示后照常进菜单"
+assert_contains "$(printf '\n' | run_cs up down 'stdinIsTty() { return 0; }; offerCoreRestart' 2>&1)" "RELOAD" "入口：终端上回车即重启"
+assert_contains "$(printf 'y\n' | run_cs up down 'stdinIsTty() { return 0; }; offerCoreRestart' 2>&1)" "RELOAD" "入口：终端上答 y 重启"
+assert_equals "0" "$(printf 'n\n' | run_cs up down 'stdinIsTty() { return 0; }; offerCoreRestart' 2>&1 | grep -c RELOAD)" "入口：终端上答 n 不重启"
+assert_equals "" "$(CS_XRAY_VER=v9.9.9 run_cs up down 'stdinIsTty() { return 0; }; offerCoreRestart' 2>&1 </dev/null)" "入口：内核是本版起的，什么都不说、不问"
+assert_equals "" "$(DRY_RUN=1 run_cs up down 'offerCoreRestart' 2>&1 </dev/null)" "入口：--dry-run 不提示也不重启"
+_out=$(run_cs down down 'markCoreStarted "${PROXY_AGENT_DIR}/nope/started_version"; echo "rc=$?"' 2>&1)
+assert_contains "${_out}" "the menu will offer the core restart again" "记不下版本：提示下次还会问"
+assert_contains "${_out}" "rc=0" "记不下版本：不让内核的启动报失败"
+_out=$(run_cs up down 'coreKind=1; _doctorCheckCore' 2>&1)
+assert_contains "${_out}" "Core started by this script version — Xray was started by an older script version" "doctor：Xray 是旧版脚本起的，内核段报 WARN 并说怎么办"
+assert_contains "$(CS_XRAY_VER=v9.9.9 run_cs up down 'coreKind=1; _doctorCheckCore' 2>&1)" "Core started by this script version — v9.9.9" "doctor：本版起的，这一行通过并写出版本"
+assert_equals "cronFunction offerCoreRestart menu" "$(sed -n '/^# 顶层入口分发/,$p' install.sh | grep -oE '^(cronFunction|offerCoreRestart|menu)$' | paste -sd' ' -)" \
+    "入口：定时任务分发之后、菜单之前才问重启（cron 入口不提示）"
+assert_contains "$(sed -n '/^updateV2RayAgent() {/,/^}/p' install.sh | grep -A1 'if stdinIsTty; then')" 'exec env PROXY_AGENT_DIR="${PROXY_AGENT_DIR}" /bin/bash "${installDir}/install.sh"' \
+    "自更新：终端上更新完直接进新版菜单，由新代码问要不要重启"
+rm -rf "${CS_ROOT}"
+
 echo ""
 
 # ============================================================================
@@ -1901,7 +1959,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试拼车钩子与 tick ===${NC}"
 
-CP_FN_NAMES="applyAccountChangeAllProtocols carpoolUserinfoUsageDropped carpoolSyncUserinfo nginxPids xrayConfigTest readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled xrayDaemonRunning carpoolCurrentClientsMap crontabHas crontabReplace ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolMachineStep carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolGuardAccountMenu carpoolCheckPrerequisites carpoolPickApiPort carpoolApiReady carpoolAllAccounts carpoolFillUuids carpoolRemoveCron removeSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable carpoolHasTty carpoolApply carpoolResetUsage carpoolShowUsage carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolInsertPageBlock carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMembersClean carpoolMembersEditApply carpoolPickMember carpoolAsk carpoolShowProtocolChoices carpoolShowMemberLinks carpoolMemberAdd carpoolMemberEdit carpoolMemberMenu carpoolMenu addUser removeUser cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountStateFile chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget"
+CP_FN_NAMES="applyAccountChangeAllProtocols carpoolUserinfoUsageDropped carpoolSyncUserinfo nginxPids xrayConfigTest readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled xrayDaemonRunning carpoolCurrentClientsMap crontabHas crontabReplace ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolMachineStep carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolGuardAccountMenu carpoolCheckPrerequisites carpoolPickApiPort carpoolApiReady carpoolAllAccounts carpoolFillUuids carpoolRemoveCron removeSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable stdinIsTty carpoolApply carpoolResetUsage carpoolShowUsage carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolInsertPageBlock carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMembersClean carpoolMembersEditApply carpoolPickMember carpoolAsk carpoolShowProtocolChoices carpoolShowMemberLinks carpoolMemberAdd carpoolMemberEdit carpoolMemberMenu carpoolMenu addUser removeUser cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountStateFile chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget"
 CP_FNS=$(sed -n "$(for _f in ${CP_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_not_empty "${CP_FNS}" "拼车：抽到 install.sh 原文"
 assert_equals "$(wc -w <<<"${CP_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CP_FNS}")" "拼车：每个函数都抽到了（抽不到说明函数体里出现了顶格的 }）"
@@ -2372,15 +2430,15 @@ jq '.enabled = false' "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/s.tmp
 jq 'del(.inbounds[0].settings.clients[2])' "${CP_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json" >"${CP_ROOT}/t.json" && mv "${CP_ROOT}/t.json" "${CP_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
 jq 'del(.inbounds[1].settings.clients[2])' "${CP_ROOT}/xray/conf/07_VLESS_vision_reality_inbounds.json" >"${CP_ROOT}/t.json" && mv "${CP_ROOT}/t.json" "${CP_ROOT}/xray/conf/07_VLESS_vision_reality_inbounds.json"
 printf '%s\n' '{}' >"${CP_STATS}"
-_out=$(run_cp 'carpoolHasTty() { return 1; }; carpoolEnable; echo "rc=$?"' 2>&1 </dev/null)
+_out=$(run_cp 'stdinIsTty() { return 1; }; carpoolEnable; echo "rc=$?"' 2>&1 </dev/null)
 assert_contains "${_out}" "rc=1" "重开（关着时删了 bob，非 tty）：返回 1"
 assert_contains "${_out}" "bob 现在不在任何协议里" "重开（关着时删了 bob）：说出谁会被放回"
 assert_contains "${_out}" "需要在终端里逐项确认" "重开（非 tty）：说明要交互"
 assert_equals 'false|["zed","alice"]' "$(cp_state '.enabled')|$(cp_emails 02_VLESS_TCP_inbounds.json '.inbounds[0].settings.clients')" "重开（非 tty）：不开启，bob 不回来"
-_out=$(printf 'n\n' | run_cp 'carpoolHasTty() { return 0; }; carpoolEnable; echo "rc=$?"' 2>&1)
+_out=$(printf 'n\n' | run_cp 'stdinIsTty() { return 0; }; carpoolEnable; echo "rc=$?"' 2>&1)
 assert_contains "${_out}" "已取消" "重开（回答 n）：取消"
 assert_equals 'false|["zed","alice"]' "$(cp_state '.enabled')|$(cp_emails 02_VLESS_TCP_inbounds.json '.inbounds[0].settings.clients')" "重开（回答 n）：不开启，bob 不回来"
-_out=$(printf 'y\n' | run_cp 'carpoolHasTty() { return 0; }; carpoolEnable; echo "rc=$?"' 2>&1)
+_out=$(printf 'y\n' | run_cp 'stdinIsTty() { return 0; }; carpoolEnable; echo "rc=$?"' 2>&1)
 assert_contains "${_out}" "rc=0" "重开（回答 y）：返回 0"
 assert_equals "true|${CP_U2}" "$(cp_state '.enabled')|$(jq -r '.inbounds[0].settings.clients[] | select(.email | startswith("bob-")) | .id' "${CP_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json")" "重开（回答 y）：开启，bob 按原 UUID 放回"
 # 关着时给 bob 换了新 UUID：重开会改回 state 里的，同样要先说出来
@@ -2388,7 +2446,7 @@ cp_reset_tree
 jq '.enabled = false' "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/s.tmp" && mv "${CP_ROOT}/carpool/s.tmp" "${CP_ROOT}/carpool/state.json"
 jq '.inbounds[0].settings.clients[2].id = "99999999-9999-9999-9999-999999999999"' "${CP_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json" >"${CP_ROOT}/t.json" && mv "${CP_ROOT}/t.json" "${CP_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
 jq '.inbounds[1].settings.clients[2].id = "99999999-9999-9999-9999-999999999999"' "${CP_ROOT}/xray/conf/07_VLESS_vision_reality_inbounds.json" >"${CP_ROOT}/t.json" && mv "${CP_ROOT}/t.json" "${CP_ROOT}/xray/conf/07_VLESS_vision_reality_inbounds.json"
-_out=$(run_cp 'carpoolHasTty() { return 1; }; carpoolEnable; echo "rc=$?"' 2>&1 </dev/null)
+_out=$(run_cp 'stdinIsTty() { return 1; }; carpoolEnable; echo "rc=$?"' 2>&1 </dev/null)
 assert_contains "${_out}" "bob 现在的 UUID 是 99999999-9999-9999-9999-999999999999，开启会改回拼车记着的 ${CP_U2}" "重开（关着时换了 UUID）：说出新旧两个 UUID"
 assert_equals "false" "$(cp_state '.enabled')" "重开（关着时换了 UUID，非 tty）：不开启"
 # 关着时把 bob 从文件和协议里都删了：开启一次之后，第一段撞他的新成员照样要拒，否则他手里的旧订阅链接拉到新成员的凭据
@@ -2398,11 +2456,11 @@ jq 'del(.members.bob)' "${CP_ROOT}/carpool/members.json" >"${CP_ROOT}/t.json" &&
 jq 'del(.inbounds[0].settings.clients[2])' "${CP_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json" >"${CP_ROOT}/t.json" && mv "${CP_ROOT}/t.json" "${CP_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
 jq 'del(.inbounds[1].settings.clients[2])' "${CP_ROOT}/xray/conf/07_VLESS_vision_reality_inbounds.json" >"${CP_ROOT}/t.json" && mv "${CP_ROOT}/t.json" "${CP_ROOT}/xray/conf/07_VLESS_vision_reality_inbounds.json"
 printf '%s\n' '{}' >"${CP_STATS}"
-_out=$(run_cp 'carpoolHasTty() { return 1; }; carpoolEnable; echo "rc=$?"' 2>&1 </dev/null)
+_out=$(run_cp 'stdinIsTty() { return 1; }; carpoolEnable; echo "rc=$?"' 2>&1 </dev/null)
 assert_contains "${_out}" "rc=0" "重开（关着时从文件和协议都删了 bob）：返回 0"
 assert_equals '["bob"]' "$(cp_state '.retiredNames | tojson')" "重开（关着时删了 bob）：bob 记进 retiredNames"
 jq '.members["bob-2"] = {}' "${CP_ROOT}/carpool/members.json" >"${CP_ROOT}/t.json" && mv "${CP_ROOT}/t.json" "${CP_ROOT}/carpool/members.json"
-_out=$(run_cp 'carpoolHasTty() { return 1; }; carpoolApply; echo "rc=$?"' 2>&1 </dev/null)
+_out=$(run_cp 'stdinIsTty() { return 1; }; carpoolApply; echo "rc=$?"' 2>&1 </dev/null)
 assert_contains "${_out}" "与已删除的成员 bob 名字的第一段相同" "重开之后再加 bob-2：拒绝，说明撞了已删成员"
 assert_equals "null" "$(cp_state '.members["bob-2"] | tojson')" "重开之后再加 bob-2：没有写进 state"
 
@@ -2504,7 +2562,7 @@ assert_equals "${_before02}" "$(cat "${CP_ROOT}/xray/conf/02_VLESS_TCP_inbounds.
 assert_equals "true" "$(cp_state '.members | has("bob")')" "应用（非 tty 删人）：state 不动"
 # 在终端里确认删人：账号从每个协议文件删掉（不是变成「不归拼车管的账号」留下），state 忘掉他
 : >"${CP_CALLS}"
-_out=$(printf 'y\n' | CP_SUBPORT=12345 run_cp 'carpoolHasTty() { return 0; }; carpoolApply; echo "rc=$?"' 2>&1)
+_out=$(printf 'y\n' | CP_SUBPORT=12345 run_cp 'stdinIsTty() { return 0; }; carpoolApply; echo "rc=$?"' 2>&1)
 assert_contains "${_out}" "rc=0" "应用（确认删人）：返回 0"
 assert_equals '["zed","alice","carol"]' "$(cp_emails 02_VLESS_TCP_inbounds.json '.inbounds[0].settings.clients')" "应用（确认删人）：bob 从 02 删掉，zed 不动"
 assert_equals '["zed","alice","carol"]' "$(cp_emails 07_VLESS_vision_reality_inbounds.json '.inbounds[1].settings.clients')" "应用（确认删人）：bob 从 07 删掉"
@@ -2523,7 +2581,7 @@ assert_equals "false" "$(cp_state '.members | has("bob-2")')" "应用（复用�
 # 删人时对账失败：removing 留着，下个 tick 重试删掉
 cp_reset_tree
 printf '%s\n' '{"members": {"alice": {"quotaGiB": 5}}}' >"${CP_ROOT}/carpool/members.json"
-printf 'y\n' | XRAY_TEST_RC=1 run_cp 'carpoolHasTty() { return 0; }; carpoolApply' >/dev/null 2>&1
+printf 'y\n' | XRAY_TEST_RC=1 run_cp 'stdinIsTty() { return 0; }; carpoolApply' >/dev/null 2>&1
 assert_equals '["zed","alice","bob"]|["bob"]' "$(cp_emails 02_VLESS_TCP_inbounds.json '.inbounds[0].settings.clients')|$(cp_state '.removing | tojson')" "应用（删人时事务失败）：协议文件不动，removing 留着"
 printf '%s\n' '{}' >"${CP_STATS}"
 run_cp 'carpoolTick' >/dev/null 2>&1
@@ -2622,18 +2680,18 @@ _out=$(printf '1\n\n' | run_cp 'carpoolMemberEdit quota; echo "rc=$?"' 2>&1)
 assert_equals "rc=0|${_cpBefore}" "$(grep -o 'rc=[0-9]' <<<"${_out}")|$(cat "${CP_ROOT}/carpool/members.json")" "成员管理（改额度）：回车取消，什么都不改"
 
 _cpOldUuid=$(cp_state '.members.alice.uuid')
-_out=$(printf '1\nn\n' | run_cp 'carpoolHasTty() { return 0; }; carpoolMemberEdit uuid; echo "rc=$?"' 2>&1)
+_out=$(printf '1\nn\n' | run_cp 'stdinIsTty() { return 0; }; carpoolMemberEdit uuid; echo "rc=$?"' 2>&1)
 assert_equals "${_cpOldUuid}|null" "$(cp_state '.members.alice.uuid')|$(cp_members '.members.alice.uuid')" "成员管理（换 UUID，答 n）：凭据不变，文件改回"
-_out=$(printf '1\ny\n' | run_cp 'carpoolHasTty() { return 0; }; carpoolMemberEdit uuid; echo "rc=$?"' 2>&1)
+_out=$(printf '1\ny\n' | run_cp 'stdinIsTty() { return 0; }; carpoolMemberEdit uuid; echo "rc=$?"' 2>&1)
 assert_equals "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa|null" "$(cp_state '.members.alice.uuid')|$(cp_members '.members.alice.uuid')" \
     "成员管理（换 UUID）：确认后 state 换成新凭据，文件里不留"
 assert_contains "${_out}" "订阅地址不变" "成员管理（换 UUID）：告诉车主订阅地址不变"
 _out=$(run_cp 'carpoolApply; echo "rc=$?"' 2>&1 </dev/null)
 assert_contains "${_out}" "没有" "成员管理（换 UUID）：之后文件与 state 没有差异"
 
-_out=$(printf '2\nn\n' | run_cp 'carpoolHasTty() { return 0; }; carpoolMemberEdit remove' 2>&1)
+_out=$(printf '2\nn\n' | run_cp 'stdinIsTty() { return 0; }; carpoolMemberEdit remove' 2>&1)
 assert_equals "true|true" "$(cp_members '.members | has("bob")')|$(cp_state '.members | has("bob")')" "成员管理（移除，答 n）：人还在、文件改回"
-printf '2\ny\n' | run_cp 'carpoolHasTty() { return 0; }; carpoolMemberEdit remove' >/dev/null 2>&1
+printf '2\ny\n' | run_cp 'stdinIsTty() { return 0; }; carpoolMemberEdit remove' >/dev/null 2>&1
 assert_equals "false|false|[\"zed\",\"alice\"]" "$(cp_members '.members | has("bob")')|$(cp_state '.members | has("bob")')|$(cp_emails 02_VLESS_TCP_inbounds.json '.inbounds[0].settings.clients')" \
     "成员管理（移除）：确认后文件、state、协议文件里都没了"
 

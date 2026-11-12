@@ -20,6 +20,9 @@ readonly SINGBOX_BIN="${SINGBOX_DIR}/sing-box"
 readonly SINGBOX_CONF_DIR="${SINGBOX_DIR}/conf"
 readonly SINGBOX_FRAGMENT_DIR="${SINGBOX_CONF_DIR}/config"
 readonly SINGBOX_MERGED_CONFIG="${SINGBOX_CONF_DIR}/config.json"
+# 上一次由脚本起这个内核的脚本版本。和当前版本不同，说明在跑的内核没用上本版的启动前修正：自更新不重启内核
+readonly XRAY_STARTED_VERSION_FILE="${XRAY_DIR}/started_version"
+readonly SINGBOX_STARTED_VERSION_FILE="${SINGBOX_DIR}/started_version"
 # 链式代理与外部节点的状态文件住在 sing-box/conf 根，不是 conf/config/ 片段目录，merge 不读它们
 readonly CHAIN_EXIT_INFO="${SINGBOX_CONF_DIR}/chain_exit_info.json"
 readonly CHAIN_RELAY_INFO="${SINGBOX_CONF_DIR}/chain_relay_info.json"

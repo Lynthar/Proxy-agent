@@ -422,6 +422,7 @@ assert_equals "0" "${menuRc}" "pasly 打开菜单后无输入退出码 0"
 assert_contains "${menuOut}" "Core: ${CORE_LABEL} [Running]" "菜单头显示 ${CORE_LABEL} 运行中"
 assert_contains "${menuOut}" "Installed protocols: VLESS+Reality+Vision" "菜单头列出 VLESS+Reality+Vision"
 assert_contains "${menuOut}" "1.Reinstall" "菜单第 1 项变成 Reinstall"
+assert_equals "0" "$(grep -c 'started by an older version' <<<"${menuOut}")" "装完再开菜单不提示重启内核（内核就是本版脚本起的）"
 
 doctorOut=$(V2RAY_LANG=en pasly doctor 2>&1)
 doctorRc=$?
@@ -432,6 +433,7 @@ fi
 assert_equals "0" "${doctorRc}" "pasly doctor 退出码 0"
 assert_equals "" "$(grep -F '[FAIL]' <<<"${doctorOut}" || true)" "doctor 零 FAIL"
 assert_contains "${doctorOut}" "[PASS] Core process" "doctor 看到核心进程"
+assert_contains "${doctorOut}" "[PASS] Core started by this script version" "doctor：内核由本版脚本起"
 assert_contains "${doctorOut}" "[PASS] Config file validation" "doctor 配置校验通过"
 assert_contains "${doctorOut}" "System clock" "doctor 查了系统时钟"
 assert_contains "${doctorOut}" "[PASS] Account UUIDs" "doctor 配置安全这一节跑了：账号 UUID 没有弱值"

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# run.sh alpine|debian [xray|singbox] [xray|singbox] | chain [xray|singbox] | domain | release OLD_TAG — 在一次性容器里跑真装机测试（domain 跑 test_install_domain_e2e.sh，release 验已发布的 Release，其余跑 test_install_e2e.sh）。
+# run.sh alpine|debian [xray|singbox] [xray|singbox] | chain [xray|singbox] | domain | release OLD_TAG | upgrade OLD_TAG — 在一次性容器里跑真装机测试
+# （domain 跑 test_install_domain_e2e.sh，release 验已发布的 Release，upgrade 从 OLD_TAG 装起再盖上工作树，其余跑 test_install_e2e.sh）。
 # 第二参是服务端内核（默认 xray），第三参是握手用的客户端内核（默认同服务端；singbox 对 xray 是交叉腿）。
 # alpine 用 OpenRC；debian 先把 systemd 当 PID 1 起来再 exec 进去。chain 是两台 Debian：入口 Xray 开拼车接链式，出口内核取第二参
 set -euo pipefail
@@ -56,6 +57,12 @@ release)
     done
     exit "${rc}"
     ;;
+upgrade)
+    # 自更新到这棵树：OLD_TAG 取 v1.5.2 之前的（那时 Xray 的本机封锁名单还没有网卡地址）
+    cid=$(startDebian)
+    trap 'docker stop -t 2 "${cid}" >/dev/null' EXIT
+    docker exec "${cid}" bash /src/tests/e2e/release-smoke.sh "${2:?run.sh upgrade OLD_TAG}" tree
+    ;;
 chain)
     net="proxy-agent-e2e-chain-$$"
     exitCid=
@@ -93,7 +100,7 @@ chain)
     exit "${rc}"
     ;;
 *)
-    echo "usage: $0 alpine|debian [xray|singbox] [xray|singbox] | chain [xray|singbox] | domain | release OLD_TAG" >&2
+    echo "usage: $0 alpine|debian [xray|singbox] [xray|singbox] | chain [xray|singbox] | domain | release OLD_TAG | upgrade OLD_TAG" >&2
     exit 2
     ;;
 esac

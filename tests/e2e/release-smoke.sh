@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# release-smoke.sh OLD_TAG → 发版之后在一次性 Debian 容器里验已发布的 Release（不是工作树）：README 那一行原样装一次，
-# 再从 OLD_TAG 装起、菜单 17 自更新到最新、菜单 22 从 GitHub 回滚到 OLD_TAG。由 run.sh release 调，每段都在新容器里
+# release-smoke.sh OLD_TAG STAGE → 一次性 Debian 容器里从 Release 装机。readme / update 验已发布的 Release（run.sh release 调）：README 那一行
+# 原样装一次，再从 OLD_TAG 装起、菜单 17 自更新到最新、菜单 22 回滚。tree 从 OLD_TAG 装起后把工作树盖上去，等于自更新到这棵树（run.sh upgrade 调）
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/assert.sh"
 
 OLD_TAG=$1
@@ -28,6 +28,21 @@ realityQuick() {
     echo "${rc}"
 }
 
+# installOldTag → 一台当年按 OLD_TAG 装的机器：脚本、lib 与 VERSION 都是那一版的（只下 install.sh 会按 Releases API 记成最新版、拉最新的 lib），
+# 装一键 Reality，打印退出码
+installOldTag() {
+    (cd /root && wget -qO /root/install.sh "${REPO_URL}/releases/download/${OLD_TAG}/install.sh" &&
+        wget -qO /tmp/old-bundle.tgz "${REPO_URL}/releases/download/${OLD_TAG}/lib_bundle.tar.gz" &&
+        tar -xzf /tmp/old-bundle.tgz -C /root && echo "${OLD_TAG#v}" >/root/VERSION && chmod 700 /root/install.sh) || { echo 1; return; }
+    realityQuick /root/install.sh
+}
+
+# localBlockHas ADDR → Xray 本机封锁的 IP 名单里有没有这个字面地址，打印 true / false
+localBlockHas() {
+    jq --arg a "$1" '[.routing.rules[]? | select(.ruleTag == "local-block-ip") | .ip[]?] | index($a) != null' \
+        "${INSTALL_ROOT}/xray/conf/09_routing.json" 2>/dev/null || echo false
+}
+
 case "${STAGE}" in
 readme)
     echo -e "${YELLOW}=== README 那一行：从 releases/latest 装 ===${NC}"
@@ -44,12 +59,7 @@ readme)
     ;;
 update)
     echo -e "${YELLOW}=== 从 ${OLD_TAG} 装起，菜单 17 自更新到 ${latestTag}，菜单 22 回滚到 ${OLD_TAG} ===${NC}"
-    # 一台当年按 OLD_TAG 装的机器：脚本、lib 与 VERSION 都是那一版的（只下 install.sh 会按 Releases API 记成最新版、拉最新的 lib）
-    rc=$(cd /root && wget -qO /root/install.sh "${REPO_URL}/releases/download/${OLD_TAG}/install.sh" &&
-        wget -qO /tmp/old-bundle.tgz "${REPO_URL}/releases/download/${OLD_TAG}/lib_bundle.tar.gz" &&
-        tar -xzf /tmp/old-bundle.tgz -C /root && echo "${OLD_TAG#v}" >/root/VERSION && chmod 700 /root/install.sh &&
-        realityQuick /root/install.sh)
-    assert_equals "0" "${rc}" "${OLD_TAG} 装一键 Reality 退出码 0"
+    assert_equals "0" "$(installOldTag)" "${OLD_TAG} 装一键 Reality 退出码 0"
     assert_equals "${OLD_TAG#v}" "$(cat "${INSTALL_ROOT}/VERSION" 2>/dev/null)" "起点是 ${OLD_TAG}"
     printf '17\n' | V2RAY_LANG=en pasly >>"${LOG}" 2>&1
     assert_equals "0" "$?" "菜单 17 自更新退出码 0"
@@ -72,8 +82,33 @@ update)
     assert_equals "${OLD_TAG#v}" "$(cat "${INSTALL_ROOT}/VERSION" 2>/dev/null)" "回滚到 ${OLD_TAG}"
     assert_contains "$(V2RAY_LANG=en pasly </dev/null 2>&1 | sed 's/\x1b\[[0-9;]*m//g')" "Core: Xray-core [Running]" "回滚后 pasly 打得开，Xray 照常在跑"
     ;;
+tree)
+    echo -e "${YELLOW}=== 从 ${OLD_TAG} 装起、盖上工作树：入口提示内核是旧版起的，终端上确认重启后用上本版的启动前修正 ===${NC}"
+    assert_equals "0" "$(installOldTag)" "${OLD_TAG} 装一键 Reality 退出码 0"
+    # 网卡地址进 Xray 本机封锁名单是 v1.5.2 起的，起点得比它早，才验得到「换了脚本、内核没重启就还没生效」
+    addr=$(ip -o -4 addr show scope global | awk '{ sub(/\/.*/, "", $4); print $4; exit }')
+    assert_not_empty "${addr}" "容器网卡有全局地址（${addr}）"
+    assert_equals "false" "$(localBlockHas "${addr}")" "起点 ${OLD_TAG} 的本机封锁名单里没有网卡地址"
+    # 自更新换的就是这几样，内核与配置不动、不重启
+    cp -f /src/install.sh "${INSTALL_ROOT}/install.sh" && chmod 700 "${INSTALL_ROOT}/install.sh" &&
+        cp -f /src/lib/*.sh "${INSTALL_ROOT}/lib/" && cp -f /src/shell/lang/*.sh "${INSTALL_ROOT}/shell/lang/" &&
+        cp -f /src/VERSION "${INSTALL_ROOT}/VERSION"
+    assert_equals "0" "$?" "工作树盖上安装根"
+    newVer="v$(tr -d '[:space:]' </src/VERSION)"
+    out=$(V2RAY_LANG=en pasly </dev/null 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+    assert_contains "${out}" "Xray was started by an older version of this script" "不是终端时打开菜单：说明 Xray 是旧版脚本起的"
+    assert_equals "false" "$(localBlockHas "${addr}")" "不是终端时只提示、不重启：名单照旧"
+    assert_contains "$(V2RAY_LANG=en pasly doctor 2>&1 | sed 's/\x1b\[[0-9;]*m//g')" "Core started by this script version — Xray was started by an older script version" \
+        "doctor 报内核是旧版脚本起的"
+    # script 给菜单一个终端；标准输入读完后它把 EOF 交给子进程并等它退出，重启不会被挂断
+    printf 'y\n' | script -qec 'V2RAY_LANG=en pasly' /dev/null >>"${LOG}" 2>&1
+    assert_equals "${newVer}" "$(cat "${INSTALL_ROOT}/xray/started_version" 2>/dev/null)" "终端上答 y：Xray 由本版脚本重启，记下 ${newVer}"
+    assert_equals "true" "$(localBlockHas "${addr}")" "重启后本机封锁名单里有网卡地址"
+    assert_equals "active" "$(systemctl is-active xray 2>/dev/null)" "重启后 Xray 在跑"
+    assert_equals "0" "$(V2RAY_LANG=en pasly </dev/null 2>&1 | grep -c 'started by an older version')" "再打开菜单不再提示"
+    ;;
 *)
-    echo "usage: $0 OLD_TAG readme|update" >&2
+    echo "usage: $0 OLD_TAG readme|update|tree" >&2
     exit 2
     ;;
 esac

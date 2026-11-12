@@ -4300,6 +4300,7 @@ handleSingBox() {
         # 导致 sing-box 实际未起来时误报"启动成功"。stop 路径上方已统一用 -x。
         if singBoxDaemonRunning; then
             echoContent green " ---> sing-box启动成功"
+            markCoreStarted "${SINGBOX_STARTED_VERSION_FILE}"
         else
             echoContent red "sing-box启动失败 (systemctl 返回码: ${startResult})"
             # 显示 systemd 服务状态以帮助诊断
@@ -4550,9 +4551,49 @@ xrayDaemonRunning() {
     [[ -n $(pgrep -f "xray/xray run -confdir") ]]
 }
 
+# markCoreStarted FILE → 记下这次起内核的脚本版本，入口靠它认出在跑的内核还没用上本版的启动前修正
+markCoreStarted() {
+    if ! printf '%s\n' "${SCRIPT_VERSION}" >"$1"; then
+        echoContent yellow " ---> $(t CORE_STARTED_MARK_FAILED "$1")"
+    fi
+}
+
+# coresStartedByOtherVersion → 在跑、却不是本版脚本起的内核名，一行一个。启动前修正只在脚本起内核时跑：
+# 自更新不重启内核，开机与崩溃后 systemd 拉起读的都是上次脚本写下的配置
+coresStartedByOtherVersion() {
+    if xrayDaemonRunning && [[ "$(cat "${XRAY_STARTED_VERSION_FILE}" 2>/dev/null)" != "${SCRIPT_VERSION}" ]]; then
+        echo Xray
+    fi
+    if singBoxDaemonRunning && [[ "$(cat "${SINGBOX_STARTED_VERSION_FILE}" 2>/dev/null)" != "${SCRIPT_VERSION}" ]]; then
+        echo sing-box
+    fi
+}
+
+# stdinIsTty → 0=标准输入是终端。要人逐项确认的操作只在终端上问，管道喂进来的输入不能被这些提问吃掉
+stdinIsTty() {
+    [[ -t 0 ]]
+}
+
+# offerCoreRestart → 菜单入口：有内核不是本版脚本起的，就说明并问要不要重启，回车即重启；不是终端只提示
+offerCoreRestart() {
+    local stale answer
+    isDryRun && return 0
+    stale=$(coresStartedByOtherVersion)
+    [[ -n "${stale}" ]] || return 0
+    echoContent yellow "\n ---> $(t CORE_RESTART_PENDING "${stale//$'\n'/ \/ }" "${SCRIPT_VERSION}")"
+    if ! stdinIsTty; then
+        echoContent yellow " ---> $(t CORE_RESTART_PENDING_HINT)"
+        return 0
+    fi
+    read -r -p "$(t CORE_RESTART_PROMPT)" answer
+    if [[ -z "${answer}" ]] || isYesInput "${answer}"; then
+        reloadCore
+    fi
+}
+
 # 操作xray
 handleXray() {
-    local startResult=0
+    local startResult=0 started=
 
     if [[ "$1" == "start" ]]; then
         labelCoreBinary "${XRAY_BIN}"
@@ -4576,12 +4617,14 @@ handleXray() {
 
     if [[ -n $(find /bin /usr/bin -name "systemctl") ]] && [[ -n $(find /etc/systemd/system/ -name "xray.service") ]]; then
         if ! xrayDaemonRunning && [[ "$1" == "start" ]]; then
+            started=1
             systemctl start xray.service || startResult=$?
         elif xrayDaemonRunning && [[ "$1" == "stop" ]]; then
             systemctl stop xray.service
         fi
     elif [[ -f "/etc/init.d/xray" ]]; then
         if ! xrayDaemonRunning && [[ "$1" == "start" ]]; then
+            started=1
             rc-service xray start || startResult=$?
         elif xrayDaemonRunning && [[ "$1" == "stop" ]]; then
             rc-service xray stop
@@ -4593,6 +4636,10 @@ handleXray() {
     if [[ "$1" == "start" ]]; then
         if xrayDaemonRunning; then
             echoContent green " ---> Xray启动成功"
+            # 已经在跑时进程没换，刚写下的启动前修正它没读到
+            if [[ -n "${started}" ]]; then
+                markCoreStarted "${XRAY_STARTED_VERSION_FILE}"
+            fi
         else
             echoContent red "Xray启动失败 (systemctl 返回码: ${startResult})"
             # 显示 systemd 服务状态以帮助诊断
@@ -9209,7 +9256,7 @@ carpoolConfirmReenable() {
     while IFS=$'\t' read -r name from to; do
         [[ -n "${name}" ]] && echoContent yellow " ---> $(t CARPOOL_REENABLE_UUID "${name}" "${from}" "${to}")"
     done < <(jq -r '.uuid[] | "\(.name)\t\(.from)\t\(.to)"' <<<"${changes}")
-    if ! carpoolHasTty; then
+    if ! stdinIsTty; then
         echoContent red " ---> $(t CARPOOL_REENABLE_NEEDS_TTY)"
         return 1
     fi
@@ -9373,11 +9420,6 @@ carpoolDisable() {
     carpoolNotifyEvents "$(jq -cn --arg r "${restoredList}" --arg k "${keptList}" '[{type: "closed", restored: $r, kept: $k}]')"
 }
 
-# carpoolHasTty → 0=标准输入是终端，删除成员与换 UUID 才能逐项确认
-carpoolHasTty() {
-    [[ -t 0 ]]
-}
-
 # carpoolApply → 应用 members.json：校验 → 显示差异 → 删除 / 换 UUID 逐项确认（非 tty 拒绝）→ 持锁重建成员表并判定 → settle
 carpoolApply() {
     local installed map fileMembers errors normalized state accounts diff answer events name force=
@@ -9404,7 +9446,7 @@ carpoolApply() {
     echoContent skyBlue "\n$(t CARPOOL_APPLY_TITLE)"
     carpoolDiffText "${diff}"
     if carpoolDiffNeedsConfirm "${diff}"; then
-        if ! carpoolHasTty; then
+        if ! stdinIsTty; then
             echoContent red " ---> $(t CARPOOL_APPLY_NEEDS_TTY)"
             return 1
         fi
@@ -10786,11 +10828,15 @@ updateV2RayAgent() {
     fi
 
     echoContent green "\n ---> 更新完毕"
-    echoContent yellow " ---> 请手动执行[pasly]打开脚本"
     echoContent green " ---> 当前版本: ${version}"
     echoContent yellow "\n如更新不成功，请手动执行下面命令\n"
     echoContent skyBlue "wget -P /root -N ${rawBase}/install.sh && chmod 700 /root/install.sh && /root/install.sh"
     echo
+    # 终端上直接进新版菜单，新版入口当场问要不要重启内核；本进程跑的是旧代码，重启了也只用上旧版的启动前修正
+    if stdinIsTty; then
+        exec env PROXY_AGENT_DIR="${PROXY_AGENT_DIR}" /bin/bash "${installDir}/install.sh"
+    fi
+    echoContent yellow " ---> 请手动执行[pasly]打开脚本"
     exit 0
 }
 
@@ -19906,6 +19952,14 @@ _doctorCheckCore() {
     else
         _doctorRow "$(t DOCTOR_CHECK_PROCESS)" warn "not running"
     fi
+
+    local stale
+    stale=$(coresStartedByOtherVersion)
+    if [[ -n "${stale}" ]]; then
+        _doctorRow "$(t DOCTOR_CHECK_CORE_STARTED_BY)" warn "$(t DOCTOR_DETAIL_CORE_STALE "${stale//$'\n'/ \/ }")"
+    elif [[ -n "${running}" ]]; then
+        _doctorRow "$(t DOCTOR_CHECK_CORE_STARTED_BY)" pass "${SCRIPT_VERSION}"
+    fi
 }
 
 _doctorCheckConfig() {
@@ -20830,4 +20884,5 @@ checkRoot
 checkForUpdates 2>/dev/null
 
 cronFunction
+offerCoreRestart
 menu
