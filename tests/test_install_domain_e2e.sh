@@ -612,6 +612,61 @@ stTarget=$(jq -r '.inbounds[0].handshake.server' "${stFile}" 2>/dev/null)
 stPort=$(jq -r '.inbounds[0].listen_port' "${stFile}" 2>/dev/null)
 assert_equals "0" "$(curl -s -o /dev/null -w '%{ssl_verify_result}' --max-time 15 --resolve "${stTarget}:${stPort}:127.0.0.1" "https://${stTarget}:${stPort}/")" \
     "ShadowTLS：没有密码直接探这个端口，看到的是 ${stTarget} 的真证书"
+
+# ============================================================================
+# 菜单 5（sing-box）：目标换成 dl.google.com 再换回本机域名；本机域名由 sing-box 的读取函数从 TLS 入站读出，只重写 7（换回前同样删掉 reality_dest.conf）
+# ============================================================================
+
+echo ""
+echo -e "${YELLOW}=== 菜单 5（sing-box）：Reality 目标换成 dl.google.com，再换回 ${DOMAIN_B} ===${NC}"
+sbFullTypes=${probedTypes}
+sbRealityFile="${SINGBOX_FRAGMENT_DIR}/07_VLESS_vision_reality_inbounds.json"
+# sbRealityTarget → 7 的「server_name@握手地址:端口」；sbRealityKeep → 端口、私钥与 short_id；sbOtherFragments → 7 以外各片段的 md5
+sbRealityTarget() {
+    jq -r '.inbounds[0] | "\(.tls.server_name)@\(.tls.reality.handshake.server):\(.tls.reality.handshake.server_port)"' "${sbRealityFile}" 2>/dev/null
+}
+sbRealityKeep() {
+    jq -r '.inbounds[0] | "\(.listen_port) \(.tls.reality.private_key) \(.tls.reality.short_id | join(","))"' "${sbRealityFile}" 2>/dev/null
+}
+sbOtherFragments() {
+    find "${SINGBOX_FRAGMENT_DIR}" -maxdepth 1 -type f ! -name "${sbRealityFile##*/}" -exec md5sum {} + | sort -k2
+}
+sbRealityBefore=$(sbRealityTarget)
+sbRealityKeepBefore=$(sbRealityKeep)
+sbOthersBefore=$(sbOtherFragments)
+assert_equals "${DOMAIN_B}@127.0.0.1:31305" "${sbRealityBefore}" "sing-box 全装时 7 以本机域名为目标，握手拨回环上的伪装站"
+# 账号沿用 · 不用本机域名 · 输目标 · 密钥沿用 · 端口沿用（上次是本机域名，不问沿用目标）
+sbR1Out=$(runMenu "5\ny\nn\ndl.google.com:443\ny\ny\n")
+sbR1Rc=$?
+[[ ${sbR1Rc} -ne 0 ]] && tail -n 20 <<<"${sbR1Out}"
+assert_equals "0" "${sbR1Rc}" "sing-box 菜单 5 换目标退出码 0"
+noNoise "sing-box 菜单 5 换目标" "${sbR1Out}"
+sleep 2
+assert_equals "dl.google.com@dl.google.com:443" "$(sbRealityTarget)" "sing-box 菜单 5：7 的目标换成 dl.google.com"
+assert_equals "${sbRealityKeepBefore}" "$(sbRealityKeep)" "sing-box 菜单 5：端口、私钥与 short_id 沿用，手里的链接不用换"
+assert_equals "${sbOthersBefore}" "$(sbOtherFragments)" "sing-box 菜单 5：7 以外的片段（含 reality_key）一个字节没动"
+assert_equals "active active" "$(systemctl is-active sing-box nginx 2>/dev/null | paste -sd' ' -)" "sing-box 菜单 5 之后 sing-box 与 nginx 都在跑"
+assert_equals "200" "$(fetchSub "${DOMAIN_B}" 'sing-box 1.14.4' "${WORK}/sub-sb.json")" "sing-box 菜单 5 之后取订阅 200"
+sbRealityTag=$(jq -r '.outbounds[] | select(.tls.reality.enabled == true) | .tag' "${WORK}/sub-sb.json" | head -n 1)
+assert_equals "dl.google.com" "$(jq -r --arg t "${sbRealityTag}" '.outbounds[] | select(.tag == $t) | .tls.server_name' "${WORK}/sub-sb.json")" \
+    "sing-box 菜单 5：订阅里 Reality 节点的 server_name 跟着换"
+assert_equals "204" "$(probeOutbound "${WORK}/sub-sb.json" "${sbRealityTag}")" "sing-box 菜单 5：换了目标的 Reality 节点真握手、访问外网"
+rm -f /etc/nginx/conf.d/reality_dest.conf && nginx -s reload
+# 账号沿用 · 不沿用 dl.google.com · 用本机域名 · 密钥沿用 · 端口沿用
+sbR2Out=$(runMenu "5\ny\nn\ny\ny\ny\n")
+sbR2Rc=$?
+[[ ${sbR2Rc} -ne 0 ]] && tail -n 20 <<<"${sbR2Out}"
+assert_equals "0" "${sbR2Rc}" "sing-box 菜单 5 换回本机域名退出码 0"
+noNoise "sing-box 菜单 5 换回本机域名" "${sbR2Out}"
+sleep 2
+assert_equals "${sbRealityBefore}" "$(sbRealityTarget)" "sing-box 菜单 5：认出本机域名 ${DOMAIN_B}，7 换回回环上的伪装站"
+assert_equals "${sbRealityKeepBefore}" "$(sbRealityKeep)" "sing-box 菜单 5 换回之后端口、私钥与 short_id 仍是原来的"
+assert_equals "${sbOthersBefore}" "$(sbOtherFragments)" "sing-box 菜单 5 换回之后 7 以外的片段仍一个字节没动"
+assert_contains "$(cat /etc/nginx/conf.d/reality_dest.conf 2>/dev/null)" "server_name ${DOMAIN_B};" "sing-box 菜单 5：选了本机域名时重写 reality_dest.conf"
+assert_equals "200" "$(fetchSub "${DOMAIN_B}" 'sing-box 1.14.4' "${WORK}/sub-sb.json")" "sing-box 菜单 5 换回之后取订阅 200"
+probeSub "sing-box 菜单 5 换回本机域名" "${WORK}/sub-sb.json"
+assert_equals "${sbFullTypes}" "${probedTypes}" "sing-box 菜单 5 换回之后订阅里的节点与全装时一样，都能用（nginx 重读了新写的 reality_dest.conf）"
+
 echo ""
 echo -e "${YELLOW}=== 菜单 2 → 2：单选 16，不要证书 ===${NC}"
 s10Out=$(runMenu "2\n2\n16\ny\n")
