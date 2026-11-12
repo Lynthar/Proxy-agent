@@ -6241,7 +6241,7 @@ assert_equals "warn|Enforcing, not labeled bin_t: sing-box (restart the core onc
 rm -rf "${DSE_DIR}"
 
 # --- 路由总览：采集器在 mock 树上跑。断言画出来的走向，也断言密钥进不了模型和页面 ---
-TP_FN_NAMES="topoInbounds topoDirectExit topoPlainExit topoRoutingPlain topoRoutingMulti topoRoutingEntry topoRouting topoCoreStart topoIssues topoCoresText topoCollect topoServe topoCommand chainRuleLabel getPresetDisplayName chainExternalSingleOnXray carpoolEnabled singBoxFragmentsHaveInbounds"
+TP_FN_NAMES="topoInbounds topoDirectExit topoPlainExit topoRoutingPlain topoRoutingMulti topoRoutingEntry topoRouting topoCoreStart topoIssues topoCoresText topoCollect topoSshTarget topoServe topoCommand chainRuleLabel getPresetDisplayName chainExternalSingleOnXray carpoolEnabled singBoxFragmentsHaveInbounds"
 TP_FNS=""
 for _tpName in ${TP_FN_NAMES}; do
     TP_FNS+=$(sed -n "/^${_tpName}() {/,/^}/p" install.sh)$'\n'
@@ -6251,12 +6251,13 @@ TP_X="${TP_ROOT}/xray/conf"
 TP_F="${TP_ROOT}/sing-box/conf/config"
 TP_C="${TP_ROOT}/sing-box/conf"
 # run_tp CODE → 装在 TP_ROOT、内核为 TP_CORE（默认 1）时跑 CODE。getPublicIP、pgrep 桩掉：不打外网；pgrep 答这个刚起的子进程，
-# 所以 mock 文件都比它旧，TP_PID 置空就是内核没在跑
+# 所以 mock 文件都比它旧，TP_PID 置空就是内核没在跑。getPublicIP 不带地址族时答域名（Reality 自偷时的真实行为），TP_V6 非空才有 IPv6 路由
 run_tp() (
-    env PROXY_AGENT_DIR="${TP_ROOT}" TP_FNS="${TP_FNS}" TP_CORE="${TP_CORE-1}" TP_PID="${TP_PID-1}" V2RAY_LANG=zh_CN bash -c '
+    env PROXY_AGENT_DIR="${TP_ROOT}" TP_FNS="${TP_FNS}" TP_CORE="${TP_CORE-1}" TP_PID="${TP_PID-1}" TP_V6="${TP_V6:-}" V2RAY_LANG=zh_CN bash -c '
         source lib/i18n.sh; source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh; source lib/carpool.sh; source lib/topo.sh
         eval "${TP_FNS}"
-        getPublicIP() { if [[ "${1:-}" == 6 ]]; then echo 2001:db8::10; else echo 203.0.113.10; fi; }
+        getPublicIP() { case "${1:-}" in 6) echo 2001:db8::10 ;; 4) echo 203.0.113.10 ;; *) echo self.example.com ;; esac; }
+        hostHasRouteTo() { [[ "$1" != *:* || -n "${TP_V6:-}" ]]; }
         pgrep() { [[ -n "${TP_PID}" ]] && echo "$$"; }
         readInstallType() { coreKind=${TP_CORE}; }
         coreKind=${TP_CORE}; nginxConfigPath=/nonexistent/; nginxStaticPath=/nonexistent/static/
@@ -6278,8 +6279,12 @@ assert_equals 'VLESS+TCP[TLS_Vision]|tcp :443|VLESS+Reality+Vision|tcp :2053' "$
     "路由总览：入站写全称，Reality 的端口取对外的那个，不取回环上的"
 assert_equals 'all|[0]' "$(jq -r '.accounts[] | select(.name == "alice") | .protocols' <<<"${_tp}")|$(jq -c '.accounts[] | select(.name == "carol") | .protocols' <<<"${_tp}")" \
     "路由总览：alice 开了全部协议，carol 只开一个"
-assert_equals 'direct|全部|203.x.x.x' "$(jq -r '"\(.flows[0].exit)|\(.flows[0].when)|\(.exits[0].host)"' <<<"${_tp}")" \
-    "路由总览：没接链式、没有分流时全走直连，本机地址默认也打码；指向默认出口的 gstatic 不算一条分流"
+assert_equals 'direct|全部|203.x.x.x|' "$(jq -r '"\(.flows[0].exit)|\(.flows[0].when)|\(.exits[0].host)|\(.exits[0].host2 // "")"' <<<"${_tp}")" \
+    "路由总览：没接链式、没有分流时全走直连，本机地址默认也打码（带地址族取，Reality 自偷时也不会标成域名）；指向默认出口的 gstatic 不算一条分流"
+assert_equals '203.0.113.10|2001:db8::10' "$(TP_V6=1 tp_model true | jq -r '.exits[0] | "\(.host)|\(.host2)"')" "路由总览：双栈机器的直连两个地址都标"
+jq '.outbounds[0].settings.domainStrategy = "ForceIPv4"' "${TP_X}/z_direct_outbound.json" >"${TP_X}/d.tmp" && mv "${TP_X}/d.tmp" "${TP_X}/z_direct_outbound.json"
+assert_equals '203.0.113.10|' "$(TP_V6=1 tp_model true | jq -r '.exits[0] | "\(.host)|\(.host2 // "")"')" "路由总览：直连限定了 IPv4 时双栈也只标 IPv4"
+assert_contains "$(jq -r '.generated' <<<"${_tp}")" " UTC" "路由总览：页头时间带时区，几台机器的页面放在一起比得出先后"
 assert_equals "0" "$(grep -c 'uuid-secret\|rawHost\|203.0.113.10' <<<"${_tp}")" "路由总览：模型里没有 UUID，也没有未打码的地址"
 assert_contains "$(tp_model true)" "203.0.113.10" "路由总览：--full 才显示本机地址"
 assert_equals "" "$(jq -r '.host' <<<"${_tp}")" "路由总览：默认不写主机名，截图和地址打码一样认不出机器"
@@ -6293,19 +6298,35 @@ assert_equals 'IPv6_out|geosite:netflix 等 2 项' "$(jq -r '.flows[] | select(.
 assert_equals 'direct|其余（默认）' "$(jq -r '.flows[-1] | "\(.exit)|\(.when)"' <<<"${_tp}")" "路由总览：有分流时默认那条写成其余"
 assert_contains "$(jq -r '.issues[]' <<<"${_tp}")" "gone_out" "路由总览：规则指向不存在的出站要报出来"
 
+# sing-box 不接链式：菜单 11 把带点的域名写成 domain_regex、geosite 写成 rule_set，标签还原成域名和 geosite 名，规则不能从图上消失
+tp_reset
+rm -f "${TP_X}"/*.json
+jq -n '{inbounds: [{listen_port: 443, tag: "VLESSReality", users: [{name: "alice-VLESS_Reality_Vision", uuid: "uuid-secret-1"}]}]}' >"${TP_F}/07_VLESS_vision_reality_inbounds.json"
+jq -n '{outbounds: [{type: "direct", tag: "direct"}, {type: "direct", tag: "IPv6_out"}],
+    route: {final: "direct", rule_set: [{tag: "netflix_IPv6_out_route", type: "remote", url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-netflix.srs"}],
+            rules: [{action: "resolve"}, {domain_regex: ["^([a-zA-Z0-9_-]+\\.)*openai\\.com", "^([a-zA-Z0-9_-]+\\.)*claude\\.ai"], rule_set: ["netflix_IPv6_out_route"], outbound: "IPv6_out"}]}}' >"${TP_C}/config.json"
+_tp=$(TP_CORE=2 tp_model)
+assert_equals 'IPv6_out|openai.com 等 3 项|IPv6' "$(jq -r '(.flows[] | select(.exit == "IPv6_out") | "\(.exit)|\(.when)") + "|" + (.exits[] | select(.key == "IPv6_out") | .name)' <<<"${_tp}")" \
+    "路由总览（sing-box）：正则写的域名还原、规则集写成 geosite 名，IPv6 分流照样画出来"
+assert_equals 'direct|其余（默认）' "$(jq -r '.flows[-1] | "\(.exit)|\(.when)"' <<<"${_tp}")" "路由总览（sing-box）：有分流时默认那条写成其余，不再是全部走直连"
+
 # 多链路：密钥和 ip、port 并排放在状态文件里，只能取需要的字段；出口标下一跳，下一跳是中继时注明，出站配置缺失的标红
 tp_reset
 jq -n '{mode: "multi_chain", default_chain: "a", accounts: {alice: "b", zed: "nosuch"},
-    rules: [{type: "custom", value: "x.example", chain: "b"}, {type: "ip_cidr", value: "1.2.3.0/24", chain: "b"}, {type: "custom", value: "y.example", chain: "a"}],
+    rules: [{type: "custom", value: "x.example, w.example", chain: "b"}, {type: "ip_cidr", value: "1.2.3.0/24", chain: "b"}, {type: "custom", value: "y.example", chain: "a"}],
     chains: [{name: "a", ip: "198.51.100.20", port: 50080, method: "m", password: "pw-secret-a"}, {name: "b", ip: "198.51.100.30", port: 44074, method: "m", password: "pw-secret-b"},
-             {name: "c", ip: "198.51.100.40", port: 1, method: "m", password: "pw-secret-c"}]}' >"${TP_C}/chain_multi_info.json"
+             {name: "c", ip: "198.51.100.40", port: 1, method: "m", password: "pw-secret-c"},
+             {name: "jp_owner", ip: "198.51.100.50", port: 443, source: "external", external_type: "vless", external_node_id: "n1"}]}' >"${TP_C}/chain_multi_info.json"
 printf '%s\n' '{"outbounds":[{"tag":"a","server":"198.51.100.20","server_port":50080,"password":"pw-secret-a"}]}' >"${TP_F}/chain_outbound_a.json"
 printf '%s\n' '{"outbounds":[{"tag":"b-hop-1","server":"192.0.2.1","server_port":40000,"password":"pw-secret-r"},{"tag":"b","server":"198.51.100.30","server_port":44074,"password":"pw-secret-b"}]}' >"${TP_F}/chain_outbound_b.json"
 _tp=$(tp_model)
 assert_equals '198.x.x.x:50080|192.x.x.x:40000|下一跳是中继，共 2 跳' "$(jq -r '[.exits[] | select(.key == "a" or .key == "b")] | "\(.[0].host):\(.[0].port)|\(.[1].host):\(.[1].port)|\(.[1].note)"' <<<"${_tp}")" \
     "路由总览（多链路）：出口标下一跳的地址和端口，不标最终出口；下一跳是中继时注明"
 assert_equals 'b' "$(jq -r '.accounts[] | select(.name == "alice") | .exit' <<<"${_tp}")" "路由总览（多链路）：账号指定的出口带上"
-assert_equals 'b|自定义域名 等 2 项' "$(jq -r '.flows[0] | "\(.exit)|\(.when)"' <<<"${_tp}")" "路由总览（多链路）：同一条链路的规则合成一根线；指向默认链路的规则不重复画"
+assert_equals 'b|x.example 等 3 项' "$(jq -r '.flows[0] | "\(.exit)|\(.when)"' <<<"${_tp}")" "路由总览（多链路）：同一条链路的规则合成一根线，自定义域名写域名本身、按域名计数；指向默认链路的规则不重复画"
+assert_equals '外部节点 1|vless|0' "$(jq -r '(.exits[] | select(.key == "jp_owner") | "\(.name)|\(.kind)") + "|" + ([.issues[] | select(contains("jp_owner"))] | length | tostring)' <<<"${_tp}")" \
+    "路由总览（多链路）：外部节点的名字取自链接备注，默认打码，问题列表里也不露"
+assert_equals 'jp_owner' "$(tp_model true | jq -r '.exits[] | select(.key == "jp_owner") | .name')" "路由总览（多链路）：--full 显示外部节点原名"
 assert_equals 'a|其余（默认）' "$(jq -r '.flows[-1] | "\(.exit)|\(.when)"' <<<"${_tp}")" "路由总览（多链路）：默认链路"
 assert_equals 'true' "$(jq -r '.exits[] | select(.key == "c") | .bad' <<<"${_tp}")" "路由总览（多链路）：状态里有、出站配置没有的链路标红"
 assert_contains "$(jq -r '.issues[]' <<<"${_tp}")" "账号 zed 指定的出口 nosuch 不存在" "路由总览（多链路）：指向不存在链路的账号要报出来"
@@ -6326,6 +6347,15 @@ assert_equals '192.0.2.1|1000|下一跳是中继，共 2 跳|direct' "$(jq -r '"
 assert_equals "0" "$(grep -c 'pw-secret' <<<"${_tp}")" "路由总览（多跳）：模型里没有密钥"
 rm -f "${TP_F}/chain_outbound.json"
 assert_equals 'true' "$(tp_model | jq -r '.exits[] | select(.key == "chain") | .bad')" "路由总览（单链路）：出站配置不在就标红"
+
+# 外部节点当唯一出口：节点名来自导入链接的备注，常带别的服务器名或账号名，默认打码
+jq -n '{role: "entry", mode: "external_single", external_node_id: "n1", external_node_name: "jpowner-vless_reality_vision"}' >"${TP_C}/chain_entry_info.json"
+jq -n '{nodes: [{id: "n1", type: "vless", server: "198.51.100.50", server_port: 443, uuid: "uuid-secret-9"}]}' >"${TP_C}/external_node_info.json"
+_tp=$(TP_CORE=2 tp_model)
+assert_equals '外部节点 1|vless|198.x.x.x|0' "$(jq -r '(.exits[] | select(.key == "chain") | "\(.name)|\(.kind)|\(.host)") + "|" + (tostring | [match("jpowner|uuid-secret"; "g")] | length | tostring)' <<<"${_tp}")" \
+    "路由总览（外部节点）：默认不露节点名与地址，也不带 UUID"
+assert_equals 'jpowner-vless_reality_vision' "$(TP_CORE=2 tp_model true | jq -r '.exits[] | select(.key == "chain") | .name')" "路由总览（外部节点）：--full 显示节点名"
+rm -f "${TP_C}/external_node_info.json"
 
 # 按协议分流（sing-box 内核）：入站决定出口，选中的单独连线，其余走 final
 tp_reset
@@ -6390,6 +6420,14 @@ _tpChains=$(jq -cn '{mode: "multi_chain", chains: [range(1; 99) | {name: "c\(.)"
 printf '%s\n' "${_tpChains}" >"${MOCK_ROOT}/topo-chains.json"
 assert_equals "31209" "$(run_ca "chainAccountAssignPorts \"\$(cat ${MOCK_ROOT}/topo-chains.json)\"" 2>/dev/null | jq '[.chains[].bridge_port] | max')" "路由总览：桥端口分配让开页面端口 31210"
 assert_equals "31210" "$(bash -c 'source lib/constants.sh; echo "${TOPO_PAGE_PORT}"')" "路由总览：页面端口是被两边封住的桥端口段的最后一个"
+
+# 隧道命令照这次登录抄：直接登录用自己的；sudo 清掉了 SSH_CONNECTION 就从上层进程的环境里找，内网地址（1:1 NAT）换成公网地址
+assert_equals "-p 2222 $(id -un)@203.0.113.7" "$(SSH_CONNECTION="198.51.100.9 50000 203.0.113.7 2222" SUDO_USER= run_tp 'topoSshTarget' 2>/dev/null)" "路由总览：隧道命令用登录时的端口与地址"
+if [[ -r /proc/self/environ ]]; then
+    assert_equals "-p 22 azureuser@203.0.113.10" \
+        "$(SSH_CONNECTION="198.51.100.9 50000 10.0.0.4 22" USER=azureuser run_tp 'env -u SSH_CONNECTION -u USER bash -c "$(declare -f topoSshTarget getPublicIP); topoSshTarget"' 2>/dev/null)" \
+        "路由总览：sudo 后从登录 shell 的环境找回用户与端口，内网地址换成公网地址"
+fi
 
 # Reality 日志开关：07 的 Reality 入站在 inbounds[1]（[0] 是 dokodemo），12 的在 [0]；按 realitySettings 找，不按下标
 RLS_ROOT="${MOCK_ROOT}/rls.root/xray/conf"

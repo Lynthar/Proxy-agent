@@ -1274,7 +1274,9 @@ assert_equals '198.51.100.20' "$(topoFinalize "${_tpFin}" true | jq -r '.exits[0
 
 _tpModel=$(jq -cn '{lang: "zh-CN", host: "h1", cores: "Xray 26.3.27", generated: "2026-11-06 14:03", maskNote: "已打码",
     labels: {title: "路由总览", colInbound: "入站", colAccount: "账号", colExit: "出口", allProtocols: "全部协议 %s 个账号", followDefault: "跟随默认 %s 个账号",
-             pinned: "账号指定", pinnedN: "账号指定 %s 人", issuesTitle: "对不上", footnote: "说明"},
+             pinned: "账号指定", pinnedN: "账号指定 %s 人", issuesTitle: "对不上", footnote: "说明",
+             followDefaultPinned: "跟随默认 %s 个账号，%s 指定此出口", people: "%s 人", listSep: "、", onlyProtocols: "仅 %s",
+             legendBundle: "图例全部协议", legendOnly: "图例仅这几个", legendRoute: "图例去出口", legendInbound: "图例由入站决定", legendHot: "图例用量", legendBad: "图例没生效", legendOff: "图例停用"},
     inbounds: [{id: 0, name: "VLESS+TCP[TLS_Vision]", sub: "tcp :443"}, {id: 7, name: "VLESS+Reality+Vision", sub: "tcp :2053"}],
     accounts: [{name: "alice", status: "active", protocols: "all", exit: "a", sub: "1 GiB", short: "1 GiB", ratio: 0.1},
                {name: "<img src=x>", status: "active", protocols: "all", exit: null, sub: "", short: "", ratio: null},
@@ -1302,13 +1304,18 @@ cp_assert_contains "${_tpHtml}" "&lt;img src=x&gt;" "渲染: 模型里的文本�
 cp_assert_not_contains "${_tpHtml}" "<img" "渲染: 账号名不能变成标签"
 cp_assert_not_contains "${_tpHtml}" "<script" "渲染: 无脚本"
 cp_assert_not_contains "${_tpHtml}" "http" "渲染: 不加载外部资源"
-assert_equals "1" "$(grep -o 'edge e-sub' <<<"${_tpHtml}" | grep -c .)" "渲染: 只开部分协议的账号每个协议一根线，carol 只开一个"
+assert_equals "0" "$(grep -o 'e-sub' <<<"${_tpHtml}" | grep -c .)" "渲染: 只开部分协议的账号不再连到入站（几个人协议各不相同时线会交叉成一片）"
+cp_assert_contains "${_tpHtml}" ">仅 7</text>" "渲染: 只开部分协议的账号在行左侧写协议编号"
+cp_assert_contains "${_tpHtml}" 'class="pid" text-anchor="end">7</text>' "渲染: 入站右侧写协议编号，和账号行的编号对得上"
+assert_equals "图例全部协议|图例仅这几个|图例去出口|图例用量|图例没生效|图例停用" "$(grep -oE '<li>.*</li>' <<<"${_tpHtml}" | grep -oE '图例[^<]*' | paste -sd'|' -)" \
+    "渲染: 图例只列这张图上出现的画法（没有入站直接决定出口的线，就不列虚线）"
 
 _tpMany=$(jq -c '.accounts = ([range(0; 20) | {name: "m\(.)", status: "active", protocols: "all", exit: null, sub: "1 GiB", short: "1 GiB", ratio: 0.1}])
     | .exits = [.exits[0]] | .flows = [{exit: "direct", when: "全部"}] | .issues = []' <<<"${_tpModel}")
 _tpHtml=$(topoRenderHtml "${_tpMany}")
 cp_assert_contains "${_tpHtml}" "全部协议 20 个账号" "渲染: 20 个账号也只有一束，不是 20 根线"
-assert_equals "0" "$(grep -o 'edge e-sub' <<<"${_tpHtml}" | grep -c .)" "渲染: 没有例外就没有单独的线"
+assert_equals "0" "$(grep -o 'rx="9.5" class="badge"' <<<"${_tpHtml}" | grep -c .)" "渲染: 没有只开部分协议的账号就没有协议编号徽标"
+assert_equals "图例全部协议|图例去出口" "$(grep -oE '图例[^<]*' <<<"${_tpHtml}" | paste -sd'|' -)" "渲染: 没有停用、超额、没生效的出口时图例不列这几项"
 cp_assert_not_contains "${_tpHtml}" 'class="issues"' "渲染: 没有不一致就不显示那一块"
 
 # 行为一致的账号只画一根线
@@ -1320,13 +1327,14 @@ _tpTwo=$(jq -c '.accounts = [{name: "alice", status: "active", protocols: "all",
 _tpHtml=$(topoRenderHtml "${_tpTwo}")
 cp_assert_contains "${_tpHtml}" "账号指定 2 人" "连线: 指定同一出口的两个账号合一束，线上写人数"
 assert_equals "1" "$(grep -o '账号指定' <<<"${_tpHtml}" | grep -c .)" "连线: 同一束只有一根线"
-assert_equals "2" "$(grep -o 'edge e-sub' <<<"${_tpHtml}" | grep -c .)" "连线: 协议集合相同的两个账号合一束，线数等于协议数（2），不是账号数 × 协议数（4）"
+assert_equals "1" "$(grep -o 'rx="9.5" class="badge"' <<<"${_tpHtml}" | grep -c .)" "连线: 协议集合相同的两个账号合一束，只写一次协议编号"
+cp_assert_contains "${_tpHtml}" ">仅 0 · 7</text>" "连线: 协议编号按 ID 写全"
 _tpSame=$(jq -c '.flows = [{exit: "a", when: "全部"}] | .exits = [.exits[1]]
     | .accounts = [{name: "alice", status: "active", protocols: "all", exit: "a", sub: "", short: "", ratio: null},
                    {name: "dave", status: "active", protocols: "all", exit: null, sub: "", short: "", ratio: null}] | .issues = []' <<<"${_tpModel}")
 _tpHtml=$(topoRenderHtml "${_tpSame}")
-cp_assert_not_contains "${_tpHtml}" "账号指定" "连线: 默认只有一个去向、指定的又正好是它时行为一样，并进默认那束"
-cp_assert_contains "${_tpHtml}" "跟随默认 2 个账号" "连线: 两个账号算在同一束里"
+cp_assert_not_contains "${_tpHtml}" ">账号指定<" "连线: 默认只有一个去向、指定的又正好是它时行为一样，并进默认那束"
+cp_assert_contains "${_tpHtml}" "跟随默认 1 个账号，alice 指定此出口" "连线: 并进来的指定账号在标签上写明，改了默认他不跟着走"
 _tpOne=$(jq -c '.inbounds = [.inbounds[0]] | .flows = [{exit: "direct", when: "全部"}] | .exits = [.exits[0]]
     | .accounts = [{name: "solo", status: "active", protocols: "all", exit: null, sub: "", short: "", ratio: null}] | .issues = []' <<<"${_tpModel}")
 assert_equals "0" "$(topoRenderHtml "${_tpOne}" | grep -o 'class="brace' | grep -c .)" "连线: 只有一个入站一个账号时不画大括号"
@@ -1336,6 +1344,40 @@ _tpBare=$(jq -c '.accounts = [] | .inbounds = [{id: "chain", chain: true, name: 
 _tpHtml=$(topoRenderHtml "${_tpBare}")
 assert_equals "0" "$?" "渲染: 只当链式出口、没有账号的机器也能画"
 cp_assert_contains "${_tpHtml}" "来自入口" "渲染: 入站直接决定出口的线标出来"
+cp_assert_contains "${_tpHtml}" "图例由入站决定" "渲染: 有入站直接决定出口的线时图例列出虚线"
+
+# 出口配色：直连固定第一色，其余在后四色里循环，第 7 个出口不会和直连同色
+_tpSeven=$(jq -c '.exits = ([.exits[0]] + [range(1; 7) | {key: "c\(.)", name: "c\(.)", kind: "链式", host: "198.x.x.x", port: 1}])
+    | .accounts = [range(1; 7) | {name: "u\(.)", status: "active", protocols: "all", exit: "c\(.)", sub: "", short: "", ratio: null}]
+    | .flows = [{exit: "direct", when: "全部"}] | .issues = []' <<<"${_tpModel}")
+assert_equals "f0 f1 f2 f3 f4 f1 f2" "$(topoRenderHtml "${_tpSeven}" | grep -oE 'width="4" height="[0-9.]+" rx="2" class="f[0-9]"' | grep -oE 'f[0-9]' | paste -sd' ' -)" \
+    "配色: 直连固定 f0，其余在 f1–f4 里循环，第 7 个出口不和直连同色"
+
+# 进同一个出口的线终点错开，终点的标签各在各的线头上
+_tpHtml=$(topoRenderHtml "$(jq -c '.issues = []' <<<"${_tpModel}")")
+_tpEnds=$(grep -oE 'C[0-9. ]+ 959 [0-9.]+"' <<<"${_tpHtml}" | grep -oE '[0-9.]+"$' | tr -d '"')
+assert_equals "$(grep -c . <<<"${_tpEnds}")" "$(sort -u <<<"${_tpEnds}" | grep -c .)" "连线: 进同一个出口的几根线终点都不重合"
+assert_equals "3" "$(grep -c . <<<"${_tpEnds}")" "连线: alice 指定 a 一根，跟随默认的去 a、去直连各一根"
+
+# 放不下的名字截断，完整的放进 title
+_tpLong=$(jq -c '.accounts[0].name = "family-shared-ipad-in-the-living-room" | .exits[1].name = "HK-IPLC-01-hkg.example-provider.net-vless"
+    | .flows[0].when = "geosite:netflix,disney,hbo,primevideo 等 9 项" | .issues = []' <<<"${_tpModel}")
+_tpHtml=$(topoRenderHtml "${_tpLong}")
+cp_assert_contains "${_tpHtml}" "<title>family-shared-ipad-in-the-living-room</title>" "截断: 长账号名截短，整串放进 title"
+cp_assert_contains "${_tpHtml}" "<title>HK-IPLC-01-hkg.example-provider.net-vless</title>" "截断: 长出口名截短，不压右上角的类型"
+cp_assert_contains "${_tpHtml}" "<title>geosite:netflix,disney,hbo,primevideo 等 9 项</title>" "截断: 长条件标签截短"
+cp_assert_contains "${_tpHtml}" ">family-shared-ipa…<title>" "截断: 页面上显示截短的（带用量条的行名字留 18 个字宽）"
+
+# 双栈的直连标两个地址
+_tpHtml=$(topoRenderHtml "$(jq -c '.exits[0].host2 = "2001:x::" | .issues = []' <<<"${_tpModel}")")
+cp_assert_contains "${_tpHtml}" 'class="ip2">2001:x::</text>' "双栈: 直连的第二个地址另起一行"
+
+# 收尾：外部节点名来自导入链接的备注，默认换成「外部节点 N」，问题列表里提到的同名链路跟着换；第二个地址同样打码
+_tpFin2='{"labels":{"externalMasked":"外部节点 %s"},"exits":[{"key":"direct","rawHost":"198.51.100.20","rawHost2":"2001:db8::1"},{"key":"jp_owner","rawName":"jp_owner","rawHost":"203.0.113.9"},{"key":"x","rawName":"备注 · 名字","rawHost":"203.0.113.10"}],"issues":["状态文件里的链路 jp_owner 没有出站配置","链路 jp_owner2 不受影响"]}'
+assert_equals '2001:x::|外部节点 1|外部节点 2|状态文件里的链路 外部节点 1 没有出站配置|链路 jp_owner2 不受影响|false' \
+    "$(topoFinalize "${_tpFin2}" false | jq -r '"\(.exits[0].host2)|\(.exits[1].name)|\(.exits[2].name)|\(.issues[0])|\(.issues[1])|\([.exits[] | has("rawName") or has("rawHost2")] | any)"')" \
+    "收尾: 外部节点名默认打码，问题里同名的链路整词替换，别的链路名不动；不留原始字段"
+assert_equals 'jp_owner|备注 · 名字|2001:db8::1' "$(topoFinalize "${_tpFin2}" true | jq -r '"\(.exits[1].name)|\(.exits[2].name)|\(.exits[0].host2)"')" "收尾: --full 显示原名与完整地址"
 
 echo "=============================================="
 echo -e "${YELLOW}测试结果汇总${NC}"

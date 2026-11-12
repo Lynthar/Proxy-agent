@@ -20481,10 +20481,25 @@ topoInbounds() {
     printf '%s\n' "${out}"
 }
 
-# topoDirectExit → 本机直连的出口节点。rawHost 是原始地址，打码在 topoFinalize 统一做，这里不判断
+# topoDirectExit → 本机直连的出口节点：本机有路由、直连出站又没限定地址族的公网地址，双栈两个都标。getPublicIP 要带地址族：
+# 不带时 Reality 目标是本机域名就返回域名。rawHost / rawHost2 是原始地址，打码在 topoFinalize 统一做
 topoDirectExit() {
-    jq -cn --arg name "$(t TOPO_EXIT_DIRECT)" --arg kind "$(t TOPO_KIND_LOCAL)" --arg host "$(getPublicIP 2>/dev/null)" \
-        '{key: "direct", name: $name, kind: $kind, rawHost: $host, port: ""}'
+    local only= v4= v6=
+    if [[ "${coreKind}" == "1" ]]; then
+        only=$(jq -r 'first(.outbounds[]? | select(.tag == "z_direct_outbound") | .settings.domainStrategy) // ""' "${XRAY_CONF_DIR}/z_direct_outbound.json" 2>/dev/null)
+    else
+        only=$(jq -r 'first(.outbounds[]? | select(.tag == "direct") | (.domain_resolver.strategy? // .domain_strategy)) // ""' "${SINGBOX_MERGED_CONFIG}" 2>/dev/null)
+    fi
+    case "${only}" in
+        ForceIPv4 | UseIPv4 | ipv4_only) only=4 ;;
+        ForceIPv6 | UseIPv6 | ipv6_only) only=6 ;;
+        *) only= ;;
+    esac
+    [[ "${only}" != 6 ]] && hostHasRouteTo 192.33.4.12 && v4=$(getPublicIP 4 2>/dev/null)
+    [[ "${only}" != 4 ]] && hostHasRouteTo 2001:500:2::c && v6=$(getPublicIP 6 2>/dev/null)
+    jq -cn --arg name "$(t TOPO_EXIT_DIRECT)" --arg kind "$(t TOPO_KIND_LOCAL)" --arg v4 "${v4}" --arg v6 "${v6}" \
+        '{key: "direct", name: $name, kind: $kind, rawHost: (if $v4 != "" then $v4 else $v6 end), port: ""}
+         + (if $v4 != "" and $v6 != "" then {rawHost2: $v6} else {} end)'
 }
 
 # topoPlainExit TAG → 没接链式时，一个出站标签对应的出口节点
@@ -20512,7 +20527,14 @@ topoRoutingPlain() {
         rules=$(jq -c '[.routing.rules[]? | select(.domain != null and (((.ruleTag // "") | startswith("local-block")) | not)) | {tag: .outboundTag, domain}]' "${XRAY_CONF_DIR}/09_routing.json" 2>/dev/null) || rules='[]'
     else
         dflt=$(jq -r '.route.final // .outbounds[0].tag // "direct"' "${SINGBOX_MERGED_CONFIG}" 2>/dev/null)
-        rules=$(jq -c '[.route.rules[]? | select(.outbound != null) | {tag: .outbound, domain: ([.domain, .domain_suffix, .domain_keyword, .rule_set] | map(select(. != null)) | flatten)} | select((.domain | length) > 0)]' "${SINGBOX_MERGED_CONFIG}" 2>/dev/null) || rules='[]'
+        # 菜单 11 把带点的域名写成 domain_regex、geosite 写成 rule_set：标签还原成域名与 geosite:名字，漏读一种字段那条规则就从图上消失
+        rules=$(jq -c 'def arr: if type == "array" then . elif . == null then [] else [.] end;
+            ([.route.rule_set[]? | {key: .tag, value: ((.url // "") | capture("geosite-(?<n>[^/]+)\\.srs$").n)}] | from_entries) as $geo
+            | [.route.rules[]? | select(.outbound != null)
+               | {tag: .outbound, domain: ((.domain | arr) + (.domain_suffix | arr) + (.domain_keyword | arr)
+                   + (.domain_regex | arr | map(if startswith("^([a-zA-Z0-9_-]+\\.)*") then split("*") | last | gsub("\\\\"; "") else . end))
+                   + (.rule_set | arr | map(if $geo[.] != null then "geosite:" + $geo[.] else . end)))}
+               | select((.domain | length) > 0)]' "${SINGBOX_MERGED_CONFIG}" 2>/dev/null) || rules='[]'
     fi
     dflt=${dflt:-direct}
     while IFS= read -r tag; do
@@ -20544,9 +20566,12 @@ topoRoutingMulti() {
             missing=$(jq -c --arg n "${name}" '. + [$n]' <<<"${missing}")
         fi
     done < <(jq -r '.chains[].name' <<<"${state}")
+    # 自定义域名规则的 value 是逗号分隔的域名，线上写域名本身（和不接链式的 Xray 分流同一个写法），其余类型写规则名
     while IFS=$'\t' read -r type value chain; do
         [[ -n "${chain}" ]] || continue
-        rules=$(jq -c --arg c "${chain}" --arg w "$(chainRuleLabel "${type}" "${value}")" '. + [{exit: $c, when: $w}]' <<<"${rules}")
+        rules=$(jq -c --arg c "${chain}" --arg type "${type}" --arg v "${value}" --arg w "$(chainRuleLabel "${type}" "${value}")" \
+            '. + [{exit: $c, items: (if $type == "custom" then ($v | split(",") | map(sub("^\\s+"; "") | sub("\\s+$"; "")) | map(select(. != ""))) else [] end
+                                      | if length > 0 then . else [$w] end)}]' <<<"${rules}")
     done < <(jq -r '.rules[] | [.type, (.value | tostring), .chain] | @tsv' <<<"${state}")
     jq -c --argjson direct "$(topoDirectExit)" --argjson hops "${hops}" --argjson missing "${missing}" --argjson rules "${rules}" \
         --arg chainKind "$(t TOPO_KIND_CHAIN)" --arg relayNote "$(t TOPO_NOTE_RELAYS)" --arg badNote "$(t TOPO_NOTE_NOT_APPLIED)" --arg badIssue "$(t TOPO_ISSUE_MISSING_CHAIN)" \
@@ -20556,11 +20581,13 @@ topoRoutingMulti() {
         | {
             exits: ([$direct] + [.chains[] | . as $c
                 | ($hops[$c.name] // {}) as $h
-                | {key: .name, name: .name, kind: (if .source == "external" then (.external_type // "") else $chainKind end), rawHost: ($h.server // .ip), port: ($h.port // .port)}
+                | {key: .name, kind: (if .source == "external" then (.external_type // "") else $chainKind end), rawHost: ($h.server // .ip), port: ($h.port // .port)}
+                  + (if .source == "external" then {rawName: .name} else {name: .name} end)
                   + (if ($missing | index($c.name)) != null then {bad: true, note: $badNote}
                      elif ($h.count // 1) > 1 then {note: ($relayNote | sub("%s"; ($h.count | tostring)))} else {} end)]),
             flows: (($rules | map(select(.exit != $dflt)) | group_by(.exit)
-                     | map(length as $c | {exit: .[0].exit, when: (.[0].when + (if $c > 1 then ($more | sub("%s"; ($c | tostring))) else "" end))}))
+                     | map((map(.items) | add) as $it | ($it | length) as $c
+                           | {exit: .[0].exit, when: ($it[0] + (if $c > 1 then ($more | sub("%s"; ($c | tostring))) else "" end))}))
                     + [{exit: $dflt, when: $w}]),
             pins: .accounts,
             inboundExits: [],
@@ -20577,7 +20604,7 @@ topoRoutingEntry() {
     mode=$(jq -r '.mode' <<<"${state}")
     if [[ "${mode}" == "external_single" ]]; then
         node=$(jq -c --arg id "$(jq -r '.external_node_id // ""' <<<"${state}")" 'first(.nodes[]? | select(.id == $id) | {type, server, server_port}) // {}' "${EXTERNAL_NODE_FILE}" 2>/dev/null) || node='{}'
-        exitObj=$(jq -cn --argjson n "${node:-{\}}" --arg name "$(jq -r '.external_node_name // ""' <<<"${state}")" '{key: "chain", name: $name, kind: ($n.type // ""), rawHost: ($n.server // ""), port: ($n.server_port // "")}')
+        exitObj=$(jq -cn --argjson n "${node:-{\}}" --arg name "$(jq -r '.external_node_name // ""' <<<"${state}")" '{key: "chain", rawName: $name, kind: ($n.type // ""), rawHost: ($n.server // ""), port: ($n.server_port // "")}')
         if chainExternalSingleOnXray; then
             issues=$(jq -cn --arg s "$(t TOPO_ISSUE_EXTERNAL_XRAY)" '[$s]')
             jq -cn --argjson x "${exitObj}" --argjson d "$(topoDirectExit)" --argjson issues "${issues}" --arg w "$(t TOPO_FLOW_ALL)" \
@@ -20695,7 +20722,7 @@ topoCoresText() {
 
 # topoCollect FULL → 渲染用的模型。FULL 为 true 时出口地址不打码
 topoCollect() {
-    local full=$1 inbounds routing state='null' labels accounts issues lang=en maskNote hostName=
+    local full=$1 inbounds routing state='null' labels accounts issues lang=en maskNote hostName= stamp zone
     [[ "${CURRENT_LANG:-}" == "zh_CN" ]] && lang=zh-CN
     inbounds=$(topoInbounds) || return 1
     routing=$(topoRouting) || return 1
@@ -20706,9 +20733,15 @@ topoCollect() {
         --arg allProtocols "$(t TOPO_ALL_PROTOCOLS)" --arg followDefault "$(t TOPO_FOLLOW_DEFAULT)" --arg pinned "$(t TOPO_PINNED)" --arg pinnedN "$(t TOPO_PINNED_N)" \
         --arg issuesTitle "$(t TOPO_ISSUES_TITLE)" --arg footnote "$(t TOPO_FOOTNOTE)" --arg foreign "$(t TOPO_ACCOUNT_FOREIGN)" \
         --arg expire "$(t TOPO_ACCOUNT_EXPIRE)" --arg disabled "$(t TOPO_ACCOUNT_DISABLED)" --arg reasonQuota "$(t TOPO_REASON_QUOTA)" --arg reasonExpired "$(t TOPO_REASON_EXPIRED)" --arg reasonManual "$(t TOPO_REASON_MANUAL)" \
+        --arg followDefaultPinned "$(t TOPO_FOLLOW_DEFAULT_PINNED)" --arg people "$(t TOPO_PEOPLE)" --arg listSep "$(t TOPO_LIST_SEP)" --arg onlyProtocols "$(t TOPO_ONLY_PROTOCOLS)" \
+        --arg externalMasked "$(t TOPO_EXTERNAL_MASKED)" --arg legendBundle "$(t TOPO_LEGEND_BUNDLE)" --arg legendOnly "$(t TOPO_LEGEND_ONLY)" --arg legendRoute "$(t TOPO_LEGEND_ROUTE)" \
+        --arg legendInbound "$(t TOPO_LEGEND_INBOUND)" --arg legendHot "$(t TOPO_LEGEND_HOT)" --arg legendBad "$(t TOPO_LEGEND_BAD)" --arg legendOff "$(t TOPO_LEGEND_OFF)" \
         '$ARGS.named')
     accounts=$(topoAccounts "$(jq -c --argjson r "${routing}" '. + $r.extraInbounds' <<<"${inbounds}")" "${state}" "$(jq -c '.pins' <<<"${routing}")" "${labels}") || return 1
     issues=$(topoIssues)
+    # 各机按自己的时区写，比两台机器的页面时要看得出差几个小时
+    stamp=$(date '+%F %H:%M %z')
+    zone=${stamp##* }
     if [[ "${full}" == "true" ]]; then
         maskNote=""
         hostName=$(hostname 2>/dev/null)
@@ -20716,12 +20749,38 @@ topoCollect() {
         maskNote=$(t TOPO_MASK_NOTE)
     fi
     topoFinalize "$(jq -cn --argjson in "${inbounds}" --argjson r "${routing}" --argjson acc "${accounts}" --argjson issues "${issues}" --argjson labels "${labels}" \
-        --arg lang "${lang}" --arg host "${hostName}" --arg cores "$(topoCoresText)" --arg generated "$(date '+%F %H:%M')" --arg maskNote "${maskNote}" --arg all "$(t TOPO_FLOW_ALL)" --arg dfltText "$(t TOPO_FLOW_DEFAULT)" '
+        --arg lang "${lang}" --arg host "${hostName}" --arg cores "$(topoCoresText)" --arg generated "${stamp% *} UTC${zone:0:3}:${zone:3:2}" --arg maskNote "${maskNote}" --arg all "$(t TOPO_FLOW_ALL)" --arg dfltText "$(t TOPO_FLOW_DEFAULT)" '
         {lang: $lang, host: $host, cores: $cores, generated: $generated, maskNote: $maskNote, labels: $labels,
          inbounds: (($in + $r.extraInbounds) | map(del(.users, .tag))),
          accounts: $acc, exits: $r.exits, inboundExits: $r.inboundExits,
          flows: (if ($r.flows | length) == 1 and $r.flows[0].when == $dfltText then [$r.flows[0] + {when: $all}] else $r.flows end),
          issues: ($r.issues + $issues)}')" "${full}"
+}
+
+# topoSshTarget → 隧道命令里的「-p 端口 用户@地址」，照这次登录抄。sudo、su 清掉了 SSH_CONNECTION 就往上找登录 shell 的环境；
+# 地址是内网的（1:1 NAT 后面，比如 Azure）换成公网地址，查不到就写 <server>
+topoSshTarget() {
+    local conn=${SSH_CONNECTION:-} user=${SUDO_USER:-$(id -un)} pid=$$ i env host port
+    for ((i = 0; i < 16 && ${#conn} == 0; i++)); do
+        pid=$(sed 's/^.*) //' "/proc/${pid}/stat" 2>/dev/null | awk '{ print $2 }')
+        [[ "${pid}" =~ ^[0-9]+$ ]] && ((pid > 1)) || break
+        env=$(tr '\0' '\n' <"/proc/${pid}/environ" 2>/dev/null)
+        conn=$(sed -n 's/^SSH_CONNECTION=//p' <<<"${env}")
+        if [[ -n "${conn}" ]]; then
+            user=$(sed -n 's/^USER=//p' <<<"${env}")
+            user=${user:-${SUDO_USER:-$(id -un)}}
+        fi
+    done
+    if [[ -z "${conn}" ]]; then
+        printf '%s@<server>\n' "${user}"
+        return 0
+    fi
+    host=$(awk '{ print $3 }' <<<"${conn}")
+    port=$(awk '{ print $4 }' <<<"${conn}")
+    if [[ "${host,,}" =~ ^(10\.|127\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|f[cd]|fe[89ab]) ]]; then
+        host=$(getPublicIP 4 2>/dev/null)
+    fi
+    printf -- '-p %s %s@%s\n' "${port}" "${user}" "${host:-<server>}"
 }
 
 # topoServe PAGE_FILE → 只在 127.0.0.1 上提供这一个页面，前台跑，回车或 Ctrl+C 就撤。不走 nginx：不用动线上配置和重载。
@@ -20761,12 +20820,7 @@ EOF
         trap - INT TERM
         return 1
     fi
-    # SSH_CONNECTION 是这次登录真实用的地址和端口，照着抄就能连上
-    if [[ -n "${SSH_CONNECTION:-}" ]]; then
-        sshPart="-p $(awk '{ print $4 }' <<<"${SSH_CONNECTION}") $(id -un)@$(awk '{ print $3 }' <<<"${SSH_CONNECTION}")"
-    else
-        sshPart="root@<server>"
-    fi
+    sshPart=$(topoSshTarget)
     echoContent green "\n ---> $(t TOPO_SERVE_READY)"
     echoContent yellow "  1. $(t TOPO_SERVE_STEP_TUNNEL)"
     echoContent skyBlue "     ssh -N -L ${TOPO_PAGE_PORT}:127.0.0.1:${TOPO_PAGE_PORT} ${sshPart}"
