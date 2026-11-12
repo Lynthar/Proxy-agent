@@ -37,6 +37,9 @@ svg .port{fill:var(--muted);font-size:12.5px;font-weight:400}svg .pid{fill:var(-
 .edge{fill:none;stroke-width:1.5}.e-strong{stroke-width:2}.e-all{stroke:var(--edge);stroke-width:2.2}.e-proto{stroke-dasharray:6 4}.brace{fill:none;stroke:var(--edge);stroke-width:1.8;stroke-linecap:round}
 .lbg{fill:var(--surface);stroke-width:1}.badge{fill:var(--surface);stroke:var(--edge);stroke-width:1}.bar-bg{fill:var(--line)}.bar-ok{fill:var(--edge)}.bar-hot{fill:var(--warn)}
 .legend{display:flex;flex-wrap:wrap;gap:6px 20px;margin:0;padding:0;list-style:none;color:var(--muted);font-size:13px}.legend li{display:flex;align-items:center;gap:7px}.legend svg{flex:none;overflow:visible}
+.acct{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--line);border-radius:8px;overflow:hidden;font-size:13.5px}.acct th,.acct td{padding:7px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}.acct th{font-weight:600;color:var(--muted);font-size:12.5px}.acct tr:last-child td{border-bottom:none}.acct .m{color:var(--muted)}.acct .w{color:var(--warn)}.acct .off{color:var(--off);text-decoration:line-through}.acct .num{font-variant-numeric:tabular-nums}h2{font-size:16px;margin:6px 0 0;font-weight:600}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}.dot.d0{background:var(--e0)}.dot.d1{background:var(--e1)}.dot.d2{background:var(--e2)}.dot.d3{background:var(--e3)}.dot.d4{background:var(--e4)}
+@media (max-width:640px){.acct thead{display:none}.acct tr{display:grid;grid-template-columns:1fr auto;gap:2px 10px;padding:8px 12px;border-bottom:1px solid var(--line)}.acct td{border:none;padding:0}.acct td:nth-child(1){font-weight:600}.acct td:nth-child(2),.acct td:nth-child(4){grid-column:1 / -1}.acct td:nth-child(3){text-align:right;grid-row:1;grid-column:2}.acct td:nth-child(4){color:var(--muted)}}
 .c0{stroke:var(--e0)}.c1{stroke:var(--e1)}.c2{stroke:var(--e2)}.c3{stroke:var(--e3)}.c4{stroke:var(--e4)}.f0{fill:var(--e0)}.f1{fill:var(--e1)}.f2{fill:var(--e2)}.f3{fill:var(--e3)}.f4{fill:var(--e4)}'
 
 # topoRenderHtml MODEL → 完整的 HTML。行为一致的账号只画一根线：开了全部协议的合一束连入站，走向相同的合一束连出口，不然人一多线就糊了。
@@ -218,6 +221,33 @@ topoRenderHtml() {
          + item(([$exits[] | select(.bad == true)] | length) > 0; "<rect x=\"2\" y=\"1.5\" width=\"30\" height=\"11\" rx=\"3\" class=\"node node-bad\"/>"; $L.legendBad)
          + item(($off | length) > 0; "<rect x=\"2\" y=\"1.5\" width=\"30\" height=\"11\" rx=\"3\" class=\"node node-off\"/>"; $L.legendOff)) as $legend
 
+      # 按账号的表：人多、手机上看图不方便，一行答完「从哪出、开了哪些协议、用了多少、哪天到期」。按名字排，停用的放最后；
+      # 跟随默认的分流条件与按协议分流在表上方写一次，行里只写跟随默认
+      | ($exits | map({key: .key, value: .}) | from_entries) as $exitByKey
+      | ([$m.flows[] | .exit] | last) as $dflt
+      | ($m.inboundExits // [] | map(select(.inbound != "chain"))) as $protoIE
+      | ((($m.flows | length) > 1) or ($protoIE | length) > 0) as $hasRules
+      | def exitCell($k): "<span class=\"dot d\($exitByKey[$k].idx // 0)\"></span>\(($exitByKey[$k].name // $k) | str | @html)";
+        (if ($m.accounts | length) == 0 then ""
+         else "<h2>\($L.tableTitle // "" | @html)</h2>"
+           + (if $hasRules then
+                "<p class=\"muted\">" + ((($L.tableRules // "%s") | @html) | split("%s") | .[0]) 
+                + ([$m.flows[] | "\(.when | str | @html) → " + exitCell(.exit)]
+                   + [$protoIE[] | . as $ie | "\(([$inbounds[] | select((.id | tostring) == ($ie.inbound | tostring)) | .name] | first // "") | str | @html) → " + exitCell($ie.exit)]
+                   | join("；"))
+                + ((($L.tableRules // "%s") | @html) | split("%s") | .[1:] | join("")) + "</p>"
+              else "" end)
+           + "<table class=\"acct\"><thead><tr><th>\($L.colAccount | @html)</th><th>\($L.colExit | @html)</th><th>\($L.tableProtocols // "" | @html)</th><th>\($L.tableUsage // "" | @html)</th></tr></thead><tbody>"
+           + ([$m.accounts | sort_by(.status == "disabled", (.name | str | ascii_downcase))[] | . as $a
+               | (if $a.status == "disabled" then null elif $a.exit != null then $a.exit else $dflt end) as $k
+               | "<tr><td\(if $a.status == "disabled" then " class=\"off\"" else "" end)>\($a.name | str | @html)</td><td>"
+                 + (if $k == null then "<span class=\"m\">\($a.sub | str | @html)</span>"
+                    else exitCell($k) + " <span class=\"m\">\((if $a.mergedPin == true then $L.tablePinnedDefault elif $a.exit != null then $L.tablePinned
+                                                           elif $hasRules then $L.tableFollowRules else $L.tableFollow end) // "" | @html)</span>" end)
+                 + "</td><td class=\"num\">\(if $a.protocols == "all" then ($L.tableAll // "") else ($a.protocols | map(tostring) | join(" · ")) end | @html)</td>"
+                 + "<td class=\"num\(if $a.hot == true or $a.warn == true then " w" else "" end)\">\(if $a.status == "disabled" then "" else ($a.sub | str | @html) end)</td></tr>"] | join(""))
+           + "</tbody></table>" end) as $table
+
       | "<!DOCTYPE html>\n<html lang=\"\($m.lang | @html)\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><meta name=\"referrer\" content=\"no-referrer\">"
         + "<title>\($L.title | @html)</title><style>\($css)</style></head><body><main>"
         + "<h1>\($L.title | @html)</h1><p class=\"muted\">\([$m.host, $m.cores, $m.generated, $m.maskNote] | map(select(. != "")) | join(" · ") | @html)</p>"
@@ -228,6 +258,7 @@ topoRenderHtml() {
         + $inNodes + $acctNodes + $exitNodes
         + "</svg></div>"
         + (if $legend == "" then "" else "<ul class=\"legend\">\($legend)</ul>" end)
+        + $table
         + "<p class=\"muted\">\($L.footnote | @html)</p></main></body></html>"
     ' <<<"$1"
 }

@@ -484,6 +484,7 @@ assert_equals "600" "$(stat -c %a "${topoFile}" 2>/dev/null)" "页面文件只�
 topoHtml=$(cat "${topoFile}" 2>/dev/null)
 assert_contains "${topoHtml}" "VLESS+Reality+Vision" "页面写入站全称"
 assert_contains "${topoHtml}" ">${E2E_USER}<" "页面列出账号"
+assert_contains "${topoHtml}" "<tr><td>${E2E_USER}</td>" "图下的按账号表里有这个账号"
 assert_contains "${topoHtml}" ".x.x.x" "出口地址默认打码"
 assert_equals "no" "$([[ "${topoHtml}" == *'class="issues"'* ]] && echo yes || echo no)" "刚装好：和状态、磁盘都对得上，不报不一致"
 assert_equals "0" "$(grep -c "${E2E_UUID}\|vless://\|<script" "${topoFile}")" "页面里没有 UUID、分享链接、脚本"

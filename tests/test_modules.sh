@@ -1276,7 +1276,9 @@ _tpModel=$(jq -cn '{lang: "zh-CN", host: "h1", cores: "Xray 26.3.27", generated:
     labels: {title: "路由总览", colInbound: "入站", colAccount: "账号", colExit: "出口", allProtocols: "全部协议 %s 个账号", followDefault: "跟随默认 %s 个账号",
              pinned: "账号指定", pinnedN: "账号指定 %s 人", issuesTitle: "对不上", footnote: "说明",
              followDefaultPinned: "跟随默认 %s 个账号，%s 指定此出口", people: "%s 人", listSep: "、", onlyProtocols: "仅 %s",
-             legendBundle: "图例全部协议", legendOnly: "图例仅这几个", legendRoute: "图例去出口", legendInbound: "图例由入站决定", legendHot: "图例用量", legendBad: "图例没生效", legendOff: "图例停用"},
+             legendBundle: "图例全部协议", legendOnly: "图例仅这几个", legendRoute: "图例去出口", legendInbound: "图例由入站决定", legendHot: "图例用量", legendBad: "图例没生效", legendOff: "图例停用",
+             tableTitle: "按账号", tableProtocols: "协议", tableUsage: "用量 · 到期", tableAll: "全部", tablePinned: "指定", tablePinnedDefault: "指定（也是默认）",
+             tableFollow: "跟随默认", tableFollowRules: "跟随默认（按上面的分流）", tableRules: "跟随默认的账号：%s"},
     inbounds: [{id: 0, name: "VLESS+TCP[TLS_Vision]", sub: "tcp :443"}, {id: 7, name: "VLESS+Reality+Vision", sub: "tcp :2053"}],
     accounts: [{name: "alice", status: "active", protocols: "all", exit: "a", sub: "1 GiB", short: "1 GiB", ratio: 0.1},
                {name: "<img src=x>", status: "active", protocols: "all", exit: null, sub: "", short: "", ratio: null},
@@ -1345,6 +1347,21 @@ _tpHtml=$(topoRenderHtml "${_tpBare}")
 assert_equals "0" "$?" "渲染: 只当链式出口、没有账号的机器也能画"
 cp_assert_contains "${_tpHtml}" "来自入口" "渲染: 入站直接决定出口的线标出来"
 cp_assert_contains "${_tpHtml}" "图例由入站决定" "渲染: 有入站直接决定出口的线时图例列出虚线"
+
+# 按账号的表：按名字排、停用的放最后；指定、并进默认的指定、跟随默认分开写；分流条件在表上方写一次
+_tpHtml=$(topoRenderHtml "$(jq -c '.issues = []' <<<"${_tpModel}")")
+_tpTable=$(grep -oE '<table class="acct">.*</table>' <<<"${_tpHtml}")
+assert_equals "&lt;img src=x&gt;|alice|carol|bob" "$(grep -oE '<tr><td( class="off")?>[^<]*' <<<"${_tpTable}" | sed -E 's/<tr><td( class="off")?>//' | paste -sd'|' -)" \
+    "按账号表: 按名字排，停用的放最后"
+cp_assert_contains "${_tpTable}" '节点 a <span class="m">指定</span>' "按账号表: 指定了出口的写出口名和「指定」"
+cp_assert_contains "${_tpTable}" '直连 <span class="m">跟随默认（按上面的分流）</span>' "按账号表: 跟随默认又有分流的，行里只写跟随默认，指向表上方的条件"
+cp_assert_contains "${_tpHtml}" '跟随默认的账号：geosite:netflix → ' "按账号表: 分流条件在表上方写一次"
+cp_assert_contains "${_tpTable}" '<td class="num">7</td><td class="num w">9 GiB</td>' "按账号表: 只开部分协议的写编号，用量过 80% 的标橙"
+cp_assert_contains "${_tpTable}" '<td class="off">bob</td><td><span class="m">停用：超额</span>' "按账号表: 停用的划掉、写原因"
+cp_assert_contains "$(topoRenderHtml "${_tpSame}")" '<span class="m">指定（也是默认）</span>' "按账号表: 指定到唯一默认出口的写明也是默认"
+assert_equals "0" "$(topoRenderHtml "${_tpBare}" | grep -c '<table')" "按账号表: 没有账号（只当链式出口）时不出表"
+_tpHtml=$(topoRenderHtml "$(jq -c '.flows = [{exit: "direct", when: "其余协议"}] | .inboundExits = [{inbound: 7, exit: "a", when: "按协议"}] | .issues = []' <<<"${_tpModel}")")
+cp_assert_contains "${_tpHtml}" 'VLESS+Reality+Vision → <span class="dot' "按账号表: 按协议分流的入站也写进表上方那行"
 
 # 出口配色：直连固定第一色，其余在后四色里循环，第 7 个出口不会和直连同色
 _tpSeven=$(jq -c '.exits = ([.exits[0]] + [range(1; 7) | {key: "c\(.)", name: "c\(.)", kind: "链式", host: "198.x.x.x", port: 1}])

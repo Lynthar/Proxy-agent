@@ -20736,6 +20736,9 @@ topoCollect() {
         --arg followDefaultPinned "$(t TOPO_FOLLOW_DEFAULT_PINNED)" --arg people "$(t TOPO_PEOPLE)" --arg listSep "$(t TOPO_LIST_SEP)" --arg onlyProtocols "$(t TOPO_ONLY_PROTOCOLS)" \
         --arg externalMasked "$(t TOPO_EXTERNAL_MASKED)" --arg legendBundle "$(t TOPO_LEGEND_BUNDLE)" --arg legendOnly "$(t TOPO_LEGEND_ONLY)" --arg legendRoute "$(t TOPO_LEGEND_ROUTE)" \
         --arg legendInbound "$(t TOPO_LEGEND_INBOUND)" --arg legendHot "$(t TOPO_LEGEND_HOT)" --arg legendBad "$(t TOPO_LEGEND_BAD)" --arg legendOff "$(t TOPO_LEGEND_OFF)" \
+        --arg tableTitle "$(t TOPO_TABLE_TITLE)" --arg tableProtocols "$(t TOPO_TABLE_COL_PROTOCOLS)" --arg tableUsage "$(t TOPO_TABLE_COL_USAGE)" --arg tableAll "$(t TOPO_TABLE_ALL_PROTOCOLS)" \
+        --arg tablePinned "$(t TOPO_TABLE_PINNED)" --arg tablePinnedDefault "$(t TOPO_TABLE_PINNED_DEFAULT)" --arg tableFollow "$(t TOPO_TABLE_FOLLOW)" \
+        --arg tableFollowRules "$(t TOPO_TABLE_FOLLOW_RULES)" --arg tableRules "$(t TOPO_TABLE_RULES)" \
         '$ARGS.named')
     accounts=$(topoAccounts "$(jq -c --argjson r "${routing}" '. + $r.extraInbounds' <<<"${inbounds}")" "${state}" "$(jq -c '.pins' <<<"${routing}")" "${labels}") || return 1
     issues=$(topoIssues)
