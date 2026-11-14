@@ -619,7 +619,7 @@ run_cs() {
         xrayDaemonRunning() { [[ -f "${PROXY_AGENT_DIR}/xray.up" ]]; }
         singBoxDaemonRunning() { [[ -f "${PROXY_AGENT_DIR}/sb.up" ]]; }
         reloadCore() { echo RELOAD; }
-        for f in labelCoreBinary removeLegacyAllowInsecure ensureRealityMinClientVer ensureXrayDirectStrategy ensureCorePortTargets \
+        for f in labelCoreBinary removeLegacyAllowInsecure ensureRealityMinClientVer ensureXrayDirectStrategy ensureCorePortTargets migrateChainEntryState \
             ensureCarpoolXray ensureXrayLocalBlock carpoolCollectBeforeStop sleep; do eval "$f() { :; }"; done
         find() { echo found; }
         systemctl() { [[ "$1" == start ]] && touch "${PROXY_AGENT_DIR}/xray.up"; return 0; }
@@ -1213,14 +1213,14 @@ run_vps 'cleanUp singBoxProtocolsDel 2' >/dev/null 2>&1
 assert_equals "singbox stop" "$(tr '\n' ' ' <"${VPS_CALLS}" | sed 's/ $//')" "换内核：一个入站都不剩就停着"
 
 vps_reset
-: >"${VPS_ROOT}/sing-box/conf/chain_entry_info.json"
+: >"${VPS_ROOT}/sing-box/conf/chain_multi_info.json"
 assert_equals "1" "$(run_vps 'coreKind=2; chainRefuseCoreSwitch 1; echo passed' >/dev/null 2>&1; echo $?)" "换内核：本机是链式入口时拒绝（入口在两种内核下结构不同）"
 assert_equals "passed" "$(run_vps 'coreKind=1; chainRefuseCoreSwitch 1; echo passed' 2>/dev/null)" "换内核：不换内核的重装照常"
 for _fn in xrayCoreInstall customXrayInstall; do
     assert_equals "reloadCore" "$(sed -n "/^${_fn}() {/,/^}/p" install.sh | sed -n '/initXrayConfig/,$p' | grep -oE 'reloadCore|handleXray start|handleSingBox start' | paste -sd' ' -)" \
         "${_fn}：写完配置经 reloadCore 重启——端口自检停过旁挂的 sing-box（链式、6 / 9），只起 Xray 它就一直停着"
 done
-rm -f "${VPS_ROOT}/sing-box/conf/chain_entry_info.json"
+rm -f "${VPS_ROOT}/sing-box/conf/chain_multi_info.json"
 assert_equals "passed" "$(run_vps 'coreKind=2; chainRefuseCoreSwitch 1; echo passed' 2>/dev/null)" "换内核：只是出口 / 中继的机器可以换"
 
 # --- 302 重定向：白名单，引号、分号、空白、$、花括号、反斜杠都改得了 nginx 那一行 ---
@@ -1540,7 +1540,7 @@ run_dc() {
         source lib/i18n.sh; source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh
         eval "${DS_FNS}"
         _doctorSection() { :; }; _doctorRow() { printf "%s|%s|%s\n" "$2" "$1" "$3"; }
-        echoContent() { :; }; chainExternalSingleOnXray() { return 1; }
+        echoContent() { :; }
         coreKind=${DS_CORE} currentHost=${DS_HOST} currentInstallProtocolType=",0,"
         "$1"' _ "$1" 2>&1
 }
@@ -1959,7 +1959,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试拼车钩子与 tick ===${NC}"
 
-CP_FN_NAMES="applyAccountChangeAllProtocols carpoolUserinfoUsageDropped carpoolSyncUserinfo nginxPids xrayConfigTest readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled xrayDaemonRunning carpoolCurrentClientsMap crontabHas crontabReplace ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolMachineStep carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolGuardAccountMenu carpoolCheckPrerequisites carpoolPickApiPort carpoolApiReady carpoolAllAccounts carpoolFillUuids carpoolRemoveCron removeSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable stdinIsTty carpoolApply carpoolResetUsage carpoolShowUsage carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolInsertPageBlock carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMembersClean carpoolMembersEditApply carpoolPickMember carpoolAsk carpoolShowProtocolChoices carpoolShowMemberLinks carpoolMemberAdd carpoolMemberEdit carpoolMemberMenu carpoolMenu addUser removeUser cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountStateFile chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget"
+CP_FN_NAMES="applyAccountChangeAllProtocols carpoolUserinfoUsageDropped carpoolSyncUserinfo nginxPids xrayConfigTest readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled xrayDaemonRunning carpoolCurrentClientsMap crontabHas crontabReplace ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolMachineStep carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolGuardAccountMenu carpoolCheckPrerequisites carpoolPickApiPort carpoolApiReady carpoolAllAccounts carpoolFillUuids carpoolRemoveCron removeSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable stdinIsTty carpoolApply carpoolResetUsage carpoolShowUsage carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolInsertPageBlock carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMembersClean carpoolMembersEditApply carpoolPickMember carpoolAsk carpoolShowProtocolChoices carpoolShowMemberLinks carpoolMemberAdd carpoolMemberEdit carpoolMemberMenu carpoolMenu addUser removeUser cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget"
 CP_FNS=$(sed -n "$(for _f in ${CP_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_not_empty "${CP_FNS}" "拼车：抽到 install.sh 原文"
 assert_equals "$(wc -w <<<"${CP_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CP_FNS}")" "拼车：每个函数都抽到了（抽不到说明函数体里出现了顶格的 }）"
@@ -2957,8 +2957,9 @@ assert_equals "1" "$(grep -c 'carpoolCollectBeforeStop' <<<"${HANDLE_XRAY_FN}")"
 assert_equals "CarpoolCollect) carpoolCollectBeforeStop checkForUpdates" \
     "$(sed -n '/^# 顶层入口分发/,$p' install.sh | grep -oE 'CarpoolCollect\)|carpoolCollectBeforeStop|checkForUpdates' | paste -sd' ' -)" \
     "入口：服务停止钩子 CarpoolCollect 在更新检查之前分发（关机途中网络可能已断）"
-assert_equals "ensureCarpoolXray writeXrayChainConfig ensureXrayLocalBlock" "$(grep -oE 'ensureCarpoolXray|writeXrayChainConfig|ensureXrayLocalBlock' <<<"${HANDLE_XRAY_FN}" | paste -sd' ' -)" \
-    "handleXray start：拼车之后、本机封锁之前写回链式路由（链式入口重装、开 IPv6 全局后不静默走直连）"
+assert_equals "ensureCarpoolXray migrateChainEntryState handleSingBox handleSingBox writeXrayChainConfig ensureXrayLocalBlock" \
+    "$(grep -oE 'ensureCarpoolXray|migrateChainEntryState|handleSingBox|writeXrayChainConfig|ensureXrayLocalBlock' <<<"${HANDLE_XRAY_FN}" | paste -sd' ' -)" \
+    "handleXray start：拼车之后先转旧入口状态（转了连 sing-box 一起重启），再写回链式路由，最后补本机封锁"
 SUBSCRIBE_FN=$(sed -n '/^subscribeLocalHasEmptyHost() {/,/^}/p;/^subscribe() {/,/^}/p' install.sh)
 assert_equals "1" "$(grep -c 'carpoolWritePlaceholders' <<<"${SUBSCRIBE_FN}")" "subscribe 末尾给停用成员补占位"
 assert_equals "2" "$(grep -c 'wget -O "${_singboxTpl}" -q --timeout=15' <<<"${SUBSCRIBE_FN}")" "subscribe：sing-box 模板的两处 wget 带超时（cron 下不能挂死）"
@@ -3245,7 +3246,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试按账号选出口 ===${NC}"
 
-CA_FN_NAMES="singBoxProbeExitIP localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs ensureXrayLocalBlock localBlockInject directOutboundInject chainAccountStateFile chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountCarry chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod setupExternalAsSingleExit chainExternalSingleOnXray generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig chainRouteLazyResolve migrateChainRouteResolve chainExitDefs chainExitTarget chainExitIsSni chainWarpEnsureRegistered chainWarpFragment chainLocalExitFragment addLocalExitAsChain multiChainAddOne singBoxProbeEndpointIP"
+CA_FN_NAMES="singBoxProbeExitIP localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs ensureXrayLocalBlock localBlockInject directOutboundInject chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig chainRouteLazyResolve migrateChainRouteResolve chainExitDefs chainExitTarget chainExitIsSni chainWarpEnsureRegistered chainWarpFragment chainLocalExitFragment addLocalExitAsChain multiChainAddOne singBoxProbeEndpointIP migrateChainEntryState chainHopOutbounds chainReadManualExit addSingleChainOutbound"
 CA_FNS=$(sed -n "$(for _f in ${CA_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_equals "$(wc -w <<<"${CA_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CA_FNS}")" "按账号选出口：每个函数都抽到了"
 CA_ROOT="${MOCK_ROOT}/chainacct.root"
@@ -3276,7 +3277,12 @@ ca_reset() {
     rm -rf "${CA_ROOT}" && mkdir -p "${CA_X}" "${CA_F}"
     : >"${CA_CALLS}"
 }
-ca_single() { jq -cn --argjson extra "$1" '{schema_version: 1, role: "entry", exit_ip: "198.51.100.7", exit_port: 5000, bridge_port: 31111, has_xray: true} + $extra' >"${CA_ENTRY}"; }
+# ca_single EXTRA → 只有一条出口 chain_1 的入口（旧版单链路转过来就是这个形状），默认出口是它
+ca_single() {
+    rm -f "${CA_ENTRY}"
+    jq -cn --argjson extra "$1" '{schema_version: 1, role: "entry", mode: "multi_chain", default_chain: "chain_1", bridge_port: 31111, has_xray: true, rules: [],
+        chains: [{name: "chain_1", ip: "198.51.100.7", port: 5000, bridge_port: 31112, is_default: true}]} + $extra' >"${CA_MULTI}"
+}
 # 三条链路：us、hk 已经分过桥端口（故意与名字顺序相反），jp 还没有
 ca_multi() {
     jq -cn --argjson extra "$1" '{schema_version: 1, role: "entry", mode: "multi_chain", default_chain: "direct", bridge_port: 31111, has_xray: true, rules: [],
@@ -3289,19 +3295,19 @@ ca_chain_rules() { jq -c '.routing.rules |= map(select((.ruleTag // "") | starts
 ca_outs() { jq -c '[.outbounds[] | "\(.tag):\(.settings.servers[0].port // .protocol)"]' "${CA_X}/chain_outbound.json"; }
 ca_re_hits() { jq -r --arg s "$1" '[.routing.rules[] | select(.user) | .user[] | ltrimstr("regexp:") as $re | $s | test($re)] | any' "${CA_X}/09_routing.json"; }
 
-# --- Xray 侧：单链路 ---
+# --- Xray 侧：只有一条出口 ---
 ca_reset
 printf '%s\n' '{"routing":{"rules":[{"type":"field","domain":["example.org"],"outboundTag":"IPv6_out"}]}}' >"${CA_X}/09_routing.json"
 _caOrig=$(cat "${CA_X}/09_routing.json")
-ca_single '{"accounts": {"alice": "direct", "a.b+c": "chain_outbound"}}'
+ca_single '{"accounts": {"alice": "direct", "a.b+c": "chain_1"}}'
 run_ca 'writeXrayChainConfig 31111' >/dev/null 2>&1
-assert_equals "0" "$?" "Xray 侧（单链路）：写入返回 0"
-assert_equals '["chain_proxy:31111","chain_direct:freedom"]' "$(ca_outs)" "Xray 侧（单链路）：默认桥的 chain_proxy 打头（第一个出站是默认），链式自己的直连排在后面，不另开桥"
-assert_equals '["chain_direct","chain_proxy","chain_proxy","chain_proxy"]' "$(ca_chain_rules '[.routing.rules[].outboundTag]')" \
-    "Xray 侧（单链路）：按账号 → gstatic 与兜底走链路；直连指向 chain_direct，不靠 WARP / IPv6 全局会删掉的 z_direct_outbound"
+assert_equals "0" "$?" "Xray 侧（一条出口）：写入返回 0"
+assert_equals '["chain_proxy:31111","chain_proxy_chain_1:31112","chain_direct:freedom"]' "$(ca_outs)" "Xray 侧（一条出口）：默认桥的 chain_proxy 打头（第一个出站是默认），链式自己的直连排在最后"
+assert_equals '["chain_direct","chain_proxy_chain_1","chain_proxy"]' "$(ca_chain_rules '[.routing.rules[].outboundTag]')" \
+    "Xray 侧（一条出口）：按账号 → 兜底进默认桥；直连指向 chain_direct，不靠 WARP / IPv6 全局会删掉的 z_direct_outbound"
 assert_equals '["local-block-port","local-block-ip"]' "$(jq -c '[.routing.rules[0:2][].ruleTag]' "${CA_X}/09_routing.json")" \
     "Xray 侧：写完当场把封本机的规则补在最前，不等下一次启动"
-assert_equals 'regexp:^a\.b\+c-[^-]*$' "$(ca_chain_rules '.routing.rules[] | select(.outboundTag == "chain_proxy" and .user) | .user[0]' | jq -r .)" "Xray 侧：账号名里的 . 与 + 转义"
+assert_equals 'regexp:^a\.b\+c-[^-]*$' "$(ca_chain_rules '.routing.rules[] | select(.outboundTag == "chain_proxy_chain_1" and .user) | .user[0]' | jq -r .)" "Xray 侧：账号名里的 . 与 + 转义"
 assert_equals "true" "$(ca_re_hits 'a.b+c-VLESS_WS')" "Xray 侧：正则命中这个账号带协议后缀的 email"
 assert_equals "false" "$(ca_re_hits 'axb+c-VLESS_WS')" "Xray 侧：. 不当通配（axb+c 不命中）"
 assert_equals "false" "$(ca_re_hits 'alice-x-VLESS_WS')" "Xray 侧：alice-x 这个别的账号不命中 alice 的规则"
@@ -3310,16 +3316,16 @@ run_ca 'writeXrayChainConfig 31111' >/dev/null 2>&1
 assert_equals "${_caOrig}" "$(cat "${CA_X}/09_routing.json.bak.chain")" "Xray 侧：再写一次不覆盖备份（否则拆链式时恢复出来的是链式路由）"
 printf '%s\n' '{"routing":{"rules":[{"type":"field","domain":["domain:gstatic.com"],"outboundTag":"z_direct_outbound"}]}}' >"${CA_X}/09_routing.json"
 run_ca 'writeXrayChainConfig 31111' >/dev/null 2>&1
-assert_equals '["chain_direct","chain_proxy","chain_proxy","chain_proxy"]' "$(ca_chain_rules '[.routing.rules[].outboundTag]')" \
+assert_equals '["chain_direct","chain_proxy_chain_1","chain_proxy"]' "$(ca_chain_rules '[.routing.rules[].outboundTag]')" \
     "Xray 侧：重装把 09_routing.json 换回模板后，下一次写入（每次启动前都有）把链式路由写回来"
 assert_equals "${_caOrig}" "$(cat "${CA_X}/09_routing.json.bak.chain")" "Xray 侧：写回时备份仍是最早的原路由"
 rm -f "${CA_X}/09_routing.json"
 run_ca 'writeXrayChainConfig 31111' >/dev/null 2>&1
-assert_equals '["chain_direct","chain_proxy","chain_proxy","chain_proxy"]' "$(ca_chain_rules '[.routing.rules[].outboundTag]')" \
+assert_equals '["chain_direct","chain_proxy_chain_1","chain_proxy"]' "$(ca_chain_rules '[.routing.rules[].outboundTag]')" \
     "Xray 侧：WARP / IPv6 全局删掉 09_routing.json 后同样写回"
 ca_single '{"default_chain": "direct"}'
 run_ca 'writeXrayChainConfig 31111' >/dev/null 2>&1
-assert_equals '["chain_direct","chain_direct"]' "$(ca_chain_rules '[.routing.rules[].outboundTag]')" "Xray 侧（单链路默认直连）：gstatic 与兜底都直连"
+assert_equals '["chain_proxy"]' "$(ca_chain_rules '[.routing.rules[].outboundTag]')" "Xray 侧（默认直连）：照样全进默认桥，直连由 sing-box 的默认出口定"
 printf '%s\n' '{broken' >"${CA_X}/zz_hand_written.json"
 assert_contains "$(run_ca 'writeXrayChainConfig 31111; echo rc=$?' 2>&1)" "rc=1" "Xray 侧：有 jq 读不了的片段时补不上封锁，返回 1 报出来，不静默跳过"
 rm -f "${CA_X}/zz_hand_written.json"
@@ -3330,7 +3336,7 @@ ca_multi '{"accounts": {"alice": "hk", "bob": "us", "carol": "direct"}}'
 run_ca 'writeXrayChainConfig 31111' >/dev/null 2>&1
 assert_equals '["chain_proxy:31111","chain_proxy_hk:31115","chain_proxy_us:31112","chain_direct:freedom"]' "$(ca_outs)" \
     "Xray 侧（多链路）：被引用的链路各开一条桥，端口是链路自己的 bridge_port；jp 没人用不开"
-assert_equals '["chain_direct","chain_proxy_hk","chain_proxy_us","chain_proxy","chain_proxy"]' "$(ca_chain_rules '[.routing.rules[].outboundTag]')" \
+assert_equals '["chain_direct","chain_proxy_hk","chain_proxy_us","chain_proxy"]' "$(ca_chain_rules '[.routing.rules[].outboundTag]')" \
     "Xray 侧（多链路）：指定的人各走各的桥，其余进默认桥由 sing-box 按域名分"
 assert_equals 'regexp:^alice-[^-]*$' "$(ca_chain_rules '.routing.rules[] | select(.outboundTag == "chain_proxy_hk") | .user[0]' | jq -r .)" "Xray 侧（多链路）：alice 的规则指向 hk 的桥"
 ca_multi '{"accounts": {"alice": "hk"}}'
@@ -3347,7 +3353,7 @@ assert_equals '["us=31112","hk=31115","jp=null"]' \
     "分配：本机已有进程在听的 31113、31114 跳过（sing-box 绑不上会直接退出，回滚到不了）"
 _caFull=$(jq -cn '{mode: "multi_chain", accounts: {alice: "new"}, chains: ([range(31112; 31211)] | to_entries | map({name: "c\(.key)", bridge_port: .value}) + [{name: "new"}])}')
 assert_contains "$(run_ca "chainAccountAssignPorts '${_caFull}'; echo rc=\$?" 2>&1)" "rc=5" "分配：31112-31210 全占满时报错，不越界"
-assert_equals '{"accounts":{"a":"chain_outbound"}}' "$(run_ca "chainAccountAssignPorts '{\"accounts\":{\"a\":\"chain_outbound\"}}'" 2>/dev/null)" "分配：单链路 / 多跳原样返回"
+assert_equals '{"accounts":{"a":"chain_outbound"}}' "$(run_ca "chainAccountAssignPorts '{\"accounts\":{\"a\":\"chain_outbound\"}}'" 2>/dev/null)" "分配：没有出口表的状态原样返回"
 
 # --- sing-box 侧：合并期注入（多链路，Xray 机上有桥与旁挂 6） ---
 ca_multi '{"accounts": {"alice": "hk", "bob": "us", "carol": "direct"}}'
@@ -3375,46 +3381,40 @@ jq '.outbounds = [{type: "direct", tag: "direct"}, {type: "socks", tag: "us"}]' 
 run_ca "chainAccountInject ${CA_MERGED} && directOutboundInject ${CA_MERGED}" >/dev/null 2>&1
 assert_equals '["direct","us"]' "$(jq -c '[.outbounds[].tag]' "${CA_MERGED}")" "合并：已有 direct 出站时不重复补"
 
-# --- sing-box 侧：sing-box 内核单链路，默认直连 ---
+# --- sing-box 侧：sing-box 内核、一条出口，默认直连 ---
 ca_reset
-ca_single '{"accounts": {"bob": "chain_outbound"}, "default_chain": "direct"}'
+ca_single '{"accounts": {"bob": "chain_1"}, "default_chain": "direct", "has_xray": false}'
 jq -n '{inbounds: [
         {type: "vless", tag: "VLESSReality", users: [{name: "bob-VLESS_Reality_Vision", uuid: "u"}, {name: "eve-VLESS_Reality_Vision", uuid: "u"}]},
         {type: "naive", tag: "naive-in", users: [{username: "bob-singbox_naive", password: "p"}]}],
-    route: {final: "chain_outbound"}}' >"${CA_MERGED}"
+    route: {final: "direct"}}' >"${CA_MERGED}"
 cp "${CA_MERGED}" "${CA_MERGED}.orig"
 run_ca "chainAccountInject ${CA_MERGED} && directOutboundInject ${CA_MERGED}" >/dev/null 2>&1
-assert_equals '[{"auth_user":["bob-VLESS_Reality_Vision","bob-singbox_naive"],"outbound":"chain_outbound"}]' "$(jq -c '.route.rules' "${CA_MERGED}")" \
+assert_equals '[{"auth_user":["bob-VLESS_Reality_Vision","bob-singbox_naive"],"outbound":"chain_1"}]' "$(jq -c '.route.rules' "${CA_MERGED}")" \
     "注入（sing-box 内核）：bob 在两个协议里的全名都进规则（naive 用 username）"
-assert_equals "direct" "$(jq -r '.route.final' "${CA_MERGED}")" "注入（单链路默认直连）：final 改成 direct"
 assert_equals '["direct"]' "$(jq -c '[.outbounds[].tag]' "${CA_MERGED}")" "合并（IPv6 全局删掉了 direct 出站）：补一个，final 与直连账号才有处可去"
 assert_equals "0" "$(jq '[.inbounds[] | select(.tag | startswith("chain_acct_in_"))] | length' "${CA_MERGED}")" "注入（sing-box 内核）：没有 Xray 的桥就不开新桥"
-jq -cn '{accounts: {bob: "chain_outbound"}}' >"${CA_ENTRY}"
+jq -cn '{chains: [{name: "chain_1", bridge_port: 31112}], accounts: {bob: "chain_1"}}' >"${CA_MULTI}"
 cp "${CA_MERGED}.orig" "${CA_MERGED}"
 run_ca "chainAccountInject ${CA_MERGED}" >/dev/null 2>&1
-assert_equals '["bob-VLESS_Reality_Vision","bob-singbox_naive"]' "$(jq -c '.route.rules[0].auth_user' "${CA_MERGED}")" "注入（状态缺 role）：照常读映射，不当成「不是入口」跳过"
+assert_equals '["bob-VLESS_Reality_Vision","bob-singbox_naive"]' "$(jq -c '.route.rules[0].auth_user' "${CA_MERGED}")" "注入（状态缺 role 与 mode）：照常读映射，不当成「不是入口」跳过"
 # sing-box 1.12.0–1.14.3 的 merge 把 naive 的用户写成 Go 字段名 Username / Password，1.14.4 起才是小写
 jq '.inbounds[1].users = [{Username: "bob-singbox_naive", Password: "p"}]' "${CA_MERGED}.orig" >"${CA_MERGED}"
 run_ca "chainAccountInject ${CA_MERGED}" >/dev/null 2>&1
 assert_equals '["bob-VLESS_Reality_Vision","bob-singbox_naive"]' "$(jq -c '.route.rules[0].auth_user' "${CA_MERGED}")" "注入（旧版 merge 的大写 Username）：naive 账号照样进规则，不落到默认出口"
 
-# --- 没有映射、external_single、坏状态 ---
+# --- 没有入口状态、坏状态 ---
 ca_reset
-printf '%s\n' '{"route":{"final":"chain_outbound"}}' >"${CA_MERGED}"
+printf '%s\n' '{"route":{"final":"direct"}}' >"${CA_MERGED}"
 _caBefore=$(cat "${CA_MERGED}")
 run_ca "chainAccountInject ${CA_MERGED}" >/dev/null 2>&1
 assert_equals "0|${_caBefore}" "$?|$(cat "${CA_MERGED}")" "注入（没有链式）：返回 0、合并结果原样"
-jq -cn '{role: "entry", mode: "external_single", accounts: {bob: "direct"}}' >"${CA_ENTRY}"
-run_ca "chainAccountInject ${CA_MERGED}" >/dev/null 2>&1
-assert_equals "0|${_caBefore}" "$?|$(cat "${CA_MERGED}")" "注入（external_single）：不支持的入口不注入"
-for _caBad in '{"role":' 'null' '{"role":"entry","accounts":{"bob":"nope"}}' '{"role":"entry","accounts":{"a*b":"direct"}}' \
-        '{"role":"entry","accounts":{"alice\n":"direct"}}' '{"role":"entry","default_chain":"us"}'; do
-    printf '%s\n' "${_caBad}" >"${CA_ENTRY}"
+for _caBad in '{"role":' 'null' '{"role":"entry","accounts":{"a*b":"direct"}}' '{"role":"entry","accounts":{"alice\n":"direct"}}' '{"role":"entry","accounts":{"bob":"nope"}}'; do
+    printf '%s\n' "${_caBad}" >"${CA_MULTI}"
     _out=$(run_ca "chainAccountInject ${CA_MERGED}; echo rc=\$?" 2>&1)
     assert_contains "${_out}" "rc=1" "注入（坏状态 ${_caBad}）：返回 1，合并随之失败而不是跳过映射"
 done
-assert_contains "${_out}" "default_chain=us" "注入（坏状态）：说出哪一项不合法"
-rm -f "${CA_ENTRY}"
+assert_contains "${_out}" "bob=nope" "注入（坏状态）：说出哪一项不合法"
 ca_multi '{"accounts": {"alice": "zz"}}'
 assert_contains "$(run_ca "chainAccountInject ${CA_MERGED}; echo rc=\$?" 2>&1)" "alice=zz" "注入（多链路指向不存在的链路）：返回 1 并列出"
 ca_multi '{"accounts": {"alice": "jp"}}'
@@ -3422,26 +3422,16 @@ assert_contains "$(run_ca "chainAccountInject ${CA_MERGED}; echo rc=\$?" 2>&1)" 
 jq '.chains[1].bridge_port = 31112 | .accounts = {alice: "hk"}' "${CA_MULTI}" >"${CA_MULTI}.t" && mv "${CA_MULTI}.t" "${CA_MULTI}"
 assert_contains "$(run_ca "chainAccountInject ${CA_MERGED}; echo rc=\$?" 2>&1)" "rc=1" "注入（两条链路同一个桥端口）：返回 1"
 
-# --- 换出口配置码带上映射 ---
-ca_reset
-jq -cn '{role: "entry", mode: "multi_hop", accounts: {alice: "direct"}, default_chain: "direct"}' >"${CA_ENTRY}"
-assert_equals '{"role":"entry","exit_ip":"203.0.113.5","accounts":{"alice":"direct"},"default_chain":"direct"}' \
-    "$(run_ca "chainAccountCarry '{\"role\":\"entry\",\"exit_ip\":\"203.0.113.5\"}'" 2>/dev/null)" "换配置码：旧的 accounts 与 default_chain 带到新状态"
-jq -cn '{role: "entry", mode: "external_single", accounts: {alice: "direct"}}' >"${CA_ENTRY}"
-assert_equals '{"role":"entry"}' "$(run_ca "chainAccountCarry '{\"role\":\"entry\"}'" 2>/dev/null)" "换配置码：external_single 的旧状态不带"
-printf '%s\n' '{"role":' >"${CA_ENTRY}"
-assert_contains "$(run_ca "chainAccountCarry '{\"role\":\"entry\"}'; echo rc=\$?" 2>&1)" "rc=1" "换配置码：旧状态读不懂就失败，不带着空映射继续（否则标了直连的人全进链路）"
-
 # --- 删账号连映射一起删 ---
 ca_reset
-ca_single '{"accounts": {"alice": "direct", "bob": "chain_outbound"}}'
+ca_single '{"accounts": {"alice": "direct", "bob": "chain_1"}}'
 printf '%s\n' '{"outbounds":[]}' >"${CA_X}/chain_outbound.json"
 run_ca 'chainAccountForget alice' >/dev/null 2>&1
-assert_equals '{"bob":"chain_outbound"}' "$(jq -c '.accounts' "${CA_ENTRY}")" "删账号：映射里的 alice 删掉（否则同名新账号会继承旧出口）"
+assert_equals '{"bob":"chain_1"}' "$(jq -c '.accounts' "${CA_MULTI}")" "删账号：映射里的 alice 删掉（否则同名新账号会继承旧出口）"
 assert_equals "false" "$(ca_re_hits 'alice-VLESS_WS')" "删账号：Xray 路由随之重写，alice 不再有规则"
-_caBefore=$(cat "${CA_ENTRY}")
+_caBefore=$(cat "${CA_MULTI}")
 run_ca 'chainAccountForget zed' >/dev/null 2>&1
-assert_equals "0|${_caBefore}" "$?|$(cat "${CA_ENTRY}")" "删账号：没映射的账号不碰状态"
+assert_equals "0|${_caBefore}" "$?|$(cat "${CA_MULTI}")" "删账号：没映射的账号不碰状态"
 
 # --- 链路名保留 direct、删链路前查映射 ---
 assert_equals "1 0" "$(run_ca 'validateChainName direct; a=$?; validateChainName us_west; echo "${a} $?"')" "链路名：direct 保留（它是直连的 tag，也是映射里「直连」的写法）"
@@ -3555,9 +3545,6 @@ ca_multi '{"default_chain": "us", "has_xray": false, "rules": [{"type": "preset"
 run_ca "${_caRoute}" >/dev/null 2>&1
 assert_equals "[{\"rule_set\":[\"geosite-github\",\"geosite-gitlab\",\"geosite-stackexchange\"],\"outbound\":\"us\"},${CA_LAZY},{\"rule_set\":[\"geoip-jp\"],\"outbound\":\"jp\"}]" \
     "$(jq -c '.route.rules' "${CA_F}/chain_route.json")" "惰性解析（sing-box 内核的多链路）：geoip 规则前也解析，本机入站的域名请求碰得上；geosite 规则集不算按 IP"
-_caEntryRoute=$(awk 'f && /^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{/ {exit} index($0, "writeChainEntryRoute() {") == 1 {f=1} f' install.sh)
-CA_ENTRY_ROUTE="${_caEntryRoute}" run_ca 'eval "${CA_ENTRY_ROUTE}"; writeChainEntryRoute true' >/dev/null 2>&1
-assert_equals "[${CA_SNIFF},{\"inbound\":[\"chain_bridge_in\"],\"outbound\":\"chain_outbound\"}]" "$(jq -c '.route.rules' "${CA_F}/chain_route.json")" "惰性解析（单链路）：桥上只 sniff"
 # ca_migrate JSON → 把 JSON 当旧版 chain_route.json 迁移两次，打印「结果|第一次提示条数|第二次提示条数|第二次是否逐字不变」
 ca_migrate() {
     local first second kept
@@ -3697,10 +3684,6 @@ assert_contains "${_out}" "节点 used 还是这些链路的出口：viaext" "�
 assert_equals "rc=1|n1,n2" "$(grep -o 'rc=[0-9]' <<<"${_out}")|$(jq -r '[.nodes[].id] | join(",")' "${CA_ROOT}/sing-box/conf/external_node_info.json")" "删外部节点（被链路引用）：返回 1，节点还在"
 printf '2\ny\n' | run_ca "${_caDel}" >/dev/null 2>&1
 assert_equals "n1" "$(jq -r '[.nodes[].id] | join(",")' "${CA_ROOT}/sing-box/conf/external_node_info.json")" "删外部节点（没人用）：照常删"
-rm -f "${CA_MULTI}"
-ca_single '{"mode": "external_single", "external_node_id": "n1"}'
-_out=$(printf '1\ny\n' | run_ca "${_caDel}" 2>&1)
-assert_contains "${_out}" "还是这些链路的出口：唯一出口" "删外部节点（配成唯一出口）：也拒绝"
 
 # --- 外部节点测试：TCP 通之后经节点真取一次出口 IP，认证不对要报失败 ---
 ca_reset
@@ -3723,7 +3706,7 @@ assert_equals "" "$(ls -A "${CA_ROOT}/tmp")" "外部节点测试：带凭据的�
 rm -f "${CA_ROOT}/sing-box/sing-box"
 assert_contains "$(printf '1\n' | run_ca "${_caExt}" 2>&1)" "只测了 TCP 端口" "外部节点测试（没装 sing-box）：如实说只测了端口"
 
-# --- 外部节点：加密方式菜单不进节点；Xray 上拒绝设为唯一出口；合并失败还原；旧版写坏的节点拦下 ---
+# --- 外部节点：加密方式菜单不进节点；旧版写坏的节点拦下 ---
 assert_equals "aes-256-gcm" "$(printf '2\n' | run_ca 'SS_METHODS=(aes-128-gcm aes-256-gcm); selectSSMethod' 2>/dev/null)" \
     "选加密方式：stdout 只有选中的方式，菜单文字不能被 \$() 一起存进节点"
 ca_ext_nodes() {
@@ -3733,42 +3716,67 @@ ca_ext_nodes() {
         {id: "n2", name: "old", type: "shadowsocks", server: "192.0.2.21", server_port: 8388, method: $bad, password: "p"}]}' \
         >"${CA_ROOT}/sing-box/conf/external_node_info.json"
 }
-ca_chain_files() { find "${CA_F}" -name 'chain_*' | wc -l | tr -d ' '; }
-_caSingle='listExternalNodes() { :; }; getExternalNodeCount() { echo 2; }; ensureSingBoxInstalled() { :; }; setupExternalAsSingleExit; echo rc=$?'
-
 ca_ext_nodes
-_out=$(printf '1\n' | run_ca "coreKind=1; ${_caSingle}" 2>&1)
-assert_equals "rc=1" "$(tail -n 1 <<<"${_out}")" "外部节点唯一出口（Xray）：拒绝，流量到不了 sing-box 片段，接了只会报成功"
-assert_contains "${_out}" "多链路" "外部节点唯一出口（Xray）：指向能用的多链路"
-assert_equals "0|no|" "$(ca_chain_files)|$([[ -f "${CA_ENTRY}" ]] && echo yes || echo no)|$(cat "${CA_CALLS}")" \
-    "外部节点唯一出口（Xray）：不写片段与状态，也不重载"
+_out=$(run_ca 'generateExternalOutboundConfig n2 x; echo "rc=$?"' 2>&1)
+assert_contains "${_out}" "删除后重新添加" "外部节点（旧版写坏的节点）：生成出站时拦下并说清楚怎么办"
 
+# --- 旧版入口状态（单链路、多跳、外部节点唯一出口）转成只有一条出口的入口：出口叫 chain_1，默认出口与账号映射照搬 ---
+# ca_migrate_entry OLD_STATE [OLD_FRAGMENT] → 以 OLD_STATE 为旧状态跑一次迁移，输出留在 _out，末行是「rc=返回值|是否真转了」
+ca_migrate_entry() {
+    ca_ext_nodes
+    printf '%s\n' "$1" >"${CA_ENTRY}"
+    printf '%s\n' "${2:-{\"outbounds\":[{\"type\":\"shadowsocks\",\"tag\":\"chain_outbound\"}]\}}" >"${CA_F}/chain_outbound.json"
+    _out=$(run_ca 'chainEntryMigrated=false; migrateChainEntryState; echo "rc=$?|${chainEntryMigrated}"' 2>&1)
+}
+ca_old_gone() { [[ ! -e "${CA_ENTRY}" && ! -e "${CA_F}/chain_outbound.json" ]] && echo gone || echo left; }
+ca_migrate_entry '{"schema_version":1,"role":"entry","exit_ip":"198.51.100.7","exit_port":5000,"method":"2022-blake3-aes-128-gcm","password":"k1","bridge_port":31111,"has_xray":true,"accounts":{"alice":"direct","bob":"chain_outbound"}}'
+assert_equals "rc=0|true|gone" "$(tail -n 1 <<<"${_out}")|$(ca_old_gone)" "迁移入口（单链路）：转了，旧状态与旧出站片段收掉"
+assert_equals '{"mode":"multi_chain","default_chain":"chain_1","has_xray":true,"accounts":{"alice":"direct","bob":"chain_1"},"chains":[{"name":"chain_1","ip":"198.51.100.7","port":5000,"method":"2022-blake3-aes-128-gcm","password":"k1","is_default":true,"bridge_port":31112}]}' \
+    "$(jq -c '{mode, default_chain, has_xray, accounts, chains}' "${CA_MULTI}")" "迁移入口（单链路）：出口叫 chain_1、仍是默认出口，指到链路的账号改指它并分到桥端口，直连的不变"
+assert_equals 'chain_1|198.51.100.7|5000|k1' "$(jq -r '.outbounds[-1] | "\(.tag)|\(.server)|\(.server_port)|\(.password)"' "${CA_F}/chain_outbound_chain_1.json")" "迁移入口（单链路）：出站片段按新名字重新生成"
+assert_equals "routeConfig" "$(cat "${CA_CALLS}")" "迁移入口：路由随之重新生成"
+assert_contains "${_out}" "[chain_1]" "迁移入口：告诉用户原来的出口现在叫什么"
+assert_equals "0" "$(grep -c '按协议分流' <<<"${_out}")" "迁移入口：没开过按协议分流的不提它"
+ca_migrate_entry '{"role":"entry","exit_ip":"198.51.100.7","exit_port":5000,"method":"m","password":"k1","has_xray":false,"default_chain":"direct","accounts":{"bob":"chain_outbound"}}'
+assert_equals 'direct|false|false|{"bob":"chain_1"}' "$(jq -r '"\(.default_chain)|\(.chains[0].is_default)|\(.has_xray)|\(.accounts | tojson)"' "${CA_MULTI}")" "迁移入口（默认直连）：默认出口仍是直连"
+ca_migrate_entry '{"role":"entry","mode":"multi_hop","hop_count":2,"hops":[{"ip":"192.0.2.1","port":40000,"key":"kr","method":"m"},{"ip":"198.51.100.30","port":44074,"key":"ke","method":"m"}],"has_xray":true}'
+assert_equals '["chain_1-hop-1:192.0.2.1:","chain_1:198.51.100.30:chain_1-hop-1"]|198.51.100.30:44074:ke' \
+    "$(jq -c '[.outbounds[] | "\(.tag):\(.server):\(.detour // "")"]' "${CA_F}/chain_outbound_chain_1.json")|$(jq -r '.chains[0] | "\(.ip):\(.port):\(.password)"' "${CA_MULTI}")" \
+    "迁移入口（多跳）：各跳照旧嵌套着拨（不然静默绕过中继），状态里记最后一跳"
+ca_migrate_entry '{"role":"entry","mode":"external_single","external_node_id":"n1","external_node_name":"good"}'
+assert_equals 'chain_1|external|n1|shadowsocks|192.0.2.20|chain_1' \
+    "$(jq -r '.chains[0] | "\(.name)|\(.source)|\(.external_node_id)|\(.external_type)|\(.ip)"' "${CA_MULTI}")|$(jq -r '.default_chain' "${CA_MULTI}")" "迁移入口（外部节点唯一出口）：转成一条外部节点出口，仍是默认"
+assert_equals 'shadowsocks|chain_1' "$(jq -r '.outbounds[0] | "\(.type)|\(.tag)"' "${CA_F}/chain_outbound_chain_1.json")" "迁移入口（外部节点唯一出口）：出站按节点重新生成"
+ca_migrate_entry '{"role":"entry","exit_ip":"198.51.100.7","exit_port":5000,"method":"m","password":"k1","default_chain":"direct","protocol_routing":{"enabled":true}}'
+assert_equals "chain_1" "$(jq -r '.default_chain' "${CA_MULTI}")" "迁移入口（开着按协议分流）：改成全部走这条出口，不是全部直连"
+assert_contains "${_out}" "「按协议分流」已下线" "迁移入口（开着按协议分流）：说明行为变了、该用什么"
+ca_migrate_entry '{"role":'
+assert_equals "rc=1|false|no" "$(tail -n 1 <<<"${_out}")|$([[ -e "${CA_MULTI}" ]] && echo yes || echo no)" "迁移入口（旧状态读不懂）：返回 1，不写新状态"
+ca_migrate_entry '{"role":"entry","mode":"external_single","external_node_id":"gone"}'
+assert_equals "rc=1|false|no|left" "$(tail -n 1 <<<"${_out}")|$([[ -e "${CA_MULTI}" ]] && echo yes || echo no)|$(ca_old_gone)" "迁移入口（外部节点已经不在）：返回 1，旧文件原样留着"
 ca_ext_nodes
-_out=$(printf '1\n' | run_ca "coreKind=2; ${_caSingle}" 2>&1)
-assert_equals "rc=0" "$(tail -n 1 <<<"${_out}")" "外部节点唯一出口（sing-box）：照常配置"
-assert_equals "external_single|chain_external_outbound|merge reloadCore" \
-    "$(jq -r .mode "${CA_ENTRY}")|$(jq -r .route.final "${CA_F}/chain_route.json")|$(paste -sd ' ' - <"${CA_CALLS}")" \
-    "外部节点唯一出口（sing-box）：状态、路由写好，合并后重载"
-
-ca_ext_nodes
-printf '{"old":1}\n' >"${CA_F}/chain_route.json"
-_out=$(printf '1\n' | CA_MERGE_RC=1 run_ca "coreKind=2; ${_caSingle}" 2>&1)
-assert_equals "rc=1" "$(tail -n 1 <<<"${_out}")" "外部节点唯一出口（合并失败）：报失败"
-assert_equals '{"old":1}|no|no|0' "$(cat "${CA_F}/chain_route.json")|$([[ -f "${CA_F}/chain_outbound.json" ]] && echo yes || echo no)|$([[ -f "${CA_ENTRY}" ]] && echo yes || echo no)|$(find "${CA_ROOT}" -maxdepth 1 -name '.txn.*' | wc -l | tr -d ' ')" \
-    "外部节点唯一出口（合并失败）：片段与状态还原、不留事务目录，否则此后每次合并都失败"
-
-ca_ext_nodes
-_out=$(printf '2\n' | run_ca "coreKind=2; ${_caSingle}" 2>&1)
-assert_equals "rc=1" "$(tail -n 1 <<<"${_out}")" "外部节点唯一出口（旧版写坏的节点）：拒绝"
-assert_contains "${_out}" "删除后重新添加" "外部节点唯一出口（旧版写坏的节点）：说清楚怎么办"
-assert_equals "0|" "$(ca_chain_files)|$(cat "${CA_CALLS}")" "外部节点唯一出口（旧版写坏的节点）：不写片段、不重载"
-
-ca_ext_nodes
-jq -cn '{role: "entry", mode: "external_single", external_node_name: "good"}' >"${CA_ENTRY}"
-_caProbe='chainExternalSingleOnXray && echo yes || echo no'
-assert_equals "yes|no" "$(run_ca "coreKind=1; ${_caProbe}")|$(run_ca "coreKind=2; ${_caProbe}")" "旧版留下的状态：只有 Xray 内核上才算没生效"
 ca_single '{}'
-assert_equals "no" "$(run_ca "coreKind=1; ${_caProbe}")" "旧版留下的状态：普通单链路入口不算"
+printf '%s\n' '{"role":"entry"}' >"${CA_ENTRY}"
+printf '%s\n' '{"outbounds":[]}' >"${CA_F}/chain_outbound.json"
+_caKept=$(cat "${CA_MULTI}")
+_out=$(run_ca 'chainEntryMigrated=false; migrateChainEntryState; echo "rc=$?|${chainEntryMigrated}"' 2>&1)
+assert_equals "rc=0|true|gone|same" "$(tail -n 1 <<<"${_out}")|$(ca_old_gone)|$([[ "${_caKept}" == "$(cat "${CA_MULTI}")" ]] && echo same || echo changed)" "迁移入口（上次转到一半）：新状态不动，把旧文件收掉"
+_out=$(run_ca 'chainEntryMigrated=false; migrateChainEntryState; echo "rc=$?|${chainEntryMigrated}"' 2>&1)
+assert_equals "rc=0|false" "$(tail -n 1 <<<"${_out}")" "迁移入口（没有旧状态）：什么都不做"
+# 合并路径：转了而 Xray 在跑，就把 Xray 一起重启（它的路由要和新合并出来的成对生效）；没转不碰 Xray
+ca_migrate_entry '{"role":"entry","exit_ip":"198.51.100.7","exit_port":5000,"method":"m","password":"k1","has_xray":true}'
+printf '%s\n' '{"role":"entry","exit_ip":"198.51.100.7","exit_port":5000,"method":"m","password":"k1","has_xray":true}' >"${CA_ENTRY}"
+rm -f "${CA_MULTI}" "${CA_F}/chain_outbound_chain_1.json"
+printf '%s\n' '{"outbounds":[]}' >"${CA_X}/chain_outbound.json"
+printf '#!/bin/sh\nexit 1\n' >"${CA_ROOT}/sing-box/sing-box" && chmod +x "${CA_ROOT}/sing-box/sing-box"
+: >"${CA_CALLS}"
+_caMergeEnv='eval "${CA_MERGE_FNS}"; xrayDaemonRunning() { true; }; handleXray() { echo "xray $1" >>"${CA_CALLS}"; }; singBoxMergeConfig; echo rc=$?'
+CA_MERGE_FNS="${_caMergeFns}" run_ca "${_caMergeEnv}" >/dev/null 2>&1
+assert_equals "routeConfig xray stop xray start|chain_1" "$(paste -sd ' ' - <"${CA_CALLS}")|$(jq -r '.chains[0].name' "${CA_MULTI}")" "迁移入口（合并路径）：转了、Xray 在跑时把 Xray 一起重启"
+: >"${CA_CALLS}"
+CA_MERGE_FNS="${_caMergeFns}" run_ca "${_caMergeEnv}" >/dev/null 2>&1
+assert_equals "" "$(cat "${CA_CALLS}")" "迁移入口（合并路径）：没有要转的就不碰 Xray"
+rm -f "${CA_ROOT}/sing-box/sing-box"
 
 # --- 多链路测试：按每条链路自己的出站真取出口 IP；密钥错、经中继的链路不再只看出口端口 ---
 ca_reset
@@ -3816,17 +3824,6 @@ assert_equals "0" "$(grep -c '单链路' <<<"${_out}")" "卸载链式（出口�
 printf '%s\n' '{"role":"relay"}' >"${CA_ROOT}/sing-box/conf/chain_relay_info.json"
 assert_contains "$(printf 'n\n' | run_ca "${_caRemove}"$'\n''removeChainProxy' 2>&1)" "中继节点" "卸载链式（中继机，留着旧的出口状态）：按中继说"
 
-# --- 多链路状态在时，单链路 / 多跳入口拒绝（否则留下两套入口状态） ---
-# 两个函数里的 heredoc 有顶格的 }，按下一个函数的开头截取
-_caEntrySetup=$(awk '/^(setupChainEntry|setupChainEntryMultiHop)\(\) \{/{f=1; print; next} f && /^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{/{f=0} f' install.sh)
-ca_reset
-ca_multi '{}'
-_out=$(run_ca "${_caEntrySetup}"$'\n''ensureSingBoxInstalled() { echo ensure >>"${CA_CALLS}"; }; setupChainEntry 198.51.100.9 5000 k m; echo rc=$?; setupChainEntryMultiHop; echo rc=$?' 2>&1)
-assert_equals "rc=1 rc=1" "$(grep -o 'rc=[0-9]' <<<"${_out}" | paste -sd ' ' -)" "单链路入口（已有多链路）：单跳与多跳都拒绝"
-assert_contains "${_out}" "请先卸载现有的多链路配置" "单链路入口（已有多链路）：说明要先卸载多链路"
-assert_equals "|no|no" "$(cat "${CA_CALLS}")|$([[ -f "${CA_F}/chain_outbound.json" ]] && echo yes || echo no)|$([[ -f "${CA_ENTRY}" ]] && echo yes || echo no)" \
-    "单链路入口（已有多链路）：不装 sing-box、不写出站片段与单链路状态"
-
 # --- 菜单 ---
 ca_reset
 _out=$(run_ca 'chainAccountExitMenu; echo rc=$?' 2>&1 </dev/null)
@@ -3836,21 +3833,19 @@ jq -n '{inbounds: [{tag: "a"}, {settings: {clients: [{email: "bob-vless_reality_
 jq -n '{inbounds: [{users: [{name: "carol-singbox_hysteria2"}]}]}' >"${CA_F}/06_hysteria2_inbounds.json"
 _out=$(printf '1\n2\n' | run_ca 'chainAccountExitMenu; echo rc=$?' 2>&1)
 assert_contains "${_out}" "没接进链路" "菜单（装了 Xray 协议、Xray 侧没接进链路）：拒绝，说明映射对 Xray 账号不起作用"
-assert_equals "rc=1|null" "$(grep -o 'rc=[0-9]' <<<"${_out}")|$(jq -r '.accounts.alice' "${CA_ENTRY}")" "菜单（Xray 侧没接上）：不写映射"
+assert_equals "rc=1|null" "$(grep -o 'rc=[0-9]' <<<"${_out}")|$(jq -r '.accounts.alice' "${CA_MULTI}")" "菜单（Xray 侧没接上）：不写映射"
 printf '%s\n' '{"outbounds":[]}' >"${CA_X}/chain_outbound.json"
 assert_equals "alice bob carol" "$(run_ca 'chainAccountAllNames' 2>/dev/null | paste -sd ' ' -)" "菜单：账号列表合并 Xray 与 sing-box 两边、去掉协议后缀"
 printf '1\n2\n' | run_ca 'chainAccountExitMenu' >/dev/null 2>&1
-assert_equals "direct|merge reloadCore" "$(jq -r '.accounts.alice' "${CA_ENTRY}")|$(paste -sd ' ' - <"${CA_CALLS}")" "菜单：alice → 直连，写入后合并并重载"
+assert_equals "direct|merge reloadCore" "$(jq -r '.accounts.alice' "${CA_MULTI}")|$(paste -sd ' ' - <"${CA_CALLS}")" "菜单：alice → 直连，写入后合并并重载"
 assert_equals "chain_direct" "$(ca_chain_rules '[.routing.rules[] | select(.user)][0].outboundTag' | jq -r .)" "菜单：Xray 路由随之有了 alice 的直连规则"
 assert_equals "yes" "$([[ -f "${CA_F}/01_direct_outbound.json" ]] && echo yes)" "菜单：sing-box 里补上 direct 出站（旁挂的 6 / 9 指定直连要用）"
-printf '0\n2\n' | run_ca 'chainAccountExitMenu' >/dev/null 2>&1
-assert_equals "direct|chain_direct" "$(jq -r '.default_chain' "${CA_ENTRY}")|$(ca_chain_rules '.routing.rules[-1].outboundTag' | jq -r .)" "菜单：默认出口改成直连，Xray 兜底随之直连"
 printf '1\n1\n' | run_ca 'chainAccountExitMenu' >/dev/null 2>&1
-assert_equals "false" "$(jq '(.accounts // {}) | has("alice")' "${CA_ENTRY}")" "菜单：alice 改回跟随默认"
-_caBefore=$(cat "${CA_ENTRY}")
+assert_equals "false" "$(jq '(.accounts // {}) | has("alice")' "${CA_MULTI}")" "菜单：alice 改回跟随默认"
+_caBefore=$(cat "${CA_MULTI}")
 _out=$(printf '2\n2\n' | CA_MERGE_RC=1 run_ca 'chainAccountExitMenu; echo rc=$?' 2>&1)
 assert_contains "${_out}" "改回原样" "菜单（合并失败）：提示没生效"
-assert_equals "${_caBefore}" "$(cat "${CA_ENTRY}")" "菜单（合并失败）：状态写回原样"
+assert_equals "${_caBefore}" "$(cat "${CA_MULTI}")" "菜单（合并失败）：状态写回原样"
 cat >"${CA_ROOT}/xray/xray" <<'EOF'
 #!/usr/bin/env bash
 case "$1 $2" in
@@ -3865,18 +3860,16 @@ _caRules=$(ca_chain_rules '.')
 _out=$(printf '2\n2\n' | XRAY_TEST_FAIL=once run_ca 'chainAccountExitMenu; echo rc=$?' 2>&1)
 assert_contains "${_out}" "unknown outbound tag" "菜单（Xray -test 不过）：打出 -test 的原因"
 assert_contains "${_out}" "改回原样" "菜单（Xray -test 不过）：提示没生效"
-assert_equals "${_caBefore}|${_caRules}" "$(cat "${CA_ENTRY}")|$(ca_chain_rules '.')" "菜单（Xray -test 不过）：状态与 Xray 路由都写回原样"
+assert_equals "${_caBefore}|${_caRules}" "$(cat "${CA_MULTI}")|$(ca_chain_rules '.')" "菜单（Xray -test 不过）：状态与 Xray 路由都写回原样"
 assert_equals "xraytest xraytest merge reloadCore" "$(paste -sd ' ' - <"${CA_CALLS}")" \
     "菜单（Xray -test 不过）：坏配置不合并不重载，写回的旧配置过了 -test 才重载"
 : >"${CA_CALLS}"
 printf '2\n2\n' | run_ca 'chainAccountExitMenu' >/dev/null 2>&1
-assert_equals "direct|xraytest merge reloadCore" "$(jq -r '.accounts.bob' "${CA_ENTRY}")|$(paste -sd ' ' - <"${CA_CALLS}")" \
+assert_equals "direct|xraytest merge reloadCore" "$(jq -r '.accounts.bob' "${CA_MULTI}")|$(paste -sd ' ' - <"${CA_CALLS}")" \
     "菜单（装了 Xray）：先 -test 再合并、重载"
 rm -f "${CA_ROOT}/xray/xray"
 assert_contains "$(printf '9\n' | run_ca 'chainAccountExitMenu; echo rc=$?' 2>&1)" "rc=1" "菜单：越界的编号拒绝"
-ca_single '{"protocol_routing": {"enabled": true}}'
-assert_contains "$(printf '9\n' | run_ca 'chainAccountExitMenu' 2>&1)" "已开启按协议分流" "菜单（开着按协议分流）：说明没指定的账号只有选中的协议走链路"
-rm -f "${CA_ENTRY}"
+rm -f "${CA_MULTI}"
 ca_multi '{}'
 printf '1\n4\n' | run_ca 'chainAccountExitMenu' >/dev/null 2>&1
 assert_equals "hk" "$(jq -r '.accounts.alice' "${CA_MULTI}")" "菜单（多链路）：出口列表是 跟随默认 / 直连 / 各条链路，第 4 项是 hk"
@@ -3995,7 +3988,7 @@ CA_ADDRS=
 # --- 卸载链式、又没有路由备份：默认路由只在直连出站还在时才指向它。规则指向不存在的出站，Xray 会直接断连接 ---
 run_remove_nobak() {
     ca_reset
-    printf '%s\n' '{"role":"entry"}' >"${CA_ROOT}/sing-box/conf/chain_entry_info.json"
+    printf '%s\n' '{"role":"entry","chains":[]}' >"${CA_MULTI}"
     printf '%s\n' '{"outbounds":[]}' >"${CA_X}/chain_outbound.json"
     [[ "$1" == direct ]] && printf '%s\n' '{"outbounds":[]}' >"${CA_X}/z_direct_outbound.json"
     printf 'y\n' | run_ca "${_caRemove}"$'\n''handleXray() { :; }; removeChainProxy' >/dev/null 2>&1
@@ -5398,7 +5391,7 @@ ah_src() {
         awk -v n="${n}" 'f && /^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{/ {exit} index($0, n "() {") == 1 {f=1} f' install.sh
     done
 }
-AH_NAMES="singBoxProbeExitIP testChainConnection getExternalNodeById initExternalNodeFile updateChainKey configureProtocolChainRouting applyProtocolChainRouting generateProtocolChainRoute saveProtocolRoutingPreference writeChainEntryRoute writeChainInfoAtomic multiChainRestoreAccounts chainAccountAssignPorts chainAccountReadState chainAccountStateFile setupMultiChainEntry removeUser shareQrCode removeSubscriptionFiles carpoolSubscribeMd5"
+AH_NAMES="singBoxProbeExitIP testChainConnection getExternalNodeById initExternalNodeFile updateChainKey writeChainInfoAtomic multiChainRestoreAccounts chainAccountAssignPorts chainAccountReadState setupMultiChainEntry removeUser shareQrCode removeSubscriptionFiles carpoolSubscribeMd5"
 AH_FN=$(ah_src ${AH_NAMES})
 assert_equals "$(wc -w <<<"${AH_NAMES}" | tr -d ' ')" "$(grep -cE '^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{$' <<<"${AH_FN}")" "链式与账号菜单：函数都抽到了"
 AH_ROOT="${MOCK_ROOT}/ah.root"
@@ -5424,19 +5417,7 @@ run_ah() {
         '"$1" 2>&1
 }
 
-# 外部节点当唯一出口时，测链路测的是节点本身
-ah_reset
-printf '%s\n' '{"role":"entry","mode":"external_single","external_node_id":"n1"}' >"${AH_CONF}/chain_entry_info.json"
-printf '%s\n' '{"nodes":[{"id":"n1","name":"hk","server":"node.example","server_port":8388}]}' >"${AH_CONF}/external_node_info.json"
-_out=$(run_ah 'testChainConnection; echo "rc=$?"' </dev/null)
-assert_contains "${_out}" "PROBE node.example:8388" "外部节点唯一出口（测链路）：探测的是节点的地址和端口"
-assert_equals "0" "$(grep -c 'null' <<<"${_out}")" "外部节点唯一出口（测链路）：不再显示 null:null"
-printf '%s\n' '{"nodes":[]}' >"${AH_CONF}/external_node_info.json"
-_out=$(run_ah 'testChainConnection; echo "rc=$?"' </dev/null)
-assert_contains "${_out}" "节点未找到" "外部节点唯一出口（测链路，节点已删）：说明找不到节点"
-assert_equals "rc=1|0" "$(tail -n 1 <<<"${_out}")|$(grep -c 'PROBE' <<<"${_out}")" "外部节点唯一出口（测链路，节点已删）：返回 1，不去探测"
-
-# 没有 Xray 桥的入口与中继：经 chain_outbound.json 里的出站真取出口 IP，不再只测首跳 TCP
+# 中继：经 chain_outbound.json 里的出站真取出口 IP，不再只测首跳 TCP
 # 假 sing-box（tools fetch -c CONF -o TAG URL）：选中的出站密码对、detour 也在、解析器是本地的，才「取到」出口 IP
 ah_fake_singbox() {
     printf '%s\n' '#!/bin/bash' \
@@ -5449,11 +5430,11 @@ ah_fake_singbox() {
 AH_PROBE='export TMPDIR="${PROXY_AGENT_DIR}/tmp"; _chainTCPProbe() { return 0; }; singBoxDaemonRunning() { return 0; }; timeout() { shift; "$@"; }; date() { echo 1000000000; }; testChainConnection; echo "rc=$?"'
 ah_reset
 ah_fake_singbox
-printf '%s\n' '{"role":"entry","mode":"single_hop","exit_ip":"198.51.100.7","exit_port":5000}' >"${AH_CONF}/chain_entry_info.json"
+printf '%s\n' '{"role":"relay","downstream_hops":[{"ip":"198.51.100.7","port":5000}]}' >"${AH_CONF}/chain_relay_info.json"
 printf '%s\n' '{"outbounds":[{"type":"shadowsocks","tag":"chain_outbound","server":"198.51.100.7","server_port":5000,"password":"right","domain_resolver":"google"}]}' >"${AH_FRAG}/chain_outbound.json"
 _out=$(run_ah "${AH_PROBE}" </dev/null)
-assert_contains "${_out}" "经链路取到出口 IP 203.0.113.5" "测链路（sing-box 内核单链路入口）：经链路取到出口 IP"
-assert_equals "rc=0|0" "$(tail -n 1 <<<"${_out}")|$(grep -c '客户端' <<<"${_out}")" "测链路（sing-box 内核单链路入口）：返回 0，不再叫人去客户端验证"
+assert_contains "${_out}" "经链路取到出口 IP 203.0.113.5" "测链路（中继，下游一跳）：经链路取到出口 IP"
+assert_equals "rc=0|0" "$(tail -n 1 <<<"${_out}")|$(grep -c '客户端' <<<"${_out}")" "测链路（中继，下游一跳）：返回 0，不再叫人去客户端验证"
 assert_equals "" "$(ls -A "${AH_ROOT}/tmp")" "测链路：带密钥的临时配置用完即删"
 jq -c '.outbounds[0].password = "wrong"' "${AH_FRAG}/chain_outbound.json" >"${AH_FRAG}/x" && mv "${AH_FRAG}/x" "${AH_FRAG}/chain_outbound.json"
 _out=$(run_ah "${AH_PROBE}" </dev/null)
@@ -5465,13 +5446,6 @@ printf '%s\n' '{"outbounds":[{"type":"shadowsocks","tag":"chain_hop_1","server":
     {"type":"shadowsocks","tag":"chain_outbound","server":"198.51.100.9","server_port":6001,"password":"right","detour":"chain_hop_1"}]}' >"${AH_FRAG}/chain_outbound.json"
 _out=$(run_ah "${AH_PROBE}" </dev/null)
 assert_equals "rc=0|1" "$(tail -n 1 <<<"${_out}")|$(grep -c '经链路取到出口 IP 203.0.113.5' <<<"${_out}")" "测链路（中继，下游两跳）：带着中间那一跳一起拨，取到出口 IP"
-ah_reset
-ah_fake_singbox
-printf '%s\n' '{"role":"entry","mode":"external_single","external_node_id":"n1"}' >"${AH_CONF}/chain_entry_info.json"
-printf '%s\n' '{"nodes":[{"id":"n1","name":"hk","server":"node.example","server_port":8388}]}' >"${AH_CONF}/external_node_info.json"
-printf '%s\n' '{"outbounds":[{"type":"shadowsocks","tag":"chain_external_outbound","server":"node.example","server_port":8388,"password":"right"}]}' >"${AH_FRAG}/chain_outbound.json"
-_out=$(run_ah "${AH_PROBE}" </dev/null)
-assert_equals "rc=0|1" "$(tail -n 1 <<<"${_out}")|$(grep -c '经链路取到出口 IP 203.0.113.5' <<<"${_out}")" "测链路（外部节点唯一出口）：经节点的出站取到出口 IP"
 
 # 中继上更新密钥：说清楚怎么换，不说没配置
 ah_reset
@@ -5482,52 +5456,6 @@ assert_equals "0" "$(grep -c '未配置链式代理' <<<"${_out}")" "中继（�
 ah_reset
 _out=$(run_ah 'updateChainKey' </dev/null)
 assert_contains "${_out}" "未配置链式代理" "没有链式配置（更新密钥）：照旧提示未配置"
-
-# 按协议分流：外部节点唯一出口拒绝；能开能关；合并失败原样还原
-ah_reset
-printf '%s\n' '{"role":"entry","mode":"external_single"}' >"${AH_CONF}/chain_entry_info.json"
-: >"${AH_FRAG}/chain_outbound.json"
-_out=$(run_ah 'configureProtocolChainRouting; echo "rc=$?"' </dev/null)
-assert_contains "${_out}" "外部节点当唯一出口时不支持按协议分流" "按协议分流（外部节点唯一出口）：拒绝并说明"
-assert_equals "rc=1|no" "$(tail -n 1 <<<"${_out}")|$([[ -f "${AH_FRAG}/chain_route.json" ]] && echo yes || echo no)" "按协议分流（外部节点唯一出口）：返回 1，不写路由"
-ah_reset
-jq -n '{role: "entry", mode: "multi_chain", chains: [{name: "a"}], rules: [], default_chain: "a"}' >"${AH_CONF}/chain_multi_info.json"
-_out=$(run_ah 'configureProtocolChainRouting; echo "rc=$?"' </dev/null)
-assert_contains "${_out}" "多链路模式不支持按协议分流" "按协议分流（多链路入口）：说清楚是多链路不支持，并指到分流规则与按账号选出口"
-assert_equals "rc=1|0" "$(tail -n 1 <<<"${_out}")|$(grep -c '不是入口节点' <<<"${_out}")" "按协议分流（多链路入口）：返回 1，不再说「不是入口节点」"
-
-ah_routing_setup() {
-    ah_reset
-    printf '%s\n' '{"role":"entry","mode":"single_hop"}' >"${AH_CONF}/chain_entry_info.json"
-    : >"${AH_FRAG}/chain_outbound.json"
-    printf '%s\n' '{"inbounds":[]}' >"${AH_FRAG}/07_VLESS_vision_reality_inbounds.json"
-    printf '%s\n' '{"route":{"final":"chain_outbound","default_domain_resolver":"google"}}' >"${AH_FRAG}/chain_route.json"
-}
-ah_routing_setup
-_before=$(cat "${AH_FRAG}/chain_route.json" "${AH_CONF}/chain_entry_info.json")
-_out=$(printf '1\ny\n' | AH_MERGE_FAIL=1 run_ah 'configureProtocolChainRouting; echo "rc=$?"')
-assert_equals "rc=1|0" "$(tail -n 1 <<<"${_out}")|$(grep -c RELOAD <<<"${_out}")" "按协议分流（开启时合并失败）：返回 1，不重载"
-assert_equals "${_before}" "$(cat "${AH_FRAG}/chain_route.json" "${AH_CONF}/chain_entry_info.json")" "按协议分流（开启时合并失败）：路由与状态逐字还原"
-_out=$(printf '0\n' | run_ah 'configureProtocolChainRouting; echo "rc=$?"')
-assert_equals "0" "$(grep -c '关闭按协议分流' <<<"${_out}")" "按协议分流（没开过）：菜单没有关闭项"
-assert_equals "rc=1" "$(tail -n 1 <<<"${_out}")" "按协议分流（没开过）：输入 0 算选错"
-_out=$(printf '1\ny\n' | run_ah 'configureProtocolChainRouting; echo "rc=$?"')
-assert_equals "rc=0|1" "$(tail -n 1 <<<"${_out}")|$(grep -c RELOAD <<<"${_out}")" "按协议分流（开启）：成功并重载"
-assert_equals 'direct|["VLESSReality"]|true' "$(jq -r '.route.final' "${AH_FRAG}/chain_route.json")|$(jq -c '.route.rules[0].inbound' "${AH_FRAG}/chain_route.json")|$(jq -r '.protocol_routing.enabled' "${AH_CONF}/chain_entry_info.json")" \
-    "按协议分流（开启）：选中的协议走链路，其余直连，状态记下"
-_before=$(cat "${AH_FRAG}/chain_route.json" "${AH_CONF}/chain_entry_info.json")
-_out=$(printf '0\n' | AH_MERGE_FAIL=1 run_ah 'configureProtocolChainRouting; echo "rc=$?"')
-assert_contains "${_out}" "0. 关闭按协议分流" "按协议分流（开过）：菜单有关闭项"
-assert_equals "${_before}" "$(cat "${AH_FRAG}/chain_route.json" "${AH_CONF}/chain_entry_info.json")" "按协议分流（关闭时合并失败）：路由与状态逐字还原"
-_out=$(printf '0\n' | run_ah 'configureProtocolChainRouting; echo "rc=$?"')
-assert_equals "rc=0|1" "$(tail -n 1 <<<"${_out}")|$(grep -c RELOAD <<<"${_out}")" "按协议分流（关闭）：成功并重载"
-assert_contains "${_out}" "按协议分流已关闭" "按协议分流（关闭）：告诉用户"
-assert_equals 'chain_outbound|null|null' "$(jq -r '.route.final' "${AH_FRAG}/chain_route.json")|$(jq -c '.route.rules' "${AH_FRAG}/chain_route.json")|$(jq -c '.protocol_routing' "${AH_CONF}/chain_entry_info.json")" \
-    "按协议分流（关闭）：路由写回全走链路，状态清掉"
-: >"${AH_FRAG}/chain_bridge_inbound.json"
-printf '%s\n' '{"role":"entry","mode":"single_hop","protocol_routing":{"enabled":true}}' >"${AH_CONF}/chain_entry_info.json"
-printf '0\n' | run_ah 'configureProtocolChainRouting' >/dev/null
-assert_equals '"chain_bridge_in"' "$(jq -c '.route.rules[0].inbound' "${AH_FRAG}/chain_route.json")" "按协议分流（关闭，有 Xray 桥）：路由带上桥的规则"
 
 # 重新配置多链路：账号的出口映射带过去，指向没了的当场列出；结果必须过映射校验，否则 sing-box 整个合并失败
 ah_multi_state() {
@@ -6162,7 +6090,7 @@ run_us() {
     echo '{"inbounds":[{"type":"hysteria2"}]}' >"${US_DIR}/sing-box/conf/config.json"
     if [[ -n "$1" ]]; then
         echo '{"inbounds":[{"type":"socks","tag":"chain_bridge_in"}]}' >"${US_DIR}/sing-box/conf/config/chain_bridge_inbound.json"
-        echo '{"role":"entry"}' >"${US_DIR}/sing-box/conf/chain_entry_info.json"
+        echo '{"role":"entry"}' >"${US_DIR}/sing-box/conf/chain_multi_info.json"
     fi
     [[ -n "$2" ]] && echo "$2" >"${US_DIR}/sing-box/conf/external_node_info.json"
     mkdir -p "${US_DIR}/etc/systemd/system" "${US_DIR}/etc/init.d"
@@ -6180,7 +6108,7 @@ run_us() {
         unInstallSingBox hysteria2
         cd "${SINGBOX_DIR}" && find . -type f | sort | paste -sd" " -' 2>&1
 }
-assert_equals "./conf/chain_entry_info.json ./conf/config/chain_bridge_inbound.json ./sing-box" "$(run_us chain)" \
+assert_equals "./conf/chain_multi_info.json ./conf/config/chain_bridge_inbound.json ./sing-box" "$(run_us chain)" \
     "Xray 机上卸 Hysteria2：链式的桥片段、入口状态与 sing-box 二进制都留着"
 assert_equals "" "$(run_us "")" "Xray 机上卸 Hysteria2、没有别的入站：sing-box 整个删掉"
 assert_equals "" "$(cd "${US_DIR}/etc" && find . -type f)" "没有别的入站：systemd 单元和 OpenRC 服务脚本都删掉"
@@ -6188,7 +6116,7 @@ US_NODES='{"nodes":[{"id":"n1","password":"secret"}]}'
 assert_equals "./conf/external_node_info.json" "$(run_us "" "${US_NODES}")" "卸掉最后一个入站：存着的外部节点留下，其余全删"
 assert_equals "secret" "$(jq -r '.nodes[0].password' "${US_DIR}/sing-box/conf/external_node_info.json")" "卸掉最后一个入站：节点内容原样"
 assert_equals "" "$(run_us "" '{"nodes":[]}')" "外部节点清单是空的：照样整个删掉，不留空目录之外的东西"
-assert_equals "./conf/chain_entry_info.json ./conf/config/chain_bridge_inbound.json ./conf/external_node_info.json ./sing-box" \
+assert_equals "./conf/chain_multi_info.json ./conf/config/chain_bridge_inbound.json ./conf/external_node_info.json ./sing-box" \
     "$(run_us chain "${US_NODES}")" "还有链式入站：外部节点清单和其余状态一样留着"
 
 # --- Xray 带域名重装换了域名：旁挂的 6 / 9 跟着换证书，不然按新域名校验必失败 ---
@@ -6490,41 +6418,12 @@ assert_equals 'WARP IPv6||false|解锁 DNS|203.x.x.x|false|本机 IPv4||false' "
     "路由总览（多链路）：WARP、解锁 DNS、本机 IPv4 出口各标自己的类型，解锁 DNS 带服务器地址（打码），都不标红"
 assert_equals "0" "$(grep -c 'pw-secret' <<<"${_tp}")" "路由总览（多链路）：WARP 的私钥不进模型"
 
-# 单链路与多跳：中继给的配置码带全部跳，出口标第一跳
-tp_reset
-jq -n '{role: "entry", exit_ip: "198.51.100.20", exit_port: 50080, key: "pw-secret-a", accounts: {alice: "direct"}}' >"${TP_C}/chain_entry_info.json"
-printf '%s\n' '{"outbounds":[{"tag":"chain_outbound"}]}' >"${TP_F}/chain_outbound.json"
-_tp=$(tp_model)
-assert_equals 'chain|全部|direct|null' "$(jq -r '"\(.flows[0].exit)|\(.flows[0].when)|\(.accounts[] | select(.name == "alice") | .exit)|\(.exits[] | select(.key == "chain") | .note)"' <<<"${_tp}")" \
-    "路由总览（单链路）：默认走链路，指定直连的账号单独走，没有中继"
-jq -n '{role: "entry", mode: "multi_hop", hop_count: 2, hops: [{ip: "192.0.2.1", port: 1000, key: "pw-secret-r", method: "m"}, {ip: "198.51.100.20", port: 50080, key: "pw-secret-a", method: "m"}], default_chain: "direct"}' >"${TP_C}/chain_entry_info.json"
-_tp=$(tp_model true)
-assert_equals '192.0.2.1|1000|下一跳是中继，共 2 跳|direct' "$(jq -r '"\(.exits[] | select(.key == "chain") | "\(.host)|\(.port)|\(.note)")|\(.flows[0].exit)"' <<<"${_tp}")" \
-    "路由总览（多跳）：标第一跳的地址并注明是中继；默认直连时全走直连"
-assert_equals "0" "$(grep -c 'pw-secret' <<<"${_tp}")" "路由总览（多跳）：模型里没有密钥"
-rm -f "${TP_F}/chain_outbound.json"
-assert_equals 'true' "$(tp_model | jq -r '.exits[] | select(.key == "chain") | .bad')" "路由总览（单链路）：出站配置不在就标红"
-
-# 外部节点当唯一出口：节点名来自导入链接的备注，常带别的服务器名或账号名，默认打码
-jq -n '{role: "entry", mode: "external_single", external_node_id: "n1", external_node_name: "jpowner-vless_reality_vision"}' >"${TP_C}/chain_entry_info.json"
-jq -n '{nodes: [{id: "n1", type: "vless", server: "198.51.100.50", server_port: 443, uuid: "uuid-secret-9"}]}' >"${TP_C}/external_node_info.json"
-_tp=$(TP_CORE=2 tp_model)
-assert_equals '外部节点 1|vless|198.x.x.x|0' "$(jq -r '(.exits[] | select(.key == "chain") | "\(.name)|\(.kind)|\(.host)") + "|" + (tostring | [match("jpowner|uuid-secret"; "g")] | length | tostring)' <<<"${_tp}")" \
-    "路由总览（外部节点）：默认不露节点名与地址，也不带 UUID"
-assert_equals 'jpowner-vless_reality_vision' "$(TP_CORE=2 tp_model true | jq -r '.exits[] | select(.key == "chain") | .name')" "路由总览（外部节点）：--full 显示节点名"
-rm -f "${TP_C}/external_node_info.json"
-
-# 按协议分流（sing-box 内核）：入站决定出口，选中的单独连线，其余走 final
+# sing-box 内核：入站里的密码和 UUID 不进模型
 tp_reset
 rm -f "${TP_X}"/*.json
-printf '%s\n' '{"outbounds":[{"tag":"chain_outbound"}]}' >"${TP_F}/chain_outbound.json"
 jq -n '{inbounds: [{listen_port: 443, tag: "VLESSReality", users: [{name: "alice-VLESS_Reality_Vision", uuid: "uuid-secret-1"}]}]}' >"${TP_F}/07_VLESS_vision_reality_inbounds.json"
 jq -n '{inbounds: [{listen_port: 2087, tag: "Hysteria2", users: [{name: "alice-Hysteria2", password: "pw-secret-h"}]}]}' >"${TP_F}/06_hysteria2_inbounds.json"
-jq -n '{route: {rules: [{inbound: ["Hysteria2"], outbound: "chain_outbound"}], final: "direct"}}' >"${TP_F}/chain_route.json"
-jq -n '{role: "entry", exit_ip: "198.51.100.20", exit_port: 50080, protocol_routing: {enabled: true, selection: "1", protocols: "Hysteria2"}}' >"${TP_C}/chain_entry_info.json"
 _tp=$(TP_CORE=2 tp_model)
-assert_equals '6|chain|按协议|direct|其余协议' "$(jq -r '"\(.inboundExits[0].inbound)|\(.inboundExits[0].exit)|\(.inboundExits[0].when)|\(.flows[0].exit)|\(.flows[0].when)"' <<<"${_tp}")" \
-    "路由总览（按协议分流）：选中的入站直接连到链路，其余协议走直连"
 assert_equals "0" "$(grep -c 'pw-secret\|uuid-secret' <<<"${_tp}")" "路由总览（sing-box）：模型里没有密码和 UUID"
 
 # 本机当链式出口或中继：多一个收别的机器流量的入站

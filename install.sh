@@ -561,7 +561,6 @@ if ! type t &>/dev/null; then
     MSG_CHAIN_MENU_TEST="测试链路连通性"
     MSG_CHAIN_MENU_ADVANCED="高级设置"
     MSG_CHAIN_MENU_UNINSTALL="卸载链式代理"
-    MSG_CHAIN_MENU_PROTOCOL_ROUTING="按协议分流设置"
     MSG_EXT_MENU_TITLE="外部节点管理"
     MSG_RECOMMENDED="推荐"
 
@@ -587,9 +586,6 @@ if ! type t &>/dev/null; then
     MSG_CHAIN_MULTI_TITLE="配置入口节点 (多链路分流模式)"
     MSG_CHAIN_MULTI_DESC="此模式允许将不同流量分流到不同的出口节点"
     MSG_CHAIN_MULTI_EXAMPLE="例如: Netflix → 美国出口, OpenAI → 香港出口"
-    MSG_CHAIN_SINGLE_EXISTS="检测到已存在单链路配置"
-    MSG_CHAIN_SINGLE_UNINSTALL_HINT="如需使用多链路分流模式，请先卸载现有链式代理配置"
-    MSG_CHAIN_MENU_PATH="菜单路径: 链式代理管理 → 卸载链式代理"
     MSG_CHAIN_MULTI_EXISTS="检测到已存在多链路配置"
     MSG_CHAIN_CONTINUE_ADD_NEW="继续添加新链路"
     MSG_CHAIN_RECONFIGURE="重新配置 (将清除现有配置)"
@@ -682,22 +678,6 @@ if ! type t &>/dev/null; then
     MSG_CHAIN_STATUS_DEFAULT_MARK="[默认]"
 
     # 协议分流相关
-    MSG_CHAIN_PROTOCOL_ROUTING_TITLE="按协议节点分流配置"
-    MSG_CHAIN_PROTOCOL_ROUTING_DESC="选择哪些协议的流量应通过链式代理"
-    MSG_CHAIN_PROTOCOL_ROUTING_DESC2="未选中的协议将直接连接"
-    MSG_CHAIN_PROTOCOL_NOT_ENTRY_NODE="当前不是入口节点，无法配置协议分流"
-    MSG_CHAIN_PROTOCOL_NO_CHAIN_OUTBOUND="未找到链式代理出站配置"
-    MSG_CHAIN_PROTOCOL_NO_PROTOCOLS="未安装任何协议"
-    MSG_CHAIN_PROTOCOL_SELECT_PROMPT="已安装的协议列表："
-    MSG_CHAIN_PROTOCOL_INPUT_HINT="请输入要通过链式代理的协议编号 (多选用逗号分隔，如: 1,2,3)"
-    MSG_CHAIN_PROTOCOL_NO_SELECTION="未选择任何协议"
-    MSG_CHAIN_PROTOCOL_INVALID_SELECTION="无效的选择"
-    MSG_CHAIN_PROTOCOL_SELECTED="已选择的协议"
-    MSG_CHAIN_PROTOCOL_CONFIRM="确认配置？"
-    MSG_CHAIN_PROTOCOL_RELOADING="正在重载配置..."
-    MSG_CHAIN_PROTOCOL_RELOAD_FAILED="配置重载失败"
-    MSG_CHAIN_PROTOCOL_SUCCESS="协议分流配置成功！"
-    MSG_CHAIN_PROTOCOL_SINGBOX_ONLY="按协议分流仅支持 sing-box 核心"
 
     # 后备 t() 函数
     t() {
@@ -2016,7 +1996,7 @@ showInstallStatus() {
 # 留下的那半再没有流量进来，链路静默失效。出口 / 中继只在 sing-box 片段里，换内核不受影响
 chainRefuseCoreSwitch() {
     [[ -n "${coreKind}" && "${coreKind}" != "$1" ]] || return 0
-    [[ -f "${CHAIN_ENTRY_INFO}" || -f "${CHAIN_MULTI_INFO}" ]] || return 0
+    [[ -f "${CHAIN_MULTI_INFO}" ]] || return 0
     echoContent red " ---> $(t CHAIN_REFUSE_CORE_SWITCH)"
     exit 1
 }
@@ -4602,6 +4582,15 @@ handleXray() {
         ensureXrayDirectStrategy
         ensureCorePortTargets || echoContent yellow " ---> $(t CORE_PORT_TARGET_FAILED)"
         ensureCarpoolXray
+        # 旧入口状态先转成现在的形状，转了就把 sing-box 一起重启：下面写的 Xray 路由要和它的路由成对生效
+        local chainEntryMigrated=false
+        if ! migrateChainEntryState; then
+            exit 1
+        fi
+        if [[ "${chainEntryMigrated}" == "true" ]] && singBoxDaemonRunning; then
+            handleSingBox stop
+            handleSingBox start
+        fi
         # 链式入口的路由每次启动前写回：重装的模板、WARP / IPv6 全局都会整份换掉 09_routing.json，指定了出口的人就静默走本机直连
         if [[ -f "${XRAY_CONF_DIR}/chain_outbound.json" ]] && ! writeXrayChainConfig "${CHAIN_BRIDGE_PORT}"; then
             echoContent red " ---> $(t XRAY_CHAIN_ROUTING_FAILED "${XRAY_CONF_DIR}/09_routing.json")"
@@ -5952,6 +5941,15 @@ singBoxMergeConfig() {
     local targetFile="${SINGBOX_MERGED_CONFIG}"
     local fragmentDir="${SINGBOX_FRAGMENT_DIR}/"
     local tmpFile mergeOutput mergeResult checkOutput checkResult
+
+    # 旧入口状态先转成现在的形状，转了就把 Xray 一起重启：它的路由要和这次合并出来的成对生效
+    local chainEntryMigrated=false
+    migrateChainEntryState || return 1
+    if [[ "${chainEntryMigrated}" == "true" && -f "${XRAY_CONF_DIR}/chain_outbound.json" ]] && xrayDaemonRunning; then
+        if ! (handleXray stop && handleXray start); then
+            return 1
+        fi
+    fi
 
     # 一次性迁移：移除已下线的「菜单 15 域名黑名单」遗留片段。
     # block 类 outbound 是 sing-box 1.11 起弃用的旧写法（1.14.4 的 check 还认），这些文件没有菜单管了，留着也用不上。
@@ -11734,16 +11732,13 @@ chainProxyMenu() {
     echoContent yellow "# 用于在多台境外VPS之间建立加密转发链路"
     echoContent yellow "# 支持多层中继: 入口 → 中继1 → 中继2 → ... → 出口 → 互联网"
     echoContent yellow "# 使用 Shadowsocks 2022 协议，加密安全、性能优秀\n"
-    chainExternalSingleOnXray && echoContent red " ---> $(t EXT_SINGLE_EXIT_XRAY_WARNING)\n"
-
     echoContent yellow "1.$(t CHAIN_MENU_WIZARD) [$(t RECOMMENDED)]"
     echoContent yellow "2.$(t CHAIN_MENU_STATUS)"
     echoContent yellow "3.$(t CHAIN_MENU_TEST)"
     echoContent yellow "4.$(t CHAIN_MENU_ADVANCED)"
     echoContent yellow "5.$(t CHAIN_MENU_UNINSTALL)"
     echoContent yellow "6.$(t EXT_MENU_TITLE)"
-    echoContent yellow "7.$(t CHAIN_MENU_PROTOCOL_ROUTING)"
-    echoContent yellow "8.$(t CHAIN_MENU_ACCOUNT_EXIT)"
+    echoContent yellow "7.$(t CHAIN_MENU_ACCOUNT_EXIT)"
 
     read -r -p "$(t PROMPT_SELECT):" selectType
 
@@ -11767,9 +11762,6 @@ chainProxyMenu() {
         externalNodeMenu
         ;;
     7)
-        configureProtocolChainRouting
-        ;;
-    8)
         chainAccountExitMenu
         ;;
     esac
@@ -11787,14 +11779,9 @@ chainProxyWizard() {
     echoContent yellow "  └─ 导入下游配置码，生成新配置码供上游使用"
     echoContent yellow "  └─ 支持多层中继: 入口→中继1→中继2→...→出口"
     echoContent yellow ""
-    echoContent yellow "3.入口节点 (Entry) - 单链路模式"
-    echoContent yellow "  └─ 导入出口或中继节点的配置码"
-    echoContent yellow ""
-    echoContent yellow "4.入口节点 (Entry) - 多链路分流模式"
-    echoContent yellow "  └─ 配置多条链路，按规则分流到不同出口"
-    echoContent yellow ""
-    echoContent yellow "5.手动配置入口节点"
-    echoContent yellow "  └─ 手动输入出口节点信息 (仅支持单跳)"
+    echoContent yellow "3.入口节点 (Entry) - 添加出口并按规则分流"
+    echoContent yellow "  └─ 出口可以是别的机器（配置码、外部节点），也可以是 WARP、本机 IPv4 / IPv6、解锁 DNS / SNI"
+    echoContent yellow "  └─ 只有一个出口时全部流量走它；不接别的机器也能用"
 
     read -r -p "请选择:" selectType
 
@@ -11806,13 +11793,7 @@ chainProxyWizard() {
         setupChainRelay
         ;;
     3)
-        setupChainEntryByCode
-        ;;
-    4)
         setupMultiChainEntry
-        ;;
-    5)
-        setupChainEntryManual
         ;;
     esac
 }
@@ -12543,72 +12524,6 @@ parseChainCode() {
     return 1
 }
 
-# 通过配置码配置入口节点
-setupChainEntryByCode() {
-    if planAction "$(t PLAN_CHAIN_ENTRY)"; then return 0; fi
-    echoContent skyBlue "\n配置入口节点 (Entry) - 配置码模式"
-    echoContent red "\n=============================================================="
-
-    echoContent yellow "请粘贴出口或中继节点的配置码:"
-    read -r -p "配置码:" chainCode
-
-    if [[ -z "${chainCode}" ]]; then
-        echoContent red " ---> 配置码不能为空"
-        return 1
-    fi
-
-    # 解析配置码 (支持 V1 单跳和 V2 多跳)
-    if ! parseChainCode "${chainCode}"; then
-        return 1
-    fi
-
-    # 根据跳数调用不同的配置函数
-    if [[ ${chainHopCount} -gt 1 ]]; then
-        # 多跳模式 - 使用全局 chainHops 变量
-        setupChainEntryMultiHop
-    else
-        # 单跳模式 - 向后兼容
-        setupChainEntry "${chainExitIP}" "${chainExitPort}" "${chainExitKey}" "${chainExitMethod}"
-    fi
-}
-
-# 手动配置入口节点
-setupChainEntryManual() {
-    if planAction "$(t PLAN_CHAIN_ENTRY)"; then return 0; fi
-    echoContent skyBlue "\n配置入口节点 (Entry) - 手动模式"
-    echoContent red "\n=============================================================="
-
-    read -r -p "出口节点IP:" chainExitIP
-    if [[ -z "${chainExitIP}" ]]; then
-        echoContent red " ---> IP不能为空"
-        return 1
-    fi
-    if ! isValidIP "${chainExitIP}"; then
-        echoContent red " ---> IP地址格式无效"
-        return 1
-    fi
-
-    read -r -p "出口节点端口:" chainExitPort
-    if [[ -z "${chainExitPort}" ]]; then
-        echoContent red " ---> 端口不能为空"
-        return 1
-    fi
-
-    read -r -p "密钥:" chainExitKey
-    if [[ -z "${chainExitKey}" ]]; then
-        echoContent red " ---> 密钥不能为空"
-        return 1
-    fi
-
-    echoContent yellow "\n加密方式 [回车默认: 2022-blake3-aes-128-gcm]"
-    read -r -p "加密方式:" chainExitMethod
-    if [[ -z "${chainExitMethod}" ]]; then
-        chainExitMethod="2022-blake3-aes-128-gcm"
-    fi
-
-    setupChainEntry "${chainExitIP}" "${chainExitPort}" "${chainExitKey}" "${chainExitMethod}"
-}
-
 # chainHopOutbounds HOPS [TAG HOP_PREFIX] → 多跳出站片段：第 i 跳经第 i-1 跳拨出，最后一跳叫 TAG（默认 chain_outbound），
 # 前面的叫 HOP_PREFIX+i（默认 chain_hop_）；HOPS 为空时失败。不能用 direct 出站加 detour 当别名：
 # sing-box 1.12 起拒绝（`detour` is not supported in direct context），整份配置合并失败
@@ -12851,56 +12766,15 @@ writeChainBridgeInbound() {
 EOF
 }
 
-# writeChainEntryRoute HAS_XRAY → 单链路 / 多跳入口的 chain_route.json，兜底都是 chain_outbound
-# 有桥时只 sniff、不解析：域名原样送给出口，由出口按自己的地址族策略解析；default_domain_resolver 1.13 起必填
-writeChainEntryRoute() {
-    if [[ "$1" == "true" ]]; then
-        cat <<EOF >"${SINGBOX_FRAGMENT_DIR}/chain_route.json"
-{
-    "route": {
-        "rules": [
-            { "inbound": "chain_bridge_in", "action": "sniff", "timeout": "1s" },
-            { "inbound": ["chain_bridge_in"], "outbound": "chain_outbound" }
-        ],
-        "final": "chain_outbound",
-        "default_domain_resolver": "google"
-    }
-}
-EOF
-    else
-        cat <<EOF >"${SINGBOX_FRAGMENT_DIR}/chain_route.json"
-{
-    "route": {
-        "final": "chain_outbound",
-        "default_domain_resolver": "google"
-    }
-}
-EOF
-    fi
-}
-
 # ======================= 按账号选出口 =======================
-# 映射 accounts {账号名: 出口} 存在入口的链式状态文件里，出口写 sing-box 出站 tag：direct、单链路 / 多跳的 chain_outbound、
-# 多链路的链路名；没写的账号走 default_chain（单链路 / 多跳缺省 chain_outbound）。被指定的账号以映射为终态，域名分流只管没指定的
+# 映射 accounts {账号名: 出口} 存在入口的状态文件 chain_multi_info.json 里，出口写 sing-box 出站 tag：direct 或出口名；
+# 没写的账号走 default_chain。被指定的账号以映射为终态，域名分流只管没指定的
 
-# chainAccountStateFile → 能按账号选出口的入口状态文件（多链路、单链路、多跳）；没有或明说是别的角色 / external_single 返回 1
-# 读不懂、缺 role 也照样打印路径，让 chainAccountReadState 报错或照常读映射，不当成「没有映射」
-chainAccountStateFile() {
-    if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
-        echo "${CHAIN_MULTI_INFO}"
-        return 0
-    fi
-    [[ -f "${CHAIN_ENTRY_INFO}" ]] || return 1
-    jq -e '((.role | type) == "string" and .role != "entry") or ((.mode | type) == "string" and .mode != "multi_hop")' \
-        "${CHAIN_ENTRY_INFO}" >/dev/null 2>&1 && return 1
-    echo "${CHAIN_ENTRY_INFO}"
-}
-
-# chainAccountReadState → 打印当前入口的链式状态（一行 JSON），没有能选出口的入口时打印 {}
+# chainAccountReadState → 打印入口的状态（一行 JSON），这台机器不是入口时打印 {}
 # 状态读不懂或映射不合法返回 1：调用方必须中止，跳过映射等于让指定了出口的人静默走默认出口
 chainAccountReadState() {
-    local file state invalid
-    if ! file=$(chainAccountStateFile); then
+    local file="${CHAIN_MULTI_INFO}" state invalid
+    if [[ ! -f "${file}" ]]; then
         echo '{}'
         return 0
     fi
@@ -12909,16 +12783,14 @@ chainAccountReadState() {
         return 1
     fi
     invalid=$(jq -r --argjson base "${CHAIN_BRIDGE_PORT}" --argjson last "${CHAIN_BRIDGE_PORT_LAST}" '
-        ((if .mode == "multi_chain" then [.chains[]? | select(.source != "sni") | .name] else ["chain_outbound"] end) + ["direct"]) as $exits
+        ([.chains[]? | select(.source != "sni") | .name] + ["direct"]) as $exits
         | ([(.accounts // {})[] | select(. != "direct")] | unique) as $refs
         | ( (.accounts // {}) | to_entries[]
             | select((.key | test("\\A[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}\\z") | not) or ((.value as $v | $exits | index($v)) == null))
             | "\(.key)=\(.value)" ),
-          ( select(.mode != "multi_chain" and .default_chain != null and .default_chain != "chain_outbound" and .default_chain != "direct")
-            | "default_chain=\(.default_chain)" ),
-          ( select(.mode == "multi_chain") | .chains[]? | select(.name as $n | $refs | index($n))
+          ( .chains[]? | select(.name as $n | $refs | index($n))
             | select((.bridge_port | type) != "number" or .bridge_port <= $base or .bridge_port > $last) | "bridge_port(\(.name))=\(.bridge_port)" ),
-          ( select(.mode == "multi_chain") | [.chains[]?.bridge_port | select(. != null)] | select(length != (unique | length))
+          ( [.chains[]?.bridge_port | select(. != null)] | select(length != (unique | length))
             | "bridge_port=\(.)" )' <<<"${state}" 2>&1) || invalid="${invalid:-accounts}"
     if [[ -n "${invalid}" ]]; then
         echoContent red " ---> $(t CHAIN_ACCOUNT_STATE_INVALID "${file}" "$(paste -sd ' ' - <<<"${invalid}")")" >&2
@@ -12927,22 +12799,20 @@ chainAccountReadState() {
     printf '%s\n' "${state}"
 }
 
-# chainAccountBridges STATE → 多链路里被映射引用的链路 [{name, port}]（按名字排序）；单链路 / 多跳返回 []
-# 端口是链路自己的 bridge_port，Xray 出站与 sing-box 入站都从这里取
+# chainAccountBridges STATE → 被映射引用的出口 [{name, port}]（按名字排序）
+# 端口是出口自己的 bridge_port，Xray 出站与 sing-box 入站都从这里取
 chainAccountBridges() {
-    jq -c 'if .mode == "multi_chain"
-        then ([(.accounts // {})[] | select(. != "direct")] | unique) as $refs
-            | [.chains[]? | select(.name as $n | $refs | index($n)) | {name, port: .bridge_port}] | sort_by(.name)
-        else [] end' <<<"$1"
+    jq -c '([(.accounts // {})[] | select(. != "direct")] | unique) as $refs
+        | [.chains[]? | select(.name as $n | $refs | index($n)) | {name, port: .bridge_port}] | sort_by(.name)' <<<"$1"
 }
 
-# chainAccountAssignPorts STATE → 给多链路里新被引用、还没有 bridge_port 的链路分一个空着的桥端口；分过的链路在就一直留着。
+# chainAccountAssignPorts STATE → 给新被引用、还没有 bridge_port 的出口分一个空着的桥端口；分过的出口在就一直留着。
 # 端口跟着链路不跟着排序：重载时两个内核先后重启，旧 sing-box 与新 Xray 端口对不上时只会连不上，不会进到别的出口。
 # 本机已有进程在听的端口也跳过：sing-box 绑不上是 exit 1，chainAccountSave 的回滚到不了
 chainAccountAssignPorts() {
     jq -c --argjson base "${CHAIN_BRIDGE_PORT}" --argjson last "$((TOPO_PAGE_PORT - 1))" \
         --argjson busy "$(listeningPorts tcp | jq -sc .)" '
-        if .mode != "multi_chain" then . else
+        if (.chains | type) != "array" then . else
             ([(.accounts // {})[] | select(. != "direct")] | unique) as $refs
             | reduce (.chains | to_entries[] | select((.value.name as $n | $refs | index($n)) and .value.bridge_port == null) | .key) as $i (.;
                 (([range($base + 1; $last + 1)] - [.chains[].bridge_port | select(. != null)] - $busy) | first) as $p
@@ -12962,15 +12832,12 @@ writeXrayChainConfig() {
         def socksOut($tag; $p): {tag: $tag, protocol: "socks", settings: {servers: [{address: "127.0.0.1", port: $p}]}};
         {outbounds: ([socksOut("chain_proxy"; $port)] + [$bridges[] | socksOut("chain_proxy_" + .name; .port)] + [{tag: "chain_direct", protocol: "freedom"}])}') || return 1
     routing=$(jq -n --argjson s "${state}" '
-        ($s.mode // "") as $mode
-        | (if $mode != "multi_chain" and $s.default_chain == "direct" then "chain_direct" else "chain_proxy" end) as $dflt
-        | {routing: {domainStrategy: "AsIs", rules: (
+        {routing: {domainStrategy: "AsIs", rules: (
             ([($s.accounts // {}) | to_entries[]
                 | {re: ("regexp:^" + ([.key | explode[] | if . == 46 or . == 43 then [92, .] else [.] end] | add | implode) + "-[^-]*$"),
-                   tag: (if .value == "direct" then "chain_direct" elif $mode == "multi_chain" then "chain_proxy_" + .value else "chain_proxy" end)}]
+                   tag: (if .value == "direct" then "chain_direct" else "chain_proxy_" + .value end)}]
                | group_by(.tag) | map({type: "field", user: map(.re), outboundTag: .[0].tag}))
-            + [{type: "field", domain: ["domain:gstatic.com", "domain:googleapis.com", "domain:googleapis.cn"], outboundTag: $dflt},
-               {type: "field", network: "tcp,udp", outboundTag: $dflt}])}}') || return 1
+            + [{type: "field", network: "tcp,udp", outboundTag: "chain_proxy"}])}}') || return 1
 
     if [[ "$(jq -cS . "${XRAY_CONF_DIR}/chain_outbound.json" 2>/dev/null)" != "$(jq -cS . <<<"${outbounds}")" ]]; then
         jsonWriteFile "${XRAY_CONF_DIR}/chain_outbound.json" "${outbounds}" false || return 1
@@ -12986,9 +12853,8 @@ writeXrayChainConfig() {
     ensureXrayLocalBlock
 }
 
-# chainAccountInject MERGED → 把映射写进合并后的 sing-box 配置，规则插在最前：多链路被引用的链路各一条桥（有 Xray 的桥时），
-# 再按 users[].name 全名匹配 sing-box 承载的用户（auth_user 只认全名，所以合并时现生成）。
-# 单链路 / 多跳 default_chain 为 direct 时 final 改成 direct。返回 1 时合并必须随之失败
+# chainAccountInject MERGED → 把映射写进合并后的 sing-box 配置，规则插在最前：被引用的出口各一条桥（有 Xray 的桥时），
+# 再按 users[].name 全名匹配 sing-box 承载的用户（auth_user 只认全名，所以合并时现生成）。返回 1 时合并必须随之失败
 chainAccountInject() {
     local merged=$1 state bridges out
     state=$(chainAccountReadState) || return 1
@@ -13012,22 +12878,8 @@ chainAccountInject() {
            + ($hits | group_by(.out) | map(pre({auth_user: map(.name)}; .[0].out)[]))) as $pre
         | .inbounds = ((.inbounds // []) + $inb)
         | .route.rules = ($pre + (.route.rules // []))
-        | (if ($s.mode // "") != "multi_chain" and $s.default_chain == "direct" then .route.final = "direct" else . end)
     ' "${merged}") || return 1
     jsonWriteFile "${merged}" "${out}" false
-}
-
-# chainAccountCarry INFO → 单链路 / 多跳的新状态带上旧状态的 accounts 与 default_chain；换出口配置码时不丢映射，
-# 否则标了直连的人会全进链路。旧状态读不懂返回 1，不带着空映射继续
-chainAccountCarry() {
-    local old='{}'
-    if [[ -f "${CHAIN_ENTRY_INFO}" ]] && ! old=$(jq -ce '
-            if (.role | type) == "string" and .role != "entry" or ((.mode | type) == "string" and .mode != "multi_hop") then {}
-            else {accounts, default_chain} | with_entries(select(.value != null)) end' "${CHAIN_ENTRY_INFO}" 2>/dev/null); then
-        echoContent red " ---> $(t CHAIN_ACCOUNT_CARRY_FAILED "${CHAIN_ENTRY_INFO}")" >&2
-        return 1
-    fi
-    jq -c --argjson old "${old}" '. + $old' <<<"$1"
 }
 
 # chainAccountApply → 映射或默认出口改过之后：Xray 侧（有的话）重写并过 -test，sing-box 重新合并（注入在合并里，合并自带 check），
@@ -13055,8 +12907,8 @@ chainAccountSave() {
 
 # chainAccountForget NAME → 账号删掉时连映射一起删，否则以后同名新建的账号会继承旧出口；调用方随后要 reloadCore
 chainAccountForget() {
-    local file state
-    file=$(chainAccountStateFile) || return 0
+    local file="${CHAIN_MULTI_INFO}" state
+    [[ -f "${file}" ]] || return 0
     state=$(chainAccountReadState) || return 1
     jq -e --arg n "$1" '(.accounts // {}) | has($n)' <<<"${state}" >/dev/null 2>&1 || return 0
     writeChainInfoAtomic "${file}" "$(jq -c --arg n "$1" 'del(.accounts[$n])' <<<"${state}")" || return 1
@@ -13084,21 +12936,19 @@ chainAccountAllNames() {
 chainAccountExitLabel() {
     case "$1" in
         direct) t CHAIN_ACCOUNT_DIRECT ;;
-        chain_outbound) t CHAIN_ACCOUNT_CHAIN ;;
         *) printf '%s\n' "$1" ;;
     esac
 }
 
-# chainAccountExitMenu → 菜单：给账号指定出口（直连、链路或多链路里的某条），或改回跟随默认
+# chainAccountExitMenu → 菜单：给账号指定出口（直连或某个出口），或改回跟随默认
 chainAccountExitMenu() {
-    local file state mode names name dflt i pick exitPick target new
+    local file="${CHAIN_MULTI_INFO}" state names name dflt i pick exitPick target new
     local -a nameList exitList
-    if ! file=$(chainAccountStateFile); then
+    if [[ ! -f "${file}" ]]; then
         echoContent red " ---> $(t CHAIN_ACCOUNT_NOT_ENTRY)"
         return 1
     fi
     state=$(chainAccountReadState) || return 1
-    mode=$(jq -r '.mode // ""' <<<"${state}")
     # 配链路时还没装 Xray 协议的话，Xray 一侧根本没接进链路，映射对 Xray 账号不起作用
     if xrayChainUnwired; then
         echoContent red " ---> $(t CHAIN_ACCOUNT_XRAY_UNWIRED)"
@@ -13111,18 +12961,11 @@ chainAccountExitMenu() {
     # 拼车停用中的成员不在入站里、chainAccountAllNames 看不到，恢复后照样按映射走，所以从拼车状态里补上
     mapfile -t nameList < <({ printf '%s\n' "${names}"; jq -r '(.accounts // {}) | keys[]' <<<"${state}"
         carpoolReadState 2>/dev/null | jq -r 'select(.enabled == true) | .members | keys[]'; } | grep -v '^$' | sort -u)
-    dflt=$(jq -r 'if .mode == "multi_chain" then (.default_chain // "direct") else (.default_chain // "chain_outbound") end' <<<"${state}")
+    dflt=$(jq -r '.default_chain // "direct"' <<<"${state}")
 
     echoContent skyBlue "\n$(t CHAIN_ACCOUNT_TITLE)"
     echoContent red "=============================================================="
-    if [[ "${mode}" == "multi_chain" ]]; then
-        echoContent yellow "$(t CHAIN_ACCOUNT_DEFAULT_LINE_MULTI "$(chainAccountExitLabel "${dflt}")")"
-    else
-        echoContent yellow "$(t CHAIN_ACCOUNT_DEFAULT_LINE "$(chainAccountExitLabel "${dflt}")")"
-    fi
-    if [[ "${mode}" != "multi_chain" && "${dflt}" != "direct" ]] && jq -e '.protocol_routing.enabled == true' <<<"${state}" >/dev/null 2>&1; then
-        echoContent yellow "$(t CHAIN_ACCOUNT_PROTOCOL_ROUTING_HINT)"
-    fi
+    echoContent yellow "$(t CHAIN_ACCOUNT_DEFAULT_LINE_MULTI "$(chainAccountExitLabel "${dflt}")")"
     echoContent yellow "$(t CHAIN_ACCOUNT_STRICT_HINT)\n"
     for i in "${!nameList[@]}"; do
         target=$(jq -r --arg n "${nameList[$i]}" '.accounts[$n]? // empty' <<<"${state}")
@@ -13132,22 +12975,8 @@ chainAccountExitMenu() {
     read -r -p "$(t PROMPT_SELECT):" pick
 
     if [[ "${pick}" == "0" ]]; then
-        if [[ "${mode}" == "multi_chain" ]]; then
-            setDefaultChain
-            return $?
-        fi
-        echoContent yellow "  1. $(t CHAIN_ACCOUNT_CHAIN)"
-        echoContent yellow "  2. $(t CHAIN_ACCOUNT_DIRECT)"
-        read -r -p "$(t PROMPT_SELECT):" exitPick
-        case "${exitPick}" in
-            1) target=chain_outbound ;;
-            2) target=direct ;;
-            *) echoContent red " ---> $(t INVALID_SELECTION)"; return 1 ;;
-        esac
-        new=$(jq -c --arg v "${target}" '.default_chain = $v' <<<"${state}") || return 1
-        chainAccountSave "${file}" "${new}" "${state}" || return 1
-        echoContent green " ---> $(t CHAIN_ACCOUNT_DEFAULT_SAVED "$(chainAccountExitLabel "${target}")")"
-        return 0
+        setDefaultChain
+        return $?
     fi
 
     if [[ ! "${pick}" =~ ^[1-9][0-9]*$ ]] || ((pick > ${#nameList[@]})); then
@@ -13156,11 +12985,7 @@ chainAccountExitMenu() {
     fi
     name=${nameList[$((pick - 1))]}
     exitList=("" direct)
-    if [[ "${mode}" == "multi_chain" ]]; then
-        mapfile -t -O 2 exitList < <(jq -r '.chains[]? | select(.source != "sni") | .name' <<<"${state}")
-    else
-        exitList+=(chain_outbound)
-    fi
+    mapfile -t -O 2 exitList < <(jq -r '.chains[]? | select(.source != "sni") | .name' <<<"${state}")
     echoContent yellow "\n$(t CHAIN_ACCOUNT_PICK_EXIT "${name}")"
     echoContent yellow "  1. $(t CHAIN_ACCOUNT_FOLLOW_DEFAULT)"
     for i in "${!exitList[@]}"; do
@@ -13184,297 +13009,6 @@ chainAccountExitMenu() {
     fi
     chainAccountSave "${file}" "${new}" "${state}" || return 1
     echoContent green " ---> $(t CHAIN_ACCOUNT_SAVED "${name}" "$(if [[ -n "${target}" ]]; then chainAccountExitLabel "${target}"; else t CHAIN_ACCOUNT_FOLLOW_DEFAULT; fi)")"
-}
-
-# 配置入口节点 - 多跳模式
-# 使用全局变量 chainHops (由 parseChainCode 设置)
-setupChainEntryMultiHop() {
-    local chainBridgePort=${CHAIN_BRIDGE_PORT}
-
-    # 多链路状态在的时候写单链路会留下两套入口状态，与多链路那边拒绝单链路对称
-    if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
-        echoContent yellow "$(t CHAIN_MULTI_EXISTS)"
-        echoContent yellow "$(t CHAIN_MULTI_UNINSTALL_HINT)"
-        echoContent yellow "$(t CHAIN_MENU_PATH)"
-        return 1
-    fi
-
-    # 确保 sing-box 已安装
-    if ! ensureSingBoxInstalled; then
-        return 1
-    fi
-
-    # 检查是否已存在链式代理配置
-    if [[ -f "${SINGBOX_FRAGMENT_DIR}/chain_outbound.json" ]]; then
-        echoContent yellow "\n检测到已存在链式代理配置"
-        read -r -p "是否覆盖现有配置？[y/n]:" confirmOverwrite
-        if ! isYesInput "${confirmOverwrite}"; then
-            return 0
-        fi
-    fi
-
-    echoContent yellow "\n正在配置入口节点 (多跳模式, ${chainHopCount}跳)..."
-
-    # 检测是否有 Xray 代理协议在运行
-    local hasXrayProtocols=false
-    # 扫描 xray/conf 下所有已注册代理协议(含 WS/XHTTP/HTTPUpgrade 等，见 lib/protocol-registry.sh)；
-    # 仅查 02/07/04 会漏掉 XHTTP 等 → hasXrayProtocols=false → 不建桥接/不改路由 → 链路静默失效
-    local _xrayProtos; _xrayProtos=$(scanInstalledProtocols "${XRAY_CONF_DIR}/")
-    if [[ -n "${_xrayProtos//,/}" ]]; then
-        hasXrayProtocols=true
-        echoContent green " ---> 检测到 Xray 代理协议，将同时配置 Xray 链式转发"
-    fi
-
-    # ============= sing-box 配置 =============
-
-    local chainOutboundJson
-    if ! chainOutboundJson=$(chainHopOutbounds "${chainHops}") || [[ -z "${chainOutboundJson}" ]]; then
-        echoContent red " ---> 链式出站配置生成失败"
-        return 1
-    fi
-    printf '%s\n' "${chainOutboundJson}" > ${SINGBOX_FRAGMENT_DIR}/chain_outbound.json
-
-    if [[ "${hasXrayProtocols}" == "true" ]]; then
-        writeChainBridgeInbound "${chainBridgePort}"
-    fi
-    writeChainEntryRoute "${hasXrayProtocols}"
-
-    # 保存配置信息（原子写入）
-    local __chainEntryInfo
-    __chainEntryInfo=$(cat <<EOF
-{
-    "schema_version": 1,
-    "role": "entry",
-    "mode": "multi_hop",
-    "hop_count": ${chainHopCount},
-    "hops": ${chainHops},
-    "bridge_port": ${chainBridgePort},
-    "has_xray": ${hasXrayProtocols}
-}
-EOF
-)
-    __chainEntryInfo=$(chainAccountCarry "${__chainEntryInfo}") || return 1
-    writeChainInfoAtomic "${CHAIN_ENTRY_INFO}" "${__chainEntryInfo}" || return 1
-
-    # 合并 sing-box 配置（统一走 singBoxMergeConfig，错误会带上 sing-box 实际报错前 20 行）
-    if ! singBoxMergeConfig; then
-        return 1
-    fi
-
-    # 启动 sing-box
-    echoContent yellow "正在启动 sing-box..."
-    handleSingBox stop
-    handleSingBox start
-
-    # 验证 sing-box 启动成功
-    sleep 1
-    if ! singBoxDaemonRunning; then
-        echoContent red " ---> sing-box 启动失败"
-        echoContent yellow "请手动执行: ${SINGBOX_BIN} run -c ${SINGBOX_MERGED_CONFIG}"
-        return 1
-    fi
-    echoContent green " ---> sing-box 启动成功"
-
-    # ============= Xray 配置 (如果存在) =============
-    if [[ "${hasXrayProtocols}" == "true" ]]; then
-        echoContent yellow "正在配置 Xray 链式转发..."
-        writeXrayChainConfig "${chainBridgePort}" || return 1
-
-        # 重启 Xray
-        echoContent yellow "正在重启 Xray..."
-        handleXray stop
-        handleXray start
-
-        sleep 1
-        if xrayDaemonRunning; then
-            echoContent green " ---> Xray 重启成功，链式转发已启用"
-        else
-            echoContent red " ---> Xray 重启失败"
-            echoContent yellow "请检查配置: ${XRAY_BIN} run -confdir ${XRAY_CONF_DIR}"
-            return 1
-        fi
-    fi
-
-    echoContent green "\n=============================================================="
-    echoContent green "入口节点配置完成！(多跳模式)"
-    echoContent green "=============================================================="
-
-    # 显示链路
-    echoContent yellow "\n当前链路 (${chainHopCount} 跳):"
-    if [[ "${hasXrayProtocols}" == "true" ]]; then
-        echoContent green "  客户端 → Xray → sing-box"
-    else
-        echoContent green "  客户端 → sing-box"
-    fi
-
-    i=1
-    while [[ $i -le ${chainHopCount} ]]; do
-        local hopIP hopPort
-        hopIP=$(echo "${chainHops}" | jq -r ".[$((i-1))].ip")
-        hopPort=$(echo "${chainHops}" | jq -r ".[$((i-1))].port")
-        if [[ $i -eq ${chainHopCount} ]]; then
-            echoContent green "           → 出口(${hopIP}:${hopPort}) → 互联网"
-        else
-            echoContent green "           → 中继${i}(${hopIP}:${hopPort})"
-        fi
-        ((i++))
-    done
-
-    # 自动测试连通性
-    echoContent yellow "\n正在测试链路连通性..."
-    sleep 2
-    testChainConnection
-}
-
-# 配置入口节点 (单跳模式，向后兼容)
-setupChainEntry() {
-    local exitIP=$1
-    local exitPort=$2
-    local exitKey=$3
-    local exitMethod=$4
-    local chainBridgePort=${CHAIN_BRIDGE_PORT}
-
-    # 多链路状态在的时候写单链路会留下两套入口状态，与多链路那边拒绝单链路对称
-    if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
-        echoContent yellow "$(t CHAIN_MULTI_EXISTS)"
-        echoContent yellow "$(t CHAIN_MULTI_UNINSTALL_HINT)"
-        echoContent yellow "$(t CHAIN_MENU_PATH)"
-        return 1
-    fi
-
-    # 确保 sing-box 已安装
-    if ! ensureSingBoxInstalled; then
-        return 1
-    fi
-
-    # 检查是否已存在链式代理出站
-    if [[ -f "${SINGBOX_FRAGMENT_DIR}/chain_outbound.json" ]]; then
-        echoContent yellow "\n检测到已存在链式代理配置"
-        read -r -p "是否覆盖现有配置？[y/n]:" confirmOverwrite
-        if ! isYesInput "${confirmOverwrite}"; then
-            return 0
-        fi
-    fi
-
-    echoContent yellow "\n正在配置入口节点..."
-
-    # 检测是否有 Xray 代理协议在运行
-    local hasXrayProtocols=false
-    # 扫描 xray/conf 下所有已注册代理协议(含 WS/XHTTP/HTTPUpgrade 等，见 lib/protocol-registry.sh)；
-    # 仅查 02/07/04 会漏掉 XHTTP 等 → hasXrayProtocols=false → 不建桥接/不改路由 → 链路静默失效
-    local _xrayProtos; _xrayProtos=$(scanInstalledProtocols "${XRAY_CONF_DIR}/")
-    if [[ -n "${_xrayProtos//,/}" ]]; then
-        hasXrayProtocols=true
-        echoContent green " ---> 检测到 Xray 代理协议，将同时配置 Xray 链式转发"
-    fi
-
-    # ============= sing-box 配置 =============
-
-    # 创建 Shadowsocks 出站 (到出口节点)
-    # exitIP / exitMethod / exitKey 来自 parseChainCode（V1 用正则切片）或用户手输（setupChainEntryManual），
-    # 字段里若含 " 或 \ 会破坏 heredoc JSON；走 jq -n + --arg 让 jq 自己 escape。
-    local _chainOutboundJson
-    if ! _chainOutboundJson=$(jq -n \
-            --arg server "${exitIP}" \
-            --argjson port "${exitPort}" \
-            --arg method "${exitMethod}" \
-            --arg password "${exitKey}" \
-            '{
-                outbounds: [{
-                    type: "shadowsocks",
-                    tag: "chain_outbound",
-                    server: $server,
-                    server_port: $port,
-                    method: $method,
-                    password: $password,
-                    multiplex: {
-                        enabled: true,
-                        protocol: "h2mux",
-                        max_connections: 4,
-                        min_streams: 4
-                    }
-                }]
-            }') || [[ -z "${_chainOutboundJson}" ]]; then
-        echoContent red " ---> 链式出站配置生成失败"
-        return 1
-    fi
-    printf '%s\n' "${_chainOutboundJson}" > ${SINGBOX_FRAGMENT_DIR}/chain_outbound.json
-
-    if [[ "${hasXrayProtocols}" == "true" ]]; then
-        writeChainBridgeInbound "${chainBridgePort}"
-    fi
-    writeChainEntryRoute "${hasXrayProtocols}"
-
-    # 保存配置信息（原子写入）
-    local __chainEntryInfo
-    __chainEntryInfo=$(cat <<EOF
-{
-    "schema_version": 1,
-    "role": "entry",
-    "exit_ip": "${exitIP}",
-    "exit_port": ${exitPort},
-    "method": "${exitMethod}",
-    "password": "${exitKey}",
-    "bridge_port": ${chainBridgePort},
-    "has_xray": ${hasXrayProtocols}
-}
-EOF
-)
-    __chainEntryInfo=$(chainAccountCarry "${__chainEntryInfo}") || return 1
-    writeChainInfoAtomic "${CHAIN_ENTRY_INFO}" "${__chainEntryInfo}" || return 1
-
-    # 合并 sing-box 配置（统一走 singBoxMergeConfig，错误会带上 sing-box 实际报错前 20 行）
-    if ! singBoxMergeConfig; then
-        return 1
-    fi
-
-    # 启动 sing-box
-    echoContent yellow "正在启动 sing-box..."
-    handleSingBox stop
-    handleSingBox start
-
-    # 验证 sing-box 启动成功
-    sleep 1
-    if ! singBoxDaemonRunning; then
-        echoContent red " ---> sing-box 启动失败"
-        echoContent yellow "请手动执行: ${SINGBOX_BIN} run -c ${SINGBOX_MERGED_CONFIG}"
-        return 1
-    fi
-    echoContent green " ---> sing-box 启动成功"
-
-    # ============= Xray 配置 (如果存在) =============
-    if [[ "${hasXrayProtocols}" == "true" ]]; then
-        echoContent yellow "正在配置 Xray 链式转发..."
-        writeXrayChainConfig "${chainBridgePort}" || return 1
-
-        # 重启 Xray
-        echoContent yellow "正在重启 Xray..."
-        handleXray stop
-        handleXray start
-
-        sleep 1
-        if xrayDaemonRunning; then
-            echoContent green " ---> Xray 重启成功，链式转发已启用"
-        else
-            echoContent red " ---> Xray 重启失败"
-            echoContent yellow "请检查配置: ${XRAY_BIN} run -confdir ${XRAY_CONF_DIR}"
-            return 1
-        fi
-    fi
-
-    echoContent green "\n=============================================================="
-    echoContent green "入口节点配置完成！"
-    echoContent green "=============================================================="
-    if [[ "${hasXrayProtocols}" == "true" ]]; then
-        echoContent yellow "流量路径: 客户端 → Xray → sing-box → 出口节点"
-    else
-        echoContent yellow "流量路径: 客户端 → sing-box → 出口节点"
-    fi
-
-    # 自动测试连通性
-    echoContent yellow "\n正在测试链路连通性..."
-    sleep 2
-    testChainConnection
 }
 
 # 查看链路状态
@@ -13570,68 +13104,6 @@ showChainStatus() {
         showRelayChainCode
 
     # 检查是否为入口节点
-    elif [[ -f "${CHAIN_ENTRY_INFO}" ]]; then
-        local mode
-        mode=$(jq -r '.mode // "single_hop"' ${CHAIN_ENTRY_INFO})
-
-        # 检查 sing-box 是否运行
-        if singBoxDaemonRunning; then
-            status="✅ 运行中"
-        else
-            status="❌ 未运行"
-        fi
-
-        if [[ "${mode}" == "multi_hop" ]]; then
-            role="入口节点 (Entry) - 多跳模式"
-            local hopCount hops
-            hopCount=$(jq -r '.hop_count' ${CHAIN_ENTRY_INFO})
-            hops=$(jq -r '.hops' ${CHAIN_ENTRY_INFO})
-
-            echoContent green "╔══════════════════════════════════════════════════════════════╗"
-            echoContent green "║                      链式代理状态                              ║"
-            echoContent green "╠══════════════════════════════════════════════════════════════╣"
-            echoContent yellow "  当前角色: ${role}"
-            echoContent yellow "  链路跳数: ${hopCount}"
-            echoContent yellow "  运行状态: ${status}"
-            echoContent green "╠══════════════════════════════════════════════════════════════╣"
-            echoContent yellow "  链路详情:"
-
-            local i=0
-            while [[ $i -lt ${hopCount} ]]; do
-                local hopIP hopPort
-                hopIP=$(echo "${hops}" | jq -r ".[$i].ip")
-                hopPort=$(echo "${hops}" | jq -r ".[$i].port")
-                if [[ $i -eq $((hopCount - 1)) ]]; then
-                    echoContent yellow "    → 出口(${hopIP}:${hopPort}) → 互联网"
-                else
-                    echoContent yellow "    → 中继$((i+1))(${hopIP}:${hopPort})"
-                fi
-                ((i++))
-            done
-            echoContent green "╚══════════════════════════════════════════════════════════════╝"
-        elif [[ "${mode}" == "external_single" ]]; then
-            echoContent green "╔══════════════════════════════════════════════════════════════╗"
-            echoContent green "║                      链式代理状态                              ║"
-            echoContent green "╠══════════════════════════════════════════════════════════════╣"
-            echoContent yellow "  当前角色: 入口节点 (Entry)"
-            echoContent yellow "  $(t EXT_SINGLE_EXIT_STATUS "$(jq -r '.external_node_name' "${CHAIN_ENTRY_INFO}")")"
-            echoContent yellow "  运行状态: ${status}"
-            chainExternalSingleOnXray && echoContent red "  $(t EXT_SINGLE_EXIT_XRAY_WARNING)"
-            echoContent green "╚══════════════════════════════════════════════════════════════╝"
-        else
-            role="入口节点 (Entry)"
-            exitIP=$(jq -r '.exit_ip' ${CHAIN_ENTRY_INFO})
-            exitPort=$(jq -r '.exit_port' ${CHAIN_ENTRY_INFO})
-
-            echoContent green "╔══════════════════════════════════════════════════════════════╗"
-            echoContent green "║                      链式代理状态                              ║"
-            echoContent green "╠══════════════════════════════════════════════════════════════╣"
-            echoContent yellow "  当前角色: ${role}"
-            echoContent yellow "  出口地址: ${exitIP}:${exitPort}"
-            echoContent yellow "  运行状态: ${status}"
-            echoContent green "╚══════════════════════════════════════════════════════════════╝"
-        fi
-
     else
         echoContent yellow "未配置链式代理"
         echoContent yellow "请使用 '快速配置向导' 进行配置"
@@ -13731,32 +13203,7 @@ testChainConnection() {
     local firstHopPort=""
     local role=""
 
-    if [[ -f "${CHAIN_ENTRY_INFO}" ]]; then
-        role="entry"
-        local mode
-        mode=$(jq -r '.mode // "single_hop"' ${CHAIN_ENTRY_INFO})
-
-        if [[ "${mode}" == "multi_hop" ]]; then
-            # 多跳模式，获取第一跳
-            firstHopIP=$(jq -r '.hops[0].ip' ${CHAIN_ENTRY_INFO})
-            firstHopPort=$(jq -r '.hops[0].port' ${CHAIN_ENTRY_INFO})
-        elif [[ "${mode}" == "external_single" ]]; then
-            # 外部节点当唯一出口：状态里只有节点 id，地址在节点列表里
-            local externalNode
-            externalNode=$(getExternalNodeById "$(jq -r '.external_node_id // empty' ${CHAIN_ENTRY_INFO})")
-            firstHopIP=$(jq -r '.server // empty' <<<"${externalNode}" 2>/dev/null)
-            firstHopPort=$(jq -r '.server_port // empty' <<<"${externalNode}" 2>/dev/null)
-            if [[ -z "${firstHopIP}" || -z "${firstHopPort}" ]]; then
-                echoContent red " ---> $(t EXT_NODE_NOT_FOUND)"
-                return 1
-            fi
-        else
-            # 单跳模式
-            firstHopIP=$(jq -r '.exit_ip' ${CHAIN_ENTRY_INFO})
-            firstHopPort=$(jq -r '.exit_port' ${CHAIN_ENTRY_INFO})
-        fi
-
-    elif [[ -f "${CHAIN_RELAY_INFO}" ]]; then
+    if [[ -f "${CHAIN_RELAY_INFO}" ]]; then
         role="relay"
         # 中继节点获取下游第一跳
         firstHopIP=$(jq -r '.downstream_hops[0].ip' ${CHAIN_RELAY_INFO})
@@ -13798,8 +13245,7 @@ testChainConnection() {
         return 1
     fi
 
-    # 测试2 走链路访问外网：必须经 sing-box 出口，直 curl 量到的是本机直连出口会假阳性。
-    # entry+Xray 走本机 SOCKS5 桥接口，测的是在跑的 sing-box；没有桥的入口与中继经 chain_outbound.json 里的出站取
+    # 测试2 走链路访问外网：必须经 chain_outbound.json 里的出站取，直 curl 量到的是本机直连出口，会假阳性
     echoContent yellow "测试2: 链路转发测试..."
 
     # 检查 sing-box 是否运行
@@ -13808,61 +13254,21 @@ testChainConnection() {
         return 1
     fi
 
-    local viaProxy=()
-    if [[ "${role}" == "entry" ]]; then
-        local hasXray bridgePort
-        hasXray=$(jq -r '.has_xray // false' ${CHAIN_ENTRY_INFO} 2>/dev/null)
-        bridgePort=$(jq -r '.bridge_port // empty' ${CHAIN_ENTRY_INFO} 2>/dev/null)
-        if [[ "${hasXray}" == "true" && -n "${bridgePort}" ]]; then
-            viaProxy=(--socks5 "127.0.0.1:${bridgePort}")
-        fi
-    fi
-
-    if [[ ${#viaProxy[@]} -gt 0 ]]; then
-        sleep 1
-        local outIP
-        outIP=$(curl -s --connect-timeout 10 "${viaProxy[@]}" https://api.ipify.org 2>/dev/null)
-
-        if [[ -n "${outIP}" ]]; then
-            echoContent green "  ✅ 链路转发正常"
-            echoContent green "  出口IP: ${outIP}"
-
-            # 测试延迟（同样走链路，否则量到的是直连延迟）
-            local startTime endTime latency
-            startTime=$(date +%s%N)
-            curl -s --connect-timeout 5 "${viaProxy[@]}" https://www.google.com >/dev/null 2>&1
-            endTime=$(date +%s%N)
-            latency=$(( (endTime - startTime) / 1000000 ))
-            echoContent green "  延迟: ${latency}ms"
-        else
-            echoContent red "  ❌ 链路转发失败"
-            echoContent red "  请检查各节点配置和网络"
-            return 1
-        fi
-
-        echoContent green "\n=============================================================="
-        echoContent green "链路测试通过！"
-        echoContent green "=============================================================="
+    local outIP startTime took
+    startTime=$(date +%s%N)
+    if outIP=$(singBoxProbeExitIP "$(jq -c '.outbounds' "${SINGBOX_FRAGMENT_DIR}/chain_outbound.json" 2>/dev/null)" chain_outbound); then
+        took=$(( ($(date +%s%N) - startTime) / 1000000 ))
+        echoContent green "  ✅ 链路转发正常"
+        echoContent green "  $(t CHAIN_TEST_PROBE_OK "${outIP}" "${took}")"
     else
-        local probeTag=chain_outbound outIP startTime took
-        if [[ "${role}" == "entry" && "$(jq -r '.mode // empty' "${CHAIN_ENTRY_INFO}" 2>/dev/null)" == "external_single" ]]; then
-            probeTag=chain_external_outbound
-        fi
-        startTime=$(date +%s%N)
-        if outIP=$(singBoxProbeExitIP "$(jq -c '.outbounds' "${SINGBOX_FRAGMENT_DIR}/chain_outbound.json" 2>/dev/null)" "${probeTag}"); then
-            took=$(( ($(date +%s%N) - startTime) / 1000000 ))
-            echoContent green "  ✅ 链路转发正常"
-            echoContent green "  $(t CHAIN_TEST_PROBE_OK "${outIP}" "${took}")"
-        else
-            echoContent red "  ❌ 链路转发失败"
-            echoContent red "  请检查各节点配置和网络"
-            return 1
-        fi
-
-        echoContent green "\n=============================================================="
-        echoContent green "链路测试通过！"
-        echoContent green "=============================================================="
+        echoContent red "  ❌ 链路转发失败"
+        echoContent red "  请检查各节点配置和网络"
+        return 1
     fi
+
+    echoContent green "\n=============================================================="
+    echoContent green "链路测试通过！"
+    echoContent green "=============================================================="
 }
 
 # 高级设置
@@ -13971,8 +13377,6 @@ updateChainKey() {
 
     elif [[ -f "${CHAIN_RELAY_INFO}" ]]; then
         echoContent yellow " ---> $(t CHAIN_KEY_UPDATE_RELAY)"
-    elif [[ -f "${CHAIN_ENTRY_INFO}" ]]; then
-        echoContent red " ---> 入口节点请从出口节点获取新配置码后重新配置"
     else
         echoContent red " ---> 未配置链式代理"
     fi
@@ -14076,9 +13480,7 @@ removeChainProxy() {
     echoContent skyBlue "\n卸载链式代理"
     echoContent red "\n=============================================================="
 
-    # 检测链式代理模式
     local isMultiChain=false
-    local isSingleChain=false
 
     if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
         isMultiChain=true
@@ -14086,14 +13488,9 @@ removeChainProxy() {
         chainCount=$(jq -r '.chains | length' ${CHAIN_MULTI_INFO} 2>/dev/null || echo "0")
         echoContent yellow "\n检测到多链路分流模式，共 ${chainCount} 条链路"
     elif [[ -f "${CHAIN_RELAY_INFO}" ]]; then
-        isSingleChain=true
         echoContent yellow "\n$(t CHAIN_REMOVE_ROLE_RELAY)"
     elif [[ -f "${CHAIN_EXIT_INFO}" ]]; then
-        isSingleChain=true
         echoContent yellow "\n$(t CHAIN_REMOVE_ROLE_EXIT)"
-    elif [[ -f "${CHAIN_ENTRY_INFO}" ]]; then
-        isSingleChain=true
-        echoContent yellow "\n检测到单链路模式"
     else
         echoContent red "\n未检测到链式代理配置"
         return 0
@@ -14104,7 +13501,7 @@ removeChainProxy() {
         return 0
     fi
 
-    # 删除 sing-box 配置文件 - 单链路模式
+    # 出口 / 中继的片段、各角色的状态文件（含旧版入口留下的 chain_entry_info.json）
     rm -f ${SINGBOX_FRAGMENT_DIR}/chain_inbound.json
     rm -f ${SINGBOX_FRAGMENT_DIR}/chain_outbound.json
     rm -f ${SINGBOX_FRAGMENT_DIR}/chain_route.json
@@ -14174,266 +13571,60 @@ removeChainProxy() {
     echoContent green " ---> 链式代理已卸载"
 }
 
-# ======================= 按协议分流功能 =======================
-
-# 生成协议分流路由配置
-# 参数: $@ - 要走链式代理的 inbound tag 列表
-generateProtocolChainRoute() {
-    local selectedTags=("$@")
-    local inboundArray
-    local routeConfig
-
-    # 构建 JSON 数组
-    inboundArray=$(printf '"%s",' "${selectedTags[@]}")
-    inboundArray="[${inboundArray%,}]"
-
-    # 检查是否存在 bridge inbound（Xray 桥接）
-    local hasBridge=false
-    if [[ -f "${SINGBOX_FRAGMENT_DIR}/chain_bridge_inbound.json" ]]; then
-        hasBridge=true
-    fi
-
-    if [[ "${hasBridge}" == "true" ]]; then
-        # 包含 bridge inbound 的路由配置
-        # default_domain_resolver 见 chainExit 注释，1.13 起必填
-        routeConfig=$(cat <<EOF
-{
-    "route": {
-        "rules": [
-            {
-                "inbound": ["chain_bridge_in"],
-                "outbound": "chain_outbound"
-            },
-            {
-                "inbound": ${inboundArray},
-                "outbound": "chain_outbound"
-            }
-        ],
-        "final": "direct",
-        "default_domain_resolver": "google"
-    }
-}
-EOF
-)
-    else
-        # 标准路由配置
-        routeConfig=$(cat <<EOF
-{
-    "route": {
-        "rules": [
-            {
-                "inbound": ${inboundArray},
-                "outbound": "chain_outbound"
-            }
-        ],
-        "final": "direct",
-        "default_domain_resolver": "google"
-    }
-}
-EOF
-)
-    fi
-
-    echo "${routeConfig}" | jq . > ${SINGBOX_FRAGMENT_DIR}/chain_route.json
-}
-
-# 保存协议分流偏好设置
-saveProtocolRoutingPreference() {
-    local selection="$1"
-    local protocolNames="$2"
-    local entryInfo="${CHAIN_ENTRY_INFO}"
-
-    if [[ -f "${entryInfo}" ]]; then
-        local updatedInfo
-        updatedInfo=$(jq --arg sel "${selection}" --arg names "${protocolNames}" \
-            '. + {protocol_routing: {enabled: true, selection: $sel, protocols: $names}}' \
-            "${entryInfo}")
-        echo "${updatedInfo}" | jq . > "${entryInfo}"
-    fi
-}
-
-# 按协议分流配置主函数
-configureProtocolChainRouting() {
-    echoContent skyBlue "\n$(t CHAIN_PROTOCOL_ROUTING_TITLE)"
-    echoContent red "\n=============================================================="
-    echoContent yellow "$(t CHAIN_PROTOCOL_ROUTING_DESC)"
-    echoContent yellow "$(t CHAIN_PROTOCOL_ROUTING_DESC2)\n"
-
-    # 检查是否运行 sing-box 核心
-    if [[ ! -f "${SINGBOX_BIN}" ]]; then
-        echoContent red " ---> $(t CHAIN_PROTOCOL_SINGBOX_ONLY)"
-        return 1
-    fi
-
-    # 多链路入口没有 chain_entry_info.json，不先判就会落进下面「不是入口节点」那句
+# migrateChainEntryState → 旧版的单链路 / 多跳 / 外部节点唯一出口入口（chain_entry_info.json）转成只有一条出口 chain_1 的入口状态，
+# 默认出口与账号映射照搬；按协议分流已下线，开着它的改成全部走这条出口。真转了就置 chainEntryMigrated=true，调用方要让两个内核
+# 一起重启：只重启一个时另一个还按旧路由送流量，指定走链路的账号会落到默认出口（可能是本机直连）
+migrateChainEntryState() {
+    local old mode name=chain_1 hops entry="" fragment="" state nodeId
+    [[ -f "${CHAIN_ENTRY_INFO}" ]] || return 0
     if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
-        echoContent red " ---> $(t CHAIN_PROTOCOL_MULTI_UNSUPPORTED)"
-        return 1
-    fi
-
-    # 检查是否为入口节点
-    if [[ ! -f "${CHAIN_ENTRY_INFO}" ]]; then
-        echoContent red " ---> $(t CHAIN_PROTOCOL_NOT_ENTRY_NODE)"
-        return 1
-    fi
-
-    # 外部节点唯一出口的出站 tag 不是 chain_outbound，这里写的路由指向不存在的出站，合并必失败
-    if [[ "$(jq -r '.mode // empty' "${CHAIN_ENTRY_INFO}" 2>/dev/null)" == "external_single" ]]; then
-        echoContent red " ---> $(t CHAIN_PROTOCOL_EXTERNAL_UNSUPPORTED)"
-        return 1
-    fi
-
-    # 检查链式代理出站是否已配置
-    if [[ ! -f "${SINGBOX_FRAGMENT_DIR}/chain_outbound.json" ]]; then
-        echoContent red " ---> $(t CHAIN_PROTOCOL_NO_CHAIN_OUTBOUND)"
-        return 1
-    fi
-
-    # 获取已安装的协议（sing-box）
-    local cfgPath="${SINGBOX_FRAGMENT_DIR}/"
-    local installedProtocols=""
-    local protocolCount=0
-
-    # 扫描 sing-box 配置文件
-    for configFile in "${cfgPath}"*_inbounds.json "${cfgPath}"*_inbounds_s.json; do
-        [[ ! -f "${configFile}" ]] && continue
-        local filename
-        filename=$(basename "${configFile}")
-        # 跳过链式代理相关的 inbound
-        [[ "${filename}" == *chain* ]] && continue
-
-        local protocolId
-        protocolId=$(parseProtocolIdFromFileName "${filename}")
-        [[ -z "${protocolId}" ]] && continue
-
-        installedProtocols="${installedProtocols}${protocolId}\n"
-        ((protocolCount++))
-    done
-
-    if [[ ${protocolCount} -eq 0 ]]; then
-        echoContent red " ---> $(t CHAIN_PROTOCOL_NO_PROTOCOLS)"
-        return 1
-    fi
-
-    # 显示已安装的协议列表
-    echoContent yellow "$(t CHAIN_PROTOCOL_SELECT_PROMPT)"
-    echoContent yellow "--------------------------------------------------------------"
-
-    local idx=1
-    local protocolMap=""
-    while IFS= read -r protocolId; do
-        [[ -z "${protocolId}" ]] && continue
-        local displayName
-        displayName=$(getProtocolDisplayName "${protocolId}")
-        local inboundTag
-        inboundTag=$(getProtocolInboundTag "${protocolId}")
-
-        [[ -z "${inboundTag}" ]] && continue
-
-        echoContent yellow "${idx}. ${displayName} [tag: ${inboundTag}]"
-        protocolMap="${protocolMap}${idx}:${protocolId}:${inboundTag},"
-        ((idx++))
-    done <<< "$(echo -e "${installedProtocols}" | sort -n | uniq)"
-
-    local routingEnabled=false
-    jq -e '.protocol_routing.enabled == true' "${CHAIN_ENTRY_INFO}" >/dev/null 2>&1 && routingEnabled=true
-    [[ "${routingEnabled}" == "true" ]] && echoContent yellow "0. $(t CHAIN_PROTOCOL_DISABLE)"
-
-    echoContent yellow "--------------------------------------------------------------"
-    echoContent yellow "$(t CHAIN_PROTOCOL_INPUT_HINT)"
-
-    # 读取用户选择
-    local userSelection
-    read -r -p "$(t PROMPT_SELECT):" userSelection
-
-    if [[ -z "${userSelection}" ]]; then
-        echoContent red " ---> $(t CHAIN_PROTOCOL_NO_SELECTION)"
-        return 1
-    fi
-
-    if [[ "${userSelection}" == "0" && "${routingEnabled}" == "true" ]]; then
-        applyProtocolChainRouting
-        return $?
-    fi
-
-    # 解析选择并构建 inbound tag 列表
-    local selectedTags=()
-    local selectedProtocolNames=()
-    IFS=',' read -ra selections <<< "${userSelection}"
-
-    for sel in "${selections[@]}"; do
-        sel=$(echo "${sel}" | tr -d ' ')
-        [[ -z "${sel}" ]] && continue
-
-        # 查找匹配的协议
-        local match
-        match=$(echo "${protocolMap}" | tr ',' '\n' | grep "^${sel}:" | head -1)
-        if [[ -n "${match}" ]]; then
-            local protocolId tag displayName
-            protocolId=$(echo "${match}" | cut -d':' -f2)
-            tag=$(echo "${match}" | cut -d':' -f3)
-            displayName=$(getProtocolDisplayName "${protocolId}")
-            selectedTags+=("${tag}")
-            selectedProtocolNames+=("${displayName}")
-        fi
-    done
-
-    if [[ ${#selectedTags[@]} -eq 0 ]]; then
-        echoContent red " ---> $(t CHAIN_PROTOCOL_INVALID_SELECTION)"
-        return 1
-    fi
-
-    # 显示已选择的协议
-    echoContent green "\n$(t CHAIN_PROTOCOL_SELECTED):"
-    for name in "${selectedProtocolNames[@]}"; do
-        echoContent yellow "  - ${name}"
-    done
-
-    # 确认
-    read -r -p "$(t CHAIN_PROTOCOL_CONFIRM) [y/n]:" confirmChoice
-    if ! isYesInput "${confirmChoice}"; then
-        echoContent yellow " ---> $(t CANCELLED)"
+        # 上次转到一半（新状态已经写好）：收掉旧文件、路由重新生成
+        rm -f "${CHAIN_ENTRY_INFO}" "${SINGBOX_FRAGMENT_DIR}/chain_outbound.json"
+        generateMultiChainRouteConfig
+        chainEntryMigrated=true
         return 0
     fi
-
-    applyProtocolChainRouting "${userSelection}" "${selectedProtocolNames[*]}" "${selectedTags[@]}"
-}
-
-# applyProtocolChainRouting [SELECTION NAMES TAG...] → 按协议分流写进路由并生效；不带参数是关闭，写回所有协议走链路。
-# 合并失败要还原：写坏的片段留着，此后每次合并都失败，sing-box 一重启就起不来
-applyProtocolChainRouting() {
-    local routeFile="${SINGBOX_FRAGMENT_DIR}/chain_route.json" selection=${1:-} names=${2:-}
-    if ! jsonTxBegin || ! jsonTxTrack "${routeFile}" || ! jsonTxTrack "${CHAIN_ENTRY_INFO}"; then
-        jsonTxRollback
-        echoContent red " ---> $(t CHAIN_PROTOCOL_RELOAD_FAILED)"
+    if ! old=$(jq -ce 'select(type == "object")' "${CHAIN_ENTRY_INFO}" 2>/dev/null) || [[ -z "${old}" ]]; then
+        echoContent red " ---> $(t CHAIN_ACCOUNT_STATE_BAD "${CHAIN_ENTRY_INFO}")"
         return 1
     fi
-    if (($# > 2)); then
-        shift 2
-        generateProtocolChainRoute "$@"
-        saveProtocolRoutingPreference "${selection}" "${names}"
+    mode=$(jq -r '.mode // "single_hop"' <<<"${old}")
+    if [[ "${mode}" == "external_single" ]]; then
+        nodeId=$(jq -r '.external_node_id // ""' <<<"${old}")
+        if fragment=$(generateExternalOutboundConfig "${nodeId}" "${name}") && [[ -n "${fragment}" ]]; then
+            fragment=$(jq -cn --argjson ob "${fragment}" '{outbounds: [$ob]}')
+            entry=$(jq -c --arg name "${name}" --arg id "${nodeId}" \
+                '{name: $name, ip: .server, port: .server_port, source: "external", external_node_id: $id, external_type: .type}' <<<"$(getExternalNodeById "${nodeId}")")
+        fi
     else
-        writeChainEntryRoute "$([[ -f "${SINGBOX_FRAGMENT_DIR}/chain_bridge_inbound.json" ]] && echo true || echo false)"
-        writeChainInfoAtomic "${CHAIN_ENTRY_INFO}" "$(jq -c 'del(.protocol_routing)' "${CHAIN_ENTRY_INFO}")"
+        hops=$(jq -c 'if .mode == "multi_hop" then .hops else [{ip: .exit_ip, port: .exit_port, key: .password, method}] end' <<<"${old}")
+        fragment=$(chainHopOutbounds "${hops}" "${name}" "${name}-hop-" 2>/dev/null)
+        entry=$(jq -c --arg name "${name}" '.[-1] | {name: $name, ip, port, method, password: .key}' <<<"${hops}" 2>/dev/null)
     fi
-
-    echoContent yellow " ---> $(t CHAIN_PROTOCOL_RELOADING)"
-    if ! singBoxMergeConfig; then
-        jsonTxRollback
-        echoContent red " ---> $(t CHAIN_PROTOCOL_RELOAD_FAILED)"
+    if [[ -z "${fragment}" || -z "${entry}" ]]; then
+        echoContent red " ---> $(t CHAIN_ENTRY_MIGRATE_FAILED "${CHAIN_ENTRY_INFO}")"
         return 1
     fi
-    jsonTxCommit
-
-    if ! reloadCore; then
-        echoContent red " ---> $(t CHAIN_PROTOCOL_RELOAD_FAILED)"
+    state=$(jq -c --argjson e "${entry}" --argjson bridge "${CHAIN_BRIDGE_PORT}" \
+        --argjson xray "$([[ -f "${XRAY_CONF_DIR}/chain_outbound.json" ]] && echo true || echo false)" '
+        (if .default_chain == "direct" and .protocol_routing.enabled != true then "direct" else $e.name end) as $dflt
+        | {schema_version: 1, role: "entry", mode: "multi_chain", chains: [$e + {is_default: ($dflt != "direct")}], rules: [], default_chain: $dflt,
+           bridge_port: $bridge, has_xray: (.has_xray // $xray), accounts: ((.accounts // {}) | map_values(if . == "direct" then . else $e.name end))}' <<<"${old}") || return 1
+    if ! state=$(chainAccountAssignPorts "${state}"); then
+        echoContent red " ---> $(t CHAIN_ACCOUNT_NO_BRIDGE_PORT "${CHAIN_BRIDGE_PORT}" "${CHAIN_BRIDGE_PORT_LAST}")"
         return 1
     fi
-
-    if [[ -n "${selection}" ]]; then
-        echoContent green " ---> $(t CHAIN_PROTOCOL_SUCCESS)"
-    else
-        echoContent green " ---> $(t CHAIN_PROTOCOL_DISABLED)"
+    jsonWriteFile "${SINGBOX_FRAGMENT_DIR}/chain_outbound_${name}.json" "${fragment}" false || return 1
+    if ! writeChainInfoAtomic "${CHAIN_MULTI_INFO}" "${state}"; then
+        rm -f "${SINGBOX_FRAGMENT_DIR}/chain_outbound_${name}.json"
+        return 1
+    fi
+    rm -f "${CHAIN_ENTRY_INFO}" "${SINGBOX_FRAGMENT_DIR}/chain_outbound.json"
+    generateMultiChainRouteConfig
+    chainEntryMigrated=true
+    echoContent yellow " ---> $(t CHAIN_ENTRY_MIGRATED "${name}")"
+    if jq -e '.protocol_routing.enabled == true' <<<"${old}" >/dev/null 2>&1; then
+        echoContent yellow " ---> $(t CHAIN_ENTRY_MIGRATED_PROTOCOL_ROUTING "${name}")"
     fi
 }
 
@@ -14618,15 +13809,6 @@ setupMultiChainEntry() {
     echoContent red "\n=============================================================="
     echoContent yellow "$(t CHAIN_MULTI_DESC)"
     echoContent yellow "$(t CHAIN_MULTI_EXAMPLE)\n"
-
-    # 检查是否已存在单链路配置
-    if [[ -f "${CHAIN_ENTRY_INFO}" ]] && \
-       [[ ! -f "${CHAIN_MULTI_INFO}" ]]; then
-        echoContent yellow "$(t CHAIN_SINGLE_EXISTS)"
-        echoContent yellow "$(t CHAIN_SINGLE_UNINSTALL_HINT)"
-        echoContent yellow "$(t CHAIN_MENU_PATH)"
-        return 1
-    fi
 
     # 检查是否已存在多链路配置
     if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
@@ -15171,6 +14353,7 @@ multiChainAddOne() {
     echoContent yellow "4.$(t CHAIN_ADD_BY_LOCAL)"
     echoContent yellow "5.$(t CHAIN_ADD_BY_DNS)"
     echoContent yellow "6.$(t CHAIN_ADD_BY_SNI)"
+    echoContent yellow "7.$(t CHAIN_ADD_BY_MANUAL)"
     echoContent yellow "0.$(t CANCEL)"
     read -r -p "$(t PROMPT_SELECT): " addType
     case "${addType}" in
@@ -15180,6 +14363,7 @@ multiChainAddOne() {
         4) addLocalExitAsChain local || return 1 ;;
         5) addLocalExitAsChain dns || return 1 ;;
         6) addLocalExitAsChain sni || return 1 ;;
+        7) addSingleChainOutbound manual || return 1 ;;
         0 | "") return 2 ;;
         *)
             echoContent red " ---> $(t INVALID_SELECTION)"
@@ -15188,20 +14372,47 @@ multiChainAddOne() {
     esac
 }
 
-# 添加单条链路
-addSingleChainOutbound() {
-    echoContent yellow "\n$(t CHAIN_STEP_IMPORT)"
-    echoContent yellow "$(t CHAIN_PASTE_CODE):"
-    read -r -p "$(t CHAIN_CODE):" inputCode
-
-    if [[ -z "${inputCode}" ]]; then
-        echoContent red " ---> $(t CHAIN_CODE_EMPTY)"
+# chainReadManualExit → 手动输入一个出口（单跳）的地址、端口、密钥与加密方式，放进 chainExit* 与空的 chainHops。任何一项不合法返回 1
+chainReadManualExit() {
+    chainHops=""
+    read -r -p "出口节点IP:" chainExitIP
+    if ! isValidIP "${chainExitIP}"; then
+        echoContent red " ---> IP地址格式无效"
         return 1
     fi
-
-    # 解析配置码
-    if ! parseChainCode "${inputCode}"; then
+    read -r -p "出口节点端口:" chainExitPort
+    if [[ ! "${chainExitPort}" =~ ^[1-9][0-9]{0,4}$ ]] || ((chainExitPort > 65535)); then
+        echoContent red " ---> $(t ERR_PORT_RANGE 1 65535)"
         return 1
+    fi
+    read -r -p "密钥:" chainExitKey
+    if [[ -z "${chainExitKey}" ]]; then
+        echoContent red " ---> 密钥不能为空"
+        return 1
+    fi
+    echoContent yellow "\n加密方式 [回车默认: 2022-blake3-aes-128-gcm]"
+    read -r -p "加密方式:" chainExitMethod
+    chainExitMethod=${chainExitMethod:-2022-blake3-aes-128-gcm}
+}
+
+# addSingleChainOutbound [manual] → 向导：加一条链路。出口信息来自配置码，传 manual 时手动输入
+addSingleChainOutbound() {
+    if [[ "${1:-}" == "manual" ]]; then
+        chainReadManualExit || return 1
+    else
+        echoContent yellow "\n$(t CHAIN_STEP_IMPORT)"
+        echoContent yellow "$(t CHAIN_PASTE_CODE):"
+        read -r -p "$(t CHAIN_CODE):" inputCode
+
+        if [[ -z "${inputCode}" ]]; then
+            echoContent red " ---> $(t CHAIN_CODE_EMPTY)"
+            return 1
+        fi
+
+        # 解析配置码
+        if ! parseChainCode "${inputCode}"; then
+            return 1
+        fi
     fi
 
     echoContent green "\n ---> $(t CHAIN_PARSE_SUCCESS):"
@@ -17187,14 +16398,11 @@ listExternalNodes() {
 }
 
 # 删除外部节点
-# externalNodeUsers ID → 引用这个外部节点的链路名，逗号分隔；配成唯一出口（external_single）的算一条
+# externalNodeUsers ID → 引用这个外部节点的出口名，逗号分隔
 externalNodeUsers() {
     local names=""
     if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
         names=$(jq -r --arg id "$1" '[.chains[]? | select(.external_node_id == $id) | .name] | join(", ")' "${CHAIN_MULTI_INFO}") || return 1
-    fi
-    if [[ -f "${CHAIN_ENTRY_INFO}" ]] && jq -e --arg id "$1" '.mode == "external_single" and .external_node_id == $id' "${CHAIN_ENTRY_INFO}" >/dev/null 2>&1; then
-        names="${names:+${names}, }$(t EXT_SINGLE_EXIT_LABEL)"
     fi
     printf '%s' "${names}"
 }
@@ -17359,114 +16567,6 @@ generateExternalOutboundConfig() {
     esac
 }
 
-# chainExternalSingleOnXray → Xray 内核上留着外部节点唯一出口（旧版配得出来）：Xray 的流量没经过它，一直从本机直出
-chainExternalSingleOnXray() {
-    [[ "${coreKind}" == "1" && -f "${CHAIN_ENTRY_INFO}" ]] &&
-        [[ "$(jq -r '.mode // ""' "${CHAIN_ENTRY_INFO}" 2>/dev/null)" == "external_single" ]]
-}
-
-# 将外部节点设置为链式代理出口（单出口模式）。只写 sing-box 片段，Xray 的流量到不了这里，所以 Xray 内核上拒绝：
-# 接了只会报成功、流量照样从本机出去。Xray 机器用多链路接外部节点，那条路有桥、也改 Xray 路由
-setupExternalAsSingleExit() {
-    if [[ "${coreKind}" == "1" ]]; then
-        echoContent red "\n ---> $(t EXT_SINGLE_EXIT_XRAY_REFUSED)"
-        return 1
-    fi
-
-    listExternalNodes
-
-    local nodeCount
-    nodeCount=$(getExternalNodeCount)
-
-    if [[ "${nodeCount}" == "0" ]]; then
-        echoContent red "\n ---> $(t EXT_ADD_NODE_FIRST)"
-        return 1
-    fi
-
-    echoContent red "=============================================================="
-    read -r -p "$(t EXT_SELECT_AS_EXIT): " selectIndex
-
-    if [[ -z "${selectIndex}" || "${selectIndex}" == "0" ]]; then
-        return
-    fi
-
-    # 获取节点信息
-    local nodeId nodeName
-    nodeId=$(jq -r --argjson idx "$((selectIndex-1))" '.nodes[$idx].id' "${EXTERNAL_NODE_FILE}" 2>/dev/null)
-    nodeName=$(jq -r --argjson idx "$((selectIndex-1))" '.nodes[$idx].name' "${EXTERNAL_NODE_FILE}" 2>/dev/null)
-
-    if [[ -z "${nodeId}" || "${nodeId}" == "null" ]]; then
-        echoContent red " ---> $(t EXT_INVALID_SELECTION)"
-        return 1
-    fi
-
-    echoContent yellow "\n$(t EXT_CONFIGURING): ${nodeName}"
-
-    # chain_route.json 的 default_domain_resolver 引用 01_dns.json 的 google tag，
-    # 该文件只有 ensureSingBoxInstalled 会创建——纯 sing-box 安装没有它，缺了 1.13 起启动即 FATAL
-    if ! ensureSingBoxInstalled; then
-        return 1
-    fi
-
-    # 生成出站配置
-    local outboundConfig
-    outboundConfig=$(generateExternalOutboundConfig "${nodeId}" "chain_external_outbound")
-
-    if [[ -z "${outboundConfig}" ]]; then
-        echoContent red " ---> $(t EXT_CONFIG_FAILED)"
-        return 1
-    fi
-
-    # 保存出站配置（jq -n 包装，不做字符串拼接，避免 outboundConfig 内部含特殊字符破坏 JSON）
-    local configDir="${SINGBOX_FRAGMENT_DIR}"
-    mkdir -p "${configDir}"
-
-    local _wrapped
-    if ! _wrapped=$(jq -n --argjson ob "${outboundConfig}" '{outbounds: [$ob]}') || [[ -z "${_wrapped}" ]]; then
-        echoContent red " ---> $(t EXT_CONFIG_FAILED)"
-        return 1
-    fi
-
-    # 合并失败要还原：写坏的片段留着，此后每次合并都失败，sing-box 一重启就起不来
-    if ! jsonTxBegin; then
-        echoContent red " ---> $(t EXT_CONFIG_FAILED)"
-        return 1
-    fi
-    if ! jsonTxTrack "${configDir}/chain_outbound.json" || ! jsonTxTrack "${configDir}/chain_route.json" || ! jsonTxTrack "${CHAIN_ENTRY_INFO}"; then
-        jsonTxRollback
-        echoContent red " ---> $(t EXT_CONFIG_FAILED)"
-        return 1
-    fi
-    printf '%s\n' "${_wrapped}" > "${configDir}/chain_outbound.json"
-
-    # 生成路由配置 - 所有流量走外部节点
-    # default_domain_resolver 见 chainExit 注释，1.13 起必填
-    jq -n '{route: {rules: [], final: "chain_external_outbound", default_domain_resolver: "google"}}' \
-        >"${configDir}/chain_route.json"
-
-    # 保存外部节点入口信息（原子写入）。节点名来自用户输入，走 --arg，带引号也不会写坏状态文件
-    local __chainEntryInfo
-    __chainEntryInfo=$(jq -n --arg id "${nodeId}" --arg name "${nodeName}" \
-        '{schema_version: 1, role: "entry", mode: "external_single", external_node_id: $id, external_node_name: $name}')
-    if ! writeChainInfoAtomic "${CHAIN_ENTRY_INFO}" "${__chainEntryInfo}"; then
-        jsonTxRollback
-        return 1
-    fi
-
-    # 合并配置
-    if ! singBoxMergeConfig; then
-        jsonTxRollback
-        return 1
-    fi
-    jsonTxCommit
-
-    # 重启服务
-    reloadCore
-
-    echoContent green "\n ---> $(t EXT_CONFIG_SUCCESS)"
-    echoContent yellow " ---> $(t EXT_TRAFFIC_ROUTE): $(t USER) → $(t ENTRY_NODE) → ${nodeName} → $(t INTERNET)"
-}
-
 # 测试外部节点连通性
 testExternalNodeConnection() {
     listExternalNodes
@@ -17536,7 +16636,6 @@ externalNodeMenu() {
     echoContent yellow "  2. $(t EXT_ADD_MANUAL)"
     echoContent yellow "  3. $(t EXT_DELETE_NODE)"
     echoContent yellow "  4. $(t EXT_TEST_NODE)"
-    echoContent yellow "  5. $(t EXT_SET_AS_EXIT)"
     echoContent yellow "  0. $(t BACK)"
 
     read -r -p "$(t PROMPT_SELECT): " menuChoice
@@ -17566,9 +16665,6 @@ externalNodeMenu() {
         4)
             testExternalNodeConnection
             externalNodeMenu
-            ;;
-        5)
-            setupExternalAsSingleExit
             ;;
         0|"")
             chainProxyMenu
@@ -20177,10 +19273,6 @@ _doctorCheckConfig() {
         return
     fi
 
-    if chainExternalSingleOnXray; then
-        _doctorRow "$(t DOCTOR_CHECK_CHAIN_EXIT)" fail "$(t EXT_SINGLE_EXIT_XRAY_WARNING)"
-    fi
-
     if [[ "${coreKind}" == "1" ]]; then
         local confDir="${XRAY_CONF_DIR}"
         local f base total=0 bad=0 badList=""
@@ -20806,53 +19898,11 @@ topoRoutingMulti() {
           }' <<<"${state}"
 }
 
-# topoRoutingEntry → 单链路、多跳、外部节点唯一出口。出口节点标这台机器真正连的下一跳，下一跳是中继时注明
-topoRoutingEntry() {
-    local state mode node selected='[]' exitObj issues='[]' dflt flows inboundExits='[]'
-    state=$(jq -c '{mode: (.mode // ""), exit_ip, exit_port, hops: [(.hops // [])[] | {ip, port}], default_chain, accounts: (.accounts // {}),
-        protocolRouting: (.protocol_routing.enabled == true), external_node_id, external_node_name}' "${CHAIN_ENTRY_INFO}") || return 1
-    mode=$(jq -r '.mode' <<<"${state}")
-    if [[ "${mode}" == "external_single" ]]; then
-        node=$(jq -c --arg id "$(jq -r '.external_node_id // ""' <<<"${state}")" 'first(.nodes[]? | select(.id == $id) | {type, server, server_port}) // {}' "${EXTERNAL_NODE_FILE}" 2>/dev/null) || node='{}'
-        exitObj=$(jq -cn --argjson n "${node:-{\}}" --arg name "$(jq -r '.external_node_name // ""' <<<"${state}")" '{key: "chain", rawName: $name, kind: ($n.type // ""), rawHost: ($n.server // ""), port: ($n.server_port // "")}')
-        if chainExternalSingleOnXray; then
-            issues=$(jq -cn --arg s "$(t TOPO_ISSUE_EXTERNAL_XRAY)" '[$s]')
-            jq -cn --argjson x "${exitObj}" --argjson d "$(topoDirectExit)" --argjson issues "${issues}" --arg w "$(t TOPO_FLOW_ALL)" \
-                '{exits: [$d, $x], flows: [{exit: "direct", when: $w}], pins: {}, inboundExits: [], issues: $issues}'
-            return 0
-        fi
-        jq -cn --argjson x "${exitObj}" --arg w "$(t TOPO_FLOW_ALL)" '{exits: [$x], flows: [{exit: "chain", when: $w}], pins: {}, inboundExits: [], issues: []}'
-        return 0
-    fi
-    exitObj=$(jq -c --arg name "$(t TOPO_EXIT_CHAIN)" --arg kind "$(t TOPO_KIND_CHAIN)" --arg relayNote "$(t TOPO_NOTE_RELAYS)" '
-        (if (.hops | length) > 0 then .hops[0] else {ip: .exit_ip, port: .exit_port} end) as $next
-        | {key: "chain", name: $name, kind: $kind, rawHost: ($next.ip // ""), port: ($next.port // "")}
-          + ((.hops | length) as $n | if $n > 1 then {note: ($relayNote | sub("%s"; ($n | tostring)))} else {} end)' <<<"${state}")
-    if [[ ! -f "${SINGBOX_FRAGMENT_DIR}/chain_outbound.json" ]]; then
-        exitObj=$(jq -c --arg note "$(t TOPO_NOTE_NOT_APPLIED)" '. + {bad: true, note: $note}' <<<"${exitObj}")
-        issues=$(jq -cn --arg s "$(t TOPO_ISSUE_MISSING_CHAIN chain_outbound)" '[$s]')
-    fi
-    dflt=$(jq -r 'if .default_chain == "direct" then "direct" else "chain" end' <<<"${state}")
-    flows=$(jq -cn --arg d "${dflt}" --arg w "$(t TOPO_FLOW_ALL)" '[{exit: $d, when: $w}]')
-    # 按协议分流：选中的入站走链路，其余走 route.final。Xray 经桥进来的流量不看这条，只有 sing-box 自己的入站才分
-    if [[ "$(jq -r '.protocolRouting' <<<"${state}")" == "true" ]]; then
-        selected=$(jq -c '[.route.rules[]? | select(.outbound == "chain_outbound" and .inbound != null) | .inbound[] | select(. != "chain_bridge_in")] | unique' "${SINGBOX_FRAGMENT_DIR}/chain_route.json" 2>/dev/null) || selected='[]'
-        inboundExits=$(jq -c --argjson sel "${selected}" --arg w "$(t TOPO_WHEN_PROTOCOL)" '[.[] | select(.tag as $t | $sel | index($t)) | {inbound: .id, exit: "chain", when: $w}]' <<<"$(topoInbounds)")
-        if [[ "${coreKind}" == "2" ]]; then
-            flows=$(jq -cn --arg w "$(t TOPO_FLOW_OTHER_PROTOCOLS)" '[{exit: "direct", when: $w}]')
-        fi
-    fi
-    jq -c --argjson x "${exitObj}" --argjson d "$(topoDirectExit)" --argjson flows "${flows}" --argjson ie "${inboundExits}" --argjson issues "${issues}" '
-        {exits: [$d, $x], flows: $flows, pins: (.accounts | map_values(if . == "chain_outbound" then "chain" else . end)), inboundExits: $ie, issues: $issues}' <<<"${state}"
-}
-
 # topoRouting → {exits, flows, pins, inboundExits, issues, extraInbounds}。本机当链式出口或中继时，多一个收别的机器流量的入站
 topoRouting() {
     local base extra='{"extraInbounds":[],"extraExits":[],"inboundExits":[]}' port chainKind
     if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
         base=$(topoRoutingMulti) || return 1
-    elif [[ -f "${CHAIN_ENTRY_INFO}" ]]; then
-        base=$(topoRoutingEntry) || return 1
     else
         base=$(topoRoutingPlain) || return 1
     fi
@@ -21151,5 +20201,9 @@ checkRoot
 checkForUpdates 2>/dev/null
 
 cronFunction
+chainEntryMigrated=false
+if migrateChainEntryState && [[ "${chainEntryMigrated}" == "true" ]]; then
+    reloadCore
+fi
 offerCoreRestart
 menu
