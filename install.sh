@@ -5610,6 +5610,33 @@ migrateSingBoxDnsSplit() {
     echoContent yellow " ---> $(t SINGBOX_DNS_SPLIT_MIGRATED)"
 }
 
+# chainRouteLazyResolve → stdin 的链式路由改成惰性解析：桥上的 resolve 去掉，第一条按 IP 分流的规则（IP 段、geoip-*）前放一条
+# 不带 inbound 的 resolve。排在它前面的域名规则照旧按域名命中、域名原样送给出口；带 inbound 的（中继认下一跳那条）不算。幂等
+chainRouteLazyResolve() {
+    jq '{action: "resolve", strategy: "prefer_ipv4"} as $lazy
+        | if (.route.rules | type) == "array" then
+            .route.rules |= ([.[] | select((. == $lazy or (.action == "resolve" and ([.inbound] | flatten) == ["chain_bridge_in"])) | not)]
+                | ([.[] | (has("inbound") | not)
+                        and (has("ip_cidr") or any([.rule_set] | flatten | .[]; type == "string" and startswith("geoip-")))]
+                    | index(true)) as $at
+                | if $at == null then . else .[:$at] + [$lazy] + .[$at:] end)
+          else . end'
+}
+
+# migrateChainRouteResolve DIR → 旧版写的 chain_route.json 过一遍 chainRouteLazyResolve，只在真改了时写回并提示。
+# 读不懂的文件不动（合并自己会报）；写回失败返回 1，合并必须随之失败
+migrateChainRouteResolve() {
+    local file="$1chain_route.json" out
+    [[ -f "${file}" ]] || return 0
+    out=$(chainRouteLazyResolve <"${file}" 2>/dev/null) || return 0
+    [[ "$(jq -c . <<<"${out}")" == "$(jq -c . "${file}" 2>/dev/null)" ]] && return 0
+    if ! jsonWriteFile "${file}" "${out}" false; then
+        echoContent red " ---> $(t CHAIN_INFO_WRITE_FAIL "${file}")"
+        return 1
+    fi
+    echoContent yellow " ---> $(t SINGBOX_CHAIN_ROUTE_MIGRATED)"
+}
+
 addSingBoxOutbound() {
     local tag=$1
     local type="ipv4"
@@ -5959,6 +5986,9 @@ singBoxMergeConfig() {
 
     migrateRetiredRuleSets "${fragmentDir}"
     migrateSingBoxDnsSplit "${fragmentDir}"
+    if ! migrateChainRouteResolve "${fragmentDir}"; then
+        return 1
+    fi
     normalizeSingBoxRuleSetHttpClient "${fragmentDir}"
 
     # 建在 config.json 同目录：mv 才是同一文件系统里的原子替换，SELinux 下也不会带着 /tmp 的 user_tmp_t 标签过去。
@@ -11844,8 +11874,7 @@ EOF
     fi
 
     # 确保直连出站存在。outbound 不带 domain_strategy（sing-box 1.12 弃用 / 1.14 删除）：
-    # chain proxy 流量在 chain_route.json 的 resolve action 里按 prefer_ipv4 解析；
-    # 非 chain 流量由客户端送 IP，outbound 自己不发起域名解析。
+    # 链式流量的解析在 chain_route.json 的路由级 resolve 里（出口按所选策略，入口只在按 IP 的规则前）。
     if [[ ! -f "${SINGBOX_FRAGMENT_DIR}/01_direct_outbound.json" ]]; then
         cat <<EOF >${SINGBOX_FRAGMENT_DIR}/01_direct_outbound.json
 {
@@ -12823,7 +12852,7 @@ EOF
 }
 
 # writeChainEntryRoute HAS_XRAY → 单链路 / 多跳入口的 chain_route.json，兜底都是 chain_outbound
-# 有桥时先 sniff 再 prefer_ipv4 重解析（出口机可能没有 IPv6）；default_domain_resolver 1.13 起必填
+# 有桥时只 sniff、不解析：域名原样送给出口，由出口按自己的地址族策略解析；default_domain_resolver 1.13 起必填
 writeChainEntryRoute() {
     if [[ "$1" == "true" ]]; then
         cat <<EOF >"${SINGBOX_FRAGMENT_DIR}/chain_route.json"
@@ -12831,7 +12860,6 @@ writeChainEntryRoute() {
     "route": {
         "rules": [
             { "inbound": "chain_bridge_in", "action": "sniff", "timeout": "1s" },
-            { "inbound": "chain_bridge_in", "action": "resolve", "strategy": "prefer_ipv4" },
             { "inbound": ["chain_bridge_in"], "outbound": "chain_outbound" }
         ],
         "final": "chain_outbound",
@@ -12975,7 +13003,7 @@ chainAccountInject() {
         | ([.inbounds[]? | .users[]? | (.name // .username // .Username) | select(type == "string" and test("-"))] | unique
            | map(. as $n | {name: $n, out: $acc[$n | sub("-[^-]*$"; "")]}) | map(select(.out != null))) as $hits
         | ((if ($tags | length) > 0
-              then [{inbound: $tags, action: "sniff", timeout: "1s"}, {inbound: $tags, action: "resolve", strategy: "prefer_ipv4"}]
+              then [{inbound: $tags, action: "sniff", timeout: "1s"}]
               else [] end)
            + [$inb[] | {inbound: [.tag], outbound: (.tag | ltrimstr("chain_acct_in_"))}]
            + ($hits | group_by(.out) | map({auth_user: map(.name), outbound: .[0].out}))) as $pre
@@ -15487,20 +15515,14 @@ generateMultiChainRouteConfig() {
     local hasXray
     hasXray=$(jq -r '.has_xray' "${infoFile}")
 
-    # 路由级 sniff/resolve 替代 inbound 上的 sniff 字段（1.11+）。
-    # 仅当存在 chain_bridge_in（has_xray）时才加 sniff/resolve，否则留空。
     local routeRules="[]"
     local ruleSetDefs="[]"
     local usedRuleSets=""
 
-    # 如果有 SOCKS5 桥接入站（来自 Xray 的流量），仅 prepend sniff/resolve（非终态 action），
-    # 让后续 preset/custom/ip_cidr/geoip 规则仍能按域名/IP 命中分流；未命中由 route.final（=defaultChain）兜底。
+    # 有 SOCKS5 桥（Xray 来的流量）时只 prepend sniff：解析留到第一条按 IP 的规则前（chainRouteLazyResolve）。
     # 不要在这里 prepend 终态规则（如 inbound→outbound:defaultChain），那会让预设分流永远不命中。
     if [[ "${hasXray}" == "true" ]]; then
-        routeRules=$(echo "${routeRules}" | jq '. + [
-            {"inbound":"chain_bridge_in","action":"sniff","timeout":"1s"},
-            {"inbound":"chain_bridge_in","action":"resolve","strategy":"prefer_ipv4"}
-        ]')
+        routeRules=$(echo "${routeRules}" | jq '. + [{"inbound":"chain_bridge_in","action":"sniff","timeout":"1s"}]')
     fi
 
     # 处理预设规则
@@ -15632,7 +15654,7 @@ generateMultiChainRouteConfig() {
                 "auto_detect_interface": true,
                 "default_domain_resolver": "google"
             }
-        } + (if ($ruleSets | length) > 0 then {experimental: {cache_file: {enabled: true, path: $cache}}} else {} end)')
+        } + (if ($ruleSets | length) > 0 then {experimental: {cache_file: {enabled: true, path: $cache}}} else {} end)' | chainRouteLazyResolve)
 
     echo "${routeConfig}" > ${SINGBOX_FRAGMENT_DIR}/chain_route.json
 }

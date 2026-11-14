@@ -664,6 +664,7 @@ MSG_SINGBOX_DOMAIN_STRATEGY_MIGRATED="已把旧版 outbound domain_strategy 迁�
 MSG_SINGBOX_RULESET_HTTP_CLIENT_MIGRATED="已把 rule_set 的 download_detour 迁移为 http_client（sing-box 1.14 起弃用，1.15 起拒绝启动）"
 MSG_SINGBOX_RULESET_RENAMED="规则集 %s 上游已撤（sing-box 下载不到远程规则集就起不来），已换成 %s"
 MSG_SINGBOX_DNS_SPLIT_MIGRATED="DNS / SNI 分流改成按路由解析（旧写法新版 sing-box 起不来，分流也不生效）"
+MSG_SINGBOX_CHAIN_ROUTE_MIGRATED="链式路由改成按规则顺序解析：域名规则命中的流量把域名交给出口解析，按 IP 的规则之前才在本机解析"
 MSG_SINGBOX_DNS_SPLIT_WRITE_FAILED="写 sing-box 分流配置失败，没有改动"
 MSG_SNI_IP_LOCAL_BLOCKED="sing-box 上 SNI IP 不能是本机或内网地址：经代理连这些地址会被本机封锁拦下，请填公网地址"
 MSG_SINGBOX_RULESET_HTTP_CLIENT_STRIPPED="当前 sing-box 内核低于 1.14，已剥离 rule_set 的 http_client 字段（升级内核后自动恢复）"

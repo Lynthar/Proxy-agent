@@ -664,6 +664,7 @@ MSG_SINGBOX_DOMAIN_STRATEGY_MIGRATED="Migrated legacy outbound domain_strategy t
 MSG_SINGBOX_RULESET_HTTP_CLIENT_MIGRATED="Migrated rule_set download_detour to http_client (deprecated since sing-box 1.14, refused from 1.15)"
 MSG_SINGBOX_RULESET_RENAMED="Rule-set %s was removed upstream (sing-box cannot start without a remote rule-set it cannot download); switched to %s"
 MSG_SINGBOX_DNS_SPLIT_MIGRATED="DNS / SNI split now resolves through route rules (newer sing-box would not start with the old form, and the split had no effect)"
+MSG_SINGBOX_CHAIN_ROUTE_MIGRATED="Chain routing now resolves lazily: traffic matched by domain rules reaches the exit as a domain, and names are resolved here only before an IP-based rule"
 MSG_SINGBOX_DNS_SPLIT_WRITE_FAILED="Failed to write the sing-box split config; nothing was changed"
 MSG_SNI_IP_LOCAL_BLOCKED="On sing-box the SNI IP can't be a local or private address: connections through the proxy to such addresses are blocked. Use a public address"
 MSG_SINGBOX_RULESET_HTTP_CLIENT_STRIPPED="Installed sing-box is older than 1.14; stripped rule_set http_client fields (restored automatically after a core upgrade)"

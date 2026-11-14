@@ -3245,7 +3245,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试按账号选出口 ===${NC}"
 
-CA_FN_NAMES="singBoxProbeExitIP localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs ensureXrayLocalBlock localBlockInject directOutboundInject chainAccountStateFile chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountCarry chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod setupExternalAsSingleExit chainExternalSingleOnXray generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig"
+CA_FN_NAMES="singBoxProbeExitIP localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs ensureXrayLocalBlock localBlockInject directOutboundInject chainAccountStateFile chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountCarry chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod setupExternalAsSingleExit chainExternalSingleOnXray generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig chainRouteLazyResolve migrateChainRouteResolve"
 CA_FNS=$(sed -n "$(for _f in ${CA_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_equals "$(wc -w <<<"${CA_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CA_FNS}")" "按账号选出口：每个函数都抽到了"
 CA_ROOT="${MOCK_ROOT}/chainacct.root"
@@ -3365,10 +3365,10 @@ assert_equals "$(jq -c '[.outbounds[] | select(.tag | startswith("chain_proxy_")
     "$(jq -c '[.inbounds[] | select(.tag | startswith("chain_acct_in_")) | {(.tag | ltrimstr("chain_acct_in_")): .listen_port}] | add' "${CA_MERGED}")" \
     "注入（多链路）：每条链路的 Xray 出站端口 = sing-box 入站端口"
 assert_equals '[["chain_acct_in_hk","chain_acct_in_us"],"sniff"]' "$(jq -c '[.route.rules[0].inbound, .route.rules[0].action]' "${CA_MERGED}")" "注入：新桥先 sniff"
-assert_equals "resolve" "$(jq -r '.route.rules[1].action' "${CA_MERGED}")" "注入：再 prefer_ipv4 重解析"
+assert_equals "0" "$(jq -c '[.route.rules[] | select(.action == "resolve")] | length' "${CA_MERGED}")" "注入：账号桥不解析，域名原样交给出口"
 assert_equals '[{"inbound":["chain_acct_in_hk"],"outbound":"hk"},{"inbound":["chain_acct_in_us"],"outbound":"us"},{"auth_user":["alice-singbox_hysteria2"],"outbound":"hk"}]' \
-    "$(jq -c '.route.rules[2:5]' "${CA_MERGED}")" "注入：桥各进各的链路；旁挂 6 的 alice 按全名进 hk；没后缀的 alice 与没指定的 dave 不在里面"
-assert_equals '[{"inbound":"chain_bridge_in","action":"sniff","timeout":"1s"},{"rule_set":["geosite-netflix"],"outbound":"us"}]' "$(jq -c '.route.rules[5:]' "${CA_MERGED}")" \
+    "$(jq -c '.route.rules[1:4]' "${CA_MERGED}")" "注入：桥各进各的链路；旁挂 6 的 alice 按全名进 hk；没后缀的 alice 与没指定的 dave 不在里面"
+assert_equals '[{"inbound":"chain_bridge_in","action":"sniff","timeout":"1s"},{"rule_set":["geosite-netflix"],"outbound":"us"}]' "$(jq -c '.route.rules[4:]' "${CA_MERGED}")" \
     "注入：原有的域名分流排在账号规则之后（被指定的人以映射为终态）"
 assert_equals "direct" "$(jq -r '.route.final' "${CA_MERGED}")" "注入（多链路）：final 不动"
 jq '.outbounds = [{type: "direct", tag: "direct"}, {type: "socks", tag: "us"}]' "${CA_MERGED}" >"${CA_MERGED}.t" && mv "${CA_MERGED}.t" "${CA_MERGED}"
@@ -3538,6 +3538,59 @@ assert_equals "us|direct" "$(jq -r .route.final "${CA_F}/chain_route.json")|$(jq
 ca_multi '{"default_chain": "us", "rules": [{"type": "custom", "value": "a.com", "chain": "us"}]}'
 run_ca "${_caRoute}" >/dev/null 2>&1
 assert_equals "null" "$(jq -r '.experimental' "${CA_F}/chain_route.json")" "多链路路由：没有远程规则集就不写 experimental"
+
+# --- 惰性解析：桥上不解析，第一条按 IP 的规则前才 resolve；旧文件合并前迁移 ---
+CA_LAZY='{"action":"resolve","strategy":"prefer_ipv4"}'
+CA_SNIFF='{"inbound":"chain_bridge_in","action":"sniff","timeout":"1s"}'
+assert_equals "[${CA_SNIFF},{\"domain_suffix\":[\"a.com\"],\"outbound\":\"us\"}]" "$(jq -c '.route.rules' "${CA_F}/chain_route.json")" \
+    "惰性解析（多链路）：只有域名规则时一条 resolve 都不插，域名原样交给出口"
+ca_multi '{"default_chain": "us", "rules": [{"type": "custom", "value": "a.com", "chain": "us"}, {"type": "ip_cidr", "value": "203.0.113.0/24", "chain": "hk"},
+    {"type": "preset", "value": "developer", "chain": "us"}, {"type": "geoip", "value": "jp", "chain": "jp"}]}'
+run_ca "${_caRoute}" >/dev/null 2>&1
+assert_equals "[${CA_SNIFF},{\"domain_suffix\":[\"a.com\"],\"outbound\":\"us\"},${CA_LAZY},{\"ip_cidr\":[\"203.0.113.0/24\"],\"outbound\":\"hk\"}]" \
+    "$(jq -c '.route.rules[:4]' "${CA_F}/chain_route.json")" "惰性解析（多链路）：resolve 正好插在第一条 IP 段规则前，前面的域名规则不动"
+assert_equals '1|{"rule_set":["geoip-jp"],"outbound":"jp"}' "$(jq -c '[.route.rules[] | select(.action == "resolve")] | length' "${CA_F}/chain_route.json")|$(jq -c '.route.rules[-1]' "${CA_F}/chain_route.json")" \
+    "惰性解析（多链路）：后面的 geoip 规则前不再插第二条，规则先后不变"
+ca_multi '{"default_chain": "us", "has_xray": false, "rules": [{"type": "preset", "value": "developer", "chain": "us"}, {"type": "geoip", "value": "jp", "chain": "jp"}]}'
+run_ca "${_caRoute}" >/dev/null 2>&1
+assert_equals "[{\"rule_set\":[\"geosite-github\",\"geosite-gitlab\",\"geosite-stackexchange\"],\"outbound\":\"us\"},${CA_LAZY},{\"rule_set\":[\"geoip-jp\"],\"outbound\":\"jp\"}]" \
+    "$(jq -c '.route.rules' "${CA_F}/chain_route.json")" "惰性解析（sing-box 内核的多链路）：geoip 规则前也解析，本机入站的域名请求碰得上；geosite 规则集不算按 IP"
+_caEntryRoute=$(awk 'f && /^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{/ {exit} index($0, "writeChainEntryRoute() {") == 1 {f=1} f' install.sh)
+CA_ENTRY_ROUTE="${_caEntryRoute}" run_ca 'eval "${CA_ENTRY_ROUTE}"; writeChainEntryRoute true' >/dev/null 2>&1
+assert_equals "[${CA_SNIFF},{\"inbound\":[\"chain_bridge_in\"],\"outbound\":\"chain_outbound\"}]" "$(jq -c '.route.rules' "${CA_F}/chain_route.json")" "惰性解析（单链路）：桥上只 sniff"
+# ca_migrate JSON → 把 JSON 当旧版 chain_route.json 迁移两次，打印「结果|第一次提示条数|第二次提示条数|第二次是否逐字不变」
+ca_migrate() {
+    local first second kept
+    printf '%s\n' "$1" >"${CA_F}/chain_route.json"
+    first=$(run_ca "migrateChainRouteResolve ${CA_F}/" 2>&1 | grep -c '按规则顺序解析')
+    kept=$(cat "${CA_F}/chain_route.json")
+    second=$(run_ca "migrateChainRouteResolve ${CA_F}/" 2>&1 | grep -c '按规则顺序解析')
+    echo "$(jq -c '.route.rules' "${CA_F}/chain_route.json")|${first}|${second}|$([[ "${kept}" == "$(cat "${CA_F}/chain_route.json")" ]] && echo same || echo changed)"
+}
+CA_OLD_RESOLVE='{"inbound":"chain_bridge_in","action":"resolve","strategy":"prefer_ipv4"}'
+assert_equals "[${CA_SNIFF},{\"inbound\":[\"chain_bridge_in\"],\"outbound\":\"chain_outbound\"}]|1|0|same" \
+    "$(ca_migrate "{\"route\":{\"rules\":[${CA_SNIFF},${CA_OLD_RESOLVE},{\"inbound\":[\"chain_bridge_in\"],\"outbound\":\"chain_outbound\"}],\"final\":\"chain_outbound\"}}")" \
+    "迁移（单链路）：桥上的 resolve 去掉，只在真改了的那次提示，再跑一次不变"
+assert_equals "[${CA_SNIFF},{\"rule_set\":[\"geosite-netflix\"],\"outbound\":\"us\"},${CA_LAZY},{\"rule_set\":[\"geoip-jp\"],\"outbound\":\"jp\"},{\"ip_cidr\":[\"203.0.113.0/24\"],\"outbound\":\"hk\"}]|1|0|same" \
+    "$(ca_migrate "{\"route\":{\"rules\":[${CA_SNIFF},${CA_OLD_RESOLVE},{\"rule_set\":[\"geosite-netflix\"],\"outbound\":\"us\"},{\"rule_set\":[\"geoip-jp\"],\"outbound\":\"jp\"},{\"ip_cidr\":[\"203.0.113.0/24\"],\"outbound\":\"hk\"}],\"final\":\"us\"}}")" \
+    "迁移（多链路）：resolve 从桥上挪到第一条按 IP 的规则前"
+assert_equals "[{\"domain_suffix\":[\"a.com\"],\"outbound\":\"us\"},${CA_LAZY},{\"ip_cidr\":[\"203.0.113.0/24\"],\"outbound\":\"hk\"}]|1|0|same" \
+    "$(ca_migrate '{"route":{"rules":[{"domain_suffix":["a.com"],"outbound":"us"},{"ip_cidr":["203.0.113.0/24"],"outbound":"hk"}],"final":"us"}}')" \
+    "迁移（sing-box 内核的多链路）：原来没有 resolve 的，IP 段规则前补上"
+CA_EXIT_RULES='[{"inbound":"chain_inbound","action":"sniff","timeout":"1s"},{"inbound":"chain_inbound","action":"resolve","strategy":"prefer_ipv4"},{"inbound":["chain_inbound"],"outbound":"direct"}]'
+assert_equals "${CA_EXIT_RULES}|0|0|same" "$(ca_migrate "{\"route\":{\"rules\":${CA_EXIT_RULES},\"final\":\"direct\"}}")" "迁移（出口）：出口按自己策略做的 resolve 不动"
+CA_RELAY_RULES='[{"inbound":["chain_inbound"],"ip_cidr":["198.51.100.9"],"port":[5000],"outbound":"direct"},{"inbound":"chain_inbound","action":"sniff","timeout":"1s"},{"inbound":["chain_inbound"],"outbound":"chain_outbound"}]'
+assert_equals "${CA_RELAY_RULES}|0|0|same" "$(ca_migrate "{\"route\":{\"rules\":${CA_RELAY_RULES},\"final\":\"direct\"}}")" "迁移（中继）：认下一跳的那条带 inbound 的 IP 规则不算，不插 resolve"
+printf 'not json\n' >"${CA_F}/chain_route.json"
+run_ca "migrateChainRouteResolve ${CA_F}/" >/dev/null 2>&1
+assert_equals "0|not json" "$?|$(cat "${CA_F}/chain_route.json")" "迁移：读不懂的文件不动、不拦合并（合并自己会报）"
+# 真的 singBoxMergeConfig 配一个 merge 必败的 sing-box 桩：迁移排在 merge 之前，文件已经改好说明合并路径上接了它
+_caMergeFns=$(sed -n '/^singBoxMergeConfig() {/,/^}/p;/^migrateRetiredRuleSets() {/,/^}/p;/^migrateSingBoxDnsSplit() {/,/^}/p;/^normalizeSingBoxRuleSetHttpClient() {/,/^}/p' install.sh)
+printf '#!/bin/sh\nexit 1\n' >"${CA_ROOT}/sing-box/sing-box" && chmod +x "${CA_ROOT}/sing-box/sing-box"
+printf '%s\n' "{\"route\":{\"rules\":[${CA_SNIFF},${CA_OLD_RESOLVE},{\"inbound\":[\"chain_bridge_in\"],\"outbound\":\"chain_outbound\"}],\"final\":\"chain_outbound\"}}" >"${CA_F}/chain_route.json"
+CA_MERGE_FNS="${_caMergeFns}" run_ca 'eval "${CA_MERGE_FNS}"; singBoxMergeConfig' >/dev/null 2>&1
+assert_equals "1|0" "$?|$(jq -c '[.route.rules[] | select(.action == "resolve")] | length' "${CA_F}/chain_route.json")" "迁移：接在合并路径上（merge 之前），合并失败照常返回 1"
+rm -f "${CA_F}/chain_route.json" "${CA_ROOT}/sing-box/sing-box"
 
 # --- 删外部节点：还被链路引用的不删并点名，没人用的照删 ---
 ca_reset
