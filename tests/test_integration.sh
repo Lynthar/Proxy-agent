@@ -3245,7 +3245,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试按账号选出口 ===${NC}"
 
-CA_FN_NAMES="singBoxProbeExitIP localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs ensureXrayLocalBlock localBlockInject directOutboundInject chainAccountStateFile chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountCarry chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod setupExternalAsSingleExit chainExternalSingleOnXray generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig chainRouteLazyResolve migrateChainRouteResolve"
+CA_FN_NAMES="singBoxProbeExitIP localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs ensureXrayLocalBlock localBlockInject directOutboundInject chainAccountStateFile chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountCarry chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod setupExternalAsSingleExit chainExternalSingleOnXray generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig chainRouteLazyResolve migrateChainRouteResolve chainExitDefs chainExitTarget chainExitIsSni chainWarpEnsureRegistered chainWarpFragment chainLocalExitFragment addLocalExitAsChain multiChainAddOne singBoxProbeEndpointIP"
 CA_FNS=$(sed -n "$(for _f in ${CA_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_equals "$(wc -w <<<"${CA_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CA_FNS}")" "按账号选出口：每个函数都抽到了"
 CA_ROOT="${MOCK_ROOT}/chainacct.root"
@@ -3591,6 +3591,100 @@ printf '%s\n' "{\"route\":{\"rules\":[${CA_SNIFF},${CA_OLD_RESOLVE},{\"inbound\"
 CA_MERGE_FNS="${_caMergeFns}" run_ca 'eval "${CA_MERGE_FNS}"; singBoxMergeConfig' >/dev/null 2>&1
 assert_equals "1|0" "$?|$(jq -c '[.route.rules[] | select(.action == "resolve")] | length' "${CA_F}/chain_route.json")" "迁移：接在合并路径上（merge 之前），合并失败照常返回 1"
 rm -f "${CA_F}/chain_route.json" "${CA_ROOT}/sing-box/sing-box"
+
+# --- 四类本机出口（WARP、本机 IPv4 / IPv6、解锁 DNS、解锁 SNI）：片段、规则前按出口的解析器再解析、SNI 规则带目标地址 ---
+ca_reset
+CA_EXITS='[{"name": "us", "ip": "198.51.100.1", "port": 5001, "bridge_port": 31112}, {"name": "v6", "source": "local", "family": "ipv6", "bridge_port": 31113},
+    {"name": "w4", "source": "warp", "family": "ipv4"}, {"name": "nf", "source": "dns", "server": "203.0.113.53"}, {"name": "sn", "source": "sni", "server": "203.0.113.80"}]'
+ca_norm() { jq -cS . <<<"$1"; }
+assert_equals '{"outbounds":[{"type":"direct","tag":"v6","domain_resolver":{"server":"google","strategy":"ipv6_only"}}]}' \
+    "$(run_ca "chainLocalExitFragment '$(jq -c '.[1]' <<<"${CA_EXITS}")' | jq -c ." 2>&1)" "本机出口片段（本机 IPv6）：direct 出站自带 ipv6_only 的解析器"
+assert_equals '{"outbounds":[{"type":"direct","tag":"nf","domain_resolver":{"server":"dns-nf"}}],"dns":{"servers":[{"type":"udp","tag":"dns-nf","server":"203.0.113.53"}]}}' \
+    "$(run_ca "chainLocalExitFragment '$(jq -c '.[3]' <<<"${CA_EXITS}")' | jq -c ." 2>&1)" "本机出口片段（解锁 DNS）：DNS 服务器与指向它的 direct 出站在同一个片段里"
+assert_equals '{"outbounds":[{"type":"direct","tag":"sn"}]}' "$(run_ca "chainLocalExitFragment '$(jq -c '.[4]' <<<"${CA_EXITS}")' | jq -c ." 2>&1)" \
+    "本机出口片段（解锁 SNI）：普通 direct，目标地址挂在规则上"
+assert_equals '{"endpoints":[{"type":"wireguard","tag":"w4","address":["172.16.0.2/32","fd01::2/128"],"private_key":"K","peers":[{"address":"162.159.192.1","port":2408,"public_key":"P","reserved":[1,2,3],"allowed_ips":["0.0.0.0/0","::/0"]}]}]}' \
+    "$(run_ca 'secretKeyWarpReg=K publicKeyWarpReg=P addressWarpReg=fd01::2 reservedWarpReg=" [1, 2, 3]"; chainWarpFragment w4 | jq -c .' 2>&1)" "本机出口片段（WARP）：endpoint 两族地址都带"
+mkdir -p "${CA_ROOT}/warp" && : >"${CA_ROOT}/warp/config" && printf '#!/bin/sh\nexit 1\n' >"${CA_ROOT}/warp/warp-reg" && chmod +x "${CA_ROOT}/warp/warp-reg"
+_caWarp=$(sed -n '/^readConfigWarpReg() {/,/^}/p' install.sh)
+_out=$(CA_WARP_FNS="${_caWarp}" run_ca 'eval "${CA_WARP_FNS}"; installWarpReg() { :; }; chainWarpEnsureRegistered; echo rc=$?' 2>&1)
+assert_equals "rc=1|gone" "$(tail -n 1 <<<"${_out}")|$([[ -e "${CA_ROOT}/warp/config" ]] && echo kept || echo gone)" "WARP 注册：注册信息是空的就失败，空文件删掉（留着的话下次不再注册）"
+printf 'private_key: K\npublic_key: P\nreserved: [1, 2, 3]\nv4: 172.16.0.2\nv6: fd01::2\n' >"${CA_ROOT}/warp/config"
+_out=$(CA_WARP_FNS="${_caWarp}" run_ca 'eval "${CA_WARP_FNS}"; installWarpReg() { :; }; chainWarpEnsureRegistered; echo "rc=$?|${secretKeyWarpReg}|${addressWarpReg}"' 2>&1)
+assert_equals "rc=0|K|fd01::2" "$(tail -n 1 <<<"${_out}")" "WARP 注册：已有注册信息直接用"
+rm -rf "${CA_ROOT}/warp"
+
+ca_multi "{\"default_chain\": \"w4\", \"chains\": ${CA_EXITS}, \"rules\": [{\"type\": \"custom\", \"value\": \"a.com\", \"chain\": \"sn\"}, {\"type\": \"ip_cidr\", \"value\": \"203.0.113.0/24\", \"chain\": \"us\"},
+    {\"type\": \"custom\", \"value\": \"b.com\", \"chain\": \"v6\"}, {\"type\": \"custom\", \"value\": \"c.com\", \"chain\": \"nf\"}, {\"type\": \"custom\", \"value\": \"d.com\", \"chain\": \"us\"}]}"
+run_ca "${_caRoute}" >/dev/null 2>&1
+assert_equals "$(ca_norm "[${CA_SNIFF},{\"domain_suffix\":[\"a.com\"],\"outbound\":\"sn\",\"override_address\":\"203.0.113.80\"},${CA_LAZY},{\"ip_cidr\":[\"203.0.113.0/24\"],\"outbound\":\"us\"},
+    {\"domain_suffix\":[\"b.com\"],\"action\":\"resolve\",\"server\":\"google\",\"strategy\":\"ipv6_only\"},{\"domain_suffix\":[\"b.com\"],\"outbound\":\"v6\"},
+    {\"domain_suffix\":[\"c.com\"],\"action\":\"resolve\",\"server\":\"dns-nf\"},{\"domain_suffix\":[\"c.com\"],\"outbound\":\"nf\"},{\"domain_suffix\":[\"d.com\"],\"outbound\":\"us\"},
+    {\"action\":\"resolve\",\"server\":\"google\",\"strategy\":\"ipv4_only\"}]")" "$(jq -cS '.route.rules' "${CA_F}/chain_route.json")" \
+    "本机出口路由：SNI 规则带 override_address；指向本机 IPv6 / 解锁 DNS 的规则前各按它的解析器 resolve；默认出口是 WARP 时末尾再 resolve；链路规则不加"
+ca_multi "{\"default_chain\": \"us\", \"chains\": ${CA_EXITS}, \"rules\": [{\"type\": \"ip_cidr\", \"value\": \"203.0.113.0/24\", \"chain\": \"v6\"}]}"
+run_ca "${_caRoute}" >/dev/null 2>&1
+assert_equals "$(ca_norm "[${CA_SNIFF},${CA_LAZY},{\"ip_cidr\":[\"203.0.113.0/24\"],\"action\":\"resolve\",\"server\":\"google\",\"strategy\":\"ipv6_only\"},{\"ip_cidr\":[\"203.0.113.0/24\"],\"outbound\":\"v6\"}]")" \
+    "$(jq -cS '.route.rules' "${CA_F}/chain_route.json")" "本机出口路由：IP 段规则指向本机 IPv6 时惰性解析排在最前，默认出口是链路时末尾不加 resolve"
+
+# 按账号指到自带解析器的出口：账号规则排在所有分流规则之前，同样要先按出口的解析器 resolve
+ca_multi "{\"chains\": ${CA_EXITS}, \"accounts\": {\"alice\": \"v6\", \"bob\": \"us\"}}"
+jq -n '{inbounds: [{type: "socks", tag: "chain_bridge_in"}, {type: "hysteria2", tag: "hy2", users: [{name: "alice-singbox_hysteria2"}, {name: "bob-singbox_hysteria2"}]}], route: {rules: [], final: "direct"}}' >"${CA_MERGED}"
+run_ca "chainAccountInject ${CA_MERGED}" >/dev/null 2>&1
+assert_equals "$(ca_norm '[{"inbound":["chain_acct_in_us","chain_acct_in_v6"],"action":"sniff","timeout":"1s"},{"inbound":["chain_acct_in_us"],"outbound":"us"},
+    {"inbound":["chain_acct_in_v6"],"action":"resolve","server":"google","strategy":"ipv6_only"},{"inbound":["chain_acct_in_v6"],"outbound":"v6"},{"auth_user":["bob-singbox_hysteria2"],"outbound":"us"},
+    {"auth_user":["alice-singbox_hysteria2"],"action":"resolve","server":"google","strategy":"ipv6_only"},{"auth_user":["alice-singbox_hysteria2"],"outbound":"v6"}]')" \
+    "$(jq -cS '.route.rules' "${CA_MERGED}")" "注入（本机出口）：指到本机 IPv6 的账号，桥与 auth_user 两条规则前都先 resolve；指到链路的不加"
+ca_multi "{\"chains\": ${CA_EXITS}, \"accounts\": {\"alice\": \"sn\"}}"
+_out=$(run_ca 'chainAccountReadState; echo rc=$?' 2>&1)
+assert_contains "${_out}" "alice=sn" "按账号选出口：指到解锁 SNI 的映射不合法（账号规则带不上目标地址），点名"
+assert_equals "rc=1" "$(tail -n 1 <<<"${_out}")" "按账号选出口：指到解锁 SNI 时读状态返回 1，合并随之失败"
+
+# 向导：本机没有那一族网络、SNI 填内网地址、SNI 想当默认出口都拒；通过的写片段、状态与规则
+ca_multi '{"chains": []}'
+_caAdd='generateNextChainName() { echo chain_1; }; isChainNameExists() { false; }; isValidIP() { [[ "$1" != bad ]]; }; isLocalBlockedIP() { [[ "$1" == 10.* ]]; }
+    hostHasRouteTo() { [[ "$1" == "${CA_ROUTE:-none}" ]]; }; addRuleToConfig() { echo "rule $*" >>"${CA_CALLS}"; }'
+_out=$(printf '2\n' | run_ca "${_caAdd}; addLocalExitAsChain local; echo rc=\$?" 2>&1)
+assert_contains "${_out}" "这台机器没有 IPv6 网络" "加本机 IPv6 出口：本机没有 IPv6 路由时拒绝（不然规则命中的流量进黑洞）"
+assert_equals "rc=1|0" "$(tail -n 1 <<<"${_out}")|$(jq '.chains | length' "${CA_MULTI}")" "加本机 IPv6 出口：拒绝时状态不动"
+_out=$(printf '2\nv6out\n2\nb.com\n' | CA_ROUTE=2001:500:2::c run_ca "${_caAdd}; addLocalExitAsChain local; echo rc=\$?" 2>&1)
+assert_equals 'rc=0|{"name":"v6out","source":"local","is_default":false,"family":"ipv6"}|ipv6_only|rule custom b.com v6out' \
+    "$(tail -n 1 <<<"${_out}")|$(jq -c '.chains[0]' "${CA_MULTI}")|$(jq -r '.outbounds[0].domain_resolver.strategy' "${CA_F}/chain_outbound_v6out.json")|$(cat "${CA_CALLS}")" \
+    "加本机 IPv6 出口：状态、出站片段、规则都写上"
+_out=$(printf '10.0.0.5\nsnbad\n2\na.com\n' | run_ca "${_caAdd}; addLocalExitAsChain sni; echo rc=\$?" 2>&1)
+assert_equals "rc=1|1" "$(tail -n 1 <<<"${_out}")|$(jq '.chains | length' "${CA_MULTI}")" "加解锁 SNI 出口：内网地址在输入处拒"
+_out=$(printf '203.0.113.80\nsn\n5\n' | run_ca "${_caAdd}; addLocalExitAsChain sni; echo rc=\$?" 2>&1)
+assert_contains "${_out}" "不能做默认出口" "加解锁 SNI 出口：选「默认」时说明原因"
+assert_equals "rc=1|1|no" "$(tail -n 1 <<<"${_out}")|$(jq '.chains | length' "${CA_MULTI}")|$([[ -e "${CA_F}/chain_outbound_sn.json" ]] && echo yes || echo no)" "加解锁 SNI 出口：选「默认」时不写状态也不留片段"
+_out=$(printf '203.0.113.53\nnf\n5\n' | run_ca "${_caAdd}; addLocalExitAsChain dns; echo rc=\$?" 2>&1)
+assert_equals "rc=0|nf|true|dns-nf" "$(tail -n 1 <<<"${_out}")|$(jq -r '.default_chain' "${CA_MULTI}")|$(jq -r '.chains[] | select(.name == "nf") | .is_default' "${CA_MULTI}")|$(jq -r '.dns.servers[0].tag' "${CA_F}/chain_outbound_nf.json")" \
+    "加解锁 DNS 出口：可以做默认出口，default_chain 与 is_default 一起改"
+_out=$(printf 'bad\n' | run_ca "${_caAdd}; addLocalExitAsChain dns; echo rc=\$?" 2>&1)
+assert_equals "rc=1" "$(tail -n 1 <<<"${_out}")" "加解锁 DNS 出口：不是 IP 的在输入处拒"
+ca_multi "{\"chains\": ${CA_EXITS}}"
+_caSetDefault=$(sed -n '/^setDefaultChain() {/,/^}/p' install.sh)
+_out=$(printf '5\n' | CA_SD="${_caSetDefault}" run_ca 'eval "${CA_SD}"; setDefaultChain; echo rc=$?' 2>&1)
+assert_equals "rc=1|direct" "$(tail -n 1 <<<"${_out}")|$(jq -r '.default_chain' "${CA_MULTI}")" "设默认出口：解锁 SNI 不能当默认，状态不动"
+assert_equals "us 198.51.100.1:5001|v6 本机 IPv6|w4 WARP IPv4|nf 解锁 DNS 203.0.113.53|sn 解锁 SNI 203.0.113.80" \
+    "$(run_ca "jq -c '.chains[]' '${CA_MULTI}' | while read -r c; do printf '%s %s|' \"\$(jq -r .name <<<\"\$c\")\" \"\$(chainExitTarget \"\$c\")\"; done" 2>&1 | sed 's/|$//')" \
+    "出口的显示目标：链路是 ip:port，本机类出口是类型加地址族或服务器"
+# 连通测试：本机类出口不测出口 IP；WARP 按它的 endpoint 片段去取
+printf '%s\n' '{"outbounds":[{"type":"shadowsocks","tag":"us"}]}' >"${CA_F}/chain_outbound_us.json"
+printf '%s\n' '{"endpoints":[{"type":"wireguard","tag":"w4"}]}' >"${CA_F}/chain_outbound_w4.json"
+mkdir -p "${CA_ROOT}/tmp"
+_out=$(run_ca "export TMPDIR=${CA_ROOT}/tmp; singBoxProbeExitIP() { echo \"probe \$2 \$(jq -c 'keys' <<<\"\$1\")\" >>\"\${CA_CALLS}\"; echo 192.0.2.9; }; date() { echo 1000000000; }; testMultiChainConnection" 2>&1)
+assert_equals "3|2" "$(grep -c '不测出口 IP' <<<"${_out}")|$(grep -c '^probe ' "${CA_CALLS}")" "测多链路：本机 IPv6、解锁 DNS、解锁 SNI 三个标成不测，只探链路与 WARP"
+assert_contains "$(cat "${CA_CALLS}")" 'probe w4 ["endpoints","outbounds"]' "测多链路：WARP 把 endpoint 片段交给探测"
+# 探测 endpoint 出口：不走 tools fetch（握手没完成就报未就绪），起临时实例经本机入站取；临时配置带私钥，不能让别人读。
+# sleep 留 1 秒：桩是后台起的，要赶在临时配置被删之前读到它
+printf '#!/bin/sh\necho "sb $1 $(stat -c %%a "$3") $(jq -c "[.inbounds[0].type, .route.final, .endpoints[0].tag]" "$3")" >>"%s"\n' "${CA_CALLS}" >"${CA_ROOT}/sing-box/sing-box" && chmod +x "${CA_ROOT}/sing-box/sing-box"
+: >"${CA_CALLS}"
+_out=$(run_ca "export TMPDIR=${CA_ROOT}/tmp; sleep() { command sleep 1; }; CA_HTTP=192.0.2.44; singBoxProbeExitIP '{\"outbounds\":[],\"endpoints\":[{\"type\":\"wireguard\",\"tag\":\"w4\"}]}' w4; echo rc=\$?" 2>&1)
+assert_equals "192.0.2.44|rc=0" "$(paste -sd '|' - <<<"${_out}")" "探测 endpoint 出口：返回经临时实例取到的地址"
+assert_contains "$(cat "${CA_CALLS}")" 'sb run 600 ["mixed","w4","w4"]' "探测 endpoint 出口：起的是带本机入站、默认出口指向它的临时实例，配置文件只有 root 能读"
+assert_contains "$(cat "${CA_CALLS}")" "-x socks5h://127.0.0.1:" "探测 endpoint 出口：经临时实例的本机入站取，不用 tools fetch"
+assert_equals "0" "$(find "${CA_ROOT}/tmp" -type f | wc -l | tr -d ' ')" "探测 endpoint 出口：临时配置用完就删"
+rm -f "${CA_ROOT}/sing-box/sing-box"
 
 # --- 删外部节点：还被链路引用的不删并点名，没人用的照删 ---
 ca_reset
@@ -6385,6 +6479,16 @@ assert_equals 'true' "$(jq -r '.exits[] | select(.key == "c") | .bad' <<<"${_tp}
 assert_contains "$(jq -r '.issues[]' <<<"${_tp}")" "账号 zed 指定的出口 nosuch 不存在" "路由总览（多链路）：指向不存在链路的账号要报出来"
 assert_equals "0" "$(grep -c 'pw-secret\|192.0.2.1' <<<"${_tp}")" "路由总览（多链路）：模型里没有密钥"
 assert_equals "0" "$(run_tp 'topoRenderHtml "$(topoCollect true)"' 2>/dev/null | grep -c 'pw-secret')" "路由总览（多链路）：--full 的页面里也没有密钥"
+# 本机类出口进总览：类型标清楚，WARP 的 endpoint 片段不算「出站配置没有」，私钥不进模型
+jq '.chains += [{name: "w6", source: "warp", family: "ipv6"}, {name: "nf", source: "dns", server: "203.0.113.53"}, {name: "v4", source: "local", family: "ipv4"}]' \
+    "${TP_C}/chain_multi_info.json" >"${TP_C}/chain_multi_info.json.t" && cp "${TP_C}/chain_multi_info.json.t" "${TP_C}/chain_multi_info.json" && rm -f "${TP_C}/chain_multi_info.json.t"
+printf '%s\n' '{"endpoints":[{"type":"wireguard","tag":"w6","private_key":"pw-secret-w"}]}' >"${TP_F}/chain_outbound_w6.json"
+printf '%s\n' '{"outbounds":[{"type":"direct","tag":"nf"}],"dns":{"servers":[{"type":"udp","tag":"dns-nf","server":"203.0.113.53"}]}}' >"${TP_F}/chain_outbound_nf.json"
+printf '%s\n' '{"outbounds":[{"type":"direct","tag":"v4"}]}' >"${TP_F}/chain_outbound_v4.json"
+_tp=$(tp_model)
+assert_equals 'WARP IPv6||false|解锁 DNS|203.x.x.x|false|本机 IPv4||false' "$(jq -r '[.exits[] | select(.key == "w6" or .key == "nf" or .key == "v4") | "\(.kind)|\(.host)|\(.bad // false)"] | join("|")' <<<"${_tp}")" \
+    "路由总览（多链路）：WARP、解锁 DNS、本机 IPv4 出口各标自己的类型，解锁 DNS 带服务器地址（打码），都不标红"
+assert_equals "0" "$(grep -c 'pw-secret' <<<"${_tp}")" "路由总览（多链路）：WARP 的私钥不进模型"
 
 # 单链路与多跳：中继给的配置码带全部跳，出口标第一跳
 tp_reset

@@ -12909,7 +12909,7 @@ chainAccountReadState() {
         return 1
     fi
     invalid=$(jq -r --argjson base "${CHAIN_BRIDGE_PORT}" --argjson last "${CHAIN_BRIDGE_PORT_LAST}" '
-        ((if .mode == "multi_chain" then [.chains[]?.name] else ["chain_outbound"] end) + ["direct"]) as $exits
+        ((if .mode == "multi_chain" then [.chains[]? | select(.source != "sni") | .name] else ["chain_outbound"] end) + ["direct"]) as $exits
         | ([(.accounts // {})[] | select(. != "direct")] | unique) as $refs
         | ( (.accounts // {}) | to_entries[]
             | select((.key | test("\\A[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}\\z") | not) or ((.value as $v | $exits | index($v)) == null))
@@ -12994,8 +12994,11 @@ chainAccountInject() {
     state=$(chainAccountReadState) || return 1
     [[ "${state}" == "{}" ]] && return 0
     bridges=$(chainAccountBridges "${state}") || return 1
-    out=$(jq --argjson s "${state}" --argjson bridges "${bridges}" '
+    out=$(jq --argjson s "${state}" --argjson bridges "${bridges}" "$(chainExitDefs)"'
         ($s.accounts // {}) as $acc
+        | ([$s.chains[]? | {key: .name, value: exitResolver}] | from_entries) as $res
+        | def pre($m; $o): (if $res[$o] then [$m + {action: "resolve"} + $res[$o]] else [] end) + [$m + {outbound: $o}];
+          .
         | (if ([.inbounds[]? | select(.tag == "chain_bridge_in")] | length) > 0
            then [$bridges[] | {type: "socks", tag: ("chain_acct_in_" + .name), listen: "127.0.0.1", listen_port: .port}]
            else [] end) as $inb
@@ -13005,8 +13008,8 @@ chainAccountInject() {
         | ((if ($tags | length) > 0
               then [{inbound: $tags, action: "sniff", timeout: "1s"}]
               else [] end)
-           + [$inb[] | {inbound: [.tag], outbound: (.tag | ltrimstr("chain_acct_in_"))}]
-           + ($hits | group_by(.out) | map({auth_user: map(.name), outbound: .[0].out}))) as $pre
+           + [$inb[] | pre({inbound: [.tag]}; (.tag | ltrimstr("chain_acct_in_")))[]]
+           + ($hits | group_by(.out) | map(pre({auth_user: map(.name)}; .[0].out)[]))) as $pre
         | .inbounds = ((.inbounds // []) + $inb)
         | .route.rules = ($pre + (.route.rules // []))
         | (if ($s.mode // "") != "multi_chain" and $s.default_chain == "direct" then .route.final = "direct" else . end)
@@ -13154,7 +13157,7 @@ chainAccountExitMenu() {
     name=${nameList[$((pick - 1))]}
     exitList=("" direct)
     if [[ "${mode}" == "multi_chain" ]]; then
-        mapfile -t -O 2 exitList < <(jq -r '.chains[]?.name' <<<"${state}")
+        mapfile -t -O 2 exitList < <(jq -r '.chains[]? | select(.source != "sni") | .name' <<<"${state}")
     else
         exitList+=(chain_outbound)
     fi
@@ -13670,16 +13673,45 @@ singBoxProbeExitIP() {
     local probeConf outIP rc
     probeConf=$(mktemp) || return 1
     chmod 600 "${probeConf}"
-    if ! jq -n --argjson obs "$1" '{log: {level: "error"}, dns: {servers: [{type: "local", tag: "local"}]},
-            outbounds: [$obs[] | del(.domain_resolver)], route: {default_domain_resolver: "local"}}' >"${probeConf}" 2>/dev/null; then
+    if ! jq -n --argjson obs "$1" '($obs | if type == "array" then {outbounds: .} else . end) as $f
+            | {log: {level: "error"}, dns: {servers: [{type: "local", tag: "local"}]}, outbounds: [$f.outbounds[]? | del(.domain_resolver)],
+               endpoints: ($f.endpoints // []), route: {default_domain_resolver: "local"}}' >"${probeConf}" 2>/dev/null; then
         rm -f "${probeConf}"
         return 1
     fi
-    # tools fetch 只要拿到响应就退出 0（不看状态码），握手或认证失败才非零；没有超时，靠 timeout 兜住
-    outIP=$(timeout 15 "${SINGBOX_BIN}" tools fetch -c "${probeConf}" -o "$2" https://api.ipify.org 2>/dev/null)
-    rc=$?
+    if jq -e '(.endpoints | length) > 0' "${probeConf}" >/dev/null 2>&1; then
+        outIP=$(singBoxProbeEndpointIP "${probeConf}" "$2")
+        rc=$?
+    else
+        # tools fetch 只要拿到响应就退出 0（不看状态码），握手或认证失败才非零；没有超时，靠 timeout 兜住
+        outIP=$(timeout 15 "${SINGBOX_BIN}" tools fetch -c "${probeConf}" -o "$2" https://api.ipify.org 2>/dev/null)
+        rc=$?
+    fi
     rm -f "${probeConf}"
     [[ ${rc} -eq 0 && "${outIP}" =~ ^[0-9a-fA-F.:]+$ ]] || return 1
+    printf '%s\n' "${outIP}"
+}
+
+# singBoxProbeEndpointIP CONF TAG → 出口是 endpoint（WARP 的 WireGuard）时的取法：握手完成前 tools fetch 直接报未就绪，
+# 所以起一个只听本机的临时实例，经它取，隔 2 秒试一次、最多 8 次（握手包丢了要等 5 秒重发）。临时配置带私钥，只让 root 读
+singBoxProbeEndpointIP() {
+    local conf=$1 port pid outIP="" i
+    port=$(randomNum 20000 60000)
+    if ! (umask 077 && jq --argjson p "${port}" --arg tag "$2" '.inbounds = [{type: "mixed", tag: "probe", listen: "127.0.0.1", listen_port: $p}]
+            | .route.final = $tag' "${conf}" >"${conf}.run"); then
+        rm -f "${conf}.run"
+        return 1
+    fi
+    "${SINGBOX_BIN}" run -c "${conf}.run" >/dev/null 2>&1 &
+    pid=$!
+    for i in 1 2 3 4 5 6 7 8; do
+        sleep 2
+        outIP=$(curl -s --max-time 5 -x "socks5h://127.0.0.1:${port}" https://api.ipify.org 2>/dev/null)
+        [[ -n "${outIP}" ]] && break
+    done
+    kill "${pid}" 2>/dev/null
+    wait "${pid}" 2>/dev/null
+    rm -f "${conf}.run"
     printf '%s\n' "${outIP}"
 }
 
@@ -14682,37 +14714,15 @@ EOF
         echoContent skyBlue "\n$(t CHAIN_ADD_NUMBER) #${chainCount}"
         echoContent red "=============================================================="
 
-        # 选择添加方式
-        echoContent yellow "$(t CHAIN_ADD_TYPE_SELECT):\n"
-        echoContent yellow "1.$(t CHAIN_ADD_BY_CODE)"
-        echoContent yellow "2.$(t CHAIN_ADD_BY_EXTERNAL)"
-        echoContent yellow "0.$(t CANCEL)"
-
-        read -r -p "$(t PROMPT_SELECT): " addType
-
-        local addResult=1
-        case "${addType}" in
-            1)
-                addSingleChainOutbound
-                addResult=$?
-                ;;
-            2)
-                addExternalNodeAsChain
-                addResult=$?
-                ;;
-            0|"")
-                ((chainCount--))
-                ;;
+        multiChainAddOne
+        case $? in
+            0) ;;
+            2) ((chainCount--)) ;;
             *)
                 ((chainCount--))
-                echoContent yellow " ---> $(t INVALID_SELECTION)"
+                echoContent yellow "\n$(t CHAIN_ADD_FAILED)"
                 ;;
         esac
-
-        if [[ ${addResult} -ne 0 && "${addType}" != "0" && -n "${addType}" ]]; then
-            ((chainCount--))
-            echoContent yellow "\n$(t CHAIN_ADD_FAILED)"
-        fi
 
         echoContent yellow "\n$(t CHAIN_CONTINUE_ADD)? [y/n]"
         read -r -p "$(t CONTINUE):" continueAdding
@@ -14999,6 +15009,183 @@ addExternalChainToConfig() {
     printf '%s\n' "${wrapped}" > "${outFile}"
 
     return 0
+}
+
+# chainExitDefs → 出口条目的 jq 定义，拼在用到它的过滤器前面。exitResolver：出口自带的解析器（WARP、本机 IPv4 / IPv6、解锁 DNS），没有为 null。
+# 指向这类出口的规则前要按它再 resolve 一次：过了惰性解析点的流量带着 IPv4 结果，不重解析就绕过了出口的地址族与解锁 DNS
+chainExitDefs() {
+    printf '%s\n' 'def exitResolver: if .source == "warp" or .source == "local"
+            then {server: "google", strategy: (if .family == "ipv6" then "ipv6_only" else "ipv4_only" end)}
+        elif .source == "dns" then {server: ("dns-" + .name)} else null end;'
+}
+
+# chainExitTarget ENTRY → 出口条目的显示目标：链路与外部节点是 ip:port，本机类出口是类型加地址族或服务器
+chainExitTarget() {
+    jq -r --arg local "$(t CHAIN_EXIT_LOCAL)" --arg dns "$(t CHAIN_EXIT_DNS)" --arg sni "$(t CHAIN_EXIT_SNI)" '
+        (if .family == "ipv6" then "IPv6" else "IPv4" end) as $fam
+        | if .source == "warp" then "WARP " + $fam elif .source == "local" then $local + " " + $fam
+          elif .source == "dns" then $dns + " " + .server elif .source == "sni" then $sni + " " + .server
+          else "\(.ip):\(.port)" end' <<<"$1"
+}
+
+# chainExitIsSni NAME → 0=这个出口是解锁 SNI。它靠规则上的 override_address 落地，只能配域名规则：做默认出口或指给账号都带不上那个地址
+chainExitIsSni() {
+    jq -e --arg n "$1" 'any(.chains[]?; .name == $n and .source == "sni")' "${CHAIN_MULTI_INFO}" >/dev/null 2>&1
+}
+
+# chainWarpEnsureRegistered → WARP 出口要的注册工具与注册信息（warp/config，只注册一次）。用户不装或注册失败返回 1
+chainWarpEnsureRegistered() {
+    (installWarpReg)
+    if [[ ! -f "${WARP_DIR}/warp-reg" && ! -s "${WARP_DIR}/config" ]]; then
+        return 1
+    fi
+    readConfigWarpReg
+    if [[ -z "${secretKeyWarpReg}" || -z "${publicKeyWarpReg}" || -z "${addressWarpReg}" || -z "${reservedWarpReg}" ]]; then
+        # 注册没成功时留下的空文件要删，不然下次不再注册
+        [[ -s "${WARP_DIR}/config" ]] || rm -f "${WARP_DIR}/config"
+        echoContent red " ---> $(t CHAIN_EXIT_WARP_FAILED)"
+        return 1
+    fi
+}
+
+# chainWarpFragment NAME → WARP 出口的 endpoint 片段（先调 chainWarpEnsureRegistered）。两族地址都带上，走哪一族由规则前的 resolve 定：
+# 只带一族的话，没过 resolve 的连接（客户端直接发 IP）碰到另一族就断
+chainWarpFragment() {
+    jq -n --arg tag "$1" --arg key "${secretKeyWarpReg}" --arg pub "${publicKeyWarpReg}" --arg v6 "${addressWarpReg}" --argjson reserved "${reservedWarpReg}" '
+        {endpoints: [{type: "wireguard", tag: $tag, address: ["172.16.0.2/32", $v6 + "/128"], private_key: $key,
+            peers: [{address: "162.159.192.1", port: 2408, public_key: $pub, reserved: $reserved, allowed_ips: ["0.0.0.0/0", "::/0"]}]}]}'
+}
+
+# chainLocalExitFragment ENTRY → 本机 IPv4 / IPv6、解锁 DNS、解锁 SNI 的出站片段：都是 direct，解析器与规则前的 resolve 同出 exitResolver
+chainLocalExitFragment() {
+    jq "$(chainExitDefs)"' exitResolver as $r
+        | {outbounds: [{type: "direct", tag: .name} + (if $r then {domain_resolver: $r} else {} end)]}
+          + (if .source == "dns" then {dns: {servers: [{type: "udp", tag: $r.server, server: .server}]}} else {} end)' <<<"$1"
+}
+
+# addLocalExitAsChain KIND → 向导：加一个不经别的机器的出口（warp / local / dns / sni），写出站片段与状态；路由由调用方随后重建
+addLocalExitAsChain() {
+    local kind=$1 family="" server="" pick probe entry fragment state chainName inputName defaultName isDefault=false
+    case "${kind}" in
+        warp | local)
+            echoContent yellow "\n$(t CHAIN_EXIT_FAMILY_SELECT):"
+            echoContent yellow "1.IPv4"
+            echoContent yellow "2.IPv6"
+            read -r -p "$(t PROMPT_SELECT): " pick
+            case "${pick}" in
+                1) family=ipv4 probe=192.33.4.12 ;;
+                2) family=ipv6 probe=2001:500:2::c ;;
+                *)
+                    echoContent red " ---> $(t INVALID_SELECTION)"
+                    return 1
+                    ;;
+            esac
+            # 本机没有这一族的路由时出口是个黑洞，规则命中的流量全断
+            if [[ "${kind}" == "local" ]] && ! hostHasRouteTo "${probe}"; then
+                echoContent red " ---> $(t CHAIN_EXIT_NO_ROUTE "IPv${family#ipv}")"
+                return 1
+            fi
+            ;;
+        dns | sni)
+            if [[ "${kind}" == "dns" ]]; then
+                echoContent yellow "\n$(t CHAIN_EXIT_DNS_NOTICE)"
+                read -r -p "$(t CHAIN_EXIT_DNS_PROMPT): " server
+            else
+                echoContent yellow "\n$(t CHAIN_EXIT_SNI_NOTICE)"
+                read -r -p "$(t CHAIN_EXIT_SNI_PROMPT): " server
+            fi
+            if ! isValidIP "${server}"; then
+                echoContent red " ---> $(t ERR_IP_INVALID)"
+                return 1
+            fi
+            if [[ "${kind}" == "sni" ]] && isLocalBlockedIP "${server}"; then
+                echoContent red " ---> $(t SNI_IP_LOCAL_BLOCKED)"
+                return 1
+            fi
+            ;;
+        *) return 1 ;;
+    esac
+    if [[ "${kind}" == "warp" ]]; then
+        chainWarpEnsureRegistered || return 1
+    fi
+
+    echoContent yellow "\n$(t CHAIN_STEP_NAME)"
+    echoContent yellow "$(t CHAIN_NAME_HINT)"
+    defaultName=$(generateNextChainName)
+    read -r -p "$(t CHAIN_NAME_PROMPT) [${defaultName}]: " inputName
+    chainName="${inputName:-${defaultName}}"
+    if ! validateChainName "${chainName}"; then
+        echoContent red " ---> $(t CHAIN_NAME_INVALID)"
+        return 1
+    fi
+    if isChainNameExists "${chainName}"; then
+        echoContent red " ---> $(t CHAIN_NAME_EXISTS)"
+        return 1
+    fi
+
+    echoContent yellow "\n$(t CHAIN_STEP_RULES)"
+    echoContent yellow "$(t CHAIN_RULES_SELECT):\n"
+    echoContent skyBlue "$(t CHAIN_DEFAULT_HINT)\n"
+    chainReadRule later || return 1
+    if [[ "${kind}" == "sni" && "${chainRuleType}" != "none" && "${chainRuleType}" != "preset" && "${chainRuleType}" != "custom" ]]; then
+        echoContent red " ---> $(t CHAIN_EXIT_SNI_NEEDS_DOMAIN)"
+        return 1
+    fi
+    [[ "${chainRuleType}" == "default" ]] && isDefault=true
+
+    entry=$(jq -cn --arg name "${chainName}" --arg source "${kind}" --arg family "${family}" --arg server "${server}" '
+        {name: $name, source: $source, is_default: false}
+        + (if $family != "" then {family: $family} else {} end) + (if $server != "" then {server: $server} else {} end)') || return 1
+    if [[ "${kind}" == "warp" ]]; then
+        fragment=$(chainWarpFragment "${chainName}")
+    else
+        fragment=$(chainLocalExitFragment "${entry}")
+    fi
+    if [[ -z "${fragment}" ]]; then
+        echoContent red " ---> $(t EXT_CONFIG_FAILED)"
+        return 1
+    fi
+    state=$(jq -c --argjson e "${entry}" --argjson d "${isDefault}" '.chains += [$e]
+        | if $d then .default_chain = $e.name | .chains |= map(.is_default = (.name == $e.name)) else . end' "${CHAIN_MULTI_INFO}") || return 1
+    jsonWriteFile "${SINGBOX_FRAGMENT_DIR}/chain_outbound_${chainName}.json" "${fragment}" false || return 1
+    if ! writeChainInfoAtomic "${CHAIN_MULTI_INFO}" "${state}"; then
+        rm -f "${SINGBOX_FRAGMENT_DIR}/chain_outbound_${chainName}.json"
+        return 1
+    fi
+    case "${chainRuleType}" in
+        preset | custom | ip_cidr | geoip) addRuleToConfig "${chainRuleType}" "${chainRuleValue}" "${chainName}" ;;
+    esac
+
+    echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]$([[ "${isDefault}" == "true" ]] && echo " ($(t DEFAULT_CHAIN))")"
+    echoContent green "   $(t CHAIN_TARGET): $(chainExitTarget "${entry}")"
+    echoContent green "   $(t RULES): $(chainRuleLabel "${chainRuleType}" "${chainRuleValue}")"
+}
+
+# multiChainAddOne → 问添加哪种出口并走对应向导。0=加上了，1=失败，2=取消
+multiChainAddOne() {
+    local addType
+    echoContent yellow "$(t CHAIN_ADD_TYPE_SELECT):\n"
+    echoContent yellow "1.$(t CHAIN_ADD_BY_CODE)"
+    echoContent yellow "2.$(t CHAIN_ADD_BY_EXTERNAL)"
+    echoContent yellow "3.$(t CHAIN_ADD_BY_WARP)"
+    echoContent yellow "4.$(t CHAIN_ADD_BY_LOCAL)"
+    echoContent yellow "5.$(t CHAIN_ADD_BY_DNS)"
+    echoContent yellow "6.$(t CHAIN_ADD_BY_SNI)"
+    echoContent yellow "0.$(t CANCEL)"
+    read -r -p "$(t PROMPT_SELECT): " addType
+    case "${addType}" in
+        1) addSingleChainOutbound || return 1 ;;
+        2) addExternalNodeAsChain || return 1 ;;
+        3) addLocalExitAsChain warp || return 1 ;;
+        4) addLocalExitAsChain local || return 1 ;;
+        5) addLocalExitAsChain dns || return 1 ;;
+        6) addLocalExitAsChain sni || return 1 ;;
+        0 | "") return 2 ;;
+        *)
+            echoContent red " ---> $(t INVALID_SELECTION)"
+            return 1
+            ;;
+    esac
 }
 
 # 添加单条链路
@@ -15319,10 +15506,7 @@ configureMultiChainRules() {
 
     local index=1
     while IFS= read -r chain; do
-        local chainIP chainPort
-        chainIP=$(jq -r ".chains[] | select(.name == \"${chain}\") | .ip" "${infoFile}")
-        chainPort=$(jq -r ".chains[] | select(.name == \"${chain}\") | .port" "${infoFile}")
-        echoContent yellow "  ${index}. ${chain} (${chainIP}:${chainPort})"
+        echoContent yellow "  ${index}. ${chain} ($(chainExitTarget "$(jq -c --arg n "${chain}" 'first(.chains[] | select(.name == $n))' "${infoFile}")"))"
         ((index++))
     done <<< "${chains}"
 
@@ -15340,6 +15524,10 @@ configureMultiChainRules() {
 
     echoContent yellow "\n$(t CHAIN_RULE_FOR) [${selectedChain}] $(t CHAIN_RULE_TYPE_SELECT):\n"
     chainReadRule || return 1
+    if chainExitIsSni "${selectedChain}" && [[ "${chainRuleType}" != "preset" && "${chainRuleType}" != "custom" ]]; then
+        echoContent red " ---> $(t CHAIN_EXIT_SNI_NEEDS_DOMAIN)"
+        return 1
+    fi
 
     case "${chainRuleType}" in
         preset)
@@ -15416,7 +15604,7 @@ finalizeMultiChainConfig() {
         echoContent yellow "$(t CHAIN_SET_DEFAULT_NOW)\n"
 
         local chains
-        chains=$(jq -r '.chains[].name' "${infoFile}")
+        chains=$(jq -r '.chains[] | select(.source != "sni") | .name' "${infoFile}")
 
         local index=1
         while IFS= read -r chain; do
@@ -15516,6 +15704,9 @@ generateMultiChainRouteConfig() {
     hasXray=$(jq -r '.has_xray' "${infoFile}")
 
     local routeRules="[]"
+    # 规则前的 resolve 与 SNI 的 override_address 要看出口条目；只取这几项，密钥不进命令行
+    local match exits
+    exits=$(jq -c '{chains: [.chains[]? | {name, source, family, server}], default_chain}' "${infoFile}")
     local ruleSetDefs="[]"
     local usedRuleSets=""
 
@@ -15536,6 +15727,7 @@ generateMultiChainRouteConfig() {
         ruleType=$(echo "${rule}" | jq -r '.type')
         ruleValue=$(echo "${rule}" | jq -r '.value')
         ruleChain=$(echo "${rule}" | jq -r '.chain')
+        match=""
 
         if [[ "${ruleType}" == "preset" ]]; then
             # 获取预设规则对应的规则集
@@ -15567,10 +15759,7 @@ generateMultiChainRouteConfig() {
             done
 
             # 添加路由规则
-            routeRules=$(echo "${routeRules}" | jq --argjson rs "${rulesetNames}" --arg chain "${ruleChain}" '. + [{
-                "rule_set": $rs,
-                "outbound": $chain
-            }]')
+            match=$(jq -cn --argjson rs "${rulesetNames}" '{rule_set: $rs}')
 
         elif [[ "${ruleType}" == "custom" ]]; then
             # 自定义域名规则
@@ -15581,10 +15770,7 @@ generateMultiChainRouteConfig() {
                 domains=$(echo "${domains}" | jq --arg d "${domain}" '. + [$d]')
             done
 
-            routeRules=$(echo "${routeRules}" | jq --argjson ds "${domains}" --arg chain "${ruleChain}" '. + [{
-                "domain_suffix": $ds,
-                "outbound": $chain
-            }]')
+            match=$(jq -cn --argjson ds "${domains}" '{domain_suffix: $ds}')
 
         elif [[ "${ruleType}" == "ip_cidr" ]]; then
             # IP CIDR 规则
@@ -15595,10 +15781,7 @@ generateMultiChainRouteConfig() {
                 ipCidrs=$(echo "${ipCidrs}" | jq --arg c "${cidr}" '. + [$c]')
             done
 
-            routeRules=$(echo "${routeRules}" | jq --argjson ips "${ipCidrs}" --arg chain "${ruleChain}" '. + [{
-                "ip_cidr": $ips,
-                "outbound": $chain
-            }]')
+            match=$(jq -cn --argjson ips "${ipCidrs}" '{ip_cidr: $ips}')
 
         elif [[ "${ruleType}" == "geoip" ]]; then
             # GeoIP 规则
@@ -15622,12 +15805,17 @@ generateMultiChainRouteConfig() {
             fi
 
             # 添加路由规则
-            routeRules=$(echo "${routeRules}" | jq --arg rs "${geoipTag}" --arg chain "${ruleChain}" '. + [{
-                "rule_set": [$rs],
-                "outbound": $chain
-            }]')
+            match=$(jq -cn --arg rs "${geoipTag}" '{rule_set: [$rs]}')
         fi
+        [[ -n "${match}" ]] || continue
+        routeRules=$(jq -c --argjson m "${match}" --arg chain "${ruleChain}" --argjson exits "${exits}" "$(chainExitDefs)"'
+            (first($exits.chains[] | select(.name == $chain)) // {}) as $e | ($e | exitResolver) as $r
+            | . + [(if $r then $m + {action: "resolve"} + $r else empty end),
+                   $m + {outbound: $chain} + (if $e.source == "sni" then {override_address: $e.server} else {} end)]' <<<"${routeRules}")
     done <<< "${rules}"
+    routeRules=$(jq -c --argjson exits "${exits}" "$(chainExitDefs)"'
+        (first($exits.chains[] | select(.name == $exits.default_chain)) // {} | exitResolver) as $r
+        | if $r then . + [{action: "resolve"} + $r] else . end' <<<"${routeRules}")
 
     # 确保 direct 出站存在（不写 domain_strategy，详见 ensureSingBoxInstalled 注释）
     if [[ ! -f "${SINGBOX_FRAGMENT_DIR}/01_direct_outbound.json" ]]; then
@@ -15717,10 +15905,8 @@ showMultiChainSummary() {
     chains=$(jq -c '.chains[]' "${infoFile}")
 
     while IFS= read -r chain; do
-        local name ip port isDefault
+        local name isDefault
         name=$(echo "${chain}" | jq -r '.name')
-        ip=$(echo "${chain}" | jq -r '.ip')
-        port=$(echo "${chain}" | jq -r '.port')
         isDefault=$(echo "${chain}" | jq -r '.is_default')
 
         # 获取此链路的规则
@@ -15743,7 +15929,7 @@ showMultiChainSummary() {
             ruleDesc="$(t CHAIN_DEFAULT_ALL_TRAFFIC)"
         fi
 
-        printf "  %-15s %-20s %-20s\n" "${name}" "${ip}:${port}" "${ruleDesc}"
+        printf "  %-15s %-20s %-20s\n" "${name}" "$(chainExitTarget "${chain}")" "${ruleDesc}"
     done <<< "${chains}"
 
     # 显示默认链路
@@ -15786,20 +15972,25 @@ testMultiChainConnection() {
     local index=0
 
     while IFS= read -r chain; do
-        local name ip port
+        local name target
         name=$(echo "${chain}" | jq -r '.name')
-        ip=$(echo "${chain}" | jq -r '.ip')
-        port=$(echo "${chain}" | jq -r '.port')
+        target=$(chainExitTarget "${chain}")
+        # 本机 IPv4 / IPv6、解锁 DNS / SNI 从这台机器自己的地址出去，没有可比的出口 IP，不测
+        if jq -e '.source == "local" or .source == "dns" or .source == "sni"' <<<"${chain}" >/dev/null; then
+            echo "${name}|${target}|skip||" >"${tmpDir}/result_${index}"
+            ((index++))
+            continue
+        fi
 
         # 按链路自己的出站真取一次出口 IP（只看出口端口的话，密钥不对、经中继的链路照样报通）
         (
             local result="fail" took="" outIP="" startTime
             startTime=$(date +%s%N)
-            if outIP=$(singBoxProbeExitIP "$(jq -c '.outbounds' "${SINGBOX_FRAGMENT_DIR}/chain_outbound_${name}.json" 2>/dev/null)" "${name}"); then
+            if outIP=$(singBoxProbeExitIP "$(jq -c '{outbounds: (.outbounds // []), endpoints: (.endpoints // [])}' "${SINGBOX_FRAGMENT_DIR}/chain_outbound_${name}.json" 2>/dev/null)" "${name}"); then
                 result="pass"
                 took=$(( ($(date +%s%N) - startTime) / 1000000 ))
             fi
-            echo "${name}|${ip}:${port}|${result}|${took}|${outIP}" > "${tmpDir}/result_${index}"
+            echo "${name}|${target}|${result}|${took}|${outIP}" > "${tmpDir}/result_${index}"
         ) &
 
         pids="${pids} $!"
@@ -15820,7 +16011,9 @@ testMultiChainConnection() {
             local name target status took outIP
             IFS='|' read -r name target status took outIP <"${resultFile}"
 
-            if [[ "${status}" == "pass" ]]; then
+            if [[ "${status}" == "skip" ]]; then
+                echoContent yellow "  • ${name} (${target}) - $(t CHAIN_TEST_LOCAL_SKIPPED)"
+            elif [[ "${status}" == "pass" ]]; then
                 echoContent green "  ✅ ${name} (${target}) - $(t CHAIN_TEST_PROBE_OK "${outIP}" "${took}")"
                 ((passCount++))
             else
@@ -15876,10 +16069,8 @@ showMultiChainStatus() {
     chains=$(jq -c '.chains[]' "${infoFile}")
 
     while IFS= read -r chain; do
-        local name ip port isDefault
+        local name isDefault
         name=$(echo "${chain}" | jq -r '.name')
-        ip=$(echo "${chain}" | jq -r '.ip')
-        port=$(echo "${chain}" | jq -r '.port')
         isDefault=$(echo "${chain}" | jq -r '.is_default')
 
         local defaultMark=""
@@ -15887,7 +16078,7 @@ showMultiChainStatus() {
             defaultMark=" $(t CHAIN_STATUS_DEFAULT_MARK)"
         fi
 
-        echoContent yellow "    • ${name}: ${ip}:${port}${defaultMark}"
+        echoContent yellow "    • ${name}: $(chainExitTarget "${chain}")${defaultMark}"
     done <<< "${chains}"
 
     echoContent green "╚══════════════════════════════════════════════════════════════╝"
@@ -15897,20 +16088,11 @@ showMultiChainStatus() {
 
 # multiChainAddChain → 往已有多链路里加一条：加完出站要重建路由、合并、重载，只加出站的话新链路的分流规则一直不生效
 multiChainAddChain() {
-    local addType
-    echoContent yellow "$(t CHAIN_ADD_TYPE_SELECT):\n"
-    echoContent yellow "1.$(t CHAIN_ADD_BY_CODE)"
-    echoContent yellow "2.$(t CHAIN_ADD_BY_EXTERNAL)"
-    echoContent yellow "0.$(t CANCEL)"
-    read -r -p "$(t PROMPT_SELECT): " addType
-    case "${addType}" in
-        1) addSingleChainOutbound || return 1 ;;
-        2) addExternalNodeAsChain || return 1 ;;
-        0 | "") return 0 ;;
-        *)
-            echoContent red " ---> $(t INVALID_SELECTION)"
-            return 1
-            ;;
+    multiChainAddOne
+    case $? in
+        0) ;;
+        2) return 0 ;;
+        *) return 1 ;;
     esac
     multiChainEnsureXrayWired || return 1
     generateMultiChainRouteConfig
@@ -15985,9 +16167,7 @@ removeMultiChainOutbound() {
 
     local index=1
     while IFS= read -r chain; do
-        local chainIP chainPort isDefault
-        chainIP=$(jq -r ".chains[] | select(.name == \"${chain}\") | .ip" "${infoFile}")
-        chainPort=$(jq -r ".chains[] | select(.name == \"${chain}\") | .port" "${infoFile}")
+        local isDefault
         isDefault=$(jq -r ".chains[] | select(.name == \"${chain}\") | .is_default" "${infoFile}")
 
         local defaultMark=""
@@ -15995,7 +16175,7 @@ removeMultiChainOutbound() {
             defaultMark=" $(t CHAIN_STATUS_DEFAULT_MARK)"
         fi
 
-        echoContent yellow "  ${index}. ${chain} (${chainIP}:${chainPort})${defaultMark}"
+        echoContent yellow "  ${index}. ${chain} ($(chainExitTarget "$(jq -c --arg n "${chain}" 'first(.chains[] | select(.name == $n))' "${infoFile}")"))${defaultMark}"
         ((index++))
     done <<< "${chains}"
 
@@ -16093,6 +16273,10 @@ setDefaultChain() {
 
     if [[ -z "${newDefault}" ]]; then
         echoContent red " ---> 无效的选择"
+        return 1
+    fi
+    if chainExitIsSni "${newDefault}"; then
+        echoContent red " ---> $(t CHAIN_EXIT_SNI_NEEDS_DOMAIN)"
         return 1
     fi
 
@@ -20578,7 +20762,7 @@ topoRoutingPlain() {
 # topoRoutingMulti → 多链路。只取画图要的字段：状态文件里 password 和 ip、port 并排，整块转储就把密钥写进页面了
 topoRoutingMulti() {
     local state name file hops='{}' missing='[]' rules='[]' type value chain
-    state=$(jq -c '{chains: [.chains[]? | {name, ip, port, source, external_type}], rules: [.rules[]? | {type, value, chain}], default_chain, accounts: (.accounts // {})}' "${CHAIN_MULTI_INFO}") || return 1
+    state=$(jq -c '{chains: [.chains[]? | {name, ip, port, source, external_type, family, server}], rules: [.rules[]? | {type, value, chain}], default_chain, accounts: (.accounts // {})}' "${CHAIN_MULTI_INFO}") || return 1
     while IFS= read -r name; do
         [[ -n "${name}" ]] || continue
         file="${SINGBOX_FRAGMENT_DIR}/chain_outbound_${name}.json"
@@ -20596,6 +20780,7 @@ topoRoutingMulti() {
                                       | if length > 0 then . else [$w] end)}]' <<<"${rules}")
     done < <(jq -r '.rules[] | [.type, (.value | tostring), .chain] | @tsv' <<<"${state}")
     jq -c --argjson direct "$(topoDirectExit)" --argjson hops "${hops}" --argjson missing "${missing}" --argjson rules "${rules}" \
+        --arg localKind "$(t TOPO_KIND_LOCAL)" --arg dnsKind "$(t CHAIN_EXIT_DNS)" --arg sniKind "$(t CHAIN_EXIT_SNI)" \
         --arg chainKind "$(t TOPO_KIND_CHAIN)" --arg relayNote "$(t TOPO_NOTE_RELAYS)" --arg badNote "$(t TOPO_NOTE_NOT_APPLIED)" --arg badIssue "$(t TOPO_ISSUE_MISSING_CHAIN)" \
         --arg badPin "$(t TOPO_ISSUE_PIN_MISSING)" --arg more "$(t TOPO_FLOW_MORE)" --arg w "$(t TOPO_FLOW_DEFAULT)" '
         (.default_chain // "direct") as $dflt
@@ -20603,7 +20788,10 @@ topoRoutingMulti() {
         | {
             exits: ([$direct] + [.chains[] | . as $c
                 | ($hops[$c.name] // {}) as $h
-                | {key: .name, kind: (if .source == "external" then (.external_type // "") else $chainKind end), rawHost: ($h.server // .ip), port: ($h.port // .port)}
+                | (if .source == "warp" or .source == "local" then (if .family == "ipv6" then " IPv6" else " IPv4" end) else "" end) as $fam
+                | {key: .name, kind: (if .source == "external" then (.external_type // "") elif .source == "warp" then "WARP" + $fam
+                                      elif .source == "local" then $localKind + $fam elif .source == "dns" then $dnsKind elif .source == "sni" then $sniKind else $chainKind end),
+                   rawHost: ($h.server // .server // .ip // ""), port: ($h.port // .port // "")}
                   + (if .source == "external" then {rawName: .name} else {name: .name} end)
                   + (if ($missing | index($c.name)) != null then {bad: true, note: $badNote}
                      elif ($h.count // 1) > 1 then {note: ($relayNote | sub("%s"; ($h.count | tostring)))} else {} end)]),
