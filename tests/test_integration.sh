@@ -3246,7 +3246,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试按账号选出口 ===${NC}"
 
-CA_FN_NAMES="singBoxProbeExitIP localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs ensureXrayLocalBlock localBlockInject directOutboundInject chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig chainRouteLazyResolve migrateChainRouteResolve chainExitDefs chainExitTarget chainExitIsSni chainWarpEnsureRegistered chainWarpFragment chainLocalExitFragment addLocalExitAsChain multiChainAddOne singBoxProbeEndpointIP migrateChainEntryState chainHopOutbounds chainReadManualExit addSingleChainOutbound"
+CA_FN_NAMES="singBoxProbeExitIP localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs ensureXrayLocalBlock localBlockInject directOutboundInject chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig chainRouteLazyResolve migrateChainRouteResolve chainExitDefs chainExitTarget chainExitIsSni chainWarpEnsureRegistered chainWarpFragment chainLocalExitFragment addLocalExitAsChain multiChainAddOne singBoxProbeEndpointIP migrateChainEntryState chainHopOutbounds chainReadManualExit addSingleChainOutbound chainIsExitMachine chainRefuseRemoteOnExit"
 CA_FNS=$(sed -n "$(for _f in ${CA_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_equals "$(wc -w <<<"${CA_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CA_FNS}")" "按账号选出口：每个函数都抽到了"
 CA_ROOT="${MOCK_ROOT}/chainacct.root"
@@ -3672,6 +3672,67 @@ assert_contains "$(cat "${CA_CALLS}")" 'sb run 600 ["mixed","w4","w4"]' "探测 
 assert_contains "$(cat "${CA_CALLS}")" "-x socks5h://127.0.0.1:" "探测 endpoint 出口：经临时实例的本机入站取，不用 tools fetch"
 assert_equals "0" "$(find "${CA_ROOT}/tmp" -type f | wc -l | tr -d ' ')" "探测 endpoint 出口：临时配置用完就删"
 rm -f "${CA_ROOT}/sing-box/sing-box"
+
+# --- 出口机的路由并进同一个生成器：经链路进来的流量走本机的出口表与规则；出口机只许加本机类出口 ---
+CA_EXIT="${CA_ROOT}/sing-box/conf/chain_exit_info.json"
+CA_RELAY="${CA_ROOT}/sing-box/conf/chain_relay_info.json"
+CA_EXIT_SNIFF='{"inbound":"chain_inbound","action":"sniff","timeout":"1s"}'
+ca_reset
+printf '%s\n' '{"role":"exit","port":5000,"domain_strategy":"prefer_ipv4"}' >"${CA_EXIT}"
+run_ca "${_caRoute}" >/dev/null 2>&1
+assert_equals "{\"route\":{\"rules\":[${CA_EXIT_SNIFF},{\"inbound\":\"chain_inbound\",\"action\":\"resolve\",\"strategy\":\"prefer_ipv4\"},{\"inbound\":[\"chain_inbound\"],\"outbound\":\"direct\"}],\"final\":\"direct\",\"default_domain_resolver\":\"google\"}}" \
+    "$(jq -c . "${CA_F}/chain_route.json")" "出口机路由（只当出口）：和以前手写的那份一样，sniff、按所选策略解析、链路流量直连"
+printf '%s\n' '{"role":"exit","port":5000,"domain_strategy":""}' >"${CA_EXIT}"
+run_ca "${_caRoute}" >/dev/null 2>&1
+assert_equals "[${CA_EXIT_SNIFF},{\"inbound\":[\"chain_inbound\"],\"outbound\":\"direct\"}]" "$(jq -c '.route.rules' "${CA_F}/chain_route.json")" "出口机路由（双栈自动）：不加解析"
+printf '%s\n' '{"role":"exit","port":5000,"domain_strategy":"prefer_ipv6"}' >"${CA_EXIT}"
+CA_LOCAL_EXITS='[{"name": "v6", "source": "local", "family": "ipv6"}, {"name": "nf", "source": "dns", "server": "203.0.113.53"}]'
+ca_multi "{\"has_xray\": false, \"chains\": ${CA_LOCAL_EXITS}, \"rules\": [{\"type\": \"custom\", \"value\": \"a.com\", \"chain\": \"nf\"}]}"
+run_ca "${_caRoute}" >/dev/null 2>&1
+assert_equals "$(ca_norm "[${CA_EXIT_SNIFF},{\"domain_suffix\":[\"a.com\"],\"action\":\"resolve\",\"server\":\"dns-nf\"},{\"domain_suffix\":[\"a.com\"],\"outbound\":\"nf\"},
+    {\"inbound\":\"chain_inbound\",\"action\":\"resolve\",\"strategy\":\"prefer_ipv6\"},{\"inbound\":[\"chain_inbound\"],\"outbound\":\"direct\"}]")" "$(jq -cS '.route.rules' "${CA_F}/chain_route.json")" \
+    "出口机路由（有自己的规则）：链路流量先过本机的分流规则，没命中的才按出口的策略解析后直连"
+ca_multi "{\"has_xray\": false, \"default_chain\": \"v6\", \"chains\": ${CA_LOCAL_EXITS}}"
+run_ca "${_caRoute}" >/dev/null 2>&1
+assert_equals "$(ca_norm "[${CA_EXIT_SNIFF},{\"action\":\"resolve\",\"server\":\"google\",\"strategy\":\"ipv6_only\"},{\"inbound\":[\"chain_inbound\"],\"outbound\":\"v6\"}]")" "$(jq -cS '.route.rules' "${CA_F}/chain_route.json")" \
+    "出口机路由（默认出口是本机 IPv6）：链路流量跟着默认出口走，按它的解析器解析，不再套建出口时的策略"
+printf '%s\n' '{"role":"relay"}' >"${CA_RELAY}"
+run_ca "${_caRoute}" >/dev/null 2>&1
+assert_equals "0" "$(jq '[.route.rules[] | select(tostring | contains("chain_inbound"))] | length' "${CA_F}/chain_route.json")" "出口机路由：中继状态在时（旧出口状态是覆盖前留下的）不当成出口"
+rm -f "${CA_RELAY}"
+_out=$(run_ca 'chainRefuseRemoteOnExit; echo rc=$?' 2>&1)
+assert_contains "${_out}" "只能加 WARP" "出口机加远端出口：拒绝并说明原因"
+assert_equals "rc=1" "$(tail -n 1 <<<"${_out}")" "出口机加远端出口：返回 1"
+_caKept=$(cat "${CA_MULTI}")
+for _caPick in 1 2 7; do
+    _out=$(printf '%s\n' "${_caPick}" | run_ca 'multiChainAddOne; echo rc=$?' 2>&1)
+    assert_equals "rc=1|same" "$(tail -n 1 <<<"${_out}")|$([[ "${_caKept}" == "$(cat "${CA_MULTI}")" ]] && echo same || echo changed)" "出口机的添加菜单选 ${_caPick}（配置码 / 外部节点 / 手动）：拒绝，状态不动"
+done
+rm -f "${CA_EXIT}"
+assert_equals "rc=0" "$(run_ca 'chainRefuseRemoteOnExit; echo rc=$?' 2>&1 | tail -n 1)" "不是出口机：添加远端出口不受限"
+# 已有远端出口的机器不能当出口；只有本机类出口的可以（向导照常往下走）
+_caExitSetup=$(awk '/^setupChainExit\(\) \{/{f=1; print; next} f && /^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{/{f=0} f' install.sh)
+_caExitRun='planAction() { return 1; }; ensureSingBoxInstalled() { echo ensure >>"${CA_CALLS}"; return 1; }; setupChainExit; echo rc=$?'
+ca_reset
+ca_multi '{}'
+_out=$(run_ca "${_caExitSetup}"$'\n'"${_caExitRun}" 2>&1 </dev/null)
+assert_contains "${_out}" "us, hk, jp" "配出口（已有远端出口）：拒绝并点名是哪些出口"
+assert_equals "rc=1|" "$(tail -n 1 <<<"${_out}")|$(cat "${CA_CALLS}")" "配出口（已有远端出口）：返回 1，向导没往下走"
+ca_multi "{\"chains\": ${CA_LOCAL_EXITS}}"
+run_ca "${_caExitSetup}"$'\n'"${_caExitRun}" >/dev/null 2>&1 </dev/null
+assert_equals "ensure" "$(cat "${CA_CALLS}")" "配出口（只有本机类出口）：不拦"
+# 中继与出口表互斥：中继的路由是它自己的一份
+_caRelaySetup=$(awk '/^setupChainRelay\(\) \{/{f=1; print; next} f && /^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{/{f=0} f' install.sh)
+_out=$(run_ca "${_caRelaySetup}"$'\n''planAction() { return 1; }; setupChainRelay; echo rc=$?' 2>&1 </dev/null)
+assert_contains "${_out}" "不能再当中继" "配中继（本机已有出口与规则）：拒绝并说明"
+assert_equals "rc=1" "$(tail -n 1 <<<"${_out}")" "配中继（本机已有出口与规则）：返回 1"
+ca_reset
+printf '%s\n' '{"role":"relay"}' >"${CA_RELAY}"
+_caEntrySetupNew=$(sed -n '/^setupMultiChainEntry() {/,/^}/p' install.sh)
+_out=$(run_ca "${_caEntrySetupNew}"$'\n''planAction() { return 1; }; ensureSingBoxInstalled() { echo ensure >>"${CA_CALLS}"; return 1; }; setupMultiChainEntry; echo rc=$?' 2>&1 </dev/null)
+assert_contains "${_out}" "本机是中继" "配入口（本机是中继）：拒绝并说明"
+assert_equals "rc=1|" "$(tail -n 1 <<<"${_out}")|$(cat "${CA_CALLS}")" "配入口（本机是中继）：返回 1，没去装 sing-box"
+rm -f "${CA_RELAY}"
 
 # --- 删外部节点：还被链路引用的不删并点名，没人用的照删 ---
 ca_reset

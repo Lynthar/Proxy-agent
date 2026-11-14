@@ -11990,6 +11990,15 @@ setupChainExit() {
     if planAction "$(t PLAN_CHAIN_EXIT)"; then return 0; fi
     echoContent skyBlue "\n配置出口节点 (Exit)"
     echoContent red "\n=============================================================="
+    # 已有通往别的机器的出口时不能当出口：经链路进来的流量会被再转一跳，绕回入口就成环
+    local remoteExits=""
+    if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
+        remoteExits=$(jq -r '[.chains[]? | select((.source // "") as $s | ["warp", "local", "dns", "sni"] | index($s) | not) | .name] | join(", ")' "${CHAIN_MULTI_INFO}") || return 1
+    fi
+    if [[ -n "${remoteExits}" ]]; then
+        echoContent red " ---> $(t CHAIN_EXIT_REFUSED_HAS_REMOTE "${remoteExits}")"
+        return 1
+    fi
 
     # 确保 sing-box 已安装
     if ! ensureSingBoxInstalled; then
@@ -12122,37 +12131,6 @@ EOF
 }
 EOF
 
-    # 创建路由配置（链式入站走直连）：先 sniff 再按 domainStrategy 重解析，显式绑 inbound + timeout 1s。
-    # default_domain_resolver 指向 01_dns.json 的 google tag——1.13 起没有它直接 FATAL。
-    if [[ -n "${domainStrategy}" ]]; then
-        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/chain_route.json
-{
-    "route": {
-        "rules": [
-            { "inbound": "chain_inbound", "action": "sniff", "timeout": "1s" },
-            { "inbound": "chain_inbound", "action": "resolve", "strategy": "${domainStrategy}" },
-            { "inbound": ["chain_inbound"], "outbound": "direct" }
-        ],
-        "final": "direct",
-        "default_domain_resolver": "google"
-    }
-}
-EOF
-    else
-        cat <<EOF >${SINGBOX_FRAGMENT_DIR}/chain_route.json
-{
-    "route": {
-        "rules": [
-            { "inbound": "chain_inbound", "action": "sniff", "timeout": "1s" },
-            { "inbound": ["chain_inbound"], "outbound": "direct" }
-        ],
-        "final": "direct",
-        "default_domain_resolver": "google"
-    }
-}
-EOF
-    fi
-
     # 保存配置信息用于生成配置码（包含网络策略），原子写入避免半写入
     # schema_version: 1 是当前字段集；未来字段调整请提升此版本号，并在读取端按版本兼容
     local __chainExitInfo
@@ -12172,6 +12150,8 @@ EOF
     writeChainInfoAtomic "${CHAIN_EXIT_INFO}" "${__chainExitInfo}" || return 1
     # 中继状态还在的话 chainExitSourceInject 不注入来源限制（分不清哪份是覆盖前留下的）
     rm -f "${CHAIN_RELAY_INFO}"
+    # 路由由统一的生成器写：经链路进来的流量走本机的出口表与规则，没有就全部直连。要在出口状态写好之后调
+    generateMultiChainRouteConfig
 
     # 开放防火墙端口
     if [[ -n "${allowedIP}" ]]; then
@@ -12567,6 +12547,11 @@ setupChainRelay() {
     if planAction "$(t PLAN_CHAIN_RELAY)"; then return 0; fi
     echoContent skyBlue "\n配置中继节点 (Relay)"
     echoContent red "\n=============================================================="
+    # 中继的路由是它自己的一份，入口的出口表与规则会被它整个盖掉
+    if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
+        echoContent red " ---> $(t CHAIN_RELAY_REFUSED_HAS_ENTRY)"
+        return 1
+    fi
     echoContent yellow "中继节点工作原理:"
     echoContent yellow "  上游节点 → [本机] → 下游节点 → ... → 出口 → 互联网"
     echoContent yellow "  本机将接收上游流量并转发到下游链路\n"
@@ -13809,6 +13794,11 @@ setupMultiChainEntry() {
     echoContent red "\n=============================================================="
     echoContent yellow "$(t CHAIN_MULTI_DESC)"
     echoContent yellow "$(t CHAIN_MULTI_EXAMPLE)\n"
+    # 中继只转发：它的路由是自己的一份，在它上面配出口与规则会把转发那条路盖掉
+    if [[ -f "${CHAIN_RELAY_INFO}" ]]; then
+        echoContent red " ---> $(t CHAIN_ENTRY_REFUSED_ON_RELAY)"
+        return 1
+    fi
 
     # 检查是否已存在多链路配置
     if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
@@ -13926,6 +13916,7 @@ EOF
 
 # 批量导入配置码
 setupMultiChainBatch() {
+    chainRefuseRemoteOnExit || return 1
     echoContent skyBlue "\n$(t CHAIN_BATCH_TITLE)"
     echoContent red "=============================================================="
     echoContent yellow "$(t CHAIN_BATCH_HINT)"
@@ -14343,6 +14334,13 @@ addLocalExitAsChain() {
     echoContent green "   $(t RULES): $(chainRuleLabel "${chainRuleType}" "${chainRuleValue}")"
 }
 
+# chainRefuseRemoteOnExit → 本机是链式出口时拒绝添加通往别的机器的出口（配置码、外部节点、手动输入）并说明，返回 1
+chainRefuseRemoteOnExit() {
+    chainIsExitMachine || return 0
+    echoContent red " ---> $(t CHAIN_EXIT_NO_REMOTE)"
+    return 1
+}
+
 # multiChainAddOne → 问添加哪种出口并走对应向导。0=加上了，1=失败，2=取消
 multiChainAddOne() {
     local addType
@@ -14357,13 +14355,13 @@ multiChainAddOne() {
     echoContent yellow "0.$(t CANCEL)"
     read -r -p "$(t PROMPT_SELECT): " addType
     case "${addType}" in
-        1) addSingleChainOutbound || return 1 ;;
-        2) addExternalNodeAsChain || return 1 ;;
+        1) chainRefuseRemoteOnExit && addSingleChainOutbound || return 1 ;;
+        2) chainRefuseRemoteOnExit && addExternalNodeAsChain || return 1 ;;
         3) addLocalExitAsChain warp || return 1 ;;
         4) addLocalExitAsChain local || return 1 ;;
         5) addLocalExitAsChain dns || return 1 ;;
         6) addLocalExitAsChain sni || return 1 ;;
-        7) addSingleChainOutbound manual || return 1 ;;
+        7) chainRefuseRemoteOnExit && addSingleChainOutbound manual || return 1 ;;
         0 | "") return 2 ;;
         *)
             echoContent red " ---> $(t INVALID_SELECTION)"
@@ -14902,22 +14900,32 @@ finalizeMultiChainConfig() {
     testMultiChainConnection
 }
 
-# 生成多链路路由配置
+# chainIsExitMachine → 0=本机是链式出口（有出口状态、没有中继状态；中继覆盖出口时旧的出口状态可能还留着）
+chainIsExitMachine() {
+    [[ -f "${CHAIN_EXIT_INFO}" && ! -f "${CHAIN_RELAY_INFO}" ]]
+}
+
+# generateMultiChainRouteConfig → 写 chain_route.json：入口的出口表与分流规则，加上本机当链式出口时收进来的那一路。
+# 出口机没有入口状态时当成「没有出口、没有规则、默认直连」；经链路进来的流量和本机自己的流量走同一张规则表
 generateMultiChainRouteConfig() {
-    local infoFile="${CHAIN_MULTI_INFO}"
+    local state='{"chains":[],"rules":[],"default_chain":"direct","has_xray":false}' isEntry=false exitStrategy=""
+    if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
+        state=$(cat "${CHAIN_MULTI_INFO}")
+        isEntry=true
+    fi
 
     # 获取默认链路
     local defaultChain
-    defaultChain=$(jq -r '.default_chain' "${infoFile}")
+    defaultChain=$(jq -r '.default_chain' <<<"${state}")
 
     # 获取是否有 Xray
     local hasXray
-    hasXray=$(jq -r '.has_xray' "${infoFile}")
+    hasXray=$(jq -r '.has_xray' <<<"${state}")
 
     local routeRules="[]"
     # 规则前的 resolve 与 SNI 的 override_address 要看出口条目；只取这几项，密钥不进命令行
     local match exits
-    exits=$(jq -c '{chains: [.chains[]? | {name, source, family, server}], default_chain}' "${infoFile}")
+    exits=$(jq -c '{chains: [.chains[]? | {name, source, family, server}], default_chain}' <<<"${state}")
     local ruleSetDefs="[]"
     local usedRuleSets=""
 
@@ -14926,10 +14934,14 @@ generateMultiChainRouteConfig() {
     if [[ "${hasXray}" == "true" ]]; then
         routeRules=$(echo "${routeRules}" | jq '. + [{"inbound":"chain_bridge_in","action":"sniff","timeout":"1s"}]')
     fi
+    if chainIsExitMachine; then
+        exitStrategy=$(jq -r '.domain_strategy // ""' "${CHAIN_EXIT_INFO}")
+        routeRules=$(echo "${routeRules}" | jq '. + [{"inbound":"chain_inbound","action":"sniff","timeout":"1s"}]')
+    fi
 
     # 处理预设规则
     local rules
-    rules=$(jq -c '.rules[]' "${infoFile}" 2>/dev/null)
+    rules=$(jq -c '.rules[]' <<<"${state}" 2>/dev/null)
 
     while IFS= read -r rule; do
         [[ -z "${rule}" ]] && continue
@@ -15024,9 +15036,17 @@ generateMultiChainRouteConfig() {
             | . + [(if $r then $m + {action: "resolve"} + $r else empty end),
                    $m + {outbound: $chain} + (if $e.source == "sni" then {override_address: $e.server} else {} end)]' <<<"${routeRules}")
     done <<< "${rules}"
+    # 出口机：落到直连的链路流量按建出口时选的地址族策略解析（覆盖掉惰性解析的结果）；最后一条把链路流量交给默认出口，
+    # 别的片段排在后面的规则管不到它
+    if chainIsExitMachine && [[ -n "${exitStrategy}" && "${defaultChain}" == "direct" ]]; then
+        routeRules=$(jq -c --arg s "${exitStrategy}" '. + [{inbound: "chain_inbound", action: "resolve", strategy: $s}]' <<<"${routeRules}")
+    fi
     routeRules=$(jq -c --argjson exits "${exits}" "$(chainExitDefs)"'
         (first($exits.chains[] | select(.name == $exits.default_chain)) // {} | exitResolver) as $r
         | if $r then . + [{action: "resolve"} + $r] else . end' <<<"${routeRules}")
+    if chainIsExitMachine; then
+        routeRules=$(jq -c --arg d "${defaultChain}" '. + [{inbound: ["chain_inbound"], outbound: $d}]' <<<"${routeRules}")
+    fi
 
     # 确保 direct 出站存在（不写 domain_strategy，详见 ensureSingBoxInstalled 注释）
     if [[ ! -f "${SINGBOX_FRAGMENT_DIR}/01_direct_outbound.json" ]]; then
@@ -15045,14 +15065,14 @@ generateMultiChainRouteConfig() {
         --argjson ruleSets "${ruleSetDefs}" \
         --arg final "${finalOutbound}" \
         --arg cache "${SINGBOX_CONF_DIR}/cache.db" \
+        --argjson entry "${isEntry}" \
         '{
-            "route": {
-                "rule_set": $ruleSets,
+            "route": ((if $entry then {"rule_set": $ruleSets} else {} end) + {
                 "rules": $rules,
-                "final": $final,
-                "auto_detect_interface": true,
+                "final": $final
+            } + (if $entry then {"auto_detect_interface": true} else {} end) + {
                 "default_domain_resolver": "google"
-            }
+            })
         } + (if ($ruleSets | length) > 0 then {experimental: {cache_file: {enabled: true, path: $cache}}} else {} end)' | chainRouteLazyResolve)
 
     echo "${routeConfig}" > ${SINGBOX_FRAGMENT_DIR}/chain_route.json
