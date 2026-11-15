@@ -619,8 +619,8 @@ run_cs() {
         xrayDaemonRunning() { [[ -f "${PROXY_AGENT_DIR}/xray.up" ]]; }
         singBoxDaemonRunning() { [[ -f "${PROXY_AGENT_DIR}/sb.up" ]]; }
         reloadCore() { echo RELOAD; }
-        for f in labelCoreBinary removeLegacyAllowInsecure ensureRealityMinClientVer ensureXrayDirectStrategy ensureCorePortTargets migrateChainEntryState \
-            ensureCarpoolXray ensureXrayLocalBlock carpoolCollectBeforeStop sleep; do eval "$f() { :; }"; done
+        for f in labelCoreBinary removeLegacyAllowInsecure ensureRealityMinClientVer ensureXrayDirectStrategy ensureCorePortTargets migrateChainEntryState legacyRoutingClear \
+            ensureCarpoolXray writeXrayRouting carpoolCollectBeforeStop sleep; do eval "$f() { :; }"; done
         find() { echo found; }
         systemctl() { [[ "$1" == start ]] && touch "${PROXY_AGENT_DIR}/xray.up"; return 0; }
         eval "${CS_FNS}"
@@ -1106,7 +1106,7 @@ echo ""
 
 echo -e "${BLUE}[真机修复] 链式、安装路径、订阅${NC}"
 
-VPS_FN_NAMES="chainHopOutbounds chainRelayRouteJson chainExitSourceInject directOutboundInject globalEgressChainNotice routingToolsMenu isValidRedirectUrl _linkBase64Decode _linkPercentDecode _linkQueryGet _linkRefuse _linkCheckEndpoint _linkTlsJson _linkTransportJson parseVlessLink _vmessField parseVmessLink isValidDomain isValidIP parseSSLink cleanUp chainRefuseCoreSwitch singBoxFragmentsHaveInbounds configuredPorts portsTakenFor customUserEmail initRealityShortIds"
+VPS_FN_NAMES="chainHopOutbounds chainRelayRouteJson chainExitSourceInject isValidRedirectUrl _linkBase64Decode _linkPercentDecode _linkQueryGet _linkRefuse _linkCheckEndpoint _linkTlsJson _linkTransportJson parseVlessLink _vmessField parseVmessLink isValidDomain isValidIP parseSSLink cleanUp chainRefuseCoreSwitch singBoxFragmentsHaveInbounds configuredPorts portsTakenFor customUserEmail initRealityShortIds"
 VPS_FNS=$(sed -n "$(for _f in ${VPS_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_equals "$(wc -w <<<"${VPS_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9_]*() {$' <<<"${VPS_FNS}")" "真机修复：每个函数都抽到了"
 # 订阅与 Reality 回落的渲染函数 heredoc 里有顶格的 }，按下一个函数的开头截取（同 installSubscribe 那段）
@@ -1171,30 +1171,6 @@ assert_equals "0" "$(jq '.route.rules | length' "${VPS_ROOT}/merged.json")" "出
 printf '%s\n' '{not json' >"${VPS_ROOT}/sing-box/conf/chain_exit_info.json"
 assert_equals "1" "$(run_vps "chainExitSourceInject ${VPS_ROOT}/merged.json" >/dev/null 2>&1; echo $?)" \
     "出口限源：出口状态读不懂让合并失败（跳过等于对所有人放开）"
-
-# --- 出口 / 中继开 IPv6 全局：direct 出站被删，final 与链式直连规则仍指向它 ---
-printf '%s\n' '{"outbounds":[{"type":"direct","tag":"IPv6_out"}],"route":{"rules":[{"inbound":["chain_inbound"],"outbound":"direct"}],"final":"direct"}}' >"${VPS_ROOT}/merged.json"
-run_vps "directOutboundInject ${VPS_ROOT}/merged.json" >/dev/null 2>&1
-assert_equals '["IPv6_out","direct"]' "$(jq -c '[.outbounds[].tag]' "${VPS_ROOT}/merged.json")" \
-    "出口（IPv6 全局）：补上 direct，排在后面不抢默认出口（没有入口状态也补，不然 sing-box 起不来）"
-printf '%s\n' '{"outbounds":[],"route":{"rules":[{"inbound":["x"],"outbound":"wg"}]}}' >"${VPS_ROOT}/merged.json"
-run_vps "directOutboundInject ${VPS_ROOT}/merged.json" >/dev/null 2>&1
-assert_equals '[]' "$(jq -c '[.outbounds[].tag]' "${VPS_ROOT}/merged.json")" "合并：没人指向 direct 时不补（WARP 全局没有出站，补了就成了默认出口）"
-
-# --- IPv6 / WARP 全局的确认前：链式出口 / 中继提示经链路的流量不走全局出口 ---
-printf '%s\n' '{"role":"exit"}' >"${VPS_ROOT}/sing-box/conf/chain_exit_info.json"
-assert_contains "$(run_vps 'globalEgressChainNotice' 2>&1)" "不走全局出口" "全局出口：链式出口上确认前提示经链路的流量仍直连"
-rm -f "${VPS_ROOT}/sing-box/conf/chain_exit_info.json"
-assert_equals "" "$(run_vps 'globalEgressChainNotice' 2>&1)" "全局出口：不是链式出口 / 中继就不提示"
-
-# --- 分流工具：Xray 链式入口上拒绝（追加的规则排在链式兜底之后永不命中），别的机器照常进菜单 ---
-mkdir -p "${VPS_ROOT}/xray/conf" && : >"${VPS_ROOT}/xray/conf/chain_outbound.json"
-_out=$(run_vps 'coreKind=1; routingToolsMenu </dev/null; echo rc=$?' 2>&1)
-assert_contains "${_out}" "多链路规则" "分流工具（Xray 链式入口）：拒绝并指向多链路规则"
-assert_equals "0" "$(grep -c 'WARP分流' <<<"${_out}")" "分流工具（Xray 链式入口）：不进菜单"
-assert_contains "$(run_vps 'coreKind=2; routingToolsMenu </dev/null; echo rc=$?' 2>&1)" "WARP分流" "分流工具（sing-box 内核）：分流片段排在链式路由前面会生效，照常进菜单"
-rm -f "${VPS_ROOT}/xray/conf/chain_outbound.json"
-assert_contains "$(run_vps 'coreKind=1; routingToolsMenu </dev/null; echo rc=$?' 2>&1)" "WARP分流" "分流工具（Xray、不是链式入口）：照常进菜单"
 
 # --- 换内核：已是 Xray 时不碰 sing-box；从 sing-box 切过来只删协议入站，出口 / 中继留着 ---
 vps_reset
@@ -2957,9 +2933,9 @@ assert_equals "1" "$(grep -c 'carpoolCollectBeforeStop' <<<"${HANDLE_XRAY_FN}")"
 assert_equals "CarpoolCollect) carpoolCollectBeforeStop checkForUpdates" \
     "$(sed -n '/^# 顶层入口分发/,$p' install.sh | grep -oE 'CarpoolCollect\)|carpoolCollectBeforeStop|checkForUpdates' | paste -sd' ' -)" \
     "入口：服务停止钩子 CarpoolCollect 在更新检查之前分发（关机途中网络可能已断）"
-assert_equals "ensureCarpoolXray migrateChainEntryState handleSingBox handleSingBox writeXrayChainConfig ensureXrayLocalBlock" \
-    "$(grep -oE 'ensureCarpoolXray|migrateChainEntryState|handleSingBox|writeXrayChainConfig|ensureXrayLocalBlock' <<<"${HANDLE_XRAY_FN}" | paste -sd' ' -)" \
-    "handleXray start：拼车之后先转旧入口状态（转了连 sing-box 一起重启），再写回链式路由，最后补本机封锁"
+assert_equals "ensureCarpoolXray migrateChainEntryState legacyRoutingClear handleSingBox handleSingBox writeXrayChainConfig writeXrayRouting" \
+    "$(sed 's/legacyRoutingCleared//g' <<<"${HANDLE_XRAY_FN}" | grep -oE 'ensureCarpoolXray|migrateChainEntryState|legacyRoutingClear|handleSingBox|writeXrayChainConfig|writeXrayRouting' | paste -sd' ' -)" \
+    "handleXray start：拼车之后先转旧入口状态、清旧分流工具的文件（改了连 sing-box 一起重启），再整份生成路由（接了链式的连桥的出站一起）"
 SUBSCRIBE_FN=$(sed -n '/^subscribeLocalHasEmptyHost() {/,/^}/p;/^subscribe() {/,/^}/p' install.sh)
 assert_equals "1" "$(grep -c 'carpoolWritePlaceholders' <<<"${SUBSCRIBE_FN}")" "subscribe 末尾给停用成员补占位"
 assert_equals "2" "$(grep -c 'wget -O "${_singboxTpl}" -q --timeout=15' <<<"${SUBSCRIBE_FN}")" "subscribe：sing-box 模板的两处 wget 带超时（cron 下不能挂死）"
@@ -3246,7 +3222,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试按账号选出口 ===${NC}"
 
-CA_FN_NAMES="singBoxProbeExitIP localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs ensureXrayLocalBlock localBlockInject directOutboundInject chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig chainRouteLazyResolve migrateChainRouteResolve chainExitDefs chainExitTarget chainExitIsSni chainWarpEnsureRegistered chainWarpFragment chainLocalExitFragment addLocalExitAsChain multiChainAddOne singBoxProbeEndpointIP migrateChainEntryState chainHopOutbounds chainReadManualExit addSingleChainOutbound chainIsExitMachine chainRefuseRemoteOnExit"
+CA_FN_NAMES="singBoxProbeExitIP localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs writeXrayRouting localBlockInject chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound xrayChainUnwire chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable multiChainRuleSetStatus legacyRoutingClear addXrayOutbound isValidIP isLocalBlockedIP ipv6Hex xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig chainRouteLazyResolve migrateChainRouteResolve chainExitDefs chainExitTarget chainExitIsSni chainWarpEnsureRegistered chainWarpFragment chainLocalExitFragment addLocalExitAsChain multiChainAddOne singBoxProbeEndpointIP migrateChainEntryState chainHopOutbounds chainReadManualExit addSingleChainOutbound chainIsExitMachine chainRefuseRemoteOnExit"
 CA_FNS=$(sed -n "$(for _f in ${CA_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_equals "$(wc -w <<<"${CA_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CA_FNS}")" "按账号选出口：每个函数都抽到了"
 CA_ROOT="${MOCK_ROOT}/chainacct.root"
@@ -3298,31 +3274,27 @@ ca_re_hits() { jq -r --arg s "$1" '[.routing.rules[] | select(.user) | .user[] |
 # --- Xray 侧：只有一条出口 ---
 ca_reset
 printf '%s\n' '{"routing":{"rules":[{"type":"field","domain":["example.org"],"outboundTag":"IPv6_out"}]}}' >"${CA_X}/09_routing.json"
-_caOrig=$(cat "${CA_X}/09_routing.json")
 ca_single '{"accounts": {"alice": "direct", "a.b+c": "chain_1"}}'
 run_ca 'writeXrayChainConfig 31111' >/dev/null 2>&1
 assert_equals "0" "$?" "Xray 侧（一条出口）：写入返回 0"
 assert_equals '["chain_proxy:31111","chain_proxy_chain_1:31112","chain_direct:freedom"]' "$(ca_outs)" "Xray 侧（一条出口）：默认桥的 chain_proxy 打头（第一个出站是默认），链式自己的直连排在最后"
 assert_equals '["chain_direct","chain_proxy_chain_1","chain_proxy"]' "$(ca_chain_rules '[.routing.rules[].outboundTag]')" \
-    "Xray 侧（一条出口）：按账号 → 兜底进默认桥；直连指向 chain_direct，不靠 WARP / IPv6 全局会删掉的 z_direct_outbound"
+    "Xray 侧（一条出口）：按账号 → 兜底进默认桥；直连指向 chain_direct，不靠旧分流工具的全局模式删过的 z_direct_outbound"
 assert_equals '["local-block-port","local-block-ip"]' "$(jq -c '[.routing.rules[0:2][].ruleTag]' "${CA_X}/09_routing.json")" \
     "Xray 侧：写完当场把封本机的规则补在最前，不等下一次启动"
 assert_equals 'regexp:^a\.b\+c-[^-]*$' "$(ca_chain_rules '.routing.rules[] | select(.outboundTag == "chain_proxy_chain_1" and .user) | .user[0]' | jq -r .)" "Xray 侧：账号名里的 . 与 + 转义"
 assert_equals "true" "$(ca_re_hits 'a.b+c-VLESS_WS')" "Xray 侧：正则命中这个账号带协议后缀的 email"
 assert_equals "false" "$(ca_re_hits 'axb+c-VLESS_WS')" "Xray 侧：. 不当通配（axb+c 不命中）"
 assert_equals "false" "$(ca_re_hits 'alice-x-VLESS_WS')" "Xray 侧：alice-x 这个别的账号不命中 alice 的规则"
-assert_equals "${_caOrig}" "$(cat "${CA_X}/09_routing.json.bak.chain")" "Xray 侧：第一次写时把原路由存成 .bak.chain"
-run_ca 'writeXrayChainConfig 31111' >/dev/null 2>&1
-assert_equals "${_caOrig}" "$(cat "${CA_X}/09_routing.json.bak.chain")" "Xray 侧：再写一次不覆盖备份（否则拆链式时恢复出来的是链式路由）"
+assert_equals "absent" "$([[ -e "${CA_X}/09_routing.json.bak.chain" ]] && echo present || echo absent)" "Xray 侧：路由整份生成，原来的规则不留、也不存备份"
 printf '%s\n' '{"routing":{"rules":[{"type":"field","domain":["domain:gstatic.com"],"outboundTag":"z_direct_outbound"}]}}' >"${CA_X}/09_routing.json"
 run_ca 'writeXrayChainConfig 31111' >/dev/null 2>&1
 assert_equals '["chain_direct","chain_proxy_chain_1","chain_proxy"]' "$(ca_chain_rules '[.routing.rules[].outboundTag]')" \
     "Xray 侧：重装把 09_routing.json 换回模板后，下一次写入（每次启动前都有）把链式路由写回来"
-assert_equals "${_caOrig}" "$(cat "${CA_X}/09_routing.json.bak.chain")" "Xray 侧：写回时备份仍是最早的原路由"
 rm -f "${CA_X}/09_routing.json"
 run_ca 'writeXrayChainConfig 31111' >/dev/null 2>&1
 assert_equals '["chain_direct","chain_proxy_chain_1","chain_proxy"]' "$(ca_chain_rules '[.routing.rules[].outboundTag]')" \
-    "Xray 侧：WARP / IPv6 全局删掉 09_routing.json 后同样写回"
+    "Xray 侧：09_routing.json 被删掉后同样写回"
 ca_single '{"default_chain": "direct"}'
 run_ca 'writeXrayChainConfig 31111' >/dev/null 2>&1
 assert_equals '["chain_proxy"]' "$(ca_chain_rules '[.routing.rules[].outboundTag]')" "Xray 侧（默认直连）：照样全进默认桥，直连由 sing-box 的默认出口定"
@@ -3377,9 +3349,6 @@ assert_equals '[{"inbound":["chain_acct_in_hk"],"outbound":"hk"},{"inbound":["ch
 assert_equals '[{"inbound":"chain_bridge_in","action":"sniff","timeout":"1s"},{"rule_set":["geosite-netflix"],"outbound":"us"}]' "$(jq -c '.route.rules[4:]' "${CA_MERGED}")" \
     "注入：原有的域名分流排在账号规则之后（被指定的人以映射为终态）"
 assert_equals "direct" "$(jq -r '.route.final' "${CA_MERGED}")" "注入（多链路）：final 不动"
-jq '.outbounds = [{type: "direct", tag: "direct"}, {type: "socks", tag: "us"}]' "${CA_MERGED}" >"${CA_MERGED}.t" && mv "${CA_MERGED}.t" "${CA_MERGED}"
-run_ca "chainAccountInject ${CA_MERGED} && directOutboundInject ${CA_MERGED}" >/dev/null 2>&1
-assert_equals '["direct","us"]' "$(jq -c '[.outbounds[].tag]' "${CA_MERGED}")" "合并：已有 direct 出站时不重复补"
 
 # --- sing-box 侧：sing-box 内核、一条出口，默认直连 ---
 ca_reset
@@ -3389,10 +3358,9 @@ jq -n '{inbounds: [
         {type: "naive", tag: "naive-in", users: [{username: "bob-singbox_naive", password: "p"}]}],
     route: {final: "direct"}}' >"${CA_MERGED}"
 cp "${CA_MERGED}" "${CA_MERGED}.orig"
-run_ca "chainAccountInject ${CA_MERGED} && directOutboundInject ${CA_MERGED}" >/dev/null 2>&1
+run_ca "chainAccountInject ${CA_MERGED}" >/dev/null 2>&1
 assert_equals '[{"auth_user":["bob-VLESS_Reality_Vision","bob-singbox_naive"],"outbound":"chain_1"}]' "$(jq -c '.route.rules' "${CA_MERGED}")" \
     "注入（sing-box 内核）：bob 在两个协议里的全名都进规则（naive 用 username）"
-assert_equals '["direct"]' "$(jq -c '[.outbounds[].tag]' "${CA_MERGED}")" "合并（IPv6 全局删掉了 direct 出站）：补一个，final 与直连账号才有处可去"
 assert_equals "0" "$(jq '[.inbounds[] | select(.tag | startswith("chain_acct_in_"))] | length' "${CA_MERGED}")" "注入（sing-box 内核）：没有 Xray 的桥就不开新桥"
 jq -cn '{chains: [{name: "chain_1", bridge_port: 31112}], accounts: {bob: "chain_1"}}' >"${CA_MULTI}"
 cp "${CA_MERGED}.orig" "${CA_MERGED}"
@@ -3572,7 +3540,7 @@ printf 'not json\n' >"${CA_F}/chain_route.json"
 run_ca "migrateChainRouteResolve ${CA_F}/" >/dev/null 2>&1
 assert_equals "0|not json" "$?|$(cat "${CA_F}/chain_route.json")" "迁移：读不懂的文件不动、不拦合并（合并自己会报）"
 # 真的 singBoxMergeConfig 配一个 merge 必败的 sing-box 桩：迁移排在 merge 之前，文件已经改好说明合并路径上接了它
-_caMergeFns=$(sed -n '/^singBoxMergeConfig() {/,/^}/p;/^migrateRetiredRuleSets() {/,/^}/p;/^migrateSingBoxDnsSplit() {/,/^}/p;/^normalizeSingBoxRuleSetHttpClient() {/,/^}/p' install.sh)
+_caMergeFns=$(sed -n '/^singBoxMergeConfig() {/,/^}/p;/^migrateRetiredRuleSets() {/,/^}/p;/^normalizeSingBoxRuleSetHttpClient() {/,/^}/p' install.sh)
 printf '#!/bin/sh\nexit 1\n' >"${CA_ROOT}/sing-box/sing-box" && chmod +x "${CA_ROOT}/sing-box/sing-box"
 printf '%s\n' "{\"route\":{\"rules\":[${CA_SNIFF},${CA_OLD_RESOLVE},{\"inbound\":[\"chain_bridge_in\"],\"outbound\":\"chain_outbound\"}],\"final\":\"chain_outbound\"}}" >"${CA_F}/chain_route.json"
 CA_MERGE_FNS="${_caMergeFns}" run_ca 'eval "${CA_MERGE_FNS}"; singBoxMergeConfig' >/dev/null 2>&1
@@ -3710,6 +3678,28 @@ for _caPick in 1 2 7; do
 done
 rm -f "${CA_EXIT}"
 assert_equals "rc=0" "$(run_ca 'chainRefuseRemoteOnExit; echo rc=$?' 2>&1 | tail -n 1)" "不是出口机：添加远端出口不受限"
+# 出口机删光自己加的出口：出口表、桥入站与 Xray 那一跳一起撤，回到没加之前；还剩出口、或不是出口机时表留着
+ca_reset
+printf '%s\n' '{"role":"exit","port":5000,"domain_strategy":"prefer_ipv4"}' >"${CA_EXIT}"
+ca_multi '{"chains": [{"name": "v6", "source": "local", "family": "ipv6"}, {"name": "nf", "source": "dns", "server": "203.0.113.53"}]}'
+touch "${CA_F}/chain_outbound_v6.json" "${CA_F}/chain_outbound_nf.json" "${CA_F}/chain_bridge_inbound.json"
+printf '%s\n' '{"outbounds":[]}' >"${CA_X}/chain_outbound.json"
+_caRmRun='handleXray() { echo "xray $1" >>"${CA_CALLS}"; }; removeMultiChainOutbound'
+_caKeptOrGone() { local f; for f in "$@"; do [[ -e "${f}" ]] && printf 'kept ' || printf 'gone '; done; }
+printf '1\ny\n' | run_ca "${_caRmRun}" >/dev/null 2>&1
+assert_equals "nf|kept kept |routeConfig merge reloadCore" "$(jq -r '[.chains[].name] | join(",")' "${CA_MULTI}")|$(_caKeptOrGone "${CA_F}/chain_bridge_inbound.json" "${CA_X}/chain_outbound.json")|$(paste -sd' ' "${CA_CALLS}")" \
+    "出口机删一个出口（还剩一个）：出口表、桥与 Xray 那一跳都留着"
+: >"${CA_CALLS}"
+_out=$(printf '1\ny\n' | run_ca "${_caRmRun}" 2>&1)
+assert_equals "gone gone gone gone kept |xray stop xray start routeConfig merge reloadCore" \
+    "$(_caKeptOrGone "${CA_MULTI}" "${CA_F}/chain_outbound_nf.json" "${CA_F}/chain_bridge_inbound.json" "${CA_X}/chain_outbound.json" "${CA_EXIT}")|$(paste -sd' ' "${CA_CALLS}")" \
+    "出口机删掉最后一个出口：出口表、桥入站、Xray 那一跳都撤掉，出口节点自己的状态留着，重启 Xray 后重新生成路由"
+assert_contains "${_out}" "出口表一并撤掉" "出口机删掉最后一个出口：说明出口表撤掉了"
+rm -f "${CA_EXIT}"
+ca_multi '{"chains": [{"name": "v6", "source": "local", "family": "ipv6"}]}'
+printf '%s\n' '{"outbounds":[]}' >"${CA_X}/chain_outbound.json"
+printf '1\ny\n' | run_ca "${_caRmRun}" >/dev/null 2>&1
+assert_equals "0|kept " "$(jq '.chains | length' "${CA_MULTI}")|$(_caKeptOrGone "${CA_X}/chain_outbound.json")" "入口机删掉最后一个出口：出口表留着（入口靠这张表认），Xray 那一跳不拆"
 # 已有远端出口的机器不能当出口；只有本机类出口的可以（向导照常往下走）
 _caExitSetup=$(awk '/^setupChainExit\(\) \{/{f=1; print; next} f && /^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{/{f=0} f' install.sh)
 _caExitRun='planAction() { return 1; }; ensureSingBoxInstalled() { echo ensure >>"${CA_CALLS}"; return 1; }; setupChainExit; echo rc=$?'
@@ -3741,7 +3731,7 @@ jq -cn '{nodes: [{id: "n1", name: "used", type: "trojan", server: "192.0.2.30", 
     >"${CA_ROOT}/sing-box/conf/external_node_info.json"
 _caDel='listExternalNodes() { :; }; deleteExternalNode; echo rc=$?'
 _out=$(printf '1\ny\n' | run_ca "${_caDel}" 2>&1)
-assert_contains "${_out}" "节点 used 还是这些链路的出口：viaext" "删外部节点（被链路引用）：拒绝并点名链路"
+assert_contains "${_out}" "节点 used 还有出口在用：viaext" "删外部节点（还有出口在用）：拒绝并点名出口"
 assert_equals "rc=1|n1,n2" "$(grep -o 'rc=[0-9]' <<<"${_out}")|$(jq -r '[.nodes[].id] | join(",")' "${CA_ROOT}/sing-box/conf/external_node_info.json")" "删外部节点（被链路引用）：返回 1，节点还在"
 printf '2\ny\n' | run_ca "${_caDel}" >/dev/null 2>&1
 assert_equals "n1" "$(jq -r '[.nodes[].id] | join(",")' "${CA_ROOT}/sing-box/conf/external_node_info.json")" "删外部节点（没人用）：照常删"
@@ -3837,6 +3827,11 @@ assert_equals "routeConfig xray stop xray start|chain_1" "$(paste -sd ' ' - <"${
 : >"${CA_CALLS}"
 CA_MERGE_FNS="${_caMergeFns}" run_ca "${_caMergeEnv}" >/dev/null 2>&1
 assert_equals "" "$(cat "${CA_CALLS}")" "迁移入口（合并路径）：没有要转的就不碰 Xray"
+rm -f "${CA_X}/chain_outbound.json"
+printf '%s\n' '{"outbounds":[]}' >"${CA_F}/IPv6_out.json"
+CA_MERGE_FNS="${_caMergeFns}" run_ca "${_caMergeEnv}" >/dev/null 2>&1
+assert_equals "xray stop xray start|absent" "$(paste -sd ' ' - <"${CA_CALLS}")|$(ls "${CA_F}/IPv6_out.json" 2>/dev/null || echo absent)" \
+    "旧分流工具（合并路径）：合并前清掉旧文件，清了、Xray 在跑时把 Xray 一起重启（没接链式也要：它的出站与 DNS 改了）"
 rm -f "${CA_ROOT}/sing-box/sing-box"
 
 # --- 多链路测试：按每条链路自己的出站真取出口 IP；密钥错、经中继的链路不再只看出口端口 ---
@@ -3856,7 +3851,7 @@ printf '%s\n' '#!/bin/bash' \
         && echo "203.0.113.$(( ${#6} ))"' >"${CA_ROOT}/sing-box/sing-box"
 chmod +x "${CA_ROOT}/sing-box/sing-box"
 _out=$(run_ca "export TMPDIR=${CA_ROOT}/tmp; timeout() { shift; \"\$@\"; }; date() { echo 1000000000; }; testMultiChainConnection" 2>&1)
-assert_contains "${_out}" "✅ us (198.51.100.1:5001) - 经链路取到出口 IP 203.0.113.2" "多链路测试：经链路取到出口 IP 才报 ✅，显示出口 IP"
+assert_contains "${_out}" "✅ us (198.51.100.1:5001) - 取到出口 IP 203.0.113.2" "多链路测试：经链路取到出口 IP 才报 ✅，显示出口 IP"
 assert_contains "${_out}" "❌ hk" "多链路测试：密钥不对的链路报 ❌（出口端口照样通，以前报 ✅）"
 assert_contains "${_out}" "✅ jp" "多链路测试：经中继的链路带着中继那一跳一起拨"
 assert_contains "${_out}" "2 通过, 1 失败" "多链路测试：汇总按真连结果算"
@@ -3893,7 +3888,7 @@ ca_single '{}'
 jq -n '{inbounds: [{tag: "a"}, {settings: {clients: [{email: "bob-vless_reality_vision"}, {email: "alice-vless_reality_vision"}]}}]}' >"${CA_X}/07_VLESS_vision_reality_inbounds.json"
 jq -n '{inbounds: [{users: [{name: "carol-singbox_hysteria2"}]}]}' >"${CA_F}/06_hysteria2_inbounds.json"
 _out=$(printf '1\n2\n' | run_ca 'chainAccountExitMenu; echo rc=$?' 2>&1)
-assert_contains "${_out}" "没接进链路" "菜单（装了 Xray 协议、Xray 侧没接进链路）：拒绝，说明映射对 Xray 账号不起作用"
+assert_contains "${_out}" "还没接进链式与分流" "菜单（装了 Xray 协议、Xray 侧没接进链路）：拒绝，说明映射对 Xray 账号不起作用"
 assert_equals "rc=1|null" "$(grep -o 'rc=[0-9]' <<<"${_out}")|$(jq -r '.accounts.alice' "${CA_MULTI}")" "菜单（Xray 侧没接上）：不写映射"
 printf '%s\n' '{"outbounds":[]}' >"${CA_X}/chain_outbound.json"
 assert_equals "alice bob carol" "$(run_ca 'chainAccountAllNames' 2>/dev/null | paste -sd ' ' -)" "菜单：账号列表合并 Xray 与 sing-box 两边、去掉协议后缀"
@@ -3941,7 +3936,7 @@ assert_equals "jp|31113|chain_proxy_jp:31113" "$(jq -r '.accounts.bob' "${CA_MUL
 printf '0\n' | run_ca 'chainAccountExitMenu' >/dev/null 2>&1
 assert_equals "setDefaultChain" "$(cat "${CA_CALLS}")" "菜单（多链路）：改默认出口交给 setDefaultChain"
 _out=$(printf '9\n' | run_ca 'chainAccountExitMenu' 2>&1)
-assert_contains "${_out}" "先按多链路的分流规则走" "菜单（多链路）：没指定出口的账号先按分流规则走，不说成直接走默认出口"
+assert_contains "${_out}" "先按分流规则走，规则没匹配上的走默认出口" "菜单（多链路）：没指定出口的账号先按分流规则走，不说成直接走默认出口"
 mkdir -p "${CA_ROOT}/carpool"
 jq -cn '{enabled: true, members: {zoe: {status: "disabled", reason: "expired"}, alice: {status: "active"}}}' >"${CA_ROOT}/carpool/state.json"
 assert_contains "$(printf '9\n' | run_ca 'source lib/carpool.sh; chainAccountExitMenu' 2>&1)" "zoe → " "菜单（拼车开着）：停用中的成员不在入站里也列出来，恢复前就能先指定出口"
@@ -3950,44 +3945,45 @@ assert_equals "0" "$(printf '9\n' | run_ca 'source lib/carpool.sh; chainAccountE
 
 # --- 代理用户连不到本机与内网：Xray 启动前补规则、sing-box 合并时注入 ---
 ca_reset
-run_ca 'ensureXrayLocalBlock' >/dev/null 2>&1
+run_ca 'writeXrayRouting' >/dev/null 2>&1
 assert_equals "0" "$?" "本机封锁（Xray，没有路由文件、没开拼车）：返回 0"
 assert_equals '[["local-block-port","31111-31210"],["local-block-ip",true]]' "$(ca_rules '[.routing.rules[] | [.ruleTag, (.port // (.ip | index("127.0.0.0/8") != null))]]')" \
     "本机封锁（Xray）：没有 09_routing.json 时新建，桥端口段按端口封、回环在 IP 清单里"
 assert_equals "local_block:blackhole local_pass:freedom" "$(jq -r '[.outbounds[] | "\(.tag):\(.protocol)"] | join(" ")' "${CA_X}/local_block_tail_outbound.json")" \
     "本机封锁（Xray）：黑洞与放行两个出站的文件名带 tail（不带就会被插到最前、z_direct 不在时成了默认出站）"
-printf '%s\n' '{"routing":{"domainStrategy":"AsIs","rules":[{"type":"field","domain":["example.org"],"outboundTag":"IPv6_out"}]}}' >"${CA_X}/09_routing.json"
+printf '%s\n' '{"routing":{"rules":[{"type":"field","domain":["hand.example"],"outboundTag":"my_out"},{"type":"field","domain":["example.org"],"outboundTag":"IPv6_out"}]}}' >"${CA_X}/09_routing.json"
+printf '%s\n' '{"outbounds":[]}' >"${CA_X}/IPv6_out.json"
 printf '%s\n' '{"stats":{},"api":{"tag":"api","listen":"127.0.0.1:23456","services":["StatsService"]}}' >"${CA_X}/12_stats_api.json"
-run_ca 'ensureXrayLocalBlock' >/dev/null 2>&1
-assert_equals '["local-block-port","local-block-ip",null]' "$(ca_rules '[.routing.rules[].ruleTag]')" "本机封锁（Xray）：两条封锁排在原有规则前面"
-assert_equals "31111-31210,23456|IPv6_out|AsIs" "$(ca_rules '"\(.routing.rules[0].port)|\(.routing.rules[2].outboundTag)|\(.routing.domainStrategy)"' | jq -r .)" \
-    "本机封锁（Xray）：开着拼车时统计 API 端口也按端口封；原有规则与 domainStrategy 不动"
+run_ca 'writeXrayRouting' >/dev/null 2>&1
+assert_equals '["local-block-port","local-block-ip"]' "$(ca_rules '[.routing.rules[].ruleTag]')" "本机封锁（Xray）：两条封锁排在最前；手改的与旧分流工具的规则都不保留"
+assert_equals "31111-31210,23456|AsIs" "$(ca_rules '"\(.routing.rules[0].port)|\(.routing.domainStrategy)"' | jq -r .)" \
+    "本机封锁（Xray）：开着拼车时统计 API 端口也按端口封，domainStrategy 是 AsIs"
 _caBefore=$(cat "${CA_X}/09_routing.json")
-run_ca 'ensureXrayLocalBlock' >/dev/null 2>&1
+run_ca 'writeXrayRouting' >/dev/null 2>&1
 assert_equals "${_caBefore}" "$(cat "${CA_X}/09_routing.json")" "本机封锁（Xray）：再跑一次不重复插、文件不变"
 printf '%s\n' '{"stats":{},"api":{"tag":"api","listen":"127.0.0.1:24000","services":["StatsService"]}}' >"${CA_X}/12_stats_api.json"
-run_ca 'ensureXrayLocalBlock' >/dev/null 2>&1
-assert_equals "31111-31210,24000|3" "$(ca_rules '"\(.routing.rules[0].port)|\(.routing.rules | length)"' | jq -r .)" "本机封锁（Xray）：API 换了端口，旧的封锁换成新的，不留两份"
+run_ca 'writeXrayRouting' >/dev/null 2>&1
+assert_equals "31111-31210,24000|2" "$(ca_rules '"\(.routing.rules[0].port)|\(.routing.rules | length)"' | jq -r .)" "本机封锁（Xray）：API 换了端口，旧的封锁换成新的，不留两份"
 jq -n '{inbounds: [{tag: "dokodemo-in-VLESSReality", port: 443, protocol: "dokodemo-door", settings: {address: "127.0.0.1", port: 45987}}, {port: 45987, listen: "127.0.0.1", protocol: "vless"}]}' \
     >"${CA_X}/07_VLESS_vision_reality_inbounds.json"
-run_ca 'ensureXrayLocalBlock' >/dev/null 2>&1
-assert_equals '["local_pass",["dokodemo-in-VLESSReality"]]|local_block|local_block|4' "$(ca_rules '"\([.routing.rules[0].outboundTag, .routing.rules[0].inboundTag] | tojson)|\(.routing.rules[1].outboundTag)|\(.routing.rules[2].outboundTag)|\(.routing.rules | length)"' | jq -r .)" \
+run_ca 'writeXrayRouting' >/dev/null 2>&1
+assert_equals '["local_pass",["dokodemo-in-VLESSReality"]]|local_block|local_block|3' "$(ca_rules '"\([.routing.rules[0].outboundTag, .routing.rules[0].inboundTag] | tojson)|\(.routing.rules[1].outboundTag)|\(.routing.rules[2].outboundTag)|\(.routing.rules | length)"' | jq -r .)" \
     "本机封锁（Xray）：dokodemo-door 入站转给 127.0.0.1 写死端口的那一跳先放行（Reality 的 443 就是这样转给 45987 的）"
 assert_equals "0" "$(ca_rules '[.routing.rules[].ruleTag | select(. != null)] | length - (unique | length)')" \
     "本机封锁（Xray）：三条规则的 ruleTag 互不相同（Xray 26.9.9 起启动时查重，重复就起不来）"
 jq '.routing.rules = [{type: "field", ruleTag: "local-block", port: "1-2", outboundTag: "local_block"},
     {type: "field", ruleTag: "local-block", outboundTag: "local_block", ip: ["127.0.0.0/8"]}] + .routing.rules' \
     "${CA_X}/09_routing.json" >"${CA_X}/09_routing.json.tmp" && mv "${CA_X}/09_routing.json.tmp" "${CA_X}/09_routing.json"
-run_ca 'ensureXrayLocalBlock' >/dev/null 2>&1
-assert_equals '["local-block-pass","local-block-port","local-block-ip"]|4' "$(ca_rules '"\([.routing.rules[].ruleTag | select(. != null)] | tojson)|\(.routing.rules | length)"' | jq -r .)" \
+run_ca 'writeXrayRouting' >/dev/null 2>&1
+assert_equals '["local-block-pass","local-block-port","local-block-ip"]|3' "$(ca_rules '"\([.routing.rules[].ruleTag | select(. != null)] | tojson)|\(.routing.rules | length)"' | jq -r .)" \
     "本机封锁（Xray）：旧版留下的同名 local-block 规则整组换成新的，不残留"
 printf '%s\n' '{"routing":' >"${CA_X}/09_routing.json"
-_caOut=$(run_ca 'ensureXrayLocalBlock; echo rc=$?' 2>&1)
+_caOut=$(run_ca 'writeXrayRouting; echo rc=$?' 2>&1)
 assert_contains "${_caOut}" "rc=1" "本机封锁（Xray）：路由文件读不懂时返回 1（handleXray 随之不启动）"
 assert_contains "${_caOut}" "jq 读不了 ${CA_X}/09_routing.json" "本机封锁（Xray）：点名读不懂的文件"
 printf '%s\n' '{"routing":{"rules":[]}}' >"${CA_X}/09_routing.json"
 printf '%s\n' '// hand-written note' '{"log":{"loglevel":"warning"}}' >"${CA_X}/00_log.json"
-_caOut=$(run_ca 'ensureXrayLocalBlock; echo rc=$?' 2>&1)
+_caOut=$(run_ca 'writeXrayRouting; echo rc=$?' 2>&1)
 assert_contains "${_caOut}" "jq 读不了 ${CA_X}/00_log.json" "本机封锁（Xray）：别的片段带注释也点名它，不赖路由文件"
 assert_equals "0" "$(grep -c "jq 读不了 ${CA_X}/09_routing.json" <<<"${_caOut}")" "本机封锁（Xray）：读得懂的文件不点名"
 
@@ -4033,11 +4029,11 @@ assert_equals "[${LB_EXIT},{\"type\":\"logical\",\"mode\":\"and\",\"rules\":[${L
 # --- 本机网卡上的全局地址也封：发往它们的连接经 lo 送达、绕过 INPUT 防火墙。行的形状照 ip -o addr 的原样 ---
 ca_reset
 CA_ADDRS=$'2: eth0    inet 203.0.113.5/24 brd 203.0.113.255 scope global eth0\\       valid_lft forever preferred_lft forever\n2: eth0    inet6 2001:db8::5/64 scope global \\       valid_lft forever preferred_lft forever'
-run_ca 'ensureXrayLocalBlock' >/dev/null 2>&1
+run_ca 'writeXrayRouting' >/dev/null 2>&1
 assert_equals '["2001:db8::5","203.0.113.5"]' "$(ca_rules '.routing.rules[] | select(.ruleTag == "local-block-ip") | .ip[-2:]')" "本机地址（Xray）：v4、v6 去掉前缀长度后并进 IP 清单"
 assert_equals "true" "$(ca_rules '.routing.rules[] | select(.ruleTag == "local-block-ip") | .ip | index("127.0.0.0/8") != null')" "本机地址（Xray）：原来的回环与私网照封"
 CA_ADDRS='2: eth0    inet 203.0.113.9/24 scope global eth0'
-run_ca 'ensureXrayLocalBlock' >/dev/null 2>&1
+run_ca 'writeXrayRouting' >/dev/null 2>&1
 assert_equals "true|false|1" "$(ca_rules '[.routing.rules[] | select(.ruleTag == "local-block-ip")] | "\(.[0].ip | index("203.0.113.9") != null)|\(.[0].ip | index("203.0.113.5") != null)|\(length)"' | jq -r .)" \
     "本机地址（Xray）：地址换了，下次启动整组换成新的，不留旧的"
 CA_ADDRS='2: eth0    inet 203.0.113.5/24 scope global eth0'
@@ -4046,17 +4042,124 @@ run_ca "localBlockInject ${CA_MERGED}" >/dev/null 2>&1
 assert_equals '["0.0.0.0/8","::ffff:0:0/96","203.0.113.5"]' "$(jq -c '.route.rules[1].ip_cidr' "${CA_MERGED}")" "本机地址（sing-box）：并进 ip_cidr"
 CA_ADDRS=
 
-# --- 卸载链式、又没有路由备份：默认路由只在直连出站还在时才指向它。规则指向不存在的出站，Xray 会直接断连接 ---
+# --- 卸载链式：Xray 重启时按「没接链式」重新生成路由。默认规则只在直连出站还在时才写：规则指向不存在的出站，Xray 会直接断连接 ---
 run_remove_nobak() {
     ca_reset
     printf '%s\n' '{"role":"entry","chains":[]}' >"${CA_MULTI}"
     printf '%s\n' '{"outbounds":[]}' >"${CA_X}/chain_outbound.json"
     [[ "$1" == direct ]] && printf '%s\n' '{"outbounds":[]}' >"${CA_X}/z_direct_outbound.json"
-    printf 'y\n' | run_ca "${_caRemove}"$'\n''handleXray() { :; }; removeChainProxy' >/dev/null 2>&1
-    jq -c '[.routing.rules[].outboundTag]' "${CA_X}/09_routing.json" 2>&1
+    printf 'y\n' | run_ca "${_caRemove}"$'\n''handleXray() { [[ "$1" != start ]] || writeXrayRouting; }; removeChainProxy' >/dev/null 2>&1
+    ca_chain_rules '[.routing.rules[].outboundTag]' 2>&1
 }
-assert_equals '["z_direct_outbound"]' "$(run_remove_nobak direct)" "卸载链式（没有备份）：直连出站在时默认路由指向它"
-assert_equals '[]' "$(run_remove_nobak)" "卸载链式（没有备份，WARP / IPv6 全局）：直连出站不在就不写指向它的规则"
+assert_equals '["z_direct_outbound"]' "$(run_remove_nobak direct)" "卸载链式：链式规则撤掉，直连出站在时默认规则指向它"
+assert_equals '[]' "$(run_remove_nobak)" "卸载链式（直连出站被旧的全局模式删了）：不写指向它的规则"
+
+# --- 出口节点给自己加了出口：出口表的菜单里留一项进出口节点自己的设置，状态两样都显示 ---
+_caAdv=$(sed -n '/^chainProxyAdvanced() {/,/^}/p;/^multiChainAdvancedMenu() {/,/^}/p;/^showChainStatus() {/,/^}/p' install.sh)
+ca_reset
+ca_multi '{}'
+_out=$(printf '9\n' | run_ca "${_caAdv}"$'\n''chainProxyAdvanced' 2>&1)
+assert_equals "0" "$(grep -c '出口节点设置' <<<"${_out}")" "高级设置（只有出口表）：没有出口节点那一项"
+printf '%s\n' '{"role":"exit","ip":"198.51.100.8","port":5000}' >"${CA_EXIT}"
+_out=$(printf '6\n9\n' | run_ca "${_caAdv}"$'\n''chainProxyAdvanced' 2>&1)
+assert_contains "${_out}" "6.出口节点设置" "高级设置（出口节点有自己的出口表）：多一项出口节点设置"
+assert_contains "${_out}" "1.显示配置码" "高级设置（出口节点有自己的出口表）：选 6 进得到配置码、密钥、端口那一层"
+_out=$(run_ca "${_caAdv}"$'\n''showMultiChainStatus() { echo MULTI-STATUS; }; showExistingChainCode() { echo EXIT-CODE; }; singBoxDaemonRunning() { return 0; }; showChainStatus' 2>&1)
+assert_equals "MULTI-STATUS|1|EXIT-CODE" "$(grep -o 'MULTI-STATUS' <<<"${_out}")|$(grep -c '监听端口: 5000' <<<"${_out}")|$(grep -o 'EXIT-CODE' <<<"${_out}")" \
+    "查看状态（出口节点有自己的出口表）：出口表之后接着显示出口节点的端口与配置码"
+rm -f "${CA_EXIT}"
+_out=$(run_ca "${_caAdv}"$'\n''showMultiChainStatus() { echo MULTI-STATUS; }; showExistingChainCode() { echo EXIT-CODE; }; showChainStatus' 2>&1)
+assert_equals "MULTI-STATUS|0" "$(grep -o 'MULTI-STATUS' <<<"${_out}")|$(grep -c 'EXIT-CODE' <<<"${_out}")" "查看状态（只有出口表）：只显示出口表"
+
+# --- 旧版入口配置转不过来的机器：只剩 chain_entry_info.json 也能走卸载清掉 ---
+ca_reset
+printf '%s\n' '{"role":"entry","mode":"external_single","external_node_id":"gone"}' >"${CA_ENTRY}"
+printf '%s\n' '{"outbounds":[]}' >"${CA_F}/chain_outbound.json"
+_out=$(printf 'y\n' | run_ca "${_caRemove}"$'\n''handleXray() { :; }; removeChainProxy' 2>&1)
+assert_contains "${_out}" "旧版本留下的入口配置" "卸载（只剩旧版入口状态）：认得出来"
+assert_equals "gone gone" "$([[ -e "${CA_ENTRY}" ]] && echo kept || echo gone) $([[ -e "${CA_F}/chain_outbound.json" ]] && echo kept || echo gone)" "卸载（只剩旧版入口状态）：旧状态与旧出站片段都删掉"
+
+# --- 没接链式的 Xray 路由：只有默认规则，手改的与旧分流工具的规则都不留 ---
+ca_reset
+printf '%s\n' '{"outbounds":[]}' | tee "${CA_X}/z_direct_outbound.json" "${CA_X}/wireguard_out_IPv4.json" >/dev/null
+printf '%s\n' '{"routing":{"rules":[{"type":"field","domain":["hand.example"],"outboundTag":"my_out"},{"type":"field","domain":["geosite:netflix"],"outboundTag":"wireguard_out_IPv4"}]}}' >"${CA_X}/09_routing.json"
+: >"${CA_X}/09_routing.json.bak.chain"
+run_ca 'writeXrayRouting' >/dev/null 2>&1
+assert_equals '["z_direct_outbound"]' "$(ca_chain_rules '[.routing.rules[].outboundTag]')" \
+    "路由（没接链式）：只有指向直连出站的默认规则，手改的与旧分流工具的规则都不留（出站文件还在也不留）"
+assert_equals "gone" "$([[ -e "${CA_X}/09_routing.json.bak.chain" ]] && echo kept || echo gone)" "路由：旧版留下的 .bak.chain 清掉"
+rm -f "${CA_X:?}/z_direct_outbound.json"
+run_ca 'writeXrayRouting' >/dev/null 2>&1
+assert_equals '[]' "$(ca_chain_rules '[.routing.rules[].outboundTag]')" "路由（直连出站不在）：不写指向它的默认规则（Xray 对指向不存在出站的规则直接断连接）"
+
+# --- 旧分流工具（原菜单 11）留下的文件：启动前删掉，Xray 的 DNS 回默认、路由重新生成，补回全局模式删掉的直连出站 ---
+# lg_fixture → Xray 上 IPv6 分流、WARP IPv4 分流、DNS 分流，sing-box 上 IPv6 分流与 SNI 分流，装着一个 Xray 协议；
+# 另有现在的出口片段与 DNS 片段，它们不能被当成旧文件删掉
+lg_fixture() {
+    ca_reset
+    printf '%s\n' '{"inbounds":[{"tag":"VLESSTCP","settings":{"clients":[]}}]}' >"${CA_X}/02_VLESS_TCP_inbounds.json"
+    printf '%s\n' '{"outbounds":[]}' | tee "${CA_X}/z_direct_outbound.json" "${CA_X}/IPv6_out.json" "${CA_X}/wireguard_out_IPv4.json" \
+        "${CA_F}/IPv6_out.json" "${CA_F}/IPv4_out.json" "${CA_F}/01_direct_outbound.json" "${CA_F}/chain_outbound_warp_ipv4.json" >/dev/null
+    jq -n '{routing: {rules: [{type: "field", domain: ["geosite:netflix"], outboundTag: "IPv6_out"}, {type: "field", domain: ["domain:openai.com"], outboundTag: "wireguard_out_IPv4"}]}}' >"${CA_X}/09_routing.json"
+    jq -n '{dns: {servers: [{address: "9.9.9.9", port: 53, domains: ["geosite:disney"]}, "localhost"]}}' >"${CA_X}/11_dns.json"
+    jq -n '{route: {rules: [{rule_set: ["netflix_IPv6_route"], outbound: "IPv6_out"}]}}' >"${CA_F}/IPv6_route.json"
+    jq -n '{dns: {servers: [{type: "hosts", tag: "hosts", predefined: {"www.sni.example": "1.2.3.4"}}]}}' >"${CA_F}/dns.json"
+    printf '%s\n' '{"dns":{"servers":[{"type":"local","tag":"local"}]}}' >"${CA_F}/02_dns_local.json"
+}
+lg_tree() { (cd "${CA_ROOT}" && find . -type f | sort | xargs cksum); }
+LG_RUN='legacyRoutingCleared=false; legacyRoutingClear; echo "rc=$?|${legacyRoutingCleared}"'
+ca_reset
+printf '%s\n' '{"inbounds":[{"tag":"VLESSTCP","settings":{"clients":[]}}]}' >"${CA_X}/02_VLESS_TCP_inbounds.json"
+printf '%s\n' '{"outbounds":[]}' >"${CA_X}/z_direct_outbound.json"
+printf '%s\n' '{"dns":{"servers":["localhost"]}}' >"${CA_X}/11_dns.json"
+_lgBefore=$(lg_tree)
+assert_equals "rc=0|false|same" "$(run_ca "${LG_RUN}" 2>/dev/null | tail -n 1)|$([[ "${_lgBefore}" == "$(lg_tree)" ]] && echo same || echo changed)" "旧分流工具：干净的机器上什么都不动"
+lg_fixture
+_out=$(run_ca "${LG_RUN}" 2>&1)
+assert_equals "rc=0|true" "$(tail -n 1 <<<"${_out}")" "旧分流工具：删了东西时置 legacyRoutingCleared，调用方据此把两个内核一起重启"
+assert_contains "${_out}" "旧分流工具（原菜单 11）的配置这一版起不再生效" "旧分流工具：告诉用户配置已清除、去哪重新设置"
+assert_equals "" "$(ls "${CA_X}/IPv6_out.json" "${CA_X}/wireguard_out_IPv4.json" "${CA_F}/IPv6_out.json" "${CA_F}/IPv4_out.json" "${CA_F}/IPv6_route.json" "${CA_F}/dns.json" 2>/dev/null)" \
+    "旧分流工具：Xray 与 sing-box 两侧的旧文件都删掉"
+assert_equals "5" "$(ls "${CA_X}/02_VLESS_TCP_inbounds.json" "${CA_X}/z_direct_outbound.json" "${CA_F}/01_direct_outbound.json" "${CA_F}/chain_outbound_warp_ipv4.json" "${CA_F}/02_dns_local.json" 2>/dev/null | wc -l | tr -d ' ')" \
+    "旧分流工具：入站、直连出站、现在的出口片段与 DNS 片段不碰"
+assert_equals '{"dns":{"servers":["localhost"]}}|["z_direct_outbound"]' "$(jq -c . "${CA_X}/11_dns.json")|$(ca_chain_rules '[.routing.rules[].outboundTag]')" \
+    "旧分流工具：Xray 的 DNS 回到默认，路由当场重新生成（Xray 被别处拉起时不留指向已删出站的规则）"
+_lgBefore=$(lg_tree)
+assert_equals "rc=0|false|same" "$(run_ca "${LG_RUN}" 2>/dev/null | tail -n 1)|$([[ "${_lgBefore}" == "$(lg_tree)" ]] && echo same || echo changed)" "旧分流工具：清过一次再跑什么都不动"
+# 旧的全局模式删掉了两侧的直连出站
+ca_reset
+printf '%s\n' '{"inbounds":[{"tag":"VLESSTCP","settings":{"clients":[]}}]}' >"${CA_X}/02_VLESS_TCP_inbounds.json"
+printf '%s\n' '{"outbounds":[]}' | tee "${CA_X}/wireguard_out_IPv4.json" "${CA_F}/wireguard_endpoints_IPv4.json" "${CA_F}/00_log.json" >/dev/null
+run_ca "${LG_RUN}" >/dev/null 2>&1
+assert_equals 'freedom|direct|absent' "$(jq -r '.outbounds[0].protocol' "${CA_X}/z_direct_outbound.json" 2>/dev/null)|$(jq -r '.outbounds[0].tag' "${CA_F}/01_direct_outbound.json" 2>/dev/null)|$(ls "${CA_F}/wireguard_endpoints_IPv4.json" 2>/dev/null || echo absent)" \
+    "旧分流工具（全局模式）：两侧的直连出站补回来（少了它，排第一的出站就成了默认出站）"
+# sing-box 的 dns.json：旧版卸载留下的单个无 tag local 也删，认不出的形状不动；Xray 的 DNS 里有 hosts 也复位
+ca_reset
+printf '%s\n' '{"dns":{"servers":[{"type":"local"}]}}' >"${CA_F}/dns.json"
+printf '%s\n' '{"dns":{"servers":["localhost"],"hosts":{"www.sni.example":"1.2.3.4"}}}' >"${CA_X}/11_dns.json"
+run_ca "${LG_RUN}" >/dev/null 2>&1
+assert_equals 'absent|{"dns":{"servers":["localhost"]}}' "$([[ -e "${CA_F}/dns.json" ]] && echo present || echo absent)|$(jq -c . "${CA_X}/11_dns.json")" \
+    "旧分流工具：旧版卸载留下的单个无 tag local 删掉；Xray 的 DNS 里的 hosts 复位"
+ca_reset
+printf '%s\n' '{"dns":{"servers":[{"tag":"x","type":"udp","server":"8.8.8.8"}]}}' >"${CA_F}/dns.json"
+assert_equals "rc=0|false|present" "$(run_ca "${LG_RUN}" 2>/dev/null | tail -n 1)|$([[ -e "${CA_F}/dns.json" ]] && echo present || echo absent)" "旧分流工具：认不出的 dns.json 不动"
+assert_equals "1" "$(sed -n '/^chainEntryMigrated=false$/,/^fi$/p' install.sh | grep -c 'migrateChainEntryState && legacyRoutingClear && .*legacyRoutingCleared')" \
+    "入口：脚本启动时清旧分流工具的文件，清了就重载内核（升级后第一次进菜单）"
+
+# --- geosite 分类规则 ---
+ca_reset
+_out=$(printf '6\nNetflix, openai\n' | run_ca 'chainReadRule later; echo "rc=$?|${chainRuleType}|${chainRuleValue}"' 2>&1)
+assert_contains "${_out}" "rc=0|geosite|netflix,openai" "选规则：6 是 geosite 分类，转小写、去空格"
+assert_equals "2" "$(grep -c 'geo/geosite/' "${CA_CALLS}")" "选规则（geosite）：每个分类的规则集都预检"
+_out=$(printf '6\nnet flix/x\n6\nnetflix\n' | run_ca 'chainReadRule; echo "rc=$?|${chainRuleType}|${chainRuleValue}"' 2>&1)
+assert_equals "rc=0|geosite|netflix" "$(tail -n 1 <<<"${_out}")" "选规则（geosite）：带斜杠的写法重问（它会拼进下载地址），之后照常"
+assert_equals "geosite: netflix,openai" "$(run_ca 'chainRuleLabel geosite netflix,openai')" "选规则：geosite 规则的显示名带分类"
+ca_multi '{"default_chain": "us", "rules": [{"type": "geosite", "value": "google-play,google", "chain": "us"}, {"type": "geosite", "value": "google", "chain": "hk"}]}'
+run_ca "${_caRoute}" >/dev/null 2>&1
+assert_equals 'geosite-google-play geosite-google|{"rule_set":["geosite-google-play","geosite-google"],"outbound":"us"}|{"rule_set":["geosite-google"],"outbound":"hk"}' \
+    "$(jq -r '[.route.rule_set[].tag] | join(" ")' "${CA_F}/chain_route.json")|$(jq -c '.route.rules[1]' "${CA_F}/chain_route.json")|$(jq -c '.route.rules[2]' "${CA_F}/chain_route.json")" \
+    "多链路路由（geosite）：规则集按整名去重，google 不因为是 google-play 的前缀而漏定义"
+
 
 echo ""
 
@@ -4483,23 +4586,19 @@ rm -rf "${PP_ROOT}"
 
 echo ""
 
-echo -e "${YELLOW}=== 测试 sing-box 的 DNS / SNI 分流 ===${NC}"
+echo -e "${YELLOW}=== 测试 sing-box 合并后补默认域名解析器与本机封锁地址 ===${NC}"
 
 DNS_FN=""
-# removeUnlockDNS / removeUnlockSNI 的 Xray 分支有带顶格 } 的 heredoc，按 sed 范围抽会截断；抽到下一个函数定义为止
-for _f in addSingBoxDNSConfig initSingBoxRules ensureSingBoxLocalDns migrateSingBoxDnsSplit defaultDomainResolverInject \
-          removeUnlockDNS removeUnlockSNI setUnlockDNS setUnlockSNI isValidIP isValidDomain isLocalBlockedIP ipv6Hex \
-          xrayDomainRuleValue; do
+for _f in defaultDomainResolverInject isValidIP isValidDomain isLocalBlockedIP ipv6Hex; do
     _body=$(awk -v n="${_f}() {" 'f && /^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{/ {exit} index($0, n) == 1 {f=1} f' install.sh)
     assert_not_empty "${_body}" "分流：抽到 ${_f} 原文"
     DNS_FN+="${_body}"$'\n'
 done
 DNS_DIR="${MOCK_ROOT}/sbdns/"
-# 子 shell 里跑：$1 是要执行的命令；netflix 当成 geosite 分类
+# 子 shell 里跑：$1 是要执行的命令
 run_dns() (
     echoContent() { echo "$2" >>"${DNS_DIR}.log"; }
     t() { echo "$1"; }
-    geositeCategoryExists() { [[ "$1" == "netflix" ]]; }
     reloadCore() { echo reload >>"${DNS_DIR}.log"; }
     localGlobalAddrs() { echo '["203.0.113.9","2001:db8::9"]'; }
     singBoxConfigPath="${DNS_DIR}"
@@ -4507,57 +4606,6 @@ run_dns() (
     eval "$1"
 )
 dns_reset() { rm -rf "${DNS_DIR}" "${DNS_DIR}.log"; mkdir -p "${DNS_DIR}"; }
-# 按文件名顺序拼出合并后的 DNS server 列表，等同 sing-box merge 对数组的拼接
-dns_merged_servers() { jq -s -c '[.[] | .dns.servers // [] | .[] | .tag // "(untagged)"]' "${DNS_DIR}"*.json; }
-
-dns_reset
-run_dns 'addSingBoxDNSConfig 1.2.3.4 "a.example,b.example" predefined' >/dev/null 2>&1
-assert_equals '{"a.example":"1.2.3.4","b.example":"1.2.3.4"}' "$(jq -c '.dns.servers[] | select(.tag == "hosts") | .predefined' "${DNS_DIR}dns.json" 2>/dev/null)" "SNI 分流：predefined 按域名映射到 IP"
-dns_reset
-run_dns "addSingBoxDNSConfig 1.2.3.4 'x\"y' predefined" >/dev/null 2>&1
-assert_equals '{"x\"y":"1.2.3.4"}' "$(jq -c '.dns.servers[] | select(.tag == "hosts") | .predefined' "${DNS_DIR}dns.json" 2>/dev/null)" "SNI 分流：域名只当数据进 jq，带引号也不会改写过滤器"
-
-# 出站拨号只问 default_domain_resolver，分流必须是路由级 resolve；local 只由 02_dns_local.json 定义，再写就重名。
-# 先放好 02_dns_local.json：装过 16、做过 IPv6 分流的机器上它已经在了，重名就出在这种机器上
-dns_reset
-run_dns 'ensureSingBoxLocalDns; addSingBoxDNSConfig 9.9.9.9 "example.com,netflix"' >/dev/null 2>&1
-assert_equals '["local","dnsRouting"]' "$(dns_merged_servers)" "DNS 分流：合并后恰好一个 local，且排在第一（dns.final 缺省取它）"
-assert_equals '[{"domain_regex":["^([a-zA-Z0-9_-]+\\.)*example\\.com"],"action":"resolve","server":"dnsRouting"},{"rule_set":["netflix_dns"],"action":"resolve","server":"dnsRouting"}]' \
-    "$(jq -c '.route.rules' "${DNS_DIR}dns.json" 2>/dev/null)" "DNS 分流：域名与规则集各一条路由级 resolve，指向分流 server"
-assert_equals '9.9.9.9' "$(jq -r '.dns.servers[0].server' "${DNS_DIR}dns.json" 2>/dev/null)" "DNS 分流：上游地址写进 server"
-assert_equals 'true' "$(jq -c '.experimental.cache_file.enabled' "${DNS_DIR}dns.json" 2>/dev/null)" "DNS 分流：有远程规则集就开 cache_file"
-assert_equals 'null' "$(jq -c '.dns.rules' "${DNS_DIR}dns.json" 2>/dev/null)" "DNS 分流：不再写 dns.rules"
-dns_reset
-run_dns 'ensureSingBoxLocalDns; addSingBoxDNSConfig 1.2.3.4 "example.com,netflix" predefined' >/dev/null 2>&1
-assert_equals '[["domain_regex"],null,null]' "$(jq -c '[[.route.rules[] | keys[] | select(. != "action" and . != "server")], .route.rule_set, .experimental]' "${DNS_DIR}dns.json" 2>/dev/null)" "SNI 分流：hosts 只认精确域名，不带规则集与 cache_file"
-assert_equals '["local","hosts"]' "$(dns_merged_servers)" "SNI 分流：合并后恰好一个 local"
-
-# 旧版写法：DNS 分流（azarm 上旧代码真实写出的）、SNI 分流、卸载留下的单个无 tag local
-DNS_OLD_DNS='{"dns":{"servers":[{"tag":"local","type":"local"},{"tag":"dnsRouting","type":"udp","server":"1.1.1.1"}],"rules":[{"rule_set":[],"domain_regex":["^([a-zA-Z0-9_-]+\\.)*example\\.com"],"server":"dnsRouting"}]},"route":{"rule_set":[]}}'
-DNS_OLD_SNI='{"dns":{"servers":[{"tag":"local","type":"local"},{"tag":"hosts","type":"hosts","predefined":{"example.com":"127.0.0.1"}}],"rules":[{"domain_regex":["^([a-zA-Z0-9_-]+\\.)*example\\.com"],"server":"hosts"}]}}'
-dns_reset
-echo "${DNS_OLD_DNS}" >"${DNS_DIR}dns.json"
-run_dns "ensureSingBoxLocalDns; migrateSingBoxDnsSplit '${DNS_DIR}'" >/dev/null 2>&1
-DNS_MIG1=$(cat "${DNS_DIR}dns.json")
-run_dns "migrateSingBoxDnsSplit '${DNS_DIR}'" >/dev/null 2>&1
-assert_equals '[{"domain_regex":["^([a-zA-Z0-9_-]+\\.)*example\\.com"],"action":"resolve","server":"dnsRouting"}]' "$(jq -c '.route.rules' "${DNS_DIR}dns.json" 2>/dev/null)" "迁移：旧 DNS 分流的 dns.rules 改成路由级 resolve"
-assert_equals '["local","dnsRouting"]' "$(dns_merged_servers)" "迁移：去掉与 02_dns_local.json 重名的 local"
-assert_equals "${DNS_MIG1}" "$(cat "${DNS_DIR}dns.json")" "迁移：再跑一遍不变"
-assert_equals '1' "$(grep -c SINGBOX_DNS_SPLIT_MIGRATED "${DNS_DIR}.log" 2>/dev/null)" "迁移：只在真改了的那次提示"
-dns_reset
-echo "${DNS_OLD_SNI}" >"${DNS_DIR}dns.json"
-run_dns "migrateSingBoxDnsSplit '${DNS_DIR}'" >/dev/null 2>&1
-assert_equals '{"servers":["local","hosts"],"rules":[{"domain_regex":["^([a-zA-Z0-9_-]+\\.)*example\\.com"],"action":"resolve","server":"hosts"}]}' \
-    "$(jq -c -n --argjson s "$(dns_merged_servers)" --slurpfile d "${DNS_DIR}dns.json" '{servers: $s, rules: $d[0].route.rules}')" "迁移：旧 SNI 分流同样改写"
-dns_reset
-echo '{"dns":{"servers":[{"type":"local"}]}}' >"${DNS_DIR}dns.json"
-run_dns "migrateSingBoxDnsSplit '${DNS_DIR}'" >/dev/null 2>&1
-assert_equals 'absent' "$([[ -e "${DNS_DIR}dns.json" ]] && echo present || echo absent)" "迁移：旧版卸载留下的单个无 tag local 整个删掉"
-dns_reset
-DNS_OTHER='{"dns":{"servers":[{"tag":"local","type":"local"},{"tag":"x","type":"udp","server":"8.8.8.8"}]}}'
-echo "${DNS_OTHER}" >"${DNS_DIR}dns.json"
-run_dns "migrateSingBoxDnsSplit '${DNS_DIR}'" >/dev/null 2>&1
-assert_equals "${DNS_OTHER}" "$(cat "${DNS_DIR}dns.json")" "迁移：认不出的形状不动"
 
 # 合并后注入：两个以上 server 又没定 default_domain_resolver 才补 local；已有的值不碰
 dns_inject() { dns_reset; echo "$1" >"${DNS_DIR}m.json"; run_dns "defaultDomainResolverInject '${DNS_DIR}m.json'" >/dev/null 2>&1; jq -c '{s: [.dns.servers[]? | .tag // "-"], r: .route.default_domain_resolver}' "${DNS_DIR}m.json"; }
@@ -4565,25 +4613,6 @@ assert_equals '{"s":["local","dnsRouting"],"r":"local"}' "$(dns_inject '{"dns":{
 assert_equals '{"s":["google","local"],"r":"google"}' "$(dns_inject '{"dns":{"servers":[{"tag":"google","type":"udp","server":"8.8.8.8"},{"tag":"local","type":"local"}]},"route":{"default_domain_resolver":"google"}}')" "注入：链式写的 google 不碰"
 assert_equals '{"s":["local"],"r":null}' "$(dns_inject '{"dns":{"servers":[{"tag":"local","type":"local"}]}}')" "注入：单个 server 不补"
 assert_equals '{"s":["a","b","local"],"r":"local"}' "$(dns_inject '{"dns":{"servers":[{"tag":"a","type":"udp","server":"8.8.8.8"},{"tag":"b","type":"udp","server":"1.1.1.1"}]}}')" "注入：没有 local 时补一个再指向它"
-
-# 卸载：sing-box 这边整个删 dns.json，02_dns_local.json 留着（IPv6 分流、16 都引用它）
-for _rm in removeUnlockDNS removeUnlockSNI; do
-    dns_reset
-    run_dns 'addSingBoxDNSConfig 9.9.9.9 "example.com"' >/dev/null 2>&1
-    run_dns "coreKind=2; ${_rm}" >/dev/null 2>&1
-    assert_equals 'absent kept' "$([[ -e "${DNS_DIR}dns.json" ]] && echo present || echo absent) $([[ -e "${DNS_DIR}02_dns_local.json" ]] && echo kept || echo gone)" "${_rm}：删 dns.json，留 02_dns_local.json"
-done
-
-# 入口：DNS 地址与域名都会进核心配置，非法值在读入时拒绝，什么都不写
-dns_set() {
-    dns_reset
-    printf '%s\n' "$@" | run_dns 'coreKind=2; ensureDirectOutbound() { :; }; addXrayDNSConfig() { :; }; setUnlockDNS' >/dev/null 2>&1
-    echo "rc=$? $([[ -e "${DNS_DIR}dns.json" ]] && echo written || echo none)"
-}
-assert_equals 'rc=1 none' "$(dns_set '1.1.1.x' 'example.com')" "DNS 分流入口：非法 DNS 地址被拒"
-assert_equals 'rc=1 none' "$(dns_set '1.1.1.1' 'exa(mple.com')" "DNS 分流入口：带正则元字符的域名被拒"
-assert_equals 'rc=1 none' "$(dns_set '1.1.1.1' ',')" "DNS 分流入口：域名为空被拒"
-assert_equals 'rc=0 written' "$(dns_set '1.1.1.1' 'example.com,netflix')" "DNS 分流入口：合法输入写入并以 0 退出"
 
 # sing-box 本机封锁按 IP 拒的地址：输入检查与 localBlockInject 的 ip_is_private + 0.0.0.0/8 + IPv4-mapped + 本机网卡地址一致
 for _ip in 0.1.2.3 10.0.0.1 010.0.0.1 127.0.0.1 169.254.169.254 172.16.0.1 172.31.255.255 192.168.1.1 224.0.0.1 239.255.255.255 \
@@ -4594,20 +4623,6 @@ for _ip in 1.1.1.1 172.15.255.255 172.32.0.1 192.169.0.1 169.255.0.1 100.64.0.1 
     assert_equals 'open' "$(run_dns "isLocalBlockedIP '${_ip}'" >/dev/null 2>&1 && echo blocked || echo open)" "本机封锁地址：${_ip} 不算"
 done
 
-# SNI 分流入口：sing-box 主核上本机与内网地址在读入时拒绝、什么都不写；Xray 的封锁只认字面 IP，hosts 映射过去照通，不拦
-sni_set() {
-    local core=$1 sb=$2
-    shift 2
-    dns_reset
-    printf '%s\n' "$@" | run_dns "coreKind=${core}; configPath='${DNS_DIR}'; singBoxConfigPath='${sb}'; setUnlockSNI" >/dev/null 2>&1
-    echo "rc=$? $([[ -e "${DNS_DIR}dns.json" ]] && echo sb || echo -) $([[ -e "${DNS_DIR}11_dns.json" ]] && echo xray || echo -)"
-}
-assert_equals 'rc=1 - -' "$(sni_set 2 "${DNS_DIR}" 127.0.0.1 example.com)" "SNI 分流入口：sing-box 上回环地址被拒"
-assert_equals 'rc=1 - -' "$(sni_set 2 "${DNS_DIR}" 10.1.2.3 example.com)" "SNI 分流入口：sing-box 上内网地址被拒"
-assert_equals 'rc=1 - -' "$(sni_set 2 "${DNS_DIR}" 203.0.113.9 example.com)" "SNI 分流入口：sing-box 上本机网卡地址被拒"
-assert_equals 'rc=0 sb -' "$(sni_set 2 "${DNS_DIR}" 1.2.3.4 example.com)" "SNI 分流入口：sing-box 上公网地址照常写入"
-assert_equals 'rc=0 - xray' "$(sni_set 1 '' 127.0.0.1 example.com)" "SNI 分流入口：Xray 上内网地址照常写入"
-assert_equals 'rc=0 sb xray' "$(sni_set 1 "${DNS_DIR}" 10.1.2.3 example.com example.com)" "SNI 分流入口：Xray 带旁挂时两边都写，不拦"
 rm -rf "${DNS_DIR}" "${DNS_DIR}.log"
 
 echo ""
@@ -5137,37 +5152,6 @@ rm -rf "${RB_ROOT}" "${RB_BAK}"
 
 echo ""
 
-echo -e "${YELLOW}=== 测试 IPv6 / WARP 分流的状态显示 ===${NC}"
-
-RT_FN=$(sed -n '/^xrayRoutingHasOutbound() {/,/^}/p;/^showIPv6Routing() {/,/^}/p;/^showWireGuardDomain() {/,/^}/p' install.sh)
-assert_equals "3" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${RT_FN}")" "分流显示：三个函数都抽到了"
-RT_DIR="${MOCK_ROOT}/routing-show/"
-# $1 = 09_routing.json 的内容（none 表示没有这个文件），其余参数是要建的出站文件名；输出两个显示函数打印的内容
-run_rt() {
-    local f
-    rm -rf "${RT_DIR}"; mkdir -p "${RT_DIR}"
-    [[ "$1" == none ]] || printf '%s\n' "$1" >"${RT_DIR}09_routing.json"
-    shift
-    for f in "$@"; do echo '{}' >"${RT_DIR}${f}.json"; done
-    env RT_DIR="${RT_DIR}" RT_FN="${RT_FN}" bash -c '
-        source lib/utils.sh
-        configPath="${RT_DIR}"; coreKind=1; singBoxConfigPath=
-        eval "${RT_FN}"
-        showIPv6Routing; showWireGuardDomain IPv4' 2>&1
-}
-RT_BLOCK='{"routing":{"rules":[{"type":"field","ruleTag":"local-block-port","port":"31111-31210","outboundTag":"local_block"}]}}'
-assert_contains "$(run_rt "${RT_BLOCK}" IPv6_out)" "已设置IPv6全局分流" "分流显示：全局模式下 09_routing.json 只剩本机封锁规则，仍认得出是 IPv6 全局"
-assert_contains "$(run_rt "${RT_BLOCK}" wireguard_out_IPv4)" "已设置warp IPv4全局分流" "分流显示：WARP 全局同理"
-assert_contains "$(run_rt none IPv6_out)" "已设置IPv6全局分流" "分流显示：还没起过 Xray、文件真不在时照旧"
-_rtOut=$(run_rt '{"routing":{"rules":[{"type":"field","domain":["geosite:netflix"],"outboundTag":"IPv6_out"}]}}' IPv6_out)
-assert_contains "${_rtOut}" "geosite:netflix" "分流显示：按域名分流时列出域名"
-assert_contains "${_rtOut}" "未安装warp IPv4分流" "分流显示：没有 WARP 出站时显示未安装"
-rm -rf "${RT_DIR}"
-
-echo ""
-
-echo ""
-
 # --- 分享片段：Xray 上的 Trojan 不进 Clash 订阅；VMess WS 的 sing-box 片段用两种服务端都认的 xudp ---
 DB_FN=$(sed -n '/^defaultBase64Code() {/,/^}/p;/^shareQrCode() {/,/^}/p' install.sh)
 DB_SUB="${MOCK_ROOT}/sharecode.root/subscribe_local"
@@ -5494,7 +5478,7 @@ ah_fake_singbox
 printf '%s\n' '{"role":"relay","downstream_hops":[{"ip":"198.51.100.7","port":5000}]}' >"${AH_CONF}/chain_relay_info.json"
 printf '%s\n' '{"outbounds":[{"type":"shadowsocks","tag":"chain_outbound","server":"198.51.100.7","server_port":5000,"password":"right","domain_resolver":"google"}]}' >"${AH_FRAG}/chain_outbound.json"
 _out=$(run_ah "${AH_PROBE}" </dev/null)
-assert_contains "${_out}" "经链路取到出口 IP 203.0.113.5" "测链路（中继，下游一跳）：经链路取到出口 IP"
+assert_contains "${_out}" "取到出口 IP 203.0.113.5" "测链路（中继，下游一跳）：经链路取到出口 IP"
 assert_equals "rc=0|0" "$(tail -n 1 <<<"${_out}")|$(grep -c '客户端' <<<"${_out}")" "测链路（中继，下游一跳）：返回 0，不再叫人去客户端验证"
 assert_equals "" "$(ls -A "${AH_ROOT}/tmp")" "测链路：带密钥的临时配置用完即删"
 jq -c '.outbounds[0].password = "wrong"' "${AH_FRAG}/chain_outbound.json" >"${AH_FRAG}/x" && mv "${AH_FRAG}/x" "${AH_FRAG}/chain_outbound.json"
@@ -5506,7 +5490,7 @@ printf '%s\n' '{"role":"relay","downstream_hops":[{"ip":"198.51.100.8","port":60
 printf '%s\n' '{"outbounds":[{"type":"shadowsocks","tag":"chain_hop_1","server":"198.51.100.8","server_port":6000,"password":"right"},
     {"type":"shadowsocks","tag":"chain_outbound","server":"198.51.100.9","server_port":6001,"password":"right","detour":"chain_hop_1"}]}' >"${AH_FRAG}/chain_outbound.json"
 _out=$(run_ah "${AH_PROBE}" </dev/null)
-assert_equals "rc=0|1" "$(tail -n 1 <<<"${_out}")|$(grep -c '经链路取到出口 IP 203.0.113.5' <<<"${_out}")" "测链路（中继，下游两跳）：带着中间那一跳一起拨，取到出口 IP"
+assert_equals "rc=0|1" "$(tail -n 1 <<<"${_out}")|$(grep -c '取到出口 IP 203.0.113.5' <<<"${_out}")" "测链路（中继，下游两跳）：带着中间那一跳一起拨，取到出口 IP"
 
 # 中继上更新密钥：说清楚怎么换，不说没配置
 ah_reset
@@ -6377,7 +6361,7 @@ assert_equals "warn|Enforcing, not labeled bin_t: sing-box (restart the core onc
 rm -rf "${DSE_DIR}"
 
 # --- 路由总览：采集器在 mock 树上跑。断言画出来的走向，也断言密钥进不了模型和页面 ---
-TP_FN_NAMES="topoInbounds topoDirectExit topoPlainExit topoRoutingPlain topoRoutingMulti topoRoutingEntry topoRouting topoCoreStart topoIssues topoCoresText topoCollect topoSshTarget topoServe topoCommand chainRuleLabel getPresetDisplayName chainExternalSingleOnXray carpoolEnabled singBoxFragmentsHaveInbounds"
+TP_FN_NAMES="topoInbounds topoDirectExit topoRoutingPlain topoRoutingMulti topoRoutingEntry topoRouting topoCoreStart topoIssues topoCoresText topoCollect topoSshTarget topoServe topoCommand chainRuleLabel getPresetDisplayName chainExternalSingleOnXray carpoolEnabled singBoxFragmentsHaveInbounds"
 TP_FNS=""
 for _tpName in ${TP_FN_NAMES}; do
     TP_FNS+=$(sed -n "/^${_tpName}() {/,/^}/p" install.sh)$'\n'
@@ -6426,26 +6410,6 @@ assert_contains "$(tp_model true)" "203.0.113.10" "路由总览：--full 才显�
 assert_equals "" "$(jq -r '.host' <<<"${_tp}")" "路由总览：默认不写主机名，截图和地址打码一样认不出机器"
 assert_not_empty "$(tp_model true | jq -r '.host')" "路由总览：--full 才写主机名"
 
-# 分流工具：条件写在连线上；规则指向不存在的出站要报出来（Xray 会直接断连接）
-jq '.routing.rules += [{domain: ["geosite:netflix", "domain:example.org"], outboundTag: "IPv6_out"}, {domain: ["a.example"], outboundTag: "gone_out"}]' "${TP_X}/09_routing.json" >"${TP_X}/r.tmp" && mv "${TP_X}/r.tmp" "${TP_X}/09_routing.json"
-printf '%s\n' '{"outbounds":[{"tag":"IPv6_out","protocol":"freedom"}]}' >"${TP_X}/IPv6_out.json"
-_tp=$(tp_model)
-assert_equals 'IPv6_out|geosite:netflix 等 2 项' "$(jq -r '.flows[] | select(.exit == "IPv6_out") | "\(.exit)|\(.when)"' <<<"${_tp}")" "路由总览：分流条件写在线上"
-assert_equals 'direct|其余（默认）' "$(jq -r '.flows[-1] | "\(.exit)|\(.when)"' <<<"${_tp}")" "路由总览：有分流时默认那条写成其余"
-assert_contains "$(jq -r '.issues[]' <<<"${_tp}")" "gone_out" "路由总览：规则指向不存在的出站要报出来"
-
-# sing-box 不接链式：菜单 11 把带点的域名写成 domain_regex、geosite 写成 rule_set，标签还原成域名和 geosite 名，规则不能从图上消失
-tp_reset
-rm -f "${TP_X}"/*.json
-jq -n '{inbounds: [{listen_port: 443, tag: "VLESSReality", users: [{name: "alice-VLESS_Reality_Vision", uuid: "uuid-secret-1"}]}]}' >"${TP_F}/07_VLESS_vision_reality_inbounds.json"
-jq -n '{outbounds: [{type: "direct", tag: "direct"}, {type: "direct", tag: "IPv6_out"}],
-    route: {final: "direct", rule_set: [{tag: "netflix_IPv6_out_route", type: "remote", url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-netflix.srs"}],
-            rules: [{action: "resolve"}, {domain_regex: ["^([a-zA-Z0-9_-]+\\.)*openai\\.com", "^([a-zA-Z0-9_-]+\\.)*claude\\.ai"], rule_set: ["netflix_IPv6_out_route"], outbound: "IPv6_out"}]}}' >"${TP_C}/config.json"
-_tp=$(TP_CORE=2 tp_model)
-assert_equals 'IPv6_out|openai.com 等 3 项|IPv6' "$(jq -r '(.flows[] | select(.exit == "IPv6_out") | "\(.exit)|\(.when)") + "|" + (.exits[] | select(.key == "IPv6_out") | .name)' <<<"${_tp}")" \
-    "路由总览（sing-box）：正则写的域名还原、规则集写成 geosite 名，IPv6 分流照样画出来"
-assert_equals 'direct|其余（默认）' "$(jq -r '.flows[-1] | "\(.exit)|\(.when)"' <<<"${_tp}")" "路由总览（sing-box）：有分流时默认那条写成其余，不再是全部走直连"
-
 # 多链路：密钥和 ip、port 并排放在状态文件里，只能取需要的字段；出口标下一跳，下一跳是中继时注明，出站配置缺失的标红
 tp_reset
 jq -n '{mode: "multi_chain", default_chain: "a", accounts: {alice: "b", zed: "nosuch"},
@@ -6475,8 +6439,8 @@ printf '%s\n' '{"endpoints":[{"type":"wireguard","tag":"w6","private_key":"pw-se
 printf '%s\n' '{"outbounds":[{"type":"direct","tag":"nf"}],"dns":{"servers":[{"type":"udp","tag":"dns-nf","server":"203.0.113.53"}]}}' >"${TP_F}/chain_outbound_nf.json"
 printf '%s\n' '{"outbounds":[{"type":"direct","tag":"v4"}]}' >"${TP_F}/chain_outbound_v4.json"
 _tp=$(tp_model)
-assert_equals 'WARP IPv6||false|解锁 DNS|203.x.x.x|false|本机 IPv4||false' "$(jq -r '[.exits[] | select(.key == "w6" or .key == "nf" or .key == "v4") | "\(.kind)|\(.host)|\(.bad // false)"] | join("|")' <<<"${_tp}")" \
-    "路由总览（多链路）：WARP、解锁 DNS、本机 IPv4 出口各标自己的类型，解锁 DNS 带服务器地址（打码），都不标红"
+assert_equals 'WARP IPv6|Cloudflare|false|解锁 DNS|203.x.x.x|false|本机 IPv4|203.x.x.x|false' "$(jq -r '[.exits[] | select(.key == "w6" or .key == "nf" or .key == "v4") | "\(.kind)|\(.host)|\(.bad // false)"] | join("|")' <<<"${_tp}")" \
+    "路由总览（多链路）：WARP 标 Cloudflare，解锁 DNS 带服务器地址、本机 IPv4 带本机那一族的地址（都打码），都不标红"
 assert_equals "0" "$(grep -c 'pw-secret' <<<"${_tp}")" "路由总览（多链路）：WARP 的私钥不进模型"
 
 # sing-box 内核：入站里的密码和 UUID 不进模型
@@ -6493,6 +6457,17 @@ jq -n '{role: "exit", ip: "203.0.113.10", port: 50080, key: "pw-secret-a"}' >"${
 _tp=$(tp_model)
 assert_equals 'chain|tcp :50080|direct|来自入口' "$(jq -r '"\(.inbounds[-1].id)|\(.inbounds[-1].sub)|\(.inboundExits[0].exit)|\(.inboundExits[0].when)"' <<<"${_tp}")" "路由总览（链式出口）：入口来的流量从本机出去"
 assert_equals 'all' "$(jq -r '.accounts[] | select(.name == "alice") | .protocols' <<<"${_tp}")" "路由总览（链式出口）：链式入站不算账号要开的协议"
+# 出口机给自己配了出口与规则：经链路进来的流量和本机流量走同一张规则表，照规则画，不再一律画成直连
+jq -n '{mode: "multi_chain", default_chain: "w", accounts: {}, rules: [{type: "custom", value: "x.example", chain: "nf"}],
+    chains: [{name: "w", source: "warp", family: "ipv4"}, {name: "nf", source: "dns", server: "203.0.113.53"}]}' >"${TP_C}/chain_multi_info.json"
+printf '%s\n' '{"endpoints":[{"type":"wireguard","tag":"w"}]}' >"${TP_F}/chain_outbound_w.json"
+printf '%s\n' '{"outbounds":[{"type":"direct","tag":"nf"}]}' >"${TP_F}/chain_outbound_nf.json"
+_tp=$(tp_model)
+assert_equals '[["chain","nf","x.example"],["chain","w","其余（默认）"]]' "$(jq -c '[.inboundExits[] | [.inbound, .exit, .when]]' <<<"${_tp}")" \
+    "路由总览（链式出口，有自己的出口表）：链路流量按出口机的规则各画一根线，默认那根指向默认出口"
+jq '.rules = []' "${TP_C}/chain_multi_info.json" >"${TP_C}/chain_multi_info.json.t" && cp "${TP_C}/chain_multi_info.json.t" "${TP_C}/chain_multi_info.json" && rm -f "${TP_C}/chain_multi_info.json.t"
+assert_equals '[["chain","w","来自入口"]]' "$(tp_model | jq -c '[.inboundExits[] | [.inbound, .exit, .when]]')" "路由总览（链式出口，只有默认出口）：一根线指向默认出口"
+rm -f "${TP_C}/chain_multi_info.json"
 rm -f "${TP_C}/chain_exit_info.json"
 jq -n '{role: "relay", port: 40000, key: "pw-secret-a", downstream_hops: [{ip: "192.0.2.1", port: 1000, key: "pw-secret-r"}, {ip: "198.51.100.20", port: 50080, key: "pw-secret-b"}], total_hops: 3}' >"${TP_C}/chain_relay_info.json"
 _tp=$(tp_model true)

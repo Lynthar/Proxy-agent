@@ -459,27 +459,6 @@ _rsOut=$(echo "${_rsIn}" | jq -c "${_rsFwd}")
 assert_equals '{"route":{"rule_set":[{"tag":"a","type":"remote","url":"u","http_client":"rule_set_http"},{"tag":"b","type":"local","path":"p"}]}}' "${_rsOut}" "rule_set forward migration swaps download_detour for http_client"
 assert_equals '{"route":{"rule_set":[{"tag":"a","type":"remote","url":"u"},{"tag":"b","type":"local","path":"p"}]}}' "$(echo "${_rsOut}" | jq -c "${_rsBack}")" "rule_set backward migration strips http_client for pre-1.14 cores"
 
-# geosite 分类清单匹配：名字可带引号也可不带，大小写不敏感，规则里的域名不算分类
-_gsList=$(mktemp)
-cat > "${_gsList}" <<'EOF'
-lists:
-  - name: "google"
-    length: 1
-    rules:
-      - "domain:google.com"
-  - name: geolocation-!cn
-    length: 1
-    rules:
-      - "domain:example.org"
-EOF
-assert_equals 0 "$(geositeListHasCategory "${_gsList}" "google"; echo $?)" "geositeListHasCategory: quoted name matches"
-assert_equals 0 "$(geositeListHasCategory "${_gsList}" "Google"; echo $?)" "geositeListHasCategory: match is case-insensitive"
-assert_equals 0 "$(geositeListHasCategory "${_gsList}" "geolocation-!cn"; echo $?)" "geositeListHasCategory: unquoted name with ! matches"
-assert_equals 1 "$(geositeListHasCategory "${_gsList}" "google.com"; echo $?)" "geositeListHasCategory: rule domains are not categories"
-assert_equals 1 "$(geositeListHasCategory "${_gsList}" "goo"; echo $?)" "geositeListHasCategory: prefix does not match"
-assert_equals 1 "$(geositeListHasCategory "${_gsList}" ""; echo $?)" "geositeListHasCategory: empty name never matches"
-assert_equals 1 "$(geositeListHasCategory "/nonexistent/dlc.yml" "google"; echo $?)" "geositeListHasCategory: missing list means no category"
-rm -f "${_gsList}"
 
 # ============================================================================
 # 测试 protocol-registry.sh 的 email 后缀列
@@ -1360,8 +1339,8 @@ cp_assert_contains "${_tpTable}" '<td class="num">7</td><td class="num w">9 GiB<
 cp_assert_contains "${_tpTable}" '<td class="off">bob</td><td><span class="m">停用：超额</span>' "按账号表: 停用的划掉、写原因"
 cp_assert_contains "$(topoRenderHtml "${_tpSame}")" '<span class="m">指定（也是默认）</span>' "按账号表: 指定到唯一默认出口的写明也是默认"
 assert_equals "0" "$(topoRenderHtml "${_tpBare}" | grep -c '<table')" "按账号表: 没有账号（只当链式出口）时不出表"
-_tpHtml=$(topoRenderHtml "$(jq -c '.flows = [{exit: "direct", when: "其余协议"}] | .inboundExits = [{inbound: 7, exit: "a", when: "按协议"}] | .issues = []' <<<"${_tpModel}")")
-cp_assert_contains "${_tpHtml}" 'VLESS+Reality+Vision → <span class="dot' "按账号表: 按协议分流的入站也写进表上方那行"
+_tpHtml=$(topoRenderHtml "$(jq -c '.flows = [{exit: "direct", when: "全部"}] | .inboundExits = [{inbound: "chain", exit: "a", when: "来自入口"}] | .issues = []' <<<"${_tpModel}")")
+assert_equals "0" "$(grep -c '跟随默认的账号：' <<<"${_tpHtml}")" "按账号表: 经链路进来的流量不是账号的分流条件，不写进表上方那行"
 
 # 出口配色：直连固定第一色，其余在后四色里循环，第 7 个出口不会和直连同色
 _tpSeven=$(jq -c '.exits = ([.exits[0]] + [range(1; 7) | {key: "c\(.)", name: "c\(.)", kind: "链式", host: "198.x.x.x", port: 1}])

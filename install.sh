@@ -522,7 +522,7 @@ if ! type t &>/dev/null; then
     MSG_MENU_INSTALL="安装"
     MSG_MENU_REINSTALL="重新安装"
     MSG_MENU_COMBO_INSTALL="任意组合安装"
-    MSG_MENU_CHAIN_PROXY="链式代理管理"
+    MSG_MENU_CHAIN_PROXY="链式与分流"
     MSG_MENU_HYSTERIA2="Hysteria2 管理"
     MSG_MENU_REALITY="REALITY 管理"
     MSG_MENU_REALITY_QUICK="一键无域名 Reality 安装"
@@ -532,7 +532,6 @@ if ! type t &>/dev/null; then
     MSG_MENU_USER="用户管理"
     MSG_MENU_DISGUISE="伪装站管理"
     MSG_MENU_CERT="证书管理"
-    MSG_MENU_ROUTING="分流工具"
     MSG_MENU_ADD_PORT="添加新端口"
     MSG_MENU_CORE="Core 管理"
     MSG_MENU_UPDATE_SCRIPT="更新脚本"
@@ -557,10 +556,10 @@ if ! type t &>/dev/null; then
     MSG_INSTALL_TOOL="安装 %s"
     # 链式代理菜单
     MSG_CHAIN_MENU_WIZARD="快速配置向导"
-    MSG_CHAIN_MENU_STATUS="查看链路状态"
-    MSG_CHAIN_MENU_TEST="测试链路连通性"
+    MSG_CHAIN_MENU_STATUS="查看状态"
+    MSG_CHAIN_MENU_TEST="测试连通性"
     MSG_CHAIN_MENU_ADVANCED="高级设置"
-    MSG_CHAIN_MENU_UNINSTALL="卸载链式代理"
+    MSG_CHAIN_MENU_UNINSTALL="卸载链式与分流"
     MSG_EXT_MENU_TITLE="外部节点管理"
     MSG_RECOMMENDED="推荐"
 
@@ -583,33 +582,33 @@ if ! type t &>/dev/null; then
     MSG_CHAIN_GEOIP_CUSTOM_HINT="请输入 GeoIP 代码 (如: kr, de, fr)"
 
     # === 多链路配置相关 ===
-    MSG_CHAIN_MULTI_TITLE="配置入口节点 (多链路分流模式)"
-    MSG_CHAIN_MULTI_DESC="此模式允许将不同流量分流到不同的出口节点"
+    MSG_CHAIN_MULTI_TITLE="配置链式与分流"
+    MSG_CHAIN_MULTI_DESC="给本机的流量添加出口，不同流量可以分到不同的出口"
     MSG_CHAIN_MULTI_EXAMPLE="例如: Netflix → 美国出口, OpenAI → 香港出口"
-    MSG_CHAIN_MULTI_EXISTS="检测到已存在多链路配置"
-    MSG_CHAIN_CONTINUE_ADD_NEW="继续添加新链路"
+    MSG_CHAIN_MULTI_EXISTS="检测到本机已有链式与分流配置"
+    MSG_CHAIN_CONTINUE_ADD_NEW="继续添加新出口"
     MSG_CHAIN_RECONFIGURE="重新配置 (将清除现有配置)"
-    MSG_CHAIN_CONFIRM_CLEAR="确认清除现有多链路配置？"
+    MSG_CHAIN_CONFIRM_CLEAR="确认清除现有的链式与分流配置？"
     MSG_CHAIN_SELECT_CONFIG_MODE="请选择配置方式"
-    MSG_CHAIN_ADD_INTERACTIVE="逐个添加链路"
+    MSG_CHAIN_ADD_INTERACTIVE="逐个添加出口"
     MSG_CHAIN_BATCH_IMPORT="批量导入配置码"
     MSG_CHAIN_BATCH_TITLE="批量导入配置码"
     MSG_CHAIN_BATCH_HINT="请逐行粘贴配置码，每行一个"
     MSG_CHAIN_BATCH_END_HINT="输入完成后输入空行结束"
     MSG_CHAIN_CODE_PROMPT="配置码"
     MSG_CHAIN_CODE_PARSE_FAILED="配置码解析失败，已跳过"
-    MSG_CHAIN_NO_CHAINS_ADDED="未添加任何链路，配置已取消"
+    MSG_CHAIN_NO_CHAINS_ADDED="未添加任何出口，配置已取消"
     MSG_CHAIN_IMPORT_SUCCESS="成功导入 %s 条链路"
     MSG_CHAIN_IMPORT_NONE="未导入任何链路，配置已取消"
     MSG_CHAIN_CONFIG_RULES_NOW="是否现在配置分流规则？"
 
     # === 规则配置相关 ===
-    MSG_CHAIN_STEP_IMPORT="步骤 1/3: 导入配置"
-    MSG_CHAIN_STEP_NAME="步骤: 命名此链路"
-    MSG_CHAIN_STEP_RULES="步骤 3/3: 设置分流规则"
-    MSG_CHAIN_RULES_SELECT="选择此链路的分流规则"
+    MSG_CHAIN_STEP_IMPORT="导入配置码"
+    MSG_CHAIN_STEP_NAME="给这个出口起名"
+    MSG_CHAIN_STEP_RULES="设置分流规则"
+    MSG_CHAIN_RULES_SELECT="选择这个出口的分流规则"
     MSG_CHAIN_RULE_CUSTOM_DOMAIN="自定义域名"
-    MSG_CHAIN_DEFAULT_HINT="提示: 如果不设置默认链路，未匹配规则的流量将从入口节点直连访问"
+    MSG_CHAIN_DEFAULT_HINT="提示: 如果不设置默认出口，未匹配规则的流量将从本机直连访问"
     MSG_CHAIN_PASTE_CODE="请粘贴出口/中继节点的配置码"
     MSG_CHAIN_CODE_EMPTY="配置码不能为空"
     MSG_CHAIN_PARSE_SUCCESS="解析成功"
@@ -620,22 +619,22 @@ if ! type t &>/dev/null; then
     MSG_CHAIN_DOMAIN="域名"
     MSG_CHAIN_DOMAIN_EMPTY="域名不能为空"
     MSG_CHAIN_RULES_TITLE="配置分流规则"
-    MSG_CHAIN_CURRENT_CHAINS="当前链路"
-    MSG_CHAIN_SELECT_CHAIN="选择要添加规则的链路编号"
-    MSG_CHAIN_INDEX="链路编号"
+    MSG_CHAIN_CURRENT_CHAINS="当前出口"
+    MSG_CHAIN_SELECT_CHAIN="选择要添加规则的出口编号"
+    MSG_CHAIN_INDEX="出口编号"
     MSG_CHAIN_INVALID_CHAIN="无效的选择"
-    MSG_CHAIN_NO_CHAINS="没有可用的链路"
-    MSG_CHAIN_NO_CONFIG="未找到多链路配置"
-    MSG_CHAIN_RULE_FOR="为链路"
+    MSG_CHAIN_NO_CHAINS="没有可用的出口"
+    MSG_CHAIN_NO_CONFIG="未找到链式与分流配置"
+    MSG_CHAIN_RULE_FOR="为出口"
     MSG_CHAIN_RULE_TYPE_SELECT="选择规则类型"
     MSG_CHAIN_GENERATING="正在生成配置..."
-    MSG_CHAIN_CONFIG_COMPLETE="多链路分流配置完成！"
-    MSG_CHAIN_NO_DEFAULT_SET="当前未设置默认链路，未匹配规则的流量将直连访问"
-    MSG_CHAIN_SET_DEFAULT_NOW="是否现在设置默认链路？"
+    MSG_CHAIN_CONFIG_COMPLETE="链式与分流配置完成！"
+    MSG_CHAIN_NO_DEFAULT_SET="当前未设置默认出口，未匹配规则的流量将直连访问"
+    MSG_CHAIN_SET_DEFAULT_NOW="是否现在设置默认出口？"
     MSG_CHAIN_NO_DEFAULT_OPTION="不设置 (未匹配流量直连)"
-    MSG_CHAIN_CONFIGURED_COUNT="已配置 %s 条链路"
-    MSG_CHAIN_SET_DEFAULT_SUCCESS="已将 [%s] 设为默认链路"
-    MSG_CHAIN_XRAY_DETECTED="检测到 Xray 代理协议，将同时配置 Xray 链式转发"
+    MSG_CHAIN_CONFIGURED_COUNT="已配置 %s 个出口"
+    MSG_CHAIN_SET_DEFAULT_SUCCESS="已将 [%s] 设为默认出口"
+    MSG_CHAIN_XRAY_DETECTED="检测到 Xray 的协议，会一并接进链式与分流"
     MSG_CHAIN_TARGET="目标"
     MSG_CHAIN_RULE_ADDED="规则已添加"
     MSG_CONFIRM="确认"
@@ -645,36 +644,36 @@ if ! type t &>/dev/null; then
     MSG_CHAIN_SINGBOX_START_FAILED="sing-box 启动失败"
     MSG_CHAIN_SINGBOX_START_SUCCESS="sing-box 启动成功"
     MSG_CHAIN_SINGBOX_DEBUG="请手动执行:"
-    MSG_CHAIN_CONFIGURING_XRAY="正在配置 Xray 链式转发..."
+    MSG_CHAIN_CONFIGURING_XRAY="正在把 Xray 接进链式与分流..."
     MSG_CHAIN_RESTARTING_XRAY="正在重启 Xray..."
-    MSG_CHAIN_TESTING_CONNECTIVITY="正在测试链路连通性..."
-    MSG_CHAIN_TESTING_PARALLEL="正在并行测试 %s 条链路..."
-    MSG_CHAIN_XRAY_RESTART_SUCCESS="Xray 重启成功，链式转发已启用"
+    MSG_CHAIN_TESTING_CONNECTIVITY="正在测试出口连通性..."
+    MSG_CHAIN_TESTING_PARALLEL="正在并行测试 %s 个出口..."
+    MSG_CHAIN_XRAY_RESTART_SUCCESS="Xray 重启成功，已接进链式与分流"
     MSG_CHAIN_XRAY_RESTART_FAILED="Xray 重启失败"
     MSG_CHAIN_XRAY_CHECK_CONFIG="请检查配置:"
-    MSG_CHAIN_SUMMARY_NAME="链路名称"
+    MSG_CHAIN_SUMMARY_NAME="出口名称"
     MSG_CHAIN_SUMMARY_TARGET="目标节点"
     MSG_CHAIN_SUMMARY_RULES="分流规则"
     MSG_CHAIN_RULE_PENDING="待配置"
     MSG_CHAIN_DEFAULT_ALL_TRAFFIC="默认 (所有其他流量)"
     MSG_CHAIN_DEFAULT_OUTBOUND="默认出站"
     MSG_CHAIN_DEFAULT_OUTBOUND_DIRECT="默认出站: 直连 (未匹配规则的流量直连访问)"
-    MSG_CHAIN_TEST_MULTI_TITLE="测试多链路连通性"
-    MSG_CHAIN_TEST_PROBE_OK="经链路取到出口 IP %s，耗时 %sms"
-    MSG_CHAIN_TEST_CONN_FAIL="经这条链路访问外网失败"
+    MSG_CHAIN_TEST_MULTI_TITLE="测试各出口连通性"
+    MSG_CHAIN_TEST_PROBE_OK="取到出口 IP %s，耗时 %sms"
+    MSG_CHAIN_TEST_CONN_FAIL="经这个出口访问外网失败"
     MSG_CHAIN_TEST_COMPLETE="测试完成: %s 通过, %s 失败"
-    MSG_CHAIN_TEST_CHECK_HINT="请检查失败链路的:"
+    MSG_CHAIN_TEST_CHECK_HINT="请检查失败的出口:"
     MSG_CHAIN_TEST_CHECK_1="1. 出口节点防火墙是否开放端口"
     MSG_CHAIN_TEST_CHECK_2="2. 出口节点 sing-box 是否运行"
     MSG_CHAIN_TEST_CHECK_3="3. IP、端口与密钥是否正确（出口重装过要重新导入配置码），出口是否只放行了别的入口"
     MSG_CHAIN_STATUS_RUNNING="运行中"
     MSG_CHAIN_STATUS_STOPPED="未运行"
-    MSG_CHAIN_STATUS_TITLE="链式代理状态"
+    MSG_CHAIN_STATUS_TITLE="链式与分流状态"
     MSG_CHAIN_STATUS_ROLE="当前角色"
-    MSG_CHAIN_STATUS_ROLE_ENTRY="入口节点 (Entry) - 多链路分流模式"
+    MSG_CHAIN_STATUS_ROLE_ENTRY="链式与分流"
     MSG_CHAIN_STATUS_RUN="运行状态"
-    MSG_CHAIN_STATUS_COUNT="链路数量"
-    MSG_CHAIN_STATUS_DETAILS="链路详情"
+    MSG_CHAIN_STATUS_COUNT="出口数量"
+    MSG_CHAIN_STATUS_DETAILS="出口详情"
     MSG_CHAIN_STATUS_DEFAULT_MARK="[默认]"
 
     # 协议分流相关
@@ -4411,14 +4410,14 @@ isLocalBlockedIP() {
     return 1
 }
 
-# ensureXrayLocalBlock → Xray 启动前把「代理用户不许连本机与内网」放到 09_routing.json 最前（幂等）：
-# 统计 API 端口与桥端口段按端口封（写成域名、DNS rebinding 都绕不过），回环 / 私网 / 链路本地 / 未指定 / 本机网卡地址按字面 IP 封。
-# 不封的话成员能经代理连到统计 API 清零自己的计数。09_routing.json 有好几个写入者，所以每次启动前补，不在写入处补
-ensureXrayLocalBlock() {
+# writeXrayRouting → Xray 启动前整份生成 09_routing.json（没变不写），手改的规则不保留。最前三条封本机与内网：统计 API 与桥端口段
+# 按端口封，回环 / 私网 / 本机网卡地址按字面 IP 封，不封的话成员能经代理清零自己的用量。后面接了链式是按账号的规则加一条交给桥的兜底
+# （user 正则只转义 . 和 +，Xray 静默丢弃写坏的正则）；没接只有默认规则
+writeXrayRouting() {
     local routing="${XRAY_CONF_DIR}/09_routing.json" outbound="${XRAY_CONF_DIR}/local_block_tail_outbound.json"
-    local outbounds apiPort hops current updated file addrs
+    local outbounds apiPort hops current="" updated file addrs rules state
     [[ -d "${XRAY_CONF_DIR}" ]] || return 0
-    # 文件名必须带 tail：不带的出站会被插到最前当默认出站，z_direct_outbound 被 WARP / IPv6 全局模式删掉时就是它，全部流量进黑洞
+    # 文件名必须带 tail：不带的出站会被插到最前，z_direct_outbound 不在时它就成了默认出站，全部流量进黑洞
     outbounds='{"outbounds":[{"tag":"local_block","protocol":"blackhole"},{"tag":"local_pass","protocol":"freedom"}]}'
     if [[ "$(jq -c . "${outbound}" 2>/dev/null)" != "${outbounds}" ]]; then
         jsonWriteFile "${outbound}" "${outbounds}" false || return 1
@@ -4431,20 +4430,34 @@ ensureXrayLocalBlock() {
         done
         return 1
     fi
-    current='{"routing":{"rules":[]}}'
-    if [[ -f "${routing}" ]]; then
-        current=$(cat "${routing}") || return 1
+    if [[ -f "${XRAY_CONF_DIR}/chain_outbound.json" ]]; then
+        state=$(chainAccountReadState) || return 1
+        rules=$(jq -cn --argjson s "${state}" '
+            ([($s.accounts // {}) | to_entries[]
+                | {re: ("regexp:^" + ([.key | explode[] | if . == 46 or . == 43 then [92, .] else [.] end] | add | implode) + "-[^-]*$"),
+                   tag: (if .value == "direct" then "chain_direct" else "chain_proxy_" + .value end)}]
+               | group_by(.tag) | map({type: "field", user: map(.re), outboundTag: .[0].tag}))
+            + [{type: "field", network: "tcp,udp", outboundTag: "chain_proxy"}]') || return 1
+    else
+        rules='[]'
+        # Xray 对指向不存在出站的规则是直接断连接：直连出站不在就不写
+        if [[ -f "${XRAY_CONF_DIR}/z_direct_outbound.json" ]]; then
+            rules='[{"type":"field","domain":["domain:gstatic.com","domain:googleapis.com","domain:googleapis.cn"],"outboundTag":"z_direct_outbound"}]'
+        fi
     fi
     addrs=$(localGlobalAddrs)
-    # ruleTag 各不相同、都以 local-block 开头（按前缀认、整组替换）：Xray 26.9.9 起启动时就查 ruleTag 重复，撞了直接起不来
-    updated=$(jq --arg ports "${CHAIN_BRIDGE_PORT}-${CHAIN_BRIDGE_PORT_LAST}${apiPort:+,${apiPort}}" --argjson hops "${hops}" --argjson addrs "${addrs}" '
-        ((if ($hops | length) > 0 then [{type: "field", ruleTag: "local-block-pass", inboundTag: $hops, outboundTag: "local_pass"}] else [] end)
-         + [{type: "field", ruleTag: "local-block-port", port: $ports, outboundTag: "local_block"},
-         {type: "field", ruleTag: "local-block-ip", outboundTag: "local_block",
-          ip: (["0.0.0.0/8", "10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4",
-               "255.255.255.255/32", "::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8"] + $addrs)}]) as $block
-        | .routing.rules = ($block + [(.routing.rules // [])[] | select((.ruleTag // "") | startswith("local-block") | not)])' <<<"${current}") || return 1
-    [[ "${updated}" == "$(jq . <<<"${current}")" ]] && return 0
+    # ruleTag 各不相同、都以 local-block 开头：Xray 26.9.9 起启动时就查 ruleTag 重复，撞了直接起不来
+    updated=$(jq -n --arg ports "${CHAIN_BRIDGE_PORT}-${CHAIN_BRIDGE_PORT_LAST}${apiPort:+,${apiPort}}" --argjson hops "${hops}" --argjson addrs "${addrs}" --argjson rules "${rules}" '
+        {routing: {domainStrategy: "AsIs", rules: (
+            (if ($hops | length) > 0 then [{type: "field", ruleTag: "local-block-pass", inboundTag: $hops, outboundTag: "local_pass"}] else [] end)
+            + [{type: "field", ruleTag: "local-block-port", port: $ports, outboundTag: "local_block"},
+               {type: "field", ruleTag: "local-block-ip", outboundTag: "local_block",
+                ip: (["0.0.0.0/8", "10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4",
+                     "255.255.255.255/32", "::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8"] + $addrs)}]
+            + $rules)}}') || return 1
+    rm -f "${routing}.bak.chain"
+    [[ -f "${routing}" ]] && current=$(jq -cS . "${routing}" 2>/dev/null)
+    [[ "${current}" == "$(jq -cS . <<<"${updated}")" ]] && return 0
     jsonWriteFile "${routing}" "${updated}" false
 }
 
@@ -4486,21 +4499,6 @@ chainExitSourceInject() {
     jq -e 'any(.inbounds[]?; .tag == "chain_inbound")' "${merged}" >/dev/null || return 0
     out=$(jq --arg ip "${allowed}" '.route.rules = [{type: "logical", mode: "and",
         rules: [{inbound: ["chain_inbound"]}, {source_ip_cidr: [$ip], invert: true}], action: "reject"}] + (.route.rules // [])' "${merged}") || return 1
-    jsonWriteFile "${merged}" "${out}" false
-}
-
-# globalEgressChainNotice → IPv6 / WARP 全局的确认前提一句：链式出口 / 中继上经链路转来的流量走链式路由里显式的 direct，不走全局出口
-globalEgressChainNotice() {
-    [[ -f "${CHAIN_EXIT_INFO}" || -f "${CHAIN_RELAY_INFO}" ]] || return 0
-    echoContent yellow "$(t GLOBAL_EGRESS_CHAIN_NOTICE)\n"
-}
-
-# directOutboundInject MERGED → final 或规则指向 direct、却没有这个出站时补一个：IPv6 / WARP 全局会删掉 01_direct_outbound，
-# 链式出口、中继、入口的直连都指向它，缺了 sing-box 起不来（check 查不出）。没人指向时不补，免得没有出站时补成默认出口
-directOutboundInject() {
-    local merged=$1 out
-    out=$(jq 'if (any(.outbounds[]?; .tag == "direct") | not) and (.route.final == "direct" or any(.route.rules[]?; .outbound == "direct"))
-        then .outbounds = ((.outbounds // []) + [{type: "direct", tag: "direct"}]) else . end' "${merged}") || return 1
     jsonWriteFile "${merged}" "${out}" false
 }
 
@@ -4582,21 +4580,22 @@ handleXray() {
         ensureXrayDirectStrategy
         ensureCorePortTargets || echoContent yellow " ---> $(t CORE_PORT_TARGET_FAILED)"
         ensureCarpoolXray
-        # 旧入口状态先转成现在的形状，转了就把 sing-box 一起重启：下面写的 Xray 路由要和它的路由成对生效
-        local chainEntryMigrated=false
-        if ! migrateChainEntryState; then
+        # 旧入口状态先转成现在的形状、旧分流工具的文件删掉，改了就把 sing-box 一起重启：下面写的 Xray 路由要和它的路由成对生效
+        local chainEntryMigrated=false legacyRoutingCleared=false
+        if ! migrateChainEntryState || ! legacyRoutingClear; then
             exit 1
         fi
-        if [[ "${chainEntryMigrated}" == "true" ]] && singBoxDaemonRunning; then
+        if [[ "${chainEntryMigrated}" == "true" || "${legacyRoutingCleared}" == "true" ]] && singBoxDaemonRunning; then
             handleSingBox stop
             handleSingBox start
         fi
-        # 链式入口的路由每次启动前写回：重装的模板、WARP / IPv6 全局都会整份换掉 09_routing.json，指定了出口的人就静默走本机直连
-        if [[ -f "${XRAY_CONF_DIR}/chain_outbound.json" ]] && ! writeXrayChainConfig "${CHAIN_BRIDGE_PORT}"; then
-            echoContent red " ---> $(t XRAY_CHAIN_ROUTING_FAILED "${XRAY_CONF_DIR}/09_routing.json")"
-            exit 1
-        fi
-        if ! ensureXrayLocalBlock; then
+        # 路由每次启动前从状态整份生成；接了链式的连桥的出站一起，写不出来就不启动：不然指定了出口的人静默走本机直连
+        if [[ -f "${XRAY_CONF_DIR}/chain_outbound.json" ]]; then
+            if ! writeXrayChainConfig "${CHAIN_BRIDGE_PORT}"; then
+                echoContent red " ---> $(t XRAY_CHAIN_ROUTING_FAILED "${XRAY_CONF_DIR}/09_routing.json")"
+                exit 1
+            fi
+        elif ! writeXrayRouting; then
             echoContent red " ---> $(t XRAY_LOCAL_BLOCK_FAILED "${XRAY_CONF_DIR}/09_routing.json")"
             exit 1
         fi
@@ -5355,117 +5354,7 @@ initTuicProtocol() {
     fi
 }
 
-# geosite 分类清单：v2fly domain-list-community 发布的 dlc.dat_plain.yml，sing-geosite 沿用同一套名字。
-# 本地缺失或超过 30 天就重新下载；下载失败时留用旧文件，一份都没有才返回失败
-ensureGeositeCategoryList() {
-    local dir tmp
-    dir=$(dirname "${GEOSITE_LIST_FILE}")
-    if [[ -s "${GEOSITE_LIST_FILE}" ]] && [[ -z "$(find "${GEOSITE_LIST_FILE}" -mtime +30 2>/dev/null)" ]]; then
-        return 0
-    fi
-    mkdir -p "${dir}"
-    tmp=$(mktemp "${dir}/dlc.XXXXXX") || return 1
-    if curl -fsSL --connect-timeout 10 -m 120 -o "${tmp}" "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat_plain.yml" 2>/dev/null \
-        && grep -qE '^[[:space:]]*-[[:space:]]*name:' "${tmp}"; then
-        mv -f "${tmp}" "${GEOSITE_LIST_FILE}"
-        return 0
-    fi
-    rm -f "${tmp}"
-    echoContent yellow " ---> $(t GEOSITE_LIST_DOWNLOAD_FAILED)"
-    [[ -s "${GEOSITE_LIST_FILE}" ]]
-}
-
-# geositeCategoryExists NAME → 0 表示 NAME 是 geosite 分类；清单拿不到时一律按不是处理
-geositeCategoryExists() {
-    ensureGeositeCategoryList || return 1
-    geositeListHasCategory "${GEOSITE_LIST_FILE}" "$1"
-}
-
-# xrayDomainRuleValue ENTRY → Xray 路由/DNS 的域名匹配项：geosite 分类给 "geosite:NAME"，其余给
-# "domain:ENTRY"。分类名没有点，带点的直接判为域名；统一小写，geosite 文件名区分大小写
-xrayDomainRuleValue() {
-    local entry="${1,,}"
-    if [[ "${entry}" != *.* ]] && geositeCategoryExists "${entry}"; then
-        printf 'geosite:%s\n' "${entry}"
-    else
-        printf 'domain:%s\n' "${entry}"
-    fi
-}
-
-# initSingBoxRules DOMAIN_CSV NAME_SUFFIX → {"domainRules":[],"ruleSet":[]}
-# geosite 分类走 remote rule_set，其余出 domain_regex
-initSingBoxRules() {
-    local domainRules=[]
-    local ruleSet=[]
-    while read -r line; do
-        if [[ -z "${line}" ]]; then
-            continue
-        fi
-        line="${line,,}"
-        if [[ "${line}" != *.* ]] && geositeCategoryExists "${line}"; then
-            ruleSet=$(echo "${ruleSet}" | jq -r --arg tag "${line}_$2" --arg url "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-${line}.srs" \
-                '. += [{tag: $tag, type: "remote", format: "binary", url: $url, http_client: "rule_set_http"}]')
-        else
-            local escapedLine="${line//./\\.}"
-            domainRules=$(echo "${domainRules}" | jq -r --arg reg "^([a-zA-Z0-9_-]+\\.)*${escapedLine}" '. += [$reg]')
-        fi
-    done < <(echo "$1" | tr ',' '\n' | grep -v '^$' | sort -u)
-    echo "{ \"domainRules\":${domainRules},\"ruleSet\":${ruleSet}}"
-}
-
-# 添加sing-box路由规则
-addSingBoxRouteRule() {
-    local outboundTag=$1
-    # 域名列表
-    local domainList=$2
-    # 路由文件名称
-    local routingName=$3
-    # 读取上次安装内容
-    if [[ -f "${singBoxConfigPath}${routingName}.json" ]]; then
-        read -r -p "读取到上次的配置，是否保留 ？[y/n]:" historyRouteStatus
-        if isYesInput "${historyRouteStatus}"; then
-            domainList="${domainList},$(jq -rc .route.rules[0].rule_set[] "${singBoxConfigPath}${routingName}.json" | awk -F "[_]" '{print $1}' | paste -sd ',')"
-            domainList="${domainList},$(jq -rc .route.rules[0].domain_regex[] "${singBoxConfigPath}${routingName}.json" | awk -F "[*]" '{print $2}' | paste -sd ',' | sed 's/\\//g')"
-        fi
-    fi
-    local rules=
-    rules=$(initSingBoxRules "${domainList}" "${routingName}")
-    # domain精确匹配规则
-    local domainRules=
-    domainRules=$(echo "${rules}" | jq .domainRules)
-
-    # ruleSet规则集
-    local ruleSet=
-    ruleSet=$(echo "${rules}" | jq .ruleSet)
-
-    # ruleSet规则tag
-    local ruleSetTag=[]
-    if [[ "$(echo "${ruleSet}" | jq '.|length')" != "0" ]]; then
-        ruleSetTag=$(echo "${ruleSet}" | jq '.|map(.tag)')
-    fi
-    if [[ -n "${singBoxConfigPath}" ]]; then
-
-        cat <<EOF >"${singBoxConfigPath}${routingName}.json"
-{
-  "route": {
-    "rules": [
-      {
-        "rule_set":${ruleSetTag},
-        "domain_regex":${domainRules},
-        "outbound": "${outboundTag}"
-      }
-    ],
-    "rule_set":${ruleSet}
-  }
-}
-EOF
-        jq 'if .route.rule_set == [] then del(.route.rule_set) else . end' "${singBoxConfigPath}${routingName}.json" >"${singBoxConfigPath}${routingName}_tmp.json" && mv "${singBoxConfigPath}${routingName}_tmp.json" "${singBoxConfigPath}${routingName}.json"
-    fi
-
-}
-
-# 确保基础 direct 出站存在（tag 恒为 "direct"）。
-# 别改调 addSingBoxOutbound——它会把 tag 覆盖成文件名，分流里所有 "direct" 引用一起失效。
+# 确保基础 direct 出站存在。tag 恒为 "direct"：路由里的直连都按这个名字引用
 ensureDirectOutbound() {
     if [[ -z "${singBoxConfigPath}" ]]; then
         return 1
@@ -5482,7 +5371,7 @@ ensureDirectOutbound() {
 EOF
 }
 
-# local 型 DNS server（走系统解析器），给 IPv4_out/IPv6_out 的 domain_resolver 引用。
+# local 型 DNS server（走系统解析器），旧片段迁移出来的 domain_resolver 引用它。
 # 文件名排在 01_dns.json 之后：dns.final 默认取首个 server，chain 场景的 google 不能被抢占。
 ensureSingBoxLocalDns() {
     if [[ -z "${singBoxConfigPath}" ]]; then
@@ -5572,33 +5461,6 @@ migrateRetiredRuleSets() {
     fi
 }
 
-# migrateSingBoxDnsSplit DIR → 旧版 DNS / SNI 分流写的 dns.json 改成 addSingBoxDNSConfig 现在的形状；旧版卸载留下的
-# 单个无 tag local 直接删。旧形状自带的 local 与 02_dns_local.json 重名、又缺解析器，sing-box 1.13 起拒绝启动。别的形状不动
-migrateSingBoxDnsSplit() {
-    local file="$1dns.json" out
-    [[ -f "${file}" ]] || return 0
-    if jq -e '. == {dns: {servers: [{type: "local"}]}}' "${file}" >/dev/null 2>&1; then
-        rm -f "${file}"
-        return 0
-    fi
-    jq -e '.dns.servers as $s | .dns.rules as $r
-        | ($s | length) == 2 and $s[0] == {tag: "local", type: "local"}
-        and ($s[1].tag == "dnsRouting" or $s[1].tag == "hosts")
-        and ($r | type) == "array" and ($r | length) > 0 and all($r[]; .server == $s[1].tag)' "${file}" >/dev/null 2>&1 || return 0
-    out=$(jq --arg cache "${SINGBOX_CONF_DIR}/cache.db" '
-        .dns.servers[1] as $srv | .dns.rules as $r
-        | .dns = {servers: [$srv]}
-        | .route.rules = [$r[] | del(.server)
-            | (if (.domain_regex // []) | length > 0 then {domain_regex} else empty end),
-              (if (.rule_set // []) | length > 0 then {rule_set} else empty end)
-            | . + {action: "resolve", server: $srv.tag}]
-        | if ((.route.rule_set // []) | length) > 0 then .experimental.cache_file = {enabled: true, path: $cache} else . end' \
-        "${file}") || return 1
-    jsonWriteFile "${file}" "${out}" false || return 1
-    singBoxConfigPath="$1" ensureSingBoxLocalDns || return 1
-    echoContent yellow " ---> $(t SINGBOX_DNS_SPLIT_MIGRATED)"
-}
-
 # chainRouteLazyResolve → stdin 的链式路由改成惰性解析：桥上的 resolve 去掉，第一条按 IP 分流的规则（IP 段、geoip-*）前放一条
 # 不带 inbound 的 resolve。排在它前面的域名规则照旧按域名命中、域名原样送给出口；带 inbound 的（中继认下一跳那条）不算。幂等
 chainRouteLazyResolve() {
@@ -5626,216 +5488,15 @@ migrateChainRouteResolve() {
     echoContent yellow " ---> $(t SINGBOX_CHAIN_ROUTE_MIGRATED)"
 }
 
-addSingBoxOutbound() {
-    local tag=$1
-    local type="ipv4"
-    local detour=$2
-    if echo "${tag}" | grep -q "IPv6"; then
-        type=ipv6
-    fi
-    # 强制地址族用 domain_resolver（dial 字段 domain_strategy 已在 1.12 弃用、1.14 移除），
-    # 它引用的 local server 由 02_dns_local.json 提供
-    ensureSingBoxLocalDns
-    if [[ -n "${detour}" ]]; then
-        cat <<EOF >"${singBoxConfigPath}${tag}.json"
-{
-     "outbounds": [
-        {
-             "type": "direct",
-             "tag": "${tag}",
-             "detour": "${detour}",
-             "domain_resolver": {
-                 "server": "local",
-                 "strategy": "${type}_only"
-             }
-        }
-    ]
-}
-EOF
-    elif echo "${tag}" | grep -q "direct"; then
-
-        cat <<EOF >"${singBoxConfigPath}${tag}.json"
-{
-     "outbounds": [
-        {
-             "type": "direct",
-             "tag": "${tag}"
-        }
-    ]
-}
-EOF
-    else
-        cat <<EOF >"${singBoxConfigPath}${tag}.json"
-{
-     "outbounds": [
-        {
-             "type": "direct",
-             "tag": "${tag}",
-             "domain_resolver": {
-                 "server": "local",
-                 "strategy": "${type}_only"
-             }
-        }
-    ]
-}
-EOF
-    fi
-}
-
-# 添加Xray-core 出站
+# addXrayOutbound TAG → 写一个 Xray 出站片段，文件名与 tag 相同：名字带 direct 是 freedom（UseIP），带 blackhole 是 blackhole
 addXrayOutbound() {
-    local tag=$1
-    local domainStrategy=
-
-    if echo "${tag}" | grep -q "IPv4"; then
-        domainStrategy="ForceIPv4"
-    elif echo "${tag}" | grep -q "IPv6"; then
-        domainStrategy="ForceIPv6"
-    fi
-
-    if [[ -n "${domainStrategy}" ]]; then
-        cat <<EOF >"${XRAY_CONF_DIR}/${tag}.json"
-{
-    "outbounds":[
-        {
-            "protocol":"freedom",
-            "settings":{
-                "domainStrategy":"${domainStrategy}"
-            },
-            "tag":"${tag}"
-        }
-    ]
-}
-EOF
-    fi
-    # direct
-    if echo "${tag}" | grep -q "direct"; then
-        cat <<EOF >"${XRAY_CONF_DIR}/${tag}.json"
-{
-    "outbounds":[
-        {
-            "protocol":"freedom",
-            "settings": {
-                "domainStrategy":"UseIP"
-            },
-            "tag":"${tag}"
-        }
-    ]
-}
-EOF
-    fi
-    # blackhole
-    if echo "${tag}" | grep -q "blackhole"; then
-        cat <<EOF >"${XRAY_CONF_DIR}/${tag}.json"
-{
-    "outbounds":[
-        {
-            "protocol":"blackhole",
-            "tag":"${tag}"
-        }
-    ]
-}
-EOF
-    fi
-    if echo "${tag}" | grep -q "wireguard_out_IPv4"; then
-        cat <<EOF >"${XRAY_CONF_DIR}/${tag}.json"
-{
-  "outbounds": [
-    {
-      "protocol": "wireguard",
-      "settings": {
-        "secretKey": "${secretKeyWarpReg}",
-        "address": [
-          "${address}"
-        ],
-        "peers": [
-          {
-            "publicKey": "${publicKeyWarpReg}",
-            "allowedIPs": [
-              "0.0.0.0/0",
-              "::/0"
-            ],
-            "endpoint": "162.159.192.1:2408"
-          }
-        ],
-        "reserved": ${reservedWarpReg},
-        "mtu": 1280
-      },
-      "tag": "${tag}"
-    }
-  ]
-}
-EOF
-    fi
-    if echo "${tag}" | grep -q "wireguard_out_IPv6"; then
-        cat <<EOF >"${XRAY_CONF_DIR}/${tag}.json"
-{
-  "outbounds": [
-    {
-      "protocol": "wireguard",
-      "settings": {
-        "secretKey": "${secretKeyWarpReg}",
-        "address": [
-          "${address}"
-        ],
-        "peers": [
-          {
-            "publicKey": "${publicKeyWarpReg}",
-            "allowedIPs": [
-              "0.0.0.0/0",
-              "::/0"
-            ],
-            "endpoint": "162.159.192.1:2408"
-          }
-        ],
-        "reserved": ${reservedWarpReg},
-        "mtu": 1280
-      },
-      "tag": "${tag}"
-    }
-  ]
-}
-EOF
-    fi
-    if echo "${tag}" | grep -q "vmess-out"; then
-        cat <<EOF >"${XRAY_CONF_DIR}/${tag}.json"
-{
-  "outbounds": [
-    {
-      "tag": "${tag}",
-      "protocol": "vmess",
-      "streamSettings": {
-        "network": "ws",
-        "security": "tls",
-        "tlsSettings": {},
-        "wsSettings": {
-          "path": "${setVMessWSTLSPath}"
-        }
-      },
-      "mux": {
-        "enabled": true,
-        "concurrency": 8
-      },
-      "settings": {
-        "vnext": [
-          {
-            "address": "${setVMessWSTLSAddress}",
-            "port": "${setVMessWSTLSPort}",
-            "users": [
-              {
-                "id": "${setVMessWSTLSUUID}",
-                "security": "auto",
-                "alterId": 0
-              }
-            ]
-          }
-        ]
-      }
-    }
-  ]
-}
-EOF
-    fi
+    local tag=$1 body
+    case "${tag}" in
+        *direct*) body=$(jq -n --arg t "${tag}" '{outbounds: [{protocol: "freedom", settings: {domainStrategy: "UseIP"}, tag: $t}]}') ;;
+        *blackhole*) body=$(jq -n --arg t "${tag}" '{outbounds: [{protocol: "blackhole", tag: $t}]}') ;;
+        *) return 1 ;;
+    esac
+    jsonWriteFile "${XRAY_CONF_DIR}/${tag}.json" "${body}" false
 }
 
 # 删除 Xray-core出站
@@ -5852,37 +5513,6 @@ removeSingBoxConfig() {
     if [[ -f "${singBoxConfigPath}${tag}.json" ]]; then
         rm "${singBoxConfigPath}${tag}.json"
     fi
-}
-
-# 初始化wireguard出站信息
-addSingBoxWireGuardEndpoints() {
-    local type=$1
-
-    readConfigWarpReg
-
-    cat <<EOF >"${singBoxConfigPath}wireguard_endpoints_${type}.json"
-{
-     "endpoints": [
-        {
-            "type": "wireguard",
-            "tag": "wireguard_endpoints_${type}",
-            "address": [
-                "${address}"
-            ],
-            "private_key": "${secretKeyWarpReg}",
-            "peers": [
-                {
-                  "address": "162.159.192.1",
-                  "port": 2408,
-                  "public_key": "${publicKeyWarpReg}",
-                  "reserved":${reservedWarpReg},
-                  "allowed_ips": ["0.0.0.0/0","::/0"]
-                }
-            ]
-        }
-    ]
-}
-EOF
 }
 
 # sing-box Tuic安装
@@ -5942,10 +5572,11 @@ singBoxMergeConfig() {
     local fragmentDir="${SINGBOX_FRAGMENT_DIR}/"
     local tmpFile mergeOutput mergeResult checkOutput checkResult
 
-    # 旧入口状态先转成现在的形状，转了就把 Xray 一起重启：它的路由要和这次合并出来的成对生效
-    local chainEntryMigrated=false
+    # 旧入口状态先转成现在的形状、旧分流工具的文件删掉，改了就把 Xray 一起重启：它的路由要和这次合并出来的成对生效
+    local chainEntryMigrated=false legacyRoutingCleared=false
     migrateChainEntryState || return 1
-    if [[ "${chainEntryMigrated}" == "true" && -f "${XRAY_CONF_DIR}/chain_outbound.json" ]] && xrayDaemonRunning; then
+    legacyRoutingClear || return 1
+    if { [[ "${chainEntryMigrated}" == "true" && -f "${XRAY_CONF_DIR}/chain_outbound.json" ]] || [[ "${legacyRoutingCleared}" == "true" ]]; } && xrayDaemonRunning; then
         if ! (handleXray stop && handleXray start); then
             return 1
         fi
@@ -5983,7 +5614,6 @@ singBoxMergeConfig() {
     fi
 
     migrateRetiredRuleSets "${fragmentDir}"
-    migrateSingBoxDnsSplit "${fragmentDir}"
     if ! migrateChainRouteResolve "${fragmentDir}"; then
         return 1
     fi
@@ -6021,11 +5651,6 @@ singBoxMergeConfig() {
     fi
     if ! chainExitSourceInject "${tmpFile}"; then
         echoContent red " ---> $(t CHAIN_EXIT_SOURCE_INJECT_FAILED "${CHAIN_EXIT_INFO}")"
-        rm -f "${tmpFile}"
-        return 1
-    fi
-    if ! directOutboundInject "${tmpFile}"; then
-        echoContent red " ---> $(t SINGBOX_DIRECT_INJECT_FAILED)"
         rm -f "${tmpFile}"
         return 1
     fi
@@ -6216,24 +5841,6 @@ EOF
 }
 EOF
     fi
-    # routing
-    cat <<EOF >${XRAY_CONF_DIR}/09_routing.json
-{
-  "routing": {
-    "rules": [
-      {
-        "type": "field",
-        "domain": [
-          "domain:gstatic.com",
-          "domain:googleapis.com",
-	  "domain:googleapis.cn"
-        ],
-        "outboundTag": "z_direct_outbound"
-      }
-    ]
-  }
-}
-EOF
     # VLESS_TCP_TLS_Vision
     # 回落nginx
     local fallbacksList='{"dest":31300,"xver":1},{"alpn":"h2","dest":31302,"xver":1}'
@@ -11233,252 +10840,6 @@ aliasInstall() {
     fi
 }
 
-# 检查ipv6、ipv4
-checkIPv6() {
-    currentIPv6IP=$(curl -s -6 -m 4 https://www.cloudflare.com/cdn-cgi/trace | grep "ip" | cut -d "=" -f 2)
-
-    if [[ -z "${currentIPv6IP}" ]]; then
-        echoContent red " ---> 不支持ipv6"
-        exit 1
-    fi
-}
-
-# ipv6 分流
-ipv6Routing() {
-    if [[ -z "${configPath}" ]]; then
-        echoContent red " ---> 未安装，请使用脚本安装"
-        menu
-        exit 1
-    fi
-
-    checkIPv6
-    echoContent skyBlue "\n功能 1/${totalProgress} : IPv6分流"
-    echoContent red "\n=============================================================="
-    echoContent yellow "1.查看已分流域名"
-    echoContent yellow "2.添加域名"
-    echoContent yellow "3.设置IPv6全局"
-    echoContent yellow "4.卸载IPv6分流"
-    echoContent red "=============================================================="
-    read -r -p "请选择:" ipv6Status
-    if [[ "${ipv6Status}" == "1" ]]; then
-        showIPv6Routing
-        exit 0
-    elif [[ "${ipv6Status}" == "2" ]]; then
-        echoContent red "=============================================================="
-        echoContent yellow "录入示例:netflix,openai\n"
-        read -r -p "请按照上面示例录入域名:" domainList
-        if [[ "${coreKind}" == "1" ]]; then
-            addXrayRouting IPv6_out outboundTag "${domainList}"
-            addXrayOutbound IPv6_out
-        fi
-
-        if [[ -n "${singBoxConfigPath}" ]]; then
-            addSingBoxRouteRule "IPv6_out" "${domainList}" "IPv6_route"
-            ensureDirectOutbound
-            addSingBoxOutbound IPv6_out
-            addSingBoxOutbound IPv4_out
-        fi
-
-        echoContent green " ---> 添加完毕"
-
-    elif [[ "${ipv6Status}" == "3" ]]; then
-
-        echoContent red "=============================================================="
-        echoContent yellow "# 注意事项\n"
-        echoContent yellow "1.会删除所有设置的分流规则"
-        echoContent yellow "2.会删除IPv6之外的所有出站规则\n"
-        globalEgressChainNotice
-        read -r -p "是否确认设置？[y/n]:" IPv6OutStatus
-
-        if isYesInput "${IPv6OutStatus}"; then
-            if [[ "${coreKind}" == "1" ]]; then
-                addXrayOutbound IPv6_out
-                removeXrayOutbound IPv4_out
-                removeXrayOutbound z_direct_outbound
-                removeXrayOutbound blackhole_out
-                removeXrayOutbound wireguard_out_IPv4
-                removeXrayOutbound wireguard_out_IPv6
-                removeXrayOutbound socks5_outbound
-
-                rm ${configPath}09_routing.json >/dev/null 2>&1
-            fi
-            if [[ -n "${singBoxConfigPath}" ]]; then
-
-                removeSingBoxConfig IPv4_out
-
-                removeSingBoxConfig wireguard_endpoints_IPv4_route
-                removeSingBoxConfig wireguard_endpoints_IPv6_route
-                removeSingBoxConfig wireguard_endpoints_IPv4
-                removeSingBoxConfig wireguard_endpoints_IPv6
-
-                removeSingBoxConfig socks5_02_inbound_route
-
-                removeSingBoxConfig IPv6_route
-
-                removeSingBoxConfig 01_direct_outbound
-
-                addSingBoxOutbound IPv6_out
-
-            fi
-
-            echoContent green " ---> IPv6全局出站设置完毕"
-        else
-
-            echoContent green " ---> 放弃设置"
-            exit 0
-        fi
-
-    elif [[ "${ipv6Status}" == "4" ]]; then
-        if [[ "${coreKind}" == "1" ]]; then
-            unInstallRouting IPv6_out outboundTag
-
-            removeXrayOutbound IPv6_out
-            addXrayOutbound "z_direct_outbound"
-        fi
-
-        if [[ -n "${singBoxConfigPath}" ]]; then
-            removeSingBoxConfig IPv6_out
-            removeSingBoxConfig "IPv6_route"
-            ensureDirectOutbound
-        fi
-
-        echoContent green " ---> IPv6分流卸载成功"
-    else
-        echoContent red " ---> 选择错误"
-        exit 1
-    fi
-
-    reloadCore
-}
-
-# xrayRoutingHasOutbound TAG → 0=09_routing.json 里有规则指向出站 TAG（按域名分流）。全局模式靠「没有这类规则」判断，
-# 不能看文件在不在：全局模式删掉的 09_routing.json 会在下次启动时被 ensureXrayLocalBlock 补回来
-xrayRoutingHasOutbound() {
-    jq -e --arg tag "$1" 'any(.routing.rules[]?; .outboundTag == $tag)' "${configPath}09_routing.json" >/dev/null 2>&1
-}
-
-# ipv6分流规则展示
-showIPv6Routing() {
-    if [[ "${coreKind}" == "1" ]]; then
-        if xrayRoutingHasOutbound IPv6_out; then
-            echoContent yellow "Xray-core："
-            jq -r -c '.routing.rules[]|select (.outboundTag=="IPv6_out")|.domain' ${configPath}09_routing.json | jq -r
-        elif [[ -f "${configPath}IPv6_out.json" ]]; then
-            echoContent yellow "Xray-core"
-            echoContent green " ---> 已设置IPv6全局分流"
-        else
-            echoContent yellow " ---> 未安装IPv6分流"
-        fi
-
-    fi
-    if [[ -n "${singBoxConfigPath}" ]]; then
-        if [[ -f "${singBoxConfigPath}IPv6_route.json" ]]; then
-            echoContent yellow "sing-box"
-            jq -r -c '.route.rules[]|select (.outbound=="IPv6_out")' "${singBoxConfigPath}IPv6_route.json" | jq -r
-        elif [[ ! -f "${singBoxConfigPath}IPv6_route.json" && -f "${singBoxConfigPath}IPv6_out.json" ]]; then
-            echoContent yellow "sing-box"
-            echoContent green " ---> 已设置IPv6全局分流"
-        else
-            echoContent yellow " ---> 未安装IPv6分流"
-        fi
-    fi
-}
-# 添加routing配置
-# 全量使用 jq --arg/--argjson 传值，避免 tag/domain 拼接进过滤器
-addXrayRouting() {
-
-    local tag=$1    # warp-socks 等内部 outboundTag
-    local type=$2   # outboundTag/inboundTag（作为 jq key 名称）
-    local domain=$3 # 域名列表（逗号分隔）
-
-    if [[ -z "${tag}" || -z "${type}" || -z "${domain}" ]]; then
-        echoContent red " ---> 参数错误"
-        exit 1
-    fi
-    # tag 形式校验：字母数字 _ - 长度 1-64，防止嵌入 JSON / jq 时破坏结构
-    if ! [[ "${tag}" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then
-        echoContent red " ---> addXrayRouting: tag 非法 '${tag}'"
-        exit 1
-    fi
-    # type 必须是已知 jq key 之一（后续会作为 .[$k] 访问），白名单防注入
-    case "${type}" in
-        outboundTag|inboundTag) ;;
-        *)
-            echoContent red " ---> addXrayRouting: type 非法 '${type}'"
-            exit 1
-            ;;
-    esac
-
-    local routingRule=
-    if [[ ! -f "${configPath}09_routing.json" ]]; then
-        # 初始骨架：用 jq -n 安全构造
-        jq -n --arg tag "${tag}" \
-            '{routing:{type:"field",rules:[{type:"field",domain:[],outboundTag:$tag}]}}' \
-            > ${configPath}09_routing.json
-    fi
-    local routingRule=
-    # outboundTag 是固定 key，tag 作为值用 --arg
-    routingRule=$(jq -r --arg tag "${tag}" \
-        '.routing.rules[]|select(.outboundTag==$tag and (.protocol == null))' \
-        ${configPath}09_routing.json)
-
-    if [[ -z "${routingRule}" ]]; then
-        routingRule=$(jq -n --arg tag "${tag}" \
-            '{type:"field",domain:[],outboundTag:$tag}')
-    fi
-
-    while read -r line; do
-        if [[ -z "${line}" ]]; then
-            continue
-        fi
-        # 放行域名与 geosite 分类名（字母数字 ! _ - .），拒绝其他（避免 URL/过滤器污染）
-        if ! [[ "${line}" =~ ^[A-Za-z0-9!._-]{1,64}$ ]]; then
-            echoContent yellow " ---> 跳过非法域名条目: ${line}"
-            continue
-        fi
-        if echo "${routingRule}" | grep -qF "${line}"; then
-            echoContent yellow " ---> ${line}已存在，跳过"
-        else
-            routingRule=$(echo "${routingRule}" | jq -r --arg rule "$(xrayDomainRuleValue "${line}")" '.domain += [$rule]')
-        fi
-    done < <(echo "${domain}" | tr ',' '\n')
-
-    unInstallRouting "${tag}" "${type}"
-    # routingRule 本身是 jq 产物的合法 JSON，改用 --argjson 明示
-    local routing=
-    routing=$(jq -r --argjson rule "${routingRule}" '.routing.rules += [$rule]' ${configPath}09_routing.json)
-    echo "${routing}" | jq . >${configPath}09_routing.json
-}
-# 根据tag卸载Routing
-unInstallRouting() {
-    local tag=$1
-    local type=$2
-    local protocol=$3
-
-    # type 必须是已知 jq key；用 .[$k] 动态访问，tag/protocol 作值传入
-    case "${type}" in
-        outboundTag|inboundTag) ;;
-        *)
-            echoContent red " ---> unInstallRouting: type 非法 '${type}'"
-            return 1
-            ;;
-    esac
-
-    if [[ -f "${configPath}09_routing.json" ]]; then
-        local routing=
-        if [[ -n "${protocol}" ]]; then
-            routing=$(jq -r --arg key "${type}" --arg tag "${tag}" --arg proto "${protocol}" \
-                'del(.routing.rules[] | select(.[$key] == $tag and (.protocol | index($proto))))' \
-                ${configPath}09_routing.json)
-            echo "${routing}" | jq . >${configPath}09_routing.json
-        else
-            routing=$(jq -r --arg key "${type}" --arg tag "${tag}" \
-                'del(.routing.rules[] | select(.[$key] == $tag and (.protocol == null )))' \
-                ${configPath}09_routing.json)
-            echo "${routing}" | jq . >${configPath}09_routing.json
-        fi
-    fi
-}
 
 # 安装嗅探
 installSniffing() {
@@ -11546,192 +10907,13 @@ installWarpReg() {
     fi
 }
 
-# 展示warp分流域名
-showWireGuardDomain() {
-    local type=$1
-    # xray
-    if [[ "${coreKind}" == "1" ]]; then
-        if xrayRoutingHasOutbound "wireguard_out_${type}"; then
-            echoContent yellow "Xray-core"
-            jq -r -c '.routing.rules[]|select (.outboundTag=="wireguard_out_'"${type}"'")|.domain' ${configPath}09_routing.json | jq -r
-        elif [[ -f "${configPath}wireguard_out_${type}.json" ]]; then
-            echoContent yellow "Xray-core"
-            echoContent green " ---> 已设置warp ${type}全局分流"
-        else
-            echoContent yellow " ---> 未安装warp ${type}分流"
-        fi
-    fi
-
-    # sing-box
-    if [[ -n "${singBoxConfigPath}" ]]; then
-        if [[ -f "${singBoxConfigPath}wireguard_endpoints_${type}_route.json" ]]; then
-            echoContent yellow "sing-box"
-            jq -r -c '.route.rules[]' "${singBoxConfigPath}wireguard_endpoints_${type}_route.json" | jq -r
-        elif [[ ! -f "${singBoxConfigPath}wireguard_endpoints_${type}_route.json" && -f "${singBoxConfigPath}wireguard_endpoints_${type}.json" ]]; then
-            echoContent yellow "sing-box"
-            echoContent green " ---> 已设置warp ${type}全局分流"
-        else
-            echoContent yellow " ---> 未安装warp ${type}分流"
-        fi
-    fi
-
-}
-
-# 添加WireGuard分流
-addWireGuardRoute() {
-    local type=$1
-    local tag=$2
-    local domainList=$3
-    # xray
-    if [[ "${coreKind}" == "1" ]]; then
-
-        addXrayRouting "wireguard_out_${type}" "${tag}" "${domainList}"
-        addXrayOutbound "wireguard_out_${type}"
-    fi
-    # sing-box
-    if [[ -n "${singBoxConfigPath}" ]]; then
-
-        # rule
-        addSingBoxRouteRule "wireguard_endpoints_${type}" "${domainList}" "wireguard_endpoints_${type}_route"
-        # addSingBoxOutbound "wireguard_out_${type}" "wireguard_out"
-        if [[ -n "${domainList}" ]]; then
-            ensureDirectOutbound
-        fi
-
-        # outbound
-        addSingBoxWireGuardEndpoints "${type}"
-    fi
-}
-
-# warp分流-第三方IPv4
-warpRoutingReg() {
-    local type=$2
-    echoContent skyBlue "\n进度  $1/${totalProgress} : WARP分流[第三方]"
-    echoContent red "=============================================================="
-
-    echoContent yellow "1.查看已分流域名"
-    echoContent yellow "2.添加域名"
-    echoContent yellow "3.设置WARP全局"
-    echoContent yellow "4.卸载WARP分流"
-    echoContent red "=============================================================="
-    read -r -p "请选择:" warpStatus
-    installWarpReg
-    readConfigWarpReg
-    local address=
-    if [[ ${type} == "IPv4" ]]; then
-        address="172.16.0.2/32"
-    elif [[ ${type} == "IPv6" ]]; then
-        address="${addressWarpReg}/128"
-    else
-        echoContent red " ---> IP获取失败，退出安装"
-        exit 1
-    fi
-
-    if [[ "${warpStatus}" == "1" ]]; then
-        showWireGuardDomain "${type}"
-        exit 0
-    elif [[ "${warpStatus}" == "2" ]]; then
-        echoContent yellow "# 注意事项"
-        echoContent yellow "# 支持sing-box、Xray-core"
-        echoContent yellow "录入示例:netflix,openai\n"
-        read -r -p "请按照上面示例录入域名:" domainList
-        addWireGuardRoute "${type}" outboundTag "${domainList}"
-        echoContent green " ---> 添加完毕"
-
-    elif [[ "${warpStatus}" == "3" ]]; then
-
-        echoContent red "=============================================================="
-        echoContent yellow "# 注意事项\n"
-        echoContent yellow "1.会删除所有设置的分流规则"
-        echoContent yellow "2.会删除除WARP[第三方]之外的所有出站规则\n"
-        globalEgressChainNotice
-        read -r -p "是否确认设置？[y/n]:" warpOutStatus
-
-        if isYesInput "${warpOutStatus}"; then
-            readConfigWarpReg
-            if [[ "${coreKind}" == "1" ]]; then
-                addXrayOutbound "wireguard_out_${type}"
-                if [[ "${type}" == "IPv4" ]]; then
-                    removeXrayOutbound "wireguard_out_IPv6"
-                elif [[ "${type}" == "IPv6" ]]; then
-                    removeXrayOutbound "wireguard_out_IPv4"
-                fi
-
-                removeXrayOutbound IPv4_out
-                removeXrayOutbound IPv6_out
-                removeXrayOutbound z_direct_outbound
-                removeXrayOutbound blackhole_out
-                removeXrayOutbound socks5_outbound
-
-                rm ${configPath}09_routing.json >/dev/null 2>&1
-            fi
-
-            if [[ -n "${singBoxConfigPath}" ]]; then
-
-                removeSingBoxConfig IPv4_out
-                removeSingBoxConfig IPv6_out
-                removeSingBoxConfig 01_direct_outbound
-
-                # 删除所有分流规则
-                removeSingBoxConfig wireguard_endpoints_IPv4_route
-                removeSingBoxConfig wireguard_endpoints_IPv6_route
-
-                removeSingBoxConfig IPv6_route
-                removeSingBoxConfig socks5_02_inbound_route
-
-                addSingBoxWireGuardEndpoints "${type}"
-                addWireGuardRoute "${type}" outboundTag ""
-                if [[ "${type}" == "IPv4" ]]; then
-                    removeSingBoxConfig wireguard_endpoints_IPv6
-                else
-                    removeSingBoxConfig wireguard_endpoints_IPv4
-                fi
-
-                # outbound
-                # addSingBoxOutbound "wireguard_out_${type}" "wireguard_out"
-
-            fi
-
-            echoContent green " ---> WARP全局出站设置完毕"
-        else
-            echoContent green " ---> 放弃设置"
-            exit 0
-        fi
-
-    elif [[ "${warpStatus}" == "4" ]]; then
-        if [[ "${coreKind}" == "1" ]]; then
-            unInstallRouting "wireguard_out_${type}" outboundTag
-
-            removeXrayOutbound "wireguard_out_${type}"
-            addXrayOutbound "z_direct_outbound"
-        fi
-
-        if [[ -n "${singBoxConfigPath}" ]]; then
-            removeSingBoxConfig "wireguard_endpoints_${type}_route"
-
-            removeSingBoxConfig "wireguard_endpoints_${type}"
-            ensureDirectOutbound
-        fi
-
-        echoContent green " ---> 卸载WARP ${type}分流完毕"
-    else
-
-        echoContent red " ---> 选择错误"
-        exit 1
-    fi
-    reloadCore
-}
-
 # ======================= 链式代理功能 =======================
 
 # 链式代理主菜单
 chainProxyMenu() {
-    echoContent skyBlue "\n功能: 链式代理管理"
+    echoContent skyBlue "\n$(t CHAIN_MENU_TITLE)"
     echoContent red "\n=============================================================="
-    echoContent yellow "# 链式代理说明"
-    echoContent yellow "# 用于在多台境外VPS之间建立加密转发链路"
-    echoContent yellow "# 支持多层中继: 入口 → 中继1 → 中继2 → ... → 出口 → 互联网"
-    echoContent yellow "# 使用 Shadowsocks 2022 协议，加密安全、性能优秀\n"
+    echoContent yellow "$(t CHAIN_MENU_INTRO)\n"
     echoContent yellow "1.$(t CHAIN_MENU_WIZARD) [$(t RECOMMENDED)]"
     echoContent yellow "2.$(t CHAIN_MENU_STATUS)"
     echoContent yellow "3.$(t CHAIN_MENU_TEST)"
@@ -11769,21 +10951,21 @@ chainProxyMenu() {
 
 # 链式代理配置向导
 chainProxyWizard() {
-    echoContent skyBlue "\n链式代理配置向导"
+    echoContent skyBlue "\n$(t CHAIN_WIZARD_TITLE)"
     echoContent red "\n=============================================================="
-    echoContent yellow "请选择本机角色:\n"
-    echoContent yellow "1.出口节点 (Exit) - 链路终点，直接访问互联网"
-    echoContent yellow "  └─ 生成配置码，供中继或入口节点导入"
+    echoContent yellow "$(t CHAIN_WIZARD_PICK):\n"
+    echoContent yellow "1.$(t CHAIN_ROLE_EXIT) - $(t CHAIN_WIZARD_EXIT)"
+    echoContent yellow "  └─ $(t CHAIN_WIZARD_EXIT_1)"
     echoContent yellow ""
-    echoContent yellow "2.中继节点 (Relay) - 链路中间节点，转发流量"
-    echoContent yellow "  └─ 导入下游配置码，生成新配置码供上游使用"
-    echoContent yellow "  └─ 支持多层中继: 入口→中继1→中继2→...→出口"
+    echoContent yellow "2.$(t CHAIN_ROLE_RELAY) - $(t CHAIN_WIZARD_RELAY)"
+    echoContent yellow "  └─ $(t CHAIN_WIZARD_RELAY_1)"
+    echoContent yellow "  └─ $(t CHAIN_WIZARD_RELAY_2)"
     echoContent yellow ""
-    echoContent yellow "3.入口节点 (Entry) - 添加出口并按规则分流"
-    echoContent yellow "  └─ 出口可以是别的机器（配置码、外部节点），也可以是 WARP、本机 IPv4 / IPv6、解锁 DNS / SNI"
-    echoContent yellow "  └─ 只有一个出口时全部流量走它；不接别的机器也能用"
+    echoContent yellow "3.$(t CHAIN_WIZARD_ENTRY)"
+    echoContent yellow "  └─ $(t CHAIN_WIZARD_ENTRY_1)"
+    echoContent yellow "  └─ $(t CHAIN_WIZARD_ENTRY_2)"
 
-    read -r -p "请选择:" selectType
+    read -r -p "$(t PROMPT_SELECT):" selectType
 
     case ${selectType} in
     1)
@@ -11801,11 +10983,11 @@ chainProxyWizard() {
 # 确保 sing-box 已安装
 ensureSingBoxInstalled() {
     if [[ ! -f "${SINGBOX_BIN}" ]]; then
-        echoContent yellow "\n检测到 sing-box 未安装，正在安装..."
+        echoContent yellow "\n$(t CHAIN_SINGBOX_INSTALLING)"
         installBaseTools
         installSingBox
         if [[ ! -f "${SINGBOX_BIN}" ]]; then
-            echoContent red " ---> sing-box 安装失败"
+            echoContent red " ---> $(t CHAIN_SINGBOX_INSTALL_FAILED)"
             return 1
         fi
     fi
@@ -11832,7 +11014,7 @@ EOF
     if [[ ! -f "${_dnsConf}" ]] || \
        { grep -q '"address"' "${_dnsConf}" 2>/dev/null && ! grep -q '"type"' "${_dnsConf}" 2>/dev/null; }; then
         if [[ -f "${_dnsConf}" ]]; then
-            echoContent yellow " ---> 检测到旧版 sing-box DNS 格式（1.11 legacy），自动迁移到 1.12+ 格式"
+            echoContent yellow " ---> $(t CHAIN_SINGBOX_DNS_MIGRATED)"
         fi
         cat <<EOF >"${_dnsConf}"
 {
@@ -11875,7 +11057,7 @@ EOF
     local _directOut="${SINGBOX_FRAGMENT_DIR}/01_direct_outbound.json"
     if [[ -f "${_directOut}" ]] && jq -e . "${_directOut}" >/dev/null 2>&1; then
         if jq -e '[.outbounds[]? | has("domain_strategy")] | any' "${_directOut}" >/dev/null 2>&1; then
-            echoContent yellow " ---> 检测到旧版 01_direct_outbound.json 含 domain_strategy（1.14 移除），自动剥离"
+            echoContent yellow " ---> $(t CHAIN_SINGBOX_DIRECT_STRIPPED)"
             local _migrated
             _migrated=$(jq '.outbounds |= map(del(.domain_strategy))' "${_directOut}" 2>/dev/null)
             if [[ -n "${_migrated}" ]]; then
@@ -11889,7 +11071,7 @@ EOF
     local _chainRoute="${SINGBOX_FRAGMENT_DIR}/chain_route.json"
     if [[ -f "${_chainRoute}" ]] && jq -e . "${_chainRoute}" >/dev/null 2>&1; then
         if ! jq -e '.route | has("default_domain_resolver")' "${_chainRoute}" >/dev/null 2>&1; then
-            echoContent yellow " ---> 检测到旧版 chain_route.json 缺 default_domain_resolver，自动补全"
+            echoContent yellow " ---> $(t CHAIN_SINGBOX_RESOLVER_ADDED)"
             local _migrated
             _migrated=$(jq '.route.default_domain_resolver = "google"' "${_chainRoute}" 2>/dev/null)
             if [[ -n "${_migrated}" ]]; then
@@ -11903,12 +11085,12 @@ EOF
     local needUpdateService=false
     if [[ ! -f "/etc/systemd/system/sing-box.service" ]] && [[ ! -f "/etc/init.d/sing-box" ]]; then
         needUpdateService=true
-        echoContent yellow "\n检测到 sing-box 服务未配置，正在配置..."
+        echoContent yellow "\n$(t CHAIN_SINGBOX_SERVICE_SETUP)"
     elif [[ -f "/etc/systemd/system/sing-box.service" ]]; then
         # 检查服务文件是否指向正确路径（修复从 v2ray-agent 迁移的问题）
         if grep -q "v2ray-agent" /etc/systemd/system/sing-box.service; then
             needUpdateService=true
-            echoContent yellow "\n检测到 sing-box 服务路径需要更新..."
+            echoContent yellow "\n$(t CHAIN_SINGBOX_SERVICE_PATH)"
         fi
     fi
 
@@ -11939,7 +11121,7 @@ WantedBy=multi-user.target
 EOF
             systemctl daemon-reload
             systemctl enable sing-box.service >/dev/null 2>&1
-            echoContent green " ---> sing-box 服务配置完成"
+            echoContent green " ---> $(t CHAIN_SINGBOX_SERVICE_DONE)"
         elif [[ "${release}" == "alpine" ]]; then
             cat <<EOF >/etc/init.d/sing-box
 #!/sbin/openrc-run
@@ -11958,7 +11140,7 @@ depend() {
 EOF
             chmod +x /etc/init.d/sing-box
             rc-update add sing-box default >/dev/null 2>&1
-            echoContent green " ---> sing-box 服务配置完成 (Alpine)"
+            echoContent green " ---> $(t CHAIN_SINGBOX_SERVICE_DONE) (Alpine)"
         fi
     fi
 
@@ -11988,7 +11170,7 @@ getChainPublicIP() {
 # 配置出口节点 (Exit)
 setupChainExit() {
     if planAction "$(t PLAN_CHAIN_EXIT)"; then return 0; fi
-    echoContent skyBlue "\n配置出口节点 (Exit)"
+    echoContent skyBlue "\n$(t CHAIN_EXIT_SETUP_TITLE)"
     echoContent red "\n=============================================================="
     # 已有通往别的机器的出口时不能当出口：经链路进来的流量会被再转一跳，绕回入口就成环
     local remoteExits=""
@@ -12007,8 +11189,8 @@ setupChainExit() {
 
     # 检查是否已存在链式代理入站
     if [[ -f "${SINGBOX_FRAGMENT_DIR}/chain_inbound.json" ]]; then
-        echoContent yellow "\n检测到已存在链式代理配置"
-        read -r -p "是否覆盖现有配置？[y/n]:" confirmOverwrite
+        echoContent yellow "\n$(t CHAIN_EXISTING_FOUND)"
+        read -r -p "$(t CHAIN_OVERWRITE_CONFIRM)" confirmOverwrite
         if ! isYesInput "${confirmOverwrite}"; then
             # 显示现有配置码
             showExistingChainCode
@@ -12019,11 +11201,11 @@ setupChainExit() {
     # 生成随机端口 (10000-60000)
     local chainPort
     chainPort=$(randomNum 10000 60000)
-    echoContent yellow "\n请输入链式代理端口 [回车使用随机端口: ${chainPort}]"
-    read -r -p "端口:" inputPort
+    echoContent yellow "\n$(t CHAIN_PORT_PROMPT "${chainPort}")"
+    read -r -p "$(t CHAIN_PORT):" inputPort
     if [[ -n "${inputPort}" ]]; then
         if [[ ! "${inputPort}" =~ ^[0-9]+$ ]] || [[ "${inputPort}" -lt 1 ]] || [[ "${inputPort}" -gt 65535 ]]; then
-            echoContent red " ---> 端口格式错误"
+            echoContent red " ---> $(t ERR_PORT_RANGE 1 65535)"
             return 1
         fi
         chainPort=${inputPort}
@@ -12032,7 +11214,7 @@ setupChainExit() {
     # 生成密钥
     local chainKey
     chainKey=$(generateChainKey)
-    echoContent green "\n ---> 已生成随机密钥"
+    echoContent green "\n ---> $(t CHAIN_KEY_GENERATED)"
 
     # 加密方法
     local chainMethod="2022-blake3-aes-128-gcm"
@@ -12041,62 +11223,62 @@ setupChainExit() {
     local publicIP
     publicIP=$(getChainPublicIP)
     if [[ -z "${publicIP}" ]]; then
-        echoContent yellow "\n无法自动获取公网IP，请手动输入"
-        read -r -p "公网IP:" publicIP
+        echoContent yellow "\n$(t CHAIN_PUBLIC_IP_MANUAL)"
+        read -r -p "$(t CHAIN_PUBLIC_IP):" publicIP
         if [[ -z "${publicIP}" ]]; then
-            echoContent red " ---> IP不能为空"
+            echoContent red " ---> $(t CHAIN_IP_EMPTY)"
             return 1
         fi
         if ! isValidIP "${publicIP}"; then
-            echoContent red " ---> IP地址格式无效"
+            echoContent red " ---> $(t ERR_IP_INVALID)"
             return 1
         fi
     fi
-    echoContent green " ---> 本机公网IP: ${publicIP}"
+    echoContent green " ---> $(t CHAIN_LOCAL_PUBLIC_IP): ${publicIP}"
 
     # 询问是否限制入口IP
-    echoContent yellow "\n是否限制只允许特定IP连接？(提高安全性)"
-    echoContent yellow "1.不限制 [回车默认]"
-    echoContent yellow "2.限制特定IP"
-    read -r -p "请选择:" limitIPChoice
+    echoContent yellow "\n$(t CHAIN_EXIT_LIMIT_ASK)"
+    echoContent yellow "1.$(t CHAIN_EXIT_LIMIT_NONE)"
+    echoContent yellow "2.$(t CHAIN_EXIT_LIMIT_IP)"
+    read -r -p "$(t PROMPT_SELECT):" limitIPChoice
 
     local allowedIP=""
     if [[ "${limitIPChoice}" == "2" ]]; then
-        read -r -p "请输入允许连接的入口节点IP:" allowedIP
+        read -r -p "$(t CHAIN_EXIT_LIMIT_PROMPT)" allowedIP
         if [[ -z "${allowedIP}" ]]; then
-            echoContent red " ---> IP不能为空"
+            echoContent red " ---> $(t CHAIN_IP_EMPTY)"
             return 1
         fi
         if ! isValidIP "${allowedIP}"; then
-            echoContent red " ---> IP地址格式无效"
+            echoContent red " ---> $(t ERR_IP_INVALID)"
             return 1
         fi
     fi
 
     # 询问网络策略（IPv4/IPv6）
-    echoContent yellow "\n选择出站网络策略："
-    echoContent yellow "1.优先IPv4 [回车默认] - 推荐：出口机只有IPv4或网络不稳定时使用"
-    echoContent yellow "2.优先IPv6 - 出口机双栈且希望优先使用IPv6"
-    echoContent yellow "3.双栈自动 - 出口机双栈，按DNS返回顺序连接"
-    read -r -p "请选择:" networkStrategyChoice
+    echoContent yellow "\n$(t CHAIN_EXIT_STRATEGY_ASK)"
+    echoContent yellow "1.$(t CHAIN_EXIT_STRATEGY_1)"
+    echoContent yellow "2.$(t CHAIN_EXIT_STRATEGY_2)"
+    echoContent yellow "3.$(t CHAIN_EXIT_STRATEGY_3)"
+    read -r -p "$(t PROMPT_SELECT):" networkStrategyChoice
 
     local domainStrategy="prefer_ipv4"
-    local strategyDesc="优先IPv4"
+    local strategyDesc=""
     case "${networkStrategyChoice}" in
         2)
             domainStrategy="prefer_ipv6"
-            strategyDesc="优先IPv6"
+            strategyDesc="$(t CHAIN_STRATEGY_V6)"
             ;;
         3)
             domainStrategy=""
-            strategyDesc="双栈自动"
+            strategyDesc="$(t CHAIN_STRATEGY_DUAL)"
             ;;
         *)
             domainStrategy="prefer_ipv4"
-            strategyDesc="优先IPv4"
+            strategyDesc="$(t CHAIN_STRATEGY_V4)"
             ;;
     esac
-    echoContent green " ---> 网络策略: ${strategyDesc}"
+    echoContent green " ---> $(t CHAIN_EXIT_STRATEGY_SET "${strategyDesc}")"
 
     # 创建入站配置
     # sniff/resolve 通过路由级 action 实现（见下方 chain_route.json），inbound 不再带 sniff 字段
@@ -12162,7 +11344,7 @@ EOF
         fi
     else
         allowPort "${chainPort}" "tcp"
-        echoContent green " ---> 已开放端口 ${chainPort}"
+        echoContent green " ---> $(t CHAIN_PORT_OPENED "${chainPort}")"
     fi
 
     # 出口只改了 sing-box，必须显式重启它：Xray 内核上 sing-box 是旁挂，reloadCore 只在装了 6 / 9 时才碰，出口会根本没起来
@@ -12173,16 +11355,16 @@ EOF
     handleSingBox start
     sleep 1
     if ! singBoxDaemonRunning; then
-        echoContent red " ---> sing-box 启动失败"
-        echoContent yellow "请手动执行: ${SINGBOX_BIN} run -c ${SINGBOX_MERGED_CONFIG}"
+        echoContent red " ---> $(t CHAIN_SINGBOX_START_FAILED)"
+        echoContent yellow "$(t CHAIN_SINGBOX_DEBUG) ${SINGBOX_BIN} run -c ${SINGBOX_MERGED_CONFIG}"
         return 1
     fi
 
     # 生成并显示配置码
     echoContent green "\n=============================================================="
-    echoContent green "出口节点配置完成！"
+    echoContent green "$(t CHAIN_EXIT_SETUP_DONE)"
     echoContent green "=============================================================="
-    echoContent yellow "\n链式代理配置码 (请复制到入口节点):\n"
+    echoContent yellow "\n$(t CHAIN_EXIT_CODE_TITLE)\n"
 
     # IPv6 字面地址必须用 [host]:port 包裹，否则入口的 host:port 拆分（依赖最后一个 `:`）会切错
     local chainCode hostInCode="${publicIP}"
@@ -12192,19 +11374,19 @@ EOF
     chainCode="chain://ss2022@${hostInCode}:${chainPort}?key=$(echo -n "${chainKey}" | base64 | tr -d '\n')&method=${chainMethod}"
     echoContent skyBlue "${chainCode}"
 
-    echoContent yellow "\n或手动配置:"
-    echoContent green "  IP地址: ${publicIP}"
-    echoContent green "  端口: ${chainPort}"
-    echoContent green "  密钥: ${chainKey}"
-    echoContent green "  加密方式: ${chainMethod}"
+    echoContent yellow "\n$(t CHAIN_MANUAL_TITLE)"
+    echoContent green "  $(t CHAIN_IP_ADDRESS): ${publicIP}"
+    echoContent green "  $(t CHAIN_PORT): ${chainPort}"
+    echoContent green "  $(t CHAIN_KEY): ${chainKey}"
+    echoContent green "  $(t CHAIN_METHOD): ${chainMethod}"
 
-    echoContent yellow "\n请妥善保管配置码，切勿泄露！"
+    echoContent yellow "\n$(t CHAIN_CODE_KEEP_SECRET)"
 }
 
 # 显示现有配置码
 showExistingChainCode() {
     if [[ ! -f "${CHAIN_EXIT_INFO}" ]]; then
-        echoContent red " ---> 未找到出口节点配置信息"
+        echoContent red " ---> $(t CHAIN_EXIT_INFO_MISSING)"
         return 1
     fi
 
@@ -12215,7 +11397,7 @@ showExistingChainCode() {
     password=$(jq -r '.password' ${CHAIN_EXIT_INFO})
 
     echoContent green "\n=============================================================="
-    echoContent green "现有出口节点配置"
+    echoContent green "$(t CHAIN_EXIT_EXISTING_TITLE)"
     echoContent green "=============================================================="
 
     # IPv6 字面地址同样需要 [host]:port 包裹
@@ -12224,14 +11406,14 @@ showExistingChainCode() {
         hostInCode="[${publicIP}]"
     fi
     chainCode="chain://ss2022@${hostInCode}:${port}?key=$(echo -n "${password}" | base64 | tr -d '\n')&method=${method}"
-    echoContent yellow "\n配置码:\n"
+    echoContent yellow "\n$(t CHAIN_CODE):\n"
     echoContent skyBlue "${chainCode}"
 
-    echoContent yellow "\n手动配置信息:"
-    echoContent green "  IP地址: ${publicIP}"
-    echoContent green "  端口: ${port}"
-    echoContent green "  密钥: ${password}"
-    echoContent green "  加密方式: ${method}"
+    echoContent yellow "\n$(t CHAIN_MANUAL_INFO)"
+    echoContent green "  $(t CHAIN_IP_ADDRESS): ${publicIP}"
+    echoContent green "  $(t CHAIN_PORT): ${port}"
+    echoContent green "  $(t CHAIN_KEY): ${password}"
+    echoContent green "  $(t CHAIN_METHOD): ${method}"
 }
 
 # SS2022 method 白名单与对应 base64 key 长度：16B → 24 chars，32B → 44 chars。
@@ -12335,31 +11517,31 @@ parseChainCode() {
 
         # 体积上限：8 跳 * 200 字节字段 + JSON 包装 远小于 64 KiB
         if [[ ${#base64Data} -gt 65536 ]]; then
-            echoContent red " ---> V2 配置码体积超限（>64KiB）"
+            echoContent red " ---> $(t CHAIN_CODE_V2_TOO_BIG)"
             return 1
         fi
 
         # URL-safe → standard，再补 padding
         local normalized
         if ! normalized=$(_chainNormalizeBase64 "${base64Data}"); then
-            echoContent red " ---> V2 配置码 base64 长度无效"
+            echoContent red " ---> $(t CHAIN_CODE_V2_BAD_BASE64)"
             return 1
         fi
 
         # 解码 Base64
         chainHops=$(echo "${normalized}" | base64 -d 2>/dev/null)
         if [[ -z "${chainHops}" ]] || ! echo "${chainHops}" | jq empty 2>/dev/null; then
-            echoContent red " ---> V2 配置码解析失败，JSON 格式错误"
+            echoContent red " ---> $(t CHAIN_CODE_V2_BAD_JSON)"
             return 1
         fi
 
         chainHopCount=$(echo "${chainHops}" | jq 'length')
         if [[ "${chainHopCount}" -lt 1 ]]; then
-            echoContent red " ---> 配置码不包含任何跳转节点"
+            echoContent red " ---> $(t CHAIN_CODE_NO_HOPS)"
             return 1
         fi
         if [[ "${chainHopCount}" -gt 8 ]]; then
-            echoContent red " ---> 配置码跳数超限（${chainHopCount} > 8）"
+            echoContent red " ---> $(t CHAIN_CODE_TOO_MANY_HOPS "${chainHopCount}")"
             return 1
         fi
 
@@ -12373,29 +11555,29 @@ parseChainCode() {
             hopMethod=$(echo "${chainHops}" | jq -r ".[$((i-1))].method // empty")
 
             if [[ -z "${hopIP}" || -z "${hopPort}" || -z "${hopKey}" || -z "${hopMethod}" ]]; then
-                echoContent red " ---> V2 配置码第 ${i} 跳缺少必要字段"
+                echoContent red " ---> $(t CHAIN_CODE_HOP_MISSING "${i}")"
                 return 1
             fi
             # IP/host 校验：允许 IPv4/IPv6 或域名（带 . 的非空字符串）
             if ! isValidIP "${hopIP}" && [[ ! "${hopIP}" =~ ^[A-Za-z0-9.-]+$ ]]; then
-                echoContent red " ---> V2 配置码第 ${i} 跳 host 非法: ${hopIP}"
+                echoContent red " ---> $(t CHAIN_CODE_HOP_BAD_HOST "${i}" "${hopIP}")"
                 return 1
             fi
             # port：1-65535
             if ! [[ "${hopPort}" =~ ^[0-9]+$ ]] || (( hopPort < 1 || hopPort > 65535 )); then
-                echoContent red " ---> V2 配置码第 ${i} 跳端口非法: ${hopPort}"
+                echoContent red " ---> $(t CHAIN_CODE_HOP_BAD_PORT "${i}" "${hopPort}")"
                 return 1
             fi
             # method/key 严格白名单 + 长度匹配
             if ! _chainSS2022PasswordOK "${hopMethod}" "${hopKey}"; then
-                echoContent red " ---> V2 配置码第 ${i} 跳 method/key 不匹配 SS2022 规范"
+                echoContent red " ---> $(t CHAIN_CODE_HOP_BAD_KEY "${i}")"
                 return 1
             fi
             ((i++))
         done
 
-        echoContent green " ---> V2 多跳配置码解析成功"
-        echoContent green "  总跳数: ${chainHopCount}"
+        echoContent green " ---> $(t CHAIN_CODE_V2_OK)"
+        echoContent green "  $(t CHAIN_CODE_TOTAL_HOPS "${chainHopCount}")"
 
         # 显示链路
         i=1
@@ -12404,9 +11586,9 @@ parseChainCode() {
             hopIP=$(echo "${chainHops}" | jq -r ".[$((i-1))].ip")
             hopPort=$(echo "${chainHops}" | jq -r ".[$((i-1))].port")
             if [[ $i -eq ${chainHopCount} ]]; then
-                echoContent green "  第${i}跳 (出口): ${hopIP}:${hopPort}"
+                echoContent green "  $(t CHAIN_CODE_HOP_EXIT "${i}" "${hopIP}:${hopPort}")"
             else
-                echoContent green "  第${i}跳 (中继): ${hopIP}:${hopPort}"
+                echoContent green "  $(t CHAIN_CODE_HOP_RELAY "${i}" "${hopIP}:${hopPort}")"
             fi
             ((i++))
         done
@@ -12434,7 +11616,7 @@ parseChainCode() {
 
         # 处理 IPv4/IPv6 host:port 拆分（IPv6 用 [host]:port）
         if ! _chainSplitHostPort "${hostPart}"; then
-            echoContent red " ---> 配置码 host:port 解析失败: ${hostPart}"
+            echoContent red " ---> $(t CHAIN_CODE_BAD_HOSTPORT "${hostPart}")"
             return 1
         fi
         chainExitIP="${_chainParsedHost}"
@@ -12443,12 +11625,12 @@ parseChainCode() {
 
         # 校验 host
         if ! isValidIP "${chainExitIP}" && [[ ! "${chainExitIP}" =~ ^[A-Za-z0-9.-]+$ ]]; then
-            echoContent red " ---> 配置码 host 非法: ${chainExitIP}"
+            echoContent red " ---> $(t CHAIN_CODE_BAD_HOST "${chainExitIP}")"
             return 1
         fi
         # 校验 port
         if ! [[ "${chainExitPort}" =~ ^[0-9]+$ ]] || (( chainExitPort < 1 || chainExitPort > 65535 )); then
-            echoContent red " ---> 配置码端口非法: ${chainExitPort}"
+            echoContent red " ---> $(t CHAIN_CODE_BAD_PORT "${chainExitPort}")"
             return 1
         fi
 
@@ -12456,33 +11638,33 @@ parseChainCode() {
         local keyBase64
         keyBase64=$(_chainQueryGet "${paramPart}" "key")
         if [[ -z "${keyBase64}" ]]; then
-            echoContent red " ---> 配置码缺少 key 参数"
+            echoContent red " ---> $(t CHAIN_CODE_NO_KEY)"
             return 1
         fi
 
         # URL-safe → standard，再 base64 -d；解码失败拒绝（不再 fallback）
         local normalizedKey
         if ! normalizedKey=$(_chainNormalizeBase64 "${keyBase64}"); then
-            echoContent red " ---> 配置码 key 编码无效"
+            echoContent red " ---> $(t CHAIN_CODE_BAD_KEY_ENCODING)"
             return 1
         fi
         chainExitKey=$(echo "${normalizedKey}" | base64 -d 2>/dev/null)
         if [[ -z "${chainExitKey}" ]]; then
-            echoContent red " ---> 配置码 key base64 解码失败"
+            echoContent red " ---> $(t CHAIN_CODE_KEY_DECODE_FAILED)"
             return 1
         fi
 
         # 提取 method（必填，不再 silent fallback）
         chainExitMethod=$(_chainQueryGet "${paramPart}" "method")
         if [[ -z "${chainExitMethod}" ]]; then
-            echoContent red " ---> 配置码缺少 method 参数"
+            echoContent red " ---> $(t CHAIN_CODE_NO_METHOD)"
             return 1
         fi
 
         # method/key 长度联合校验
         if ! _chainSS2022PasswordOK "${chainExitMethod}" "${chainExitKey}"; then
-            echoContent red " ---> 配置码 method/key 不匹配 SS2022 规范"
-            echoContent red "      method=${chainExitMethod}, key 长度=${#chainExitKey}"
+            echoContent red " ---> $(t CHAIN_CODE_BAD_KEY)"
+            echoContent red "      $(t CHAIN_CODE_KEY_DETAIL "${chainExitMethod}" "${#chainExitKey}")"
             return 1
         fi
 
@@ -12492,15 +11674,15 @@ parseChainCode() {
             '[{ip: $ip, port: $port, key: $key, method: $method}]')
         chainHopCount=1
 
-        echoContent green " ---> V1 配置码解析成功"
-        echoContent green "  出口IP: ${chainExitIP}"
-        echoContent green "  出口端口: ${chainExitPort}"
-        echoContent green "  加密方式: ${chainExitMethod}"
+        echoContent green " ---> $(t CHAIN_CODE_V1_OK)"
+        echoContent green "  $(t CHAIN_CODE_EXIT_IP): ${chainExitIP}"
+        echoContent green "  $(t CHAIN_CODE_EXIT_PORT): ${chainExitPort}"
+        echoContent green "  $(t CHAIN_METHOD): ${chainExitMethod}"
 
         return 0
     fi
 
-    echoContent red " ---> 配置码格式错误，不支持的格式"
+    echoContent red " ---> $(t CHAIN_CODE_UNSUPPORTED)"
     return 1
 }
 
@@ -12545,16 +11727,16 @@ chainRelayRouteJson() {
 # 中继节点同时作为上游的"出口"（接收流量）和下游的"入口"（转发流量）
 setupChainRelay() {
     if planAction "$(t PLAN_CHAIN_RELAY)"; then return 0; fi
-    echoContent skyBlue "\n配置中继节点 (Relay)"
+    echoContent skyBlue "\n$(t CHAIN_RELAY_SETUP_TITLE)"
     echoContent red "\n=============================================================="
     # 中继的路由是它自己的一份，入口的出口表与规则会被它整个盖掉
     if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
         echoContent red " ---> $(t CHAIN_RELAY_REFUSED_HAS_ENTRY)"
         return 1
     fi
-    echoContent yellow "中继节点工作原理:"
-    echoContent yellow "  上游节点 → [本机] → 下游节点 → ... → 出口 → 互联网"
-    echoContent yellow "  本机将接收上游流量并转发到下游链路\n"
+    echoContent yellow "$(t CHAIN_RELAY_HOW)"
+    echoContent yellow "  $(t CHAIN_RELAY_HOW_1)"
+    echoContent yellow "  $(t CHAIN_RELAY_HOW_2)\n"
 
     # 确保 sing-box 已安装
     if ! ensureSingBoxInstalled; then
@@ -12564,20 +11746,20 @@ setupChainRelay() {
     # 检查是否已存在链式代理配置
     if [[ -f "${SINGBOX_FRAGMENT_DIR}/chain_inbound.json" ]] || \
        [[ -f "${SINGBOX_FRAGMENT_DIR}/chain_outbound.json" ]]; then
-        echoContent yellow "\n检测到已存在链式代理配置"
-        read -r -p "是否覆盖现有配置？[y/n]:" confirmOverwrite
+        echoContent yellow "\n$(t CHAIN_EXISTING_FOUND)"
+        read -r -p "$(t CHAIN_OVERWRITE_CONFIRM)" confirmOverwrite
         if ! isYesInput "${confirmOverwrite}"; then
             return 0
         fi
     fi
 
     # 步骤1: 导入下游配置码
-    echoContent yellow "步骤 1/3: 导入下游节点配置码"
-    echoContent yellow "请粘贴下游节点（出口或其他中继）的配置码:"
-    read -r -p "配置码:" downstreamCode
+    echoContent yellow "$(t CHAIN_RELAY_STEP_1)"
+    echoContent yellow "$(t CHAIN_RELAY_PASTE)"
+    read -r -p "$(t CHAIN_CODE):" downstreamCode
 
     if [[ -z "${downstreamCode}" ]]; then
-        echoContent red " ---> 配置码不能为空"
+        echoContent red " ---> $(t CHAIN_CODE_EMPTY)"
         return 1
     fi
 
@@ -12589,16 +11771,16 @@ setupChainRelay() {
     # chainHops 现在包含下游所有节点
 
     # 步骤2: 配置本机监听
-    echoContent yellow "\n步骤 2/3: 配置本机监听端口"
+    echoContent yellow "\n$(t CHAIN_RELAY_STEP_2)"
 
     # 生成随机端口 (10000-60000)
     local chainPort
     chainPort=$(randomNum 10000 60000)
-    echoContent yellow "请输入本机链式代理端口 [回车使用随机端口: ${chainPort}]"
-    read -r -p "端口:" inputPort
+    echoContent yellow "$(t CHAIN_PORT_PROMPT "${chainPort}")"
+    read -r -p "$(t CHAIN_PORT):" inputPort
     if [[ -n "${inputPort}" ]]; then
         if [[ ! "${inputPort}" =~ ^[0-9]+$ ]] || [[ "${inputPort}" -lt 1 ]] || [[ "${inputPort}" -gt 65535 ]]; then
-            echoContent red " ---> 端口格式错误"
+            echoContent red " ---> $(t ERR_PORT_RANGE 1 65535)"
             return 1
         fi
         chainPort=${inputPort}
@@ -12613,21 +11795,21 @@ setupChainRelay() {
     local publicIP
     publicIP=$(getChainPublicIP)
     if [[ -z "${publicIP}" ]]; then
-        echoContent yellow "\n无法自动获取公网IP，请手动输入"
-        read -r -p "公网IP:" publicIP
+        echoContent yellow "\n$(t CHAIN_PUBLIC_IP_MANUAL)"
+        read -r -p "$(t CHAIN_PUBLIC_IP):" publicIP
         if [[ -z "${publicIP}" ]]; then
-            echoContent red " ---> IP不能为空"
+            echoContent red " ---> $(t CHAIN_IP_EMPTY)"
             return 1
         fi
         if ! isValidIP "${publicIP}"; then
-            echoContent red " ---> IP地址格式无效"
+            echoContent red " ---> $(t ERR_IP_INVALID)"
             return 1
         fi
     fi
-    echoContent green " ---> 本机公网IP: ${publicIP}"
+    echoContent green " ---> $(t CHAIN_LOCAL_PUBLIC_IP): ${publicIP}"
 
     # 步骤3: 生成配置
-    echoContent yellow "\n步骤 3/3: 生成配置..."
+    echoContent yellow "\n$(t CHAIN_RELAY_STEP_3)"
 
     # 创建入站配置 (接收上游流量)
     # sniff 通过路由级 action 实现（见 chain_route.json）
@@ -12651,14 +11833,14 @@ EOF
 
     local chainOutboundJson
     if ! chainOutboundJson=$(chainHopOutbounds "${chainHops}") || [[ -z "${chainOutboundJson}" ]]; then
-        echoContent red " ---> 链式出站配置生成失败"
+        echoContent red " ---> $(t CHAIN_RELAY_OUTBOUND_FAILED)"
         return 1
     fi
     printf '%s\n' "${chainOutboundJson}" > ${SINGBOX_FRAGMENT_DIR}/chain_outbound.json
 
     local relayRouteJson
     if ! relayRouteJson=$(chainRelayRouteJson "${chainHops}") || ! jsonWriteFile "${SINGBOX_FRAGMENT_DIR}/chain_route.json" "${relayRouteJson}" false; then
-        echoContent red " ---> 链式路由配置生成失败"
+        echoContent red " ---> $(t CHAIN_RELAY_ROUTE_FAILED)"
         return 1
     fi
 
@@ -12689,7 +11871,7 @@ EOF
 
     # 开放防火墙端口
     allowPort "${chainPort}" "tcp"
-    echoContent green " ---> 已开放端口 ${chainPort}"
+    echoContent green " ---> $(t CHAIN_PORT_OPENED "${chainPort}")"
 
     # 合并配置并重启
     if ! singBoxMergeConfig; then
@@ -12701,8 +11883,8 @@ EOF
     # 验证启动成功
     sleep 1
     if ! singBoxDaemonRunning; then
-        echoContent red " ---> sing-box 启动失败"
-        echoContent yellow "请手动执行: ${SINGBOX_BIN} run -c ${SINGBOX_MERGED_CONFIG}"
+        echoContent red " ---> $(t CHAIN_SINGBOX_START_FAILED)"
+        echoContent yellow "$(t CHAIN_SINGBOX_DEBUG) ${SINGBOX_BIN} run -c ${SINGBOX_MERGED_CONFIG}"
         return 1
     fi
 
@@ -12711,10 +11893,10 @@ EOF
     newChainCode="chain://v2@$(echo -n "${newHops}" | base64 | tr -d '\n')"
 
     echoContent green "\n=============================================================="
-    echoContent green "中继节点配置完成！"
+    echoContent green "$(t CHAIN_RELAY_SETUP_DONE)"
     echoContent green "=============================================================="
-    echoContent yellow "\n当前链路 (${chainHopCount} + 1 = $((chainHopCount + 1)) 跳):"
-    echoContent green "  上游 → 本机(${publicIP}:${chainPort})"
+    echoContent yellow "\n$(t CHAIN_RELAY_PATH "${chainHopCount}" "$((chainHopCount + 1))")"
+    echoContent green "  $(t CHAIN_RELAY_PATH_SELF "${publicIP}:${chainPort}")"
 
     i=1
     while [[ $i -le ${chainHopCount} ]]; do
@@ -12722,17 +11904,17 @@ EOF
         hopIP=$(echo "${chainHops}" | jq -r ".[$((i-1))].ip")
         hopPort=$(echo "${chainHops}" | jq -r ".[$((i-1))].port")
         if [[ $i -eq ${chainHopCount} ]]; then
-            echoContent green "        → 出口(${hopIP}:${hopPort}) → 互联网"
+            echoContent green "        $(t CHAIN_PATH_EXIT "${hopIP}:${hopPort}")"
         else
-            echoContent green "        → 中继${i}(${hopIP}:${hopPort})"
+            echoContent green "        $(t CHAIN_PATH_RELAY "${i}" "${hopIP}:${hopPort}")"
         fi
         ((i++))
     done
 
-    echoContent yellow "\n配置码 (供上游入口或中继节点使用):\n"
+    echoContent yellow "\n$(t CHAIN_RELAY_CODE_TITLE)\n"
     echoContent skyBlue "${newChainCode}"
 
-    echoContent yellow "\n请妥善保管配置码，切勿泄露！"
+    echoContent yellow "\n$(t CHAIN_CODE_KEEP_SECRET)"
 }
 
 # writeChainBridgeInbound PORT → sing-box 片段 chain_bridge_inbound.json：Xray 经本机回环 socks 进 sing-box 的桥
@@ -12805,37 +11987,20 @@ chainAccountAssignPorts() {
         end' <<<"$1"
 }
 
-# writeXrayChainConfig PORT → Xray 侧两件：chain_proxy 系列出站指向本机的桥；09_routing.json 整份换成链式路由：先按账号映射分
-# （user 正则，. + 转义——Xray 静默丢弃写坏的正则），其余交给默认出口；没变就不写，写了当场补封本机的规则（被 systemd 拉起时没有那一步）。
-# 原路由只在第一次被换掉时存成 .bak.chain：改映射、每次启动 Xray 都调这里，覆盖掉的话 removeChainProxy 就恢复不出原样
+# writeXrayChainConfig PORT → Xray 接进链式：chain_proxy 系列出站指向本机的桥（没变不写），再整份生成路由。
+# 写完当场生成路由而不等下次启动：Xray 被 systemd 拉起时没有启动前那一步
 writeXrayChainConfig() {
-    local port=$1 state bridges outbounds routing current
+    local port=$1 state bridges outbounds
     state=$(chainAccountReadState) || return 1
     bridges=$(chainAccountBridges "${state}") || return 1
-    # 直连走链式自己的 chain_direct：WARP / IPv6 全局会删掉 z_direct_outbound，指向它的账号就全断。它不能排第一，Xray 把第一个出站当默认
+    # 直连走链式自己的 chain_direct，不跟 z_direct_outbound 的解析策略。它不能排第一，Xray 把第一个出站当默认
     outbounds=$(jq -n --argjson port "${port}" --argjson bridges "${bridges}" '
         def socksOut($tag; $p): {tag: $tag, protocol: "socks", settings: {servers: [{address: "127.0.0.1", port: $p}]}};
         {outbounds: ([socksOut("chain_proxy"; $port)] + [$bridges[] | socksOut("chain_proxy_" + .name; .port)] + [{tag: "chain_direct", protocol: "freedom"}])}') || return 1
-    routing=$(jq -n --argjson s "${state}" '
-        {routing: {domainStrategy: "AsIs", rules: (
-            ([($s.accounts // {}) | to_entries[]
-                | {re: ("regexp:^" + ([.key | explode[] | if . == 46 or . == 43 then [92, .] else [.] end] | add | implode) + "-[^-]*$"),
-                   tag: (if .value == "direct" then "chain_direct" else "chain_proxy_" + .value end)}]
-               | group_by(.tag) | map({type: "field", user: map(.re), outboundTag: .[0].tag}))
-            + [{type: "field", network: "tcp,udp", outboundTag: "chain_proxy"}])}}') || return 1
-
     if [[ "$(jq -cS . "${XRAY_CONF_DIR}/chain_outbound.json" 2>/dev/null)" != "$(jq -cS . <<<"${outbounds}")" ]]; then
         jsonWriteFile "${XRAY_CONF_DIR}/chain_outbound.json" "${outbounds}" false || return 1
     fi
-    # local-block 组是 ensureXrayLocalBlock 补的，不算链式路由，比较时去掉
-    current=$(jq -cS '.routing.rules |= map(select((.ruleTag // "") | startswith("local-block") | not))' "${XRAY_CONF_DIR}/09_routing.json" 2>/dev/null)
-    if [[ "${current}" != "$(jq -cS . <<<"${routing}")" ]]; then
-        if [[ -f "${XRAY_CONF_DIR}/09_routing.json" && ! -f "${XRAY_CONF_DIR}/09_routing.json.bak.chain" ]]; then
-            cp "${XRAY_CONF_DIR}/09_routing.json" "${XRAY_CONF_DIR}/09_routing.json.bak.chain" || return 1
-        fi
-        jsonWriteFile "${XRAY_CONF_DIR}/09_routing.json" "${routing}" false || return 1
-    fi
-    ensureXrayLocalBlock
+    writeXrayRouting
 }
 
 # chainAccountInject MERGED → 把映射写进合并后的 sing-box 配置，规则插在最前：被引用的出口各一条桥（有 Xray 的桥时），
@@ -12998,23 +12163,23 @@ chainAccountExitMenu() {
 
 # 查看链路状态
 showChainStatus() {
-    echoContent skyBlue "\n链式代理状态"
+    echoContent skyBlue "\n$(t CHAIN_STATUS_TITLE)"
     echoContent red "\n=============================================================="
 
-    # 检查是否为多链路模式
+    # 有出口表先显示它；本机同时是出口节点时接着显示出口节点自己的端口、来源限制与配置码
     if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
         showMultiChainStatus
-        return $?
+        chainIsExitMachine || return 0
     fi
 
-    local role="未配置"
+    local role=""
     local exitIP=""
     local exitPort=""
-    local status="❌ 未配置"
+    local status=""
 
     # 检查是否为出口节点
     if [[ -f "${CHAIN_EXIT_INFO}" ]]; then
-        role="出口节点 (Exit)"
+        role="$(t CHAIN_ROLE_EXIT)"
         local ip port
         ip=$(jq -r '.ip' ${CHAIN_EXIT_INFO})
         port=$(jq -r '.port' ${CHAIN_EXIT_INFO})
@@ -13023,19 +12188,19 @@ showChainStatus() {
 
         # 检查 sing-box 是否运行
         if singBoxDaemonRunning; then
-            status="✅ 运行中"
+            status="✅ $(t CHAIN_STATUS_RUNNING)"
         else
-            status="❌ 未运行"
+            status="❌ $(t CHAIN_STATUS_STOPPED)"
         fi
 
         echoContent green "╔══════════════════════════════════════════════════════════════╗"
-        echoContent green "║                      链式代理状态                              ║"
+        echoContent green "║  $(t CHAIN_STATUS_BOX_CHAIN)"
         echoContent green "╠══════════════════════════════════════════════════════════════╣"
-        echoContent yellow "  当前角色: ${role}"
-        echoContent yellow "  监听端口: ${port}"
-        echoContent yellow "  本机IP: ${ip}"
-        echoContent yellow "  允许连接: ${allowedIP:-所有IP}"
-        echoContent yellow "  运行状态: ${status}"
+        echoContent yellow "  $(t CHAIN_STATUS_ROLE): ${role}"
+        echoContent yellow "  $(t CHAIN_STATUS_LISTEN_PORT): ${port}"
+        echoContent yellow "  $(t CHAIN_STATUS_LOCAL_IP): ${ip}"
+        echoContent yellow "  $(t CHAIN_STATUS_ALLOWED): ${allowedIP:-$(t CHAIN_STATUS_ALLOW_ALL)}"
+        echoContent yellow "  $(t CHAIN_STATUS_RUN): ${status}"
         echoContent green "╚══════════════════════════════════════════════════════════════╝"
 
         # 显示配置码
@@ -13043,7 +12208,7 @@ showChainStatus() {
 
     # 检查是否为中继节点
     elif [[ -f "${CHAIN_RELAY_INFO}" ]]; then
-        role="中继节点 (Relay)"
+        role="$(t CHAIN_ROLE_RELAY)"
         local ip port totalHops
         ip=$(jq -r '.ip' ${CHAIN_RELAY_INFO})
         port=$(jq -r '.port' ${CHAIN_RELAY_INFO})
@@ -13053,21 +12218,21 @@ showChainStatus() {
 
         # 检查 sing-box 是否运行
         if singBoxDaemonRunning; then
-            status="✅ 运行中"
+            status="✅ $(t CHAIN_STATUS_RUNNING)"
         else
-            status="❌ 未运行"
+            status="❌ $(t CHAIN_STATUS_STOPPED)"
         fi
 
         echoContent green "╔══════════════════════════════════════════════════════════════╗"
-        echoContent green "║                      链式代理状态                              ║"
+        echoContent green "║  $(t CHAIN_STATUS_BOX_CHAIN)"
         echoContent green "╠══════════════════════════════════════════════════════════════╣"
-        echoContent yellow "  当前角色: ${role}"
-        echoContent yellow "  监听端口: ${port}"
-        echoContent yellow "  本机IP: ${ip}"
-        echoContent yellow "  链路总跳数: ${totalHops}"
-        echoContent yellow "  运行状态: ${status}"
+        echoContent yellow "  $(t CHAIN_STATUS_ROLE): ${role}"
+        echoContent yellow "  $(t CHAIN_STATUS_LISTEN_PORT): ${port}"
+        echoContent yellow "  $(t CHAIN_STATUS_LOCAL_IP): ${ip}"
+        echoContent yellow "  $(t CHAIN_STATUS_TOTAL_HOPS): ${totalHops}"
+        echoContent yellow "  $(t CHAIN_STATUS_RUN): ${status}"
         echoContent green "╠══════════════════════════════════════════════════════════════╣"
-        echoContent yellow "  下游链路:"
+        echoContent yellow "  $(t CHAIN_STATUS_DOWNSTREAM):"
 
         local i=0
         local hopCount
@@ -13077,9 +12242,9 @@ showChainStatus() {
             hopIP=$(echo "${downstreamHops}" | jq -r ".[$i].ip")
             hopPort=$(echo "${downstreamHops}" | jq -r ".[$i].port")
             if [[ $i -eq $((hopCount - 1)) ]]; then
-                echoContent yellow "    → 出口(${hopIP}:${hopPort}) → 互联网"
+                echoContent yellow "    $(t CHAIN_PATH_EXIT "${hopIP}:${hopPort}")"
             else
-                echoContent yellow "    → 中继$((i+1))(${hopIP}:${hopPort})"
+                echoContent yellow "    $(t CHAIN_PATH_RELAY "$((i+1))" "${hopIP}:${hopPort}")"
             fi
             ((i++))
         done
@@ -13090,15 +12255,15 @@ showChainStatus() {
 
     # 检查是否为入口节点
     else
-        echoContent yellow "未配置链式代理"
-        echoContent yellow "请使用 '快速配置向导' 进行配置"
+        echoContent yellow "$(t CHAIN_NOTHING_CONFIGURED)"
+        echoContent yellow "$(t CHAIN_USE_WIZARD "$(t CHAIN_MENU_WIZARD)")"
     fi
 }
 
 # 显示中继节点配置码
 showRelayChainCode() {
     if [[ ! -f "${CHAIN_RELAY_INFO}" ]]; then
-        echoContent red " ---> 未找到中继节点配置信息"
+        echoContent red " ---> $(t CHAIN_RELAY_INFO_MISSING)"
         return 1
     fi
 
@@ -13119,7 +12284,7 @@ showRelayChainCode() {
     local chainCode
     chainCode="chain://v2@$(echo -n "${newHops}" | base64 | tr -d '\n')"
 
-    echoContent yellow "\n配置码 (供上游入口或中继节点使用):\n"
+    echoContent yellow "\n$(t CHAIN_RELAY_CODE_TITLE)\n"
     echoContent skyBlue "${chainCode}"
 }
 
@@ -13180,7 +12345,7 @@ testChainConnection() {
         return $?
     fi
 
-    echoContent skyBlue "\n测试链路连通性"
+    echoContent skyBlue "\n$(t CHAIN_MENU_TEST)"
     echoContent red "\n=============================================================="
 
     # 确定节点角色并获取首跳信息
@@ -13196,46 +12361,46 @@ testChainConnection() {
 
     elif [[ -f "${CHAIN_EXIT_INFO}" ]]; then
         role="exit"
-        echoContent yellow "当前为出口节点，无需测试链路"
-        echoContent yellow "请在入口节点测试连通性"
+        echoContent yellow "$(t CHAIN_TEST_ON_EXIT)"
+        echoContent yellow "$(t CHAIN_TEST_ON_EXIT_HINT)"
 
         # 测试出口节点自身网络
-        echoContent yellow "\n测试出口节点网络..."
+        echoContent yellow "\n$(t CHAIN_TEST_EXIT_NET)"
         local testIP
         testIP=$(curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null)
         if [[ -n "${testIP}" ]]; then
-            echoContent green "✅ 出口节点网络正常"
-            echoContent green "   出口IP: ${testIP}"
+            echoContent green "✅ $(t CHAIN_TEST_EXIT_NET_OK)"
+            echoContent green "   $(t CHAIN_CODE_EXIT_IP): ${testIP}"
         else
-            echoContent red "❌ 出口节点网络异常"
+            echoContent red "❌ $(t CHAIN_TEST_EXIT_NET_FAIL)"
         fi
         return 0
     else
-        echoContent red " ---> 未配置链式代理"
+        echoContent red " ---> $(t CHAIN_NOTHING_CONFIGURED)"
         return 1
     fi
 
-    echoContent yellow "首跳节点: ${firstHopIP}:${firstHopPort}\n"
+    echoContent yellow "$(t CHAIN_TEST_FIRST_HOP "${firstHopIP}:${firstHopPort}")\n"
 
     # 测试1: TCP端口连通性 (到第一跳)
-    echoContent yellow "测试1: TCP端口连通性..."
+    echoContent yellow "$(t CHAIN_TEST_STEP_TCP)"
     if _chainTCPProbe "${firstHopIP}" "${firstHopPort}" 5; then
-        echoContent green "  ✅ TCP端口连通 (${firstHopIP}:${firstHopPort})"
+        echoContent green "  ✅ $(t CHAIN_TEST_TCP_OK "${firstHopIP}:${firstHopPort}")"
     else
-        echoContent red "  ❌ TCP端口不通"
-        echoContent red "  请检查:"
-        echoContent red "  1. 目标节点防火墙是否开放端口 ${firstHopPort}"
-        echoContent red "  2. 目标节点 sing-box 是否运行"
-        echoContent red "  3. IP地址是否正确"
+        echoContent red "  ❌ $(t CHAIN_TEST_TCP_FAIL)"
+        echoContent red "  $(t CHAIN_TEST_CHECK)"
+        echoContent red "  $(t CHAIN_TEST_TCP_CHECK_1 "${firstHopPort}")"
+        echoContent red "  $(t CHAIN_TEST_TCP_CHECK_2)"
+        echoContent red "  $(t CHAIN_TEST_TCP_CHECK_3)"
         return 1
     fi
 
     # 测试2 走链路访问外网：必须经 chain_outbound.json 里的出站取，直 curl 量到的是本机直连出口，会假阳性
-    echoContent yellow "测试2: 链路转发测试..."
+    echoContent yellow "$(t CHAIN_TEST_STEP_FORWARD)"
 
     # 检查 sing-box 是否运行
     if ! singBoxDaemonRunning; then
-        echoContent red "  ❌ sing-box 未运行"
+        echoContent red "  ❌ $(t CHAIN_TEST_SINGBOX_DOWN)"
         return 1
     fi
 
@@ -13243,36 +12408,36 @@ testChainConnection() {
     startTime=$(date +%s%N)
     if outIP=$(singBoxProbeExitIP "$(jq -c '.outbounds' "${SINGBOX_FRAGMENT_DIR}/chain_outbound.json" 2>/dev/null)" chain_outbound); then
         took=$(( ($(date +%s%N) - startTime) / 1000000 ))
-        echoContent green "  ✅ 链路转发正常"
+        echoContent green "  ✅ $(t CHAIN_TEST_FORWARD_OK)"
         echoContent green "  $(t CHAIN_TEST_PROBE_OK "${outIP}" "${took}")"
     else
-        echoContent red "  ❌ 链路转发失败"
-        echoContent red "  请检查各节点配置和网络"
+        echoContent red "  ❌ $(t CHAIN_TEST_FORWARD_FAIL)"
+        echoContent red "  $(t CHAIN_TEST_FORWARD_CHECK)"
         return 1
     fi
 
     echoContent green "\n=============================================================="
-    echoContent green "链路测试通过！"
+    echoContent green "$(t CHAIN_TEST_PASSED)"
     echoContent green "=============================================================="
 }
 
 # 高级设置
 chainProxyAdvanced() {
-    # 检查是否为多链路模式
-    if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
+    # 有出口表时进它的菜单；传 role 是从那个菜单回来看出口节点自己的设置
+    if [[ -f "${CHAIN_MULTI_INFO}" && "${1:-}" != "role" ]]; then
         multiChainAdvancedMenu
         return $?
     fi
 
-    echoContent skyBlue "\n链式代理高级设置"
+    echoContent skyBlue "\n$(t CHAIN_ROLE_ADV_TITLE)"
     echoContent red "\n=============================================================="
 
-    echoContent yellow "1.显示配置码 (出口/中继节点)"
-    echoContent yellow "2.更新密钥"
-    echoContent yellow "3.修改端口"
-    echoContent yellow "4.查看详细配置"
+    echoContent yellow "1.$(t CHAIN_ROLE_ADV_CODE)"
+    echoContent yellow "2.$(t CHAIN_ROLE_ADV_KEY)"
+    echoContent yellow "3.$(t CHAIN_ROLE_ADV_PORT)"
+    echoContent yellow "4.$(t CHAIN_ADV_DETAIL)"
 
-    read -r -p "请选择:" selectType
+    read -r -p "$(t PROMPT_SELECT):" selectType
 
     case ${selectType} in
     1)
@@ -13281,7 +12446,7 @@ chainProxyAdvanced() {
         elif [[ -f "${CHAIN_RELAY_INFO}" ]]; then
             showRelayChainCode
         else
-            echoContent red " ---> 当前不是出口或中继节点"
+            echoContent red " ---> $(t CHAIN_NOT_EXIT_OR_RELAY)"
         fi
         ;;
     2)
@@ -13298,7 +12463,7 @@ chainProxyAdvanced() {
 
 # 更新密钥
 updateChainKey() {
-    echoContent yellow "\n更新链式代理密钥"
+    echoContent yellow "\n$(t CHAIN_KEY_UPDATE_TITLE)"
 
     if [[ -f "${CHAIN_EXIT_INFO}" ]]; then
         # 出口节点：旧密钥一换就失效，接在上面的入口立刻断，先问
@@ -13350,26 +12515,26 @@ updateChainKey() {
         fi
         reloadCore
 
-        echoContent green " ---> 密钥已更新"
-        echoContent yellow "\n新配置码:\n"
+        echoContent green " ---> $(t CHAIN_KEY_UPDATED)"
+        echoContent yellow "\n$(t CHAIN_NEW_CODE):\n"
         local chainCode hostInCode="${publicIP}"
         if [[ "${publicIP}" == *:* ]]; then
             hostInCode="[${publicIP}]"
         fi
         chainCode="chain://ss2022@${hostInCode}:${port}?key=$(echo -n "${newKey}" | base64 | tr -d '\n')&method=${method}"
         echoContent skyBlue "${chainCode}"
-        echoContent yellow "\n请更新入口节点配置！"
+        echoContent yellow "\n$(t CHAIN_UPDATE_ENTRY_HINT)"
 
     elif [[ -f "${CHAIN_RELAY_INFO}" ]]; then
         echoContent yellow " ---> $(t CHAIN_KEY_UPDATE_RELAY)"
     else
-        echoContent red " ---> 未配置链式代理"
+        echoContent red " ---> $(t CHAIN_NOT_CONFIGURED)"
     fi
 }
 
 # 更新端口
 updateChainPort() {
-    echoContent yellow "\n更新链式代理端口"
+    echoContent yellow "\n$(t CHAIN_PORT_UPDATE_TITLE)"
 
     local infoFile=""
     if [[ -f "${CHAIN_EXIT_INFO}" ]]; then
@@ -13377,20 +12542,20 @@ updateChainPort() {
     elif [[ -f "${CHAIN_RELAY_INFO}" ]]; then
         infoFile="${CHAIN_RELAY_INFO}"
     else
-        echoContent red " ---> 仅出口或中继节点可修改端口"
+        echoContent red " ---> $(t CHAIN_PORT_UPDATE_ROLE_ONLY)"
         return 1
     fi
 
     local oldPort
     oldPort=$(jq -r '.port' "${infoFile}")
 
-    read -r -p "新端口 [当前: ${oldPort}]:" newPort
+    read -r -p "$(t CHAIN_PORT_NEW_PROMPT "${oldPort}")" newPort
     if [[ -z "${newPort}" ]]; then
         return 0
     fi
 
     if [[ ! "${newPort}" =~ ^[0-9]+$ ]] || [[ "${newPort}" -lt 1 ]] || [[ "${newPort}" -gt 65535 ]]; then
-        echoContent red " ---> 端口格式错误"
+        echoContent red " ---> $(t ERR_PORT_RANGE 1 65535)"
         return 1
     fi
 
@@ -13428,7 +12593,7 @@ updateChainPort() {
     fi
     reloadCore
 
-    echoContent green " ---> 端口已更新为 ${newPort}"
+    echoContent green " ---> $(t CHAIN_PORT_UPDATED "${newPort}")"
 
     # 显示相应的配置码
     if [[ "${infoFile}" == *"exit"* ]]; then
@@ -13436,33 +12601,42 @@ updateChainPort() {
     else
         showRelayChainCode
     fi
-    echoContent yellow "\n请更新上游节点配置！"
+    echoContent yellow "\n$(t CHAIN_UPDATE_UPSTREAM_HINT)"
 }
 
 # 显示详细配置
 showChainDetailConfig() {
-    echoContent skyBlue "\n链式代理详细配置"
+    echoContent skyBlue "\n$(t CHAIN_DETAIL_TITLE)"
     echoContent red "\n=============================================================="
 
     if [[ -f "${SINGBOX_FRAGMENT_DIR}/chain_inbound.json" ]]; then
-        echoContent yellow "\n入站配置 (chain_inbound.json):"
+        echoContent yellow "\n$(t CHAIN_DETAIL_INBOUND chain_inbound.json)"
         jq . ${SINGBOX_FRAGMENT_DIR}/chain_inbound.json
     fi
 
     if [[ -f "${SINGBOX_FRAGMENT_DIR}/chain_outbound.json" ]]; then
-        echoContent yellow "\n出站配置 (chain_outbound.json):"
+        echoContent yellow "\n$(t CHAIN_DETAIL_OUTBOUND chain_outbound.json)"
         jq . ${SINGBOX_FRAGMENT_DIR}/chain_outbound.json
     fi
 
     if [[ -f "${SINGBOX_FRAGMENT_DIR}/chain_route.json" ]]; then
-        echoContent yellow "\n路由配置 (chain_route.json):"
+        echoContent yellow "\n$(t CHAIN_DETAIL_ROUTE chain_route.json)"
         jq . ${SINGBOX_FRAGMENT_DIR}/chain_route.json
     fi
 }
 
-# 卸载链式代理
+# xrayChainUnwire → 拆掉 Xray 接进 sing-box 的那一跳并重启 Xray：启动前按「没接链式」重新生成路由
+xrayChainUnwire() {
+    [[ -f "${XRAY_CONF_DIR}/chain_outbound.json" ]] || return 0
+    rm -f "${XRAY_CONF_DIR}/chain_outbound.json"
+    echoContent yellow " ---> $(t CHAIN_REMOVE_XRAY_DONE)"
+    handleXray stop
+    handleXray start
+}
+
+# 卸载链式与分流
 removeChainProxy() {
-    echoContent skyBlue "\n卸载链式代理"
+    echoContent skyBlue "\n$(t CHAIN_MENU_UNINSTALL)"
     echoContent red "\n=============================================================="
 
     local isMultiChain=false
@@ -13471,17 +12645,19 @@ removeChainProxy() {
         isMultiChain=true
         local chainCount
         chainCount=$(jq -r '.chains | length' ${CHAIN_MULTI_INFO} 2>/dev/null || echo "0")
-        echoContent yellow "\n检测到多链路分流模式，共 ${chainCount} 条链路"
+        echoContent yellow "\n$(t CHAIN_REMOVE_ROLE_ENTRY "${chainCount}")"
     elif [[ -f "${CHAIN_RELAY_INFO}" ]]; then
         echoContent yellow "\n$(t CHAIN_REMOVE_ROLE_RELAY)"
     elif [[ -f "${CHAIN_EXIT_INFO}" ]]; then
         echoContent yellow "\n$(t CHAIN_REMOVE_ROLE_EXIT)"
+    elif [[ -f "${CHAIN_ENTRY_INFO}" ]]; then
+        echoContent yellow "\n$(t CHAIN_REMOVE_ROLE_OLD_ENTRY)"
     else
-        echoContent red "\n未检测到链式代理配置"
+        echoContent yellow "\n$(t CHAIN_NOTHING_CONFIGURED)"
         return 0
     fi
 
-    read -r -p "确认卸载链式代理？[y/n]:" confirmRemove
+    read -r -p "$(t CHAIN_REMOVE_CONFIRM)" confirmRemove
     if ! isYesInput "${confirmRemove}"; then
         return 0
     fi
@@ -13518,42 +12694,20 @@ removeChainProxy() {
         rm -f ${SINGBOX_FRAGMENT_DIR}/chain_multi_route.json 2>/dev/null
         # 删除多链路信息文件
         rm -f ${CHAIN_MULTI_INFO}
-        echoContent yellow " ---> 已删除多链路分流配置"
+        echoContent yellow " ---> $(t CHAIN_REMOVE_TABLE_DONE)"
     fi
 
-    # 删除 Xray 链式代理配置
-    if [[ -f "${XRAY_CONF_DIR}/chain_outbound.json" ]]; then
-        rm -f ${XRAY_CONF_DIR}/chain_outbound.json
-        echoContent yellow " ---> 已删除 Xray 链式出站配置"
-
-        # 恢复原路由配置
-        if [[ -f "${XRAY_CONF_DIR}/09_routing.json.bak.chain" ]]; then
-            mv ${XRAY_CONF_DIR}/09_routing.json.bak.chain ${XRAY_CONF_DIR}/09_routing.json
-            echoContent yellow " ---> 已恢复 Xray 原路由配置"
-        else
-            # 没有备份：重置成默认路由。直连出站被 WARP / IPv6 全局删掉时不写这条：规则指向不存在的出站，Xray 会直接断连接
-            local defaultRules='[]'
-            if [[ -f "${XRAY_CONF_DIR}/z_direct_outbound.json" ]]; then
-                defaultRules='[{"type":"field","domain":["domain:gstatic.com","domain:googleapis.com","domain:googleapis.cn"],"outboundTag":"z_direct_outbound"}]'
-            fi
-            jsonWriteFile "${XRAY_CONF_DIR}/09_routing.json" "$(jq -n --argjson rules "${defaultRules}" '{routing: {rules: $rules}}')" false
-            echoContent yellow " ---> 已重置 Xray 路由配置为默认"
-        fi
-
-        # 重启 Xray
-        handleXray stop
-        handleXray start
-    fi
+    xrayChainUnwire
 
     # 重新合并 sing-box 配置
     # 卸载语义：清理动作已完成（链式相关片段都已 rm），merge 失败说明还有别的片段问题，
     # 但用户的主目标"移除链式代理"已经达到，只警告不 return 1。
     if ! singBoxMergeConfig; then
-        echoContent yellow " ---> 警告：sing-box 配置合并失败，请检查其他片段"
+        echoContent yellow " ---> $(t CHAIN_REMOVE_MERGE_WARN)"
     fi
     reloadCore
 
-    echoContent green " ---> 链式代理已卸载"
+    echoContent green " ---> $(t CHAIN_REMOVE_DONE)"
 }
 
 # migrateChainEntryState → 旧版的单链路 / 多跳 / 外部节点唯一出口入口（chain_entry_info.json）转成只有一条出口 chain_1 的入口状态，
@@ -13626,10 +12780,9 @@ multiChainRuleSetUrl() {
 
 # multiChainRuleSetsAvailable TAG... → 逐个 HEAD 一遍，404 或连不上都打红返回 1：sing-box 起步时有一个远程规则集下载不到就整个退出
 multiChainRuleSetsAvailable() {
-    local tag url code
+    local tag code
     for tag in "$@"; do
-        url=$(multiChainRuleSetUrl "${tag}") || return 1
-        code=$(curl -sI -o /dev/null -w '%{http_code}' --max-time 10 "${url}" 2>/dev/null)
+        code=$(multiChainRuleSetStatus "${tag}") || return 1
         case "${code}" in
             200) ;;
             404)
@@ -13637,11 +12790,19 @@ multiChainRuleSetsAvailable() {
                 return 1
                 ;;
             *)
-                echoContent red " ---> $(t CHAIN_RULESET_UNREACHABLE "${tag}" "${code:-000}")"
+                echoContent red " ---> $(t CHAIN_RULESET_UNREACHABLE "${tag}" "${code}")"
                 return 1
                 ;;
         esac
     done
+}
+
+# multiChainRuleSetStatus TAG → HEAD 一次规则集的下载地址，打印 HTTP 状态码，连不上是 000
+multiChainRuleSetStatus() {
+    local url code
+    url=$(multiChainRuleSetUrl "$1") || return 1
+    code=$(curl -sI -o /dev/null -w '%{http_code}' --max-time 10 "${url}" 2>/dev/null)
+    echo "${code:-000}"
 }
 
 # 预设规则集定义
@@ -13683,14 +12844,14 @@ getPresetRulesets() {
 getPresetDisplayName() {
     local preset=$1
     case "${preset}" in
-        streaming) echo "流媒体 (Netflix/Disney+/YouTube/...)" ;;
-        ai) echo "AI服务 (OpenAI/Bing/...)" ;;
-        social) echo "社交媒体 (Telegram/Twitter/...)" ;;
-        developer) echo "开发者 (GitHub/GitLab/...)" ;;
-        gaming) echo "游戏 (Steam/Epic/...)" ;;
-        google) echo "谷歌服务" ;;
-        microsoft) echo "微软服务" ;;
-        apple) echo "苹果服务" ;;
+        streaming) t CHAIN_PRESET_STREAMING ;;
+        ai) t CHAIN_PRESET_AI ;;
+        social) t CHAIN_PRESET_SOCIAL ;;
+        developer) t CHAIN_PRESET_DEV ;;
+        gaming) t CHAIN_PRESET_GAMING ;;
+        google) t CHAIN_PRESET_GOOGLE ;;
+        microsoft) t CHAIN_PRESET_MICROSOFT ;;
+        apple) t CHAIN_PRESET_APPLE ;;
         *) echo "${preset}" ;;
     esac
 }
@@ -14095,7 +13256,7 @@ addExternalNodeAsChain() {
         return 1
     fi
     case "${chainRuleType}" in
-        preset | custom | ip_cidr | geoip) addRuleToConfig "${chainRuleType}" "${chainRuleValue}" "${chainName}" ;;
+        preset | custom | ip_cidr | geoip | geosite) addRuleToConfig "${chainRuleType}" "${chainRuleValue}" "${chainName}" ;;
     esac
 
     if [[ "${isDefault}" == "true" ]]; then
@@ -14300,7 +13461,7 @@ addLocalExitAsChain() {
     echoContent yellow "$(t CHAIN_RULES_SELECT):\n"
     echoContent skyBlue "$(t CHAIN_DEFAULT_HINT)\n"
     chainReadRule later || return 1
-    if [[ "${kind}" == "sni" && "${chainRuleType}" != "none" && "${chainRuleType}" != "preset" && "${chainRuleType}" != "custom" ]]; then
+    if [[ "${kind}" == "sni" && "${chainRuleType}" != "none" && "${chainRuleType}" != "preset" && "${chainRuleType}" != "custom" && "${chainRuleType}" != "geosite" ]]; then
         echoContent red " ---> $(t CHAIN_EXIT_SNI_NEEDS_DOMAIN)"
         return 1
     fi
@@ -14326,7 +13487,7 @@ addLocalExitAsChain() {
         return 1
     fi
     case "${chainRuleType}" in
-        preset | custom | ip_cidr | geoip) addRuleToConfig "${chainRuleType}" "${chainRuleValue}" "${chainName}" ;;
+        preset | custom | ip_cidr | geoip | geosite) addRuleToConfig "${chainRuleType}" "${chainRuleValue}" "${chainName}" ;;
     esac
 
     echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]$([[ "${isDefault}" == "true" ]] && echo " ($(t DEFAULT_CHAIN))")"
@@ -14373,23 +13534,23 @@ multiChainAddOne() {
 # chainReadManualExit → 手动输入一个出口（单跳）的地址、端口、密钥与加密方式，放进 chainExit* 与空的 chainHops。任何一项不合法返回 1
 chainReadManualExit() {
     chainHops=""
-    read -r -p "出口节点IP:" chainExitIP
+    read -r -p "$(t CHAIN_MANUAL_IP):" chainExitIP
     if ! isValidIP "${chainExitIP}"; then
-        echoContent red " ---> IP地址格式无效"
+        echoContent red " ---> $(t ERR_IP_INVALID)"
         return 1
     fi
-    read -r -p "出口节点端口:" chainExitPort
+    read -r -p "$(t CHAIN_MANUAL_PORT):" chainExitPort
     if [[ ! "${chainExitPort}" =~ ^[1-9][0-9]{0,4}$ ]] || ((chainExitPort > 65535)); then
         echoContent red " ---> $(t ERR_PORT_RANGE 1 65535)"
         return 1
     fi
-    read -r -p "密钥:" chainExitKey
+    read -r -p "$(t CHAIN_KEY):" chainExitKey
     if [[ -z "${chainExitKey}" ]]; then
-        echoContent red " ---> 密钥不能为空"
+        echoContent red " ---> $(t CHAIN_KEY_EMPTY)"
         return 1
     fi
-    echoContent yellow "\n加密方式 [回车默认: 2022-blake3-aes-128-gcm]"
-    read -r -p "加密方式:" chainExitMethod
+    echoContent yellow "\n$(t CHAIN_MANUAL_METHOD_HINT 2022-blake3-aes-128-gcm)"
+    read -r -p "$(t CHAIN_METHOD):" chainExitMethod
     chainExitMethod=${chainExitMethod:-2022-blake3-aes-128-gcm}
 }
 
@@ -14454,7 +13615,7 @@ addSingleChainOutbound() {
         return 1
     fi
     case "${chainRuleType}" in
-        preset | custom | ip_cidr | geoip) addRuleToConfig "${chainRuleType}" "${chainRuleValue}" "${chainName}" ;;
+        preset | custom | ip_cidr | geoip | geosite) addRuleToConfig "${chainRuleType}" "${chainRuleValue}" "${chainName}" ;;
     esac
     local chainTarget
     chainTarget=$(jq -r '[.[] | "\(.ip):\(.port)"] | join(" → ")' <<<"${chainHops}")
@@ -14491,7 +13652,7 @@ addChainToConfig() {
     local outFile="${SINGBOX_FRAGMENT_DIR}/chain_outbound_${name}.json"
     local outboundJson
     if ! outboundJson=$(chainHopOutbounds "${hops}" "${name}" "${name}-hop-") || [[ -z "${outboundJson}" ]]; then
-        echoContent red " ---> 链路出站配置生成失败: ${name}"
+        echoContent red " ---> $(t CHAIN_OUTBOUND_WRITE_FAILED "${name}")"
         return 1
     fi
 
@@ -14553,8 +13714,8 @@ addRuleToConfig() {
     mv "${tmpFile}" "${infoFile}"
 }
 
-# chainReadRule [later] → 交互选一条分流规则，结果放在 chainRuleType（none / preset / custom / ip_cidr / geoip / default）与 chainRuleValue。
-# 传 later 时多一项 0「稍后统一配置」，1–5 与不传时相同：向导与规则菜单共用这份编号，错一位就会选成别的。
+# chainReadRule [later] → 交互选一条分流规则，结果放在 chainRuleType（none / preset / custom / ip_cidr / geoip / default / geosite）与 chainRuleValue。
+# 传 later 时多一项 0「稍后统一配置」，1–6 与不传时相同：向导与规则菜单共用这份编号，错一位就会选成别的。
 # 输错或留空就重问，不静默落成没有规则——那样流量全走默认出口、看不出配错了。读不到输入返回 1
 chainReadRule() {
     local later=$1 choice sub value sets
@@ -14567,6 +13728,7 @@ chainReadRule() {
         echoContent yellow "3.$(t CHAIN_RULE_IP_CIDR)"
         echoContent yellow "4.$(t CHAIN_RULE_GEOIP)"
         echoContent yellow "5.$(t CHAIN_RULE_DEFAULT)"
+        echoContent yellow "6.$(t CHAIN_RULE_GEOSITE)"
         read -r -p "$(t PROMPT_SELECT): " choice || return 1
         if [[ "${choice}" =~ ^[0-9]{1,3}$ ]]; then
             choice=$((10#${choice}))
@@ -14674,6 +13836,21 @@ chainReadRule() {
                 chainRuleType=default
                 return 0
                 ;;
+            6)
+                echoContent yellow "$(t CHAIN_GEOSITE_HINT):"
+                read -r -p "geosite: " value || return 1
+                value=$(tr '[:upper:]' '[:lower:]' <<<"${value// /}")
+                # 分类名拼进规则集的 tag 与下载地址
+                if [[ ! "${value}" =~ ^[a-z0-9!@_-]{1,64}(,[a-z0-9!@_-]{1,64})*$ ]]; then
+                    echoContent red " ---> $(t CHAIN_GEOSITE_INVALID)"
+                    continue
+                fi
+                IFS=',' read -ra sets <<<"geosite-${value//,/,geosite-}"
+                multiChainRuleSetsAvailable "${sets[@]}" || continue
+                chainRuleType=geosite
+                chainRuleValue=${value}
+                return 0
+                ;;
         esac
         echoContent red " ---> $(t INVALID_SELECTION)"
     done
@@ -14686,6 +13863,7 @@ chainRuleLabel() {
         custom) t CUSTOM_DOMAIN ;;
         ip_cidr) echo "IP CIDR" ;;
         geoip) echo "geoip-$2" ;;
+        geosite) echo "geosite: $2" ;;
         default) t ALL_UNMATCHED ;;
         *) t PENDING_CONFIG ;;
     esac
@@ -14733,7 +13911,7 @@ configureMultiChainRules() {
 
     echoContent yellow "\n$(t CHAIN_RULE_FOR) [${selectedChain}] $(t CHAIN_RULE_TYPE_SELECT):\n"
     chainReadRule || return 1
-    if chainExitIsSni "${selectedChain}" && [[ "${chainRuleType}" != "preset" && "${chainRuleType}" != "custom" ]]; then
+    if chainExitIsSni "${selectedChain}" && [[ "${chainRuleType}" != "preset" && "${chainRuleType}" != "custom" && "${chainRuleType}" != "geosite" ]]; then
         echoContent red " ---> $(t CHAIN_EXIT_SNI_NEEDS_DOMAIN)"
         return 1
     fi
@@ -14754,6 +13932,10 @@ configureMultiChainRules() {
         geoip)
             addRuleToConfig "geoip" "${chainRuleValue}" "${selectedChain}"
             echoContent green " ---> $(t CHAIN_GEOIP_RULE_ADDED): $(chainRuleLabel "${chainRuleType}" "${chainRuleValue}") → ${selectedChain}"
+            ;;
+        geosite)
+            addRuleToConfig "geosite" "${chainRuleValue}" "${selectedChain}"
+            echoContent green " ---> $(t CHAIN_RULE_ADDED): $(chainRuleLabel "${chainRuleType}" "${chainRuleValue}") → ${selectedChain}"
             ;;
         default)
             local tmpFile
@@ -14952,10 +14134,14 @@ generateMultiChainRouteConfig() {
         ruleChain=$(echo "${rule}" | jq -r '.chain')
         match=""
 
-        if [[ "${ruleType}" == "preset" ]]; then
-            # 获取预设规则对应的规则集
+        if [[ "${ruleType}" == "preset" || "${ruleType}" == "geosite" ]]; then
+            # 预设是固定的一组 geosite 规则集，geosite 规则的值就是逗号分隔的分类名
             local rulesets
-            rulesets=$(getPresetRulesets "${ruleValue}")
+            if [[ "${ruleType}" == "preset" ]]; then
+                rulesets=$(getPresetRulesets "${ruleValue}")
+            else
+                rulesets="geosite-${ruleValue//,/,geosite-}"
+            fi
 
             IFS=',' read -ra rulesetArray <<< "${rulesets}"
             local rulesetNames="[]"
@@ -14963,8 +14149,8 @@ generateMultiChainRouteConfig() {
             for ruleset in "${rulesetArray[@]}"; do
                 rulesetNames=$(echo "${rulesetNames}" | jq --arg rs "${ruleset}" '. + [$rs]')
 
-                # 如果规则集未添加，添加定义
-                if [[ ! "${usedRuleSets}" =~ "${ruleset}" ]]; then
+                # 规则集只定义一次，按整名比：google 与 google-play 这类互为前缀
+                if [[ "${usedRuleSets}," != *",${ruleset},"* ]]; then
                     usedRuleSets="${usedRuleSets},${ruleset}"
 
                     local rulesetUrl
@@ -15011,7 +14197,7 @@ generateMultiChainRouteConfig() {
             local geoipTag="geoip-${ruleValue}"
 
             # 如果规则集未添加，添加定义
-            if [[ ! "${usedRuleSets}" =~ "${geoipTag}" ]]; then
+            if [[ "${usedRuleSets}," != *",${geoipTag},"* ]]; then
                 usedRuleSets="${usedRuleSets},${geoipTag}"
 
                 local geoipUrl
@@ -15287,7 +14473,7 @@ showMultiChainStatus() {
     defaultChain=$(jq -r '.default_chain' "${infoFile}")
 
     echoContent green "╔══════════════════════════════════════════════════════════════╗"
-    echoContent green "║                      $(t CHAIN_STATUS_TITLE)                              ║"
+    echoContent green "║  $(t MENU_CHAIN_PROXY)"
     echoContent green "╠══════════════════════════════════════════════════════════════╣"
     echoContent yellow "  $(t CHAIN_STATUS_ROLE): $(t CHAIN_STATUS_ROLE_ENTRY)"
     echoContent yellow "  $(t CHAIN_STATUS_RUN): ${status}"
@@ -15328,25 +14514,26 @@ multiChainAddChain() {
     multiChainEnsureXrayWired || return 1
     generateMultiChainRouteConfig
     if ! singBoxMergeConfig; then
-        echoContent red " ---> 配置合并失败，链路未生效"
+        echoContent red " ---> $(t CHAIN_MERGE_FAILED_ADD)"
         return 1
     fi
     reloadCore
-    echoContent green " ---> 配置已更新"
+    echoContent green " ---> $(t CHAIN_CONFIG_UPDATED)"
 }
 
 # 多链路高级管理菜单
 multiChainAdvancedMenu() {
-    echoContent skyBlue "\n多链路高级管理"
+    echoContent skyBlue "\n$(t CHAIN_ADV_TITLE)"
     echoContent red "=============================================================="
 
-    echoContent yellow "1.添加链式出站"
-    echoContent yellow "2.删除链式出站"
-    echoContent yellow "3.配置分流规则"
-    echoContent yellow "4.设置默认链路"
-    echoContent yellow "5.查看详细配置"
+    echoContent yellow "1.$(t CHAIN_ADV_ADD)"
+    echoContent yellow "2.$(t CHAIN_ADV_REMOVE)"
+    echoContent yellow "3.$(t CHAIN_RULES_TITLE)"
+    echoContent yellow "4.$(t CHAIN_ADV_DEFAULT)"
+    echoContent yellow "5.$(t CHAIN_ADV_DETAIL)"
+    chainIsExitMachine && echoContent yellow "6.$(t CHAIN_ADVANCED_EXIT_ITEM)"
 
-    read -r -p "请选择:" selectType
+    read -r -p "$(t PROMPT_SELECT):" selectType
 
     case ${selectType} in
     1)
@@ -15361,9 +14548,9 @@ multiChainAdvancedMenu() {
         generateMultiChainRouteConfig
         if singBoxMergeConfig; then
             reloadCore
-            echoContent green " ---> 配置已更新"
+            echoContent green " ---> $(t CHAIN_CONFIG_UPDATED)"
         else
-            echoContent red " ---> 配置合并失败，规则未生效"
+            echoContent red " ---> $(t CHAIN_MERGE_FAILED_RULES)"
         fi
         ;;
     4)
@@ -15371,6 +14558,11 @@ multiChainAdvancedMenu() {
         ;;
     5)
         showMultiChainDetailConfig
+        ;;
+    6)
+        if chainIsExitMachine; then
+            chainProxyAdvanced role
+        fi
         ;;
     esac
 }
@@ -15380,11 +14572,11 @@ removeMultiChainOutbound() {
     local infoFile="${CHAIN_MULTI_INFO}"
 
     if [[ ! -f "${infoFile}" ]]; then
-        echoContent red " ---> 未找到多链路配置"
+        echoContent red " ---> $(t CHAIN_NO_CONFIG)"
         return 1
     fi
 
-    echoContent yellow "\n当前链路:\n"
+    echoContent yellow "\n$(t CHAIN_CURRENT_CHAINS):\n"
 
     local chains
     chains=$(jq -r '.chains[].name' "${infoFile}")
@@ -15392,7 +14584,7 @@ removeMultiChainOutbound() {
     chainCount=$(jq '.chains | length' "${infoFile}")
 
     if [[ ${chainCount} -lt 1 ]]; then
-        echoContent red " ---> 没有可删除的链路"
+        echoContent red " ---> $(t CHAIN_REMOVE_NONE)"
         return 1
     fi
 
@@ -15410,13 +14602,13 @@ removeMultiChainOutbound() {
         ((index++))
     done <<< "${chains}"
 
-    read -r -p "请选择要删除的链路编号: " deleteIndex
+    read -r -p "$(t CHAIN_REMOVE_PICK): " deleteIndex
 
     local selectedChain
     selectedChain=$(echo "${chains}" | sed -n "${deleteIndex}p")
 
     if [[ -z "${selectedChain}" ]]; then
-        echoContent red " ---> 无效的选择"
+        echoContent red " ---> $(t CHAIN_INVALID_CHAIN)"
         return 1
     fi
 
@@ -15428,8 +14620,8 @@ removeMultiChainOutbound() {
         return 1
     fi
 
-    echoContent yellow "\n确认删除链路 [${selectedChain}]？[y/n]"
-    read -r -p "确认: " confirmDelete
+    echoContent yellow "\n$(t CHAIN_REMOVE_ONE_CONFIRM "${selectedChain}")"
+    read -r -p "$(t CONFIRM): " confirmDelete
 
     if ! isYesInput "${confirmDelete}"; then
         return 0
@@ -15457,19 +14649,25 @@ removeMultiChainOutbound() {
         chmod 600 "${tmpFile}"
         jq '.default_chain = "direct"' "${infoFile}" > "${tmpFile}"
         mv "${tmpFile}" "${infoFile}"
-        echoContent yellow " ---> 已重置默认链路为直连"
+        echoContent yellow " ---> $(t CHAIN_DEFAULT_RESET_DIRECT)"
     fi
 
-    # 重新生成路由配置
-    multiChainEnsureXrayWired
+    # 出口机删光自己加的出口就撤掉出口表与 Xray 那一跳，回到没加之前：留着空表，状态页与 3 → 4 仍按「有出口表」走
+    if chainIsExitMachine && [[ "$(jq '.chains | length' "${infoFile}")" == "0" ]]; then
+        rm -f "${infoFile}" "${SINGBOX_FRAGMENT_DIR}/chain_bridge_inbound.json"
+        xrayChainUnwire
+        echoContent yellow " ---> $(t CHAIN_EXIT_TABLE_REMOVED)"
+    else
+        multiChainEnsureXrayWired
+    fi
     generateMultiChainRouteConfig
     # 删除语义：物理删除已完成，merge 失败说明剩余配置仍有问题，告警不阻断
     if ! singBoxMergeConfig; then
-        echoContent yellow " ---> 警告：sing-box 配置合并失败，链路记录已删除但配置未刷新"
+        echoContent yellow " ---> $(t CHAIN_REMOVE_ONE_MERGE_WARN)"
     fi
     reloadCore
 
-    echoContent green " ---> 链路 [${selectedChain}] 已删除"
+    echoContent green " ---> $(t CHAIN_REMOVE_ONE_DONE "${selectedChain}")"
 }
 
 # 设置默认链路
@@ -15477,11 +14675,11 @@ setDefaultChain() {
     local infoFile="${CHAIN_MULTI_INFO}"
 
     if [[ ! -f "${infoFile}" ]]; then
-        echoContent red " ---> 未找到多链路配置"
+        echoContent red " ---> $(t CHAIN_NO_CONFIG)"
         return 1
     fi
 
-    echoContent yellow "\n选择默认链路:\n"
+    echoContent yellow "\n$(t CHAIN_DEFAULT_PICK):\n"
 
     local chains
     chains=$(jq -r '.chains[].name' "${infoFile}")
@@ -15491,9 +14689,9 @@ setDefaultChain() {
         echoContent yellow "  ${index}. ${chain}"
         ((index++))
     done <<< "${chains}"
-    echoContent yellow "  ${index}. 直连 (未匹配流量直连访问)"
+    echoContent yellow "  ${index}. $(t CHAIN_DEFAULT_DIRECT_OPTION)"
 
-    read -r -p "请选择: " defaultChoice
+    read -r -p "$(t PROMPT_SELECT): " defaultChoice
 
     local newDefault
     if [[ "${defaultChoice}" == "${index}" ]]; then
@@ -15503,7 +14701,7 @@ setDefaultChain() {
     fi
 
     if [[ -z "${newDefault}" ]]; then
-        echoContent red " ---> 无效的选择"
+        echoContent red " ---> $(t CHAIN_INVALID_CHAIN)"
         return 1
     fi
     if chainExitIsSni "${newDefault}"; then
@@ -15532,25 +14730,25 @@ setDefaultChain() {
     # 重新生成路由配置
     generateMultiChainRouteConfig
     if ! singBoxMergeConfig; then
-        echoContent red " ---> 配置合并失败，默认链路设置未生效"
+        echoContent red " ---> $(t CHAIN_MERGE_FAILED_DEFAULT)"
         return 1
     fi
     reloadCore
 
-    echoContent green " ---> 默认链路已设置为: ${newDefault}"
+    echoContent green " ---> $(t CHAIN_DEFAULT_SET_DONE "${newDefault}")"
 }
 
 # 显示多链路详细配置
 showMultiChainDetailConfig() {
-    echoContent skyBlue "\n多链路详细配置"
+    echoContent skyBlue "\n$(t CHAIN_ADV_DETAIL_TITLE)"
     echoContent red "=============================================================="
 
     if [[ -f "${CHAIN_MULTI_INFO}" ]]; then
-        echoContent yellow "\n元数据 (chain_multi_info.json):"
+        echoContent yellow "\n$(t CHAIN_DETAIL_STATE chain_multi_info.json)"
         jq . ${CHAIN_MULTI_INFO}
     fi
 
-    echoContent yellow "\n链路出站配置:"
+    echoContent yellow "\n$(t CHAIN_DETAIL_EXITS)"
     for f in ${SINGBOX_FRAGMENT_DIR}/chain_outbound_*.json; do
         if [[ -f "${f}" ]]; then
             echoContent yellow "\n$(basename "${f}"):"
@@ -15559,7 +14757,7 @@ showMultiChainDetailConfig() {
     done
 
     if [[ -f "${SINGBOX_FRAGMENT_DIR}/chain_route.json" ]]; then
-        echoContent yellow "\n路由配置 (chain_route.json):"
+        echoContent yellow "\n$(t CHAIN_DETAIL_ROUTE chain_route.json)"
         jq . ${SINGBOX_FRAGMENT_DIR}/chain_route.json
     fi
 }
@@ -16697,92 +15895,36 @@ externalNodeMenu() {
 
 # ======================= 外部节点功能结束 =======================
 
-# 分流工具。Xray 链式入口上拒绝：链式路由最后一条兜底接住所有流量，这里追加的规则排在它后面永远不命中，
-# 下次启动还被写回的链式路由冲掉，菜单却报成功。sing-box 的分流片段排在链式路由前面，照常生效
-routingToolsMenu() {
-    if [[ "${coreKind}" == "1" && -f "${XRAY_CONF_DIR}/chain_outbound.json" ]]; then
-        echoContent red " ---> $(t ROUTING_TOOLS_CHAIN_ENTRY_REFUSED)"
-        exit 1
+# ======================= 旧分流工具（原菜单 11）留下的文件 =======================
+
+# legacyRoutingClear → 旧分流工具（原菜单 11）留下的文件启动前删掉，Xray 的 DNS 回到默认、路由重新生成，补回旧的全局模式删掉的
+# 直连出站：少了它，排第一的出站就成了默认出站。删了东西就置 legacyRoutingCleared=true，调用方要让两个内核一起重启
+legacyRoutingClear() {
+    local xr="${XRAY_CONF_DIR}" sb="${SINGBOX_FRAGMENT_DIR}" file found=false
+    for file in "${xr}"/{IPv4_out,IPv6_out,wireguard_out_IPv4,wireguard_out_IPv6}.json \
+        "${sb}"/{IPv4_out,IPv6_out,IPv6_route,wireguard_endpoints_IPv4,wireguard_endpoints_IPv4_route,wireguard_endpoints_IPv6,wireguard_endpoints_IPv6_route}.json; do
+        [[ -f "${file}" ]] || continue
+        rm -f "${file}"
+        found=true
+    done
+    if jq -e 'any(.dns.servers[]?; .tag == "dnsRouting" or .tag == "hosts") or . == {dns: {servers: [{type: "local"}]}}' "${sb}/dns.json" >/dev/null 2>&1; then
+        rm -f "${sb}/dns.json"
+        found=true
     fi
-    echoContent skyBlue "\n功能 1/${totalProgress} : 分流工具"
-    echoContent red "\n=============================================================="
-    echoContent yellow "# 注意事项"
-    echoContent yellow "# 用于服务端的流量分流，可用于解锁ChatGPT、流媒体等相关内容\n"
-
-    echoContent yellow "1.WARP分流【第三方 IPv4】"
-    echoContent yellow "2.WARP分流【第三方 IPv6】"
-    echoContent yellow "3.IPv6分流"
-    echoContent yellow "4.DNS分流"
-    echoContent yellow "5.SNI反向代理分流"
-
-    read -r -p "请选择:" selectType
-
-    case ${selectType} in
-    1)
-        warpRoutingReg 1 IPv4
-        ;;
-    2)
-        warpRoutingReg 1 IPv6
-        ;;
-    3)
-        ipv6Routing 1
-        ;;
-    4)
-        dnsRouting 1
-        ;;
-    5)
-        if [[ -n "${singBoxConfigPath}" ]]; then
-            echoContent red "\n ---> 此功能不支持Hysteria2、Tuic"
-        fi
-        sniRouting 1
-        ;;
-    esac
-
-}
-
-# 设置VMess+WS+TLS【仅出站】
-setVMessWSRoutingOutbounds() {
-    read -r -p "请输入VMess+WS+TLS的地址:" setVMessWSTLSAddress
-    echoContent red "=============================================================="
-    echoContent yellow "录入示例:netflix,openai\n"
-    read -r -p "请按照上面示例录入域名:" domainList
-
-    if [[ -z ${domainList} ]]; then
-        echoContent red " ---> 域名不可为空"
-        setVMessWSRoutingOutbounds
+    if jq -e 'any(.dns.servers[]? | objects; ((.domains // []) | length) > 0) or ((.dns.hosts // {}) | length) > 0' "${xr}/11_dns.json" >/dev/null 2>&1; then
+        jsonWriteFile "${xr}/11_dns.json" '{"dns":{"servers":["localhost"]}}' false || return 1
+        found=true
     fi
-
-    if [[ -n "${setVMessWSTLSAddress}" ]]; then
-        removeXrayOutbound VMess-out
-
-        echo
-        read -r -p "请输入VMess+WS+TLS的端口:" setVMessWSTLSPort
-        echo
-        if [[ -z "${setVMessWSTLSPort}" ]]; then
-            echoContent red " ---> 端口不可为空"
-        fi
-
-        read -r -p "请输入VMess+WS+TLS的UUID:" setVMessWSTLSUUID
-        echo
-        if [[ -z "${setVMessWSTLSUUID}" ]]; then
-            echoContent red " ---> UUID不可为空"
-        fi
-
-        read -r -p "请输入VMess+WS+TLS的Path路径:" setVMessWSTLSPath
-        echo
-        if [[ -z "${setVMessWSTLSPath}" ]]; then
-            echoContent red " ---> 路径不可为空"
-        elif ! echo "${setVMessWSTLSPath}" | grep -q "/"; then
-            setVMessWSTLSPath="/${setVMessWSTLSPath}"
-        fi
-        addXrayOutbound "VMess-out"
-        addXrayRouting VMess-out outboundTag "${domainList}"
-        reloadCore
-        echoContent green " ---> 添加分流成功"
-        exit 0
+    [[ "${found}" == "true" ]] || return 0
+    if [[ -n "$(scanInstalledProtocols "${xr}/" 2>/dev/null | tr -d ',')" && ! -f "${xr}/z_direct_outbound.json" ]]; then
+        addXrayOutbound z_direct_outbound || return 1
     fi
-    echoContent red " ---> 地址不可为空"
-    setVMessWSRoutingOutbounds
+    if compgen -G "${sb}/*.json" >/dev/null && [[ ! -f "${sb}/01_direct_outbound.json" ]]; then
+        singBoxConfigPath="${sb}/" ensureDirectOutbound || return 1
+    fi
+    writeXrayRouting || return 1
+    legacyRoutingCleared=true
+    echoContent yellow " ---> $(t LEGACY_ROUTING_CLEARED)"
 }
 
 # 重启核心
@@ -16835,275 +15977,7 @@ reloadCore() {
     fi
 }
 
-# dns分流
-dnsRouting() {
 
-    if [[ -z "${configPath}" ]]; then
-        echoContent red " ---> 未安装，请使用脚本安装"
-        menu
-        exit 1
-    fi
-    echoContent skyBlue "\n功能 1/${totalProgress} : DNS分流"
-    echoContent red "\n=============================================================="
-
-    echoContent yellow "1.添加"
-    echoContent yellow "2.卸载"
-    read -r -p "请选择:" selectType
-
-    case ${selectType} in
-    1)
-        setUnlockDNS
-        ;;
-    2)
-        removeUnlockDNS
-        ;;
-    esac
-}
-
-# SNI反向代理分流
-sniRouting() {
-
-    if [[ -z "${configPath}" ]]; then
-        echoContent red " ---> 未安装，请使用脚本安装"
-        menu
-        exit 1
-    fi
-    echoContent skyBlue "\n功能 1/${totalProgress} : SNI反向代理分流"
-    echoContent red "\n=============================================================="
-    echoContent yellow "# 注意事项"
-    echoContent yellow "# sing-box 侧只能填具体域名，不支持规则集。\n"
-
-    echoContent yellow "1.添加"
-    echoContent yellow "2.卸载"
-    read -r -p "请选择:" selectType
-
-    case ${selectType} in
-    1)
-        setUnlockSNI
-        ;;
-    2)
-        removeUnlockSNI
-        ;;
-    esac
-}
-# 设置SNI分流
-setUnlockSNI() {
-    read -r -p "请输入分流的SNI IP:" setSNIP
-    if [[ -n ${setSNIP} ]]; then
-        # 验证IP格式
-        if ! isValidIP "${setSNIP}"; then
-            echoContent red " ---> $(t ERR_IP_INVALID)"
-            exit 1
-        fi
-        # Xray 的本机封锁只认字面 IP，hosts 映射到内网的照通；sing-box 解析后按 IP 拒，写进去也连不上
-        if [[ "${coreKind}" == 2 ]] && isLocalBlockedIP "${setSNIP}"; then
-            echoContent red " ---> $(t SNI_IP_LOCAL_BLOCKED)"
-            exit 1
-        fi
-        echoContent red "=============================================================="
-
-        if [[ "${coreKind}" == 1 ]]; then
-            echoContent yellow "录入示例:netflix,disney,hulu"
-            read -r -p "请按照上面示例录入域名:" xrayDomainList
-            local hosts={}
-            while read -r domain; do
-                if [[ -z "${domain}" ]]; then
-                    continue
-                fi
-                hosts=$(echo "${hosts}" | jq -r --arg key "$(xrayDomainRuleValue "${domain}")" --arg value "${setSNIP}" '. + {($key): $value}')
-            done < <(echo "${xrayDomainList}" | tr ',' '\n')
-            cat <<EOF >${configPath}11_dns.json
-{
-    "dns": {
-        "hosts":${hosts},
-        "servers": [
-            "8.8.8.8",
-            "1.1.1.1"
-        ]
-    }
-}
-EOF
-        fi
-        if [[ -n "${singBoxConfigPath}" ]]; then
-            echoContent yellow "录入示例:www.netflix.com,www.google.com"
-            read -r -p "请按照上面示例录入域名:" singboxDomainList
-            local singboxDomain singboxDomains
-            IFS=',' read -r -a singboxDomains <<<"${singboxDomainList}"
-            for singboxDomain in "${singboxDomains[@]}"; do
-                if [[ -n "${singboxDomain}" ]] && ! isValidDomain "${singboxDomain}"; then
-                    echoContent red " ---> $(t ERR_DOMAIN_INVALID): ${singboxDomain}"
-                    exit 1
-                fi
-            done
-            if ! addSingBoxDNSConfig "${setSNIP}" "${singboxDomainList}" "predefined"; then
-                echoContent red " ---> $(t SINGBOX_DNS_SPLIT_WRITE_FAILED)"
-                exit 1
-            fi
-        fi
-        echoContent yellow " ---> SNI反向代理分流成功"
-        reloadCore
-        exit 0
-    fi
-    echoContent red " ---> SNI IP不可为空"
-    exit 1
-}
-
-# 添加xray dns 配置
-addXrayDNSConfig() {
-    local ip=$1
-    local domainList=$2
-    local domains=[]
-    while read -r line; do
-        if [[ -z "${line}" ]]; then
-            continue
-        fi
-        domains=$(echo "${domains}" | jq -r --arg rule "$(xrayDomainRuleValue "${line}")" '. += [$rule]')
-    done < <(echo "${domainList}" | tr ',' '\n')
-
-    if [[ "${coreKind}" == "1" ]]; then
-
-        cat <<EOF >${configPath}11_dns.json
-{
-    "dns": {
-        "servers": [
-            {
-                "address": "${ip}",
-                "port": 53,
-                "domains": ${domains}
-            },
-        "localhost"
-        ]
-    }
-}
-EOF
-    fi
-}
-
-# addSingBoxDNSConfig SERVER DOMAIN_CSV [predefined] → 写 dns.json：命中的域名在路由里 resolve 到分流 server
-# （DNS 分流是上游 SERVER，SNI 分流是把域名定到 SERVER 的 hosts）。必须是路由级 resolve：出站拨号只问
-# default_domain_resolver，写成 dns.rules 的分流起得来却不生效
-addSingBoxDNSConfig() {
-    local server=$1 domainList=$2 actionType=${3:-} rules serverJson json
-    [[ -n "${singBoxConfigPath}" ]] || return 0
-    rules=$(initSingBoxRules "${domainList}" "dns") || return 1
-    if [[ "${actionType}" == "predefined" ]]; then
-        # hosts 只认精确域名，规则集命中的域名在这里解析不出来，所以只留域名规则
-        rules=$(jq '.ruleSet = []' <<<"${rules}") || return 1
-        serverJson=$(jq -n --arg ip "${server}" --arg list "${domainList}" '{type: "hosts", tag: "hosts",
-            predefined: ($list | split(",") | map(select(length > 0)) | unique | map({key: ., value: $ip}) | from_entries)}') || return 1
-    else
-        serverJson=$(jq -n --arg ip "${server}" '{type: "udp", tag: "dnsRouting", server: $ip}') || return 1
-    fi
-    json=$(jq -n --argjson r "${rules}" --argjson srv "${serverJson}" --arg cache "${SINGBOX_CONF_DIR}/cache.db" '
-        ($r.ruleSet | length) as $remote
-        | {dns: {servers: [$srv]},
-           route: ({rules: ([if ($r.domainRules | length) > 0 then {domain_regex: $r.domainRules} else empty end,
-                             if $remote > 0 then {rule_set: ($r.ruleSet | map(.tag))} else empty end]
-                            | map(. + {action: "resolve", server: $srv.tag}))}
-                   + (if $remote > 0 then {rule_set: $r.ruleSet} else {} end))}
-        + (if $remote > 0 then {experimental: {cache_file: {enabled: true, path: $cache}}} else {} end)') || return 1
-    # local 只由 02_dns_local.json 定义：它排在 dns.json 前面，dns.final 缺省取首个 server 才是 local；这里再写就重名，1.14.3 起拒绝启动
-    ensureSingBoxLocalDns || return 1
-    jsonWriteFile "${singBoxConfigPath}dns.json" "${json}" false
-}
-# 设置dns
-setUnlockDNS() {
-    local setDNS domainList item items=()
-    read -r -p "请输入分流的DNS:" setDNS
-    if [[ -z ${setDNS} ]]; then
-        echoContent red " ---> dns不可为空"
-        exit 1
-    fi
-    # 地址与域名都会写进核心配置，一个非法值就让配置校验失败、核心停着
-    if ! isValidIP "${setDNS}"; then
-        echoContent red " ---> $(t ERR_IP_INVALID)"
-        exit 1
-    fi
-    echoContent red "=============================================================="
-    echoContent yellow "录入示例:netflix,disney,hulu"
-    read -r -p "请按照上面示例录入域名:" domainList
-    IFS=',' read -r -a items <<<"${domainList}"
-    for item in "${items[@]}"; do
-        if [[ -n "${item}" ]] && ! isValidDomain "${item}"; then
-            echoContent red " ---> $(t ERR_DOMAIN_INVALID): ${item}"
-            exit 1
-        fi
-    done
-    if [[ -z "${domainList//,/}" ]]; then
-        echoContent red " ---> $(t ERR_DOMAIN_EMPTY)"
-        exit 1
-    fi
-
-    if [[ "${coreKind}" == "1" ]]; then
-        addXrayDNSConfig "${setDNS}" "${domainList}"
-    fi
-
-    if [[ -n "${singBoxConfigPath}" ]]; then
-        ensureDirectOutbound
-        if ! addSingBoxDNSConfig "${setDNS}" "${domainList}"; then
-            echoContent red " ---> $(t SINGBOX_DNS_SPLIT_WRITE_FAILED)"
-            exit 1
-        fi
-    fi
-
-    reloadCore
-
-    echoContent yellow "\n ---> 如还无法观看可以尝试以下两种方案"
-    echoContent yellow " 1.重启vps"
-    echoContent yellow " 2.卸载dns解锁后，修改本地的[/etc/resolv.conf]DNS设置并重启vps\n"
-    exit 0
-}
-
-# 移除 DNS分流
-removeUnlockDNS() {
-    if [[ "${coreKind}" == "1" && -f "${configPath}11_dns.json" ]]; then
-        cat <<EOF >${configPath}11_dns.json
-{
-	"dns": {
-		"servers": [
-			"localhost"
-		]
-	}
-}
-EOF
-    fi
-
-    # 整个删掉：留一个无 tag 的 local 会和 02_dns_local.json 凑成两个 server，缺解析器起不来
-    if [[ -n "${singBoxConfigPath}" ]]; then
-        rm -f "${singBoxConfigPath}dns.json"
-    fi
-
-    reloadCore
-
-    echoContent green " ---> 卸载成功"
-
-    exit 0
-}
-
-# 移除SNI分流
-removeUnlockSNI() {
-    if [[ "${coreKind}" == 1 ]]; then
-        cat <<EOF >${configPath}11_dns.json
-{
-    "dns": {
-        "servers": [
-            "localhost"
-        ]
-    }
-}
-EOF
-    fi
-
-    # 同 removeUnlockDNS：整个删掉，不留无 tag 的 local
-    if [[ -n "${singBoxConfigPath}" ]]; then
-        rm -f "${singBoxConfigPath}dns.json"
-    fi
-
-    reloadCore
-    echoContent green " ---> 卸载成功"
-
-    exit 0
-}
 
 # validateCustomInstallTokens SELECTION ALLOWED... → 0=合法；非法时打印红字并返回 1
 # 旧的字符级正则（^[0-9]+$ / ^[0-7]+$）会放过 999、70 之类未知项，下游 grep 静默忽略——
@@ -19674,7 +18548,6 @@ menu() {
     echoContent yellow "7.$(t MENU_USER)"
     echoContent yellow "8.$(t MENU_DISGUISE)"
     echoContent yellow "9.$(t MENU_CERT)"
-    echoContent yellow "11.$(t MENU_ROUTING)"
     echoContent yellow "12.$(t MENU_ADD_PORT)"
     echoContent skyBlue "-------------------------$(t MENU_VERSION_MGMT)-----------------------------"
     echoContent yellow "16.$(t MENU_CORE)"
@@ -19721,9 +18594,6 @@ menu() {
         ;;
     9)
         renewalTLS 1
-        ;;
-    11)
-        routingToolsMenu 1
         ;;
     12)
         addCorePort 1
@@ -19820,61 +18690,21 @@ topoDirectExit() {
          + (if $v4 != "" and $v6 != "" then {rawHost2: $v6} else {} end)'
 }
 
-# topoPlainExit TAG → 没接链式时，一个出站标签对应的出口节点
-topoPlainExit() {
-    case "$1" in
-        direct | z_direct_outbound) topoDirectExit ;;
-        IPv4_out) jq -cn --arg name "IPv4" --arg kind "$(t TOPO_KIND_LOCAL)" --arg host "$(getPublicIP 4 2>/dev/null)" '{key: "IPv4_out", name: $name, kind: $kind, rawHost: $host, port: ""}' ;;
-        IPv6_out) jq -cn --arg name "IPv6" --arg kind "$(t TOPO_KIND_LOCAL)" --arg host "$(getPublicIP 6 2>/dev/null)" '{key: "IPv6_out", name: $name, kind: $kind, rawHost: $host, port: ""}' ;;
-        wireguard_out_IPv4 | wireguard_endpoints_IPv4) jq -cn --arg key "$1" '{key: $key, name: "WARP IPv4", kind: "WireGuard", host: "Cloudflare", port: ""}' ;;
-        wireguard_out_IPv6 | wireguard_endpoints_IPv6) jq -cn --arg key "$1" '{key: $key, name: "WARP IPv6", kind: "WireGuard", host: "Cloudflare", port: ""}' ;;
-        *) jq -cn --arg key "$1" '{key: $key, name: $key, kind: "", host: "", port: ""}' ;;
-    esac
-}
-
-# topoRoutingPlain → 没接链式：出口是本机直连与分流工具加的出站，条件从生效配置读
+# topoRoutingPlain → 没接链式：全部流量本机直连
 topoRoutingPlain() {
-    local dflt= candidate rules tag exits='[]' flows='[]' issues='[]' when
-    if [[ "${coreKind}" == "1" ]]; then
-        for candidate in z_direct_outbound IPv4_out IPv6_out wireguard_out_IPv4 wireguard_out_IPv6; do
-            if [[ -f "${XRAY_CONF_DIR}/${candidate}.json" ]]; then
-                dflt=${candidate}
-                break
-            fi
-        done
-        rules=$(jq -c '[.routing.rules[]? | select(.domain != null and (((.ruleTag // "") | startswith("local-block")) | not)) | {tag: .outboundTag, domain}]' "${XRAY_CONF_DIR}/09_routing.json" 2>/dev/null) || rules='[]'
-    else
-        dflt=$(jq -r '.route.final // .outbounds[0].tag // "direct"' "${SINGBOX_MERGED_CONFIG}" 2>/dev/null)
-        # 菜单 11 把带点的域名写成 domain_regex、geosite 写成 rule_set：标签还原成域名与 geosite:名字，漏读一种字段那条规则就从图上消失
-        rules=$(jq -c 'def arr: if type == "array" then . elif . == null then [] else [.] end;
-            ([.route.rule_set[]? | {key: .tag, value: ((.url // "") | capture("geosite-(?<n>[^/]+)\\.srs$").n)}] | from_entries) as $geo
-            | [.route.rules[]? | select(.outbound != null)
-               | {tag: .outbound, domain: ((.domain | arr) + (.domain_suffix | arr) + (.domain_keyword | arr)
-                   + (.domain_regex | arr | map(if startswith("^([a-zA-Z0-9_-]+\\.)*") then split("*") | last | gsub("\\\\"; "") else . end))
-                   + (.rule_set | arr | map(if $geo[.] != null then "geosite:" + $geo[.] else . end)))}
-               | select((.domain | length) > 0)]' "${SINGBOX_MERGED_CONFIG}" 2>/dev/null) || rules='[]'
-    fi
-    dflt=${dflt:-direct}
-    while IFS= read -r tag; do
-        [[ -n "${tag}" && "${tag}" != "${dflt}" ]] || continue
-        when=$(jq -r --arg t "${tag}" --arg more "$(t TOPO_FLOW_MORE)" '[.[] | select(.tag == $t) | .domain[]] as $d
-            | ($d[0] | sub("^domain:"; "")) + (if ($d | length) > 1 then ($more | sub("%s"; ($d | length | tostring))) else "" end)' <<<"${rules:-[]}")
-        exits=$(jq -c --argjson x "$(topoPlainExit "${tag}")" '. + [$x]' <<<"${exits}") || return 1
-        flows=$(jq -c --arg k "${tag}" --arg w "${when}" '. + [{exit: $k, when: $w}]' <<<"${flows}") || return 1
-        # 规则指向不存在的出站时 Xray 直接断连接，不走默认出站，这种机器要看得到
-        if [[ "${coreKind}" == "1" && ! -f "${XRAY_CONF_DIR}/${tag}.json" ]]; then
-            issues=$(jq -c --arg s "$(t TOPO_ISSUE_MISSING_OUTBOUND "${tag}")" '. + [$s]' <<<"${issues}")
-        fi
-    done < <(jq -r '.[].tag' <<<"${rules:-[]}" | awk '!seen[$0]++')
-    exits=$(jq -c --argjson x "$(topoPlainExit "${dflt}")" '[$x] + .' <<<"${exits}") || return 1
-    jq -cn --argjson exits "${exits}" --argjson flows "${flows}" --argjson issues "${issues}" --arg dflt "$(jq -r '.key' <<<"$(topoPlainExit "${dflt}")")" --arg w "$(t TOPO_FLOW_DEFAULT)" \
-        '{exits: $exits, flows: ($flows + [{exit: $dflt, when: $w}]), pins: {}, inboundExits: [], issues: $issues}'
+    jq -cn --argjson d "$(topoDirectExit)" --arg w "$(t TOPO_FLOW_DEFAULT)" '{exits: [$d], flows: [{exit: $d.key, when: $w}], pins: {}, inboundExits: [], issues: []}'
 }
 
 # topoRoutingMulti → 多链路。只取画图要的字段：状态文件里 password 和 ip、port 并排，整块转储就把密钥写进页面了
 topoRoutingMulti() {
-    local state name file hops='{}' missing='[]' rules='[]' type value chain
+    local state name file hops='{}' missing='[]' rules='[]' type value chain v4="" v6=""
     state=$(jq -c '{chains: [.chains[]? | {name, ip, port, source, external_type, family, server}], rules: [.rules[]? | {type, value, chain}], default_chain, accounts: (.accounts // {})}' "${CHAIN_MULTI_INFO}") || return 1
+    if jq -e 'any(.chains[]; .source == "local" and .family != "ipv6")' <<<"${state}" >/dev/null; then
+        v4=$(getPublicIP 4 2>/dev/null)
+    fi
+    if jq -e 'any(.chains[]; .source == "local" and .family == "ipv6")' <<<"${state}" >/dev/null; then
+        v6=$(getPublicIP 6 2>/dev/null)
+    fi
     while IFS= read -r name; do
         [[ -n "${name}" ]] || continue
         file="${SINGBOX_FRAGMENT_DIR}/chain_outbound_${name}.json"
@@ -19888,10 +18718,11 @@ topoRoutingMulti() {
     while IFS=$'\t' read -r type value chain; do
         [[ -n "${chain}" ]] || continue
         rules=$(jq -c --arg c "${chain}" --arg type "${type}" --arg v "${value}" --arg w "$(chainRuleLabel "${type}" "${value}")" \
-            '. + [{exit: $c, items: (if $type == "custom" then ($v | split(",") | map(sub("^\\s+"; "") | sub("\\s+$"; "")) | map(select(. != ""))) else [] end
+            '. + [{exit: $c, items: (if $type == "custom" or $type == "geosite" then ($v | split(",") | map(sub("^\\s+"; "") | sub("\\s+$"; "")) | map(select(. != ""))
+                                          | if $type == "geosite" then map("geosite:" + .) else . end) else [] end
                                       | if length > 0 then . else [$w] end)}]' <<<"${rules}")
     done < <(jq -r '.rules[] | [.type, (.value | tostring), .chain] | @tsv' <<<"${state}")
-    jq -c --argjson direct "$(topoDirectExit)" --argjson hops "${hops}" --argjson missing "${missing}" --argjson rules "${rules}" \
+    jq -c --argjson direct "$(topoDirectExit)" --argjson hops "${hops}" --argjson missing "${missing}" --argjson rules "${rules}" --arg v4 "${v4}" --arg v6 "${v6}" \
         --arg localKind "$(t TOPO_KIND_LOCAL)" --arg dnsKind "$(t CHAIN_EXIT_DNS)" --arg sniKind "$(t CHAIN_EXIT_SNI)" \
         --arg chainKind "$(t TOPO_KIND_CHAIN)" --arg relayNote "$(t TOPO_NOTE_RELAYS)" --arg badNote "$(t TOPO_NOTE_NOT_APPLIED)" --arg badIssue "$(t TOPO_ISSUE_MISSING_CHAIN)" \
         --arg badPin "$(t TOPO_ISSUE_PIN_MISSING)" --arg more "$(t TOPO_FLOW_MORE)" --arg w "$(t TOPO_FLOW_DEFAULT)" '
@@ -19903,7 +18734,9 @@ topoRoutingMulti() {
                 | (if .source == "warp" or .source == "local" then (if .family == "ipv6" then " IPv6" else " IPv4" end) else "" end) as $fam
                 | {key: .name, kind: (if .source == "external" then (.external_type // "") elif .source == "warp" then "WARP" + $fam
                                       elif .source == "local" then $localKind + $fam elif .source == "dns" then $dnsKind elif .source == "sni" then $sniKind else $chainKind end),
-                   rawHost: ($h.server // .server // .ip // ""), port: ($h.port // .port // "")}
+                   port: (if .source == "warp" or .source == "local" then "" else ($h.port // .port // "") end)}
+                  + (if .source == "warp" then {host: "Cloudflare"} elif .source == "local" then {rawHost: (if .family == "ipv6" then $v6 else $v4 end)}
+                     else {rawHost: ($h.server // .server // .ip // "")} end)
                   + (if .source == "external" then {rawName: .name} else {name: .name} end)
                   + (if ($missing | index($c.name)) != null then {bad: true, note: $badNote}
                      elif ($h.count // 1) > 1 then {note: ($relayNote | sub("%s"; ($h.count | tostring)))} else {} end)]),
@@ -19936,8 +18769,14 @@ topoRouting() {
                inboundExits: [{inbound: "chain", exit: "next", when: $when}]}' "${CHAIN_RELAY_INFO}") || return 1
     elif [[ -f "${CHAIN_EXIT_INFO}" ]]; then
         port=$(jq -r '.port // "?"' "${CHAIN_EXIT_INFO}" 2>/dev/null)
-        extra=$(jq -cn --arg in "$(t TOPO_CHAIN_INBOUND)" --arg when "$(t TOPO_WHEN_FROM_ENTRY)" --arg sub "tcp :${port}" \
-            '{extraInbounds: [{id: "chain", chain: true, tag: "", name: $in, sub: $sub, users: []}], extraExits: [], inboundExits: [{inbound: "chain", exit: "direct", when: $when}]}')
+        # 出口机有自己的出口表时，经链路进来的流量走同一张规则表：每条分流一根线，只有默认出口时一根线标「来自入口」
+        extra=$(jq -c --arg in "$(t TOPO_CHAIN_INBOUND)" --arg when "$(t TOPO_WHEN_FROM_ENTRY)" --arg sub "tcp :${port}" \
+            --argjson multi "$([[ -f "${CHAIN_MULTI_INFO}" ]] && echo true || echo false)" '
+            .flows as $f
+            | {extraInbounds: [{id: "chain", chain: true, tag: "", name: $in, sub: $sub, users: []}], extraExits: [],
+               inboundExits: (if ($multi | not) then [{inbound: "chain", exit: "direct", when: $when}]
+                              elif ($f | length) == 1 then [{inbound: "chain", exit: $f[0].exit, when: $when}]
+                              else [$f[] | {inbound: "chain", exit, when}] end)}' <<<"${base}") || return 1
     fi
     jq -c --argjson e "${extra}" --argjson d "$(topoDirectExit)" '
         .extraInbounds = $e.extraInbounds
@@ -20222,7 +19061,8 @@ checkForUpdates 2>/dev/null
 
 cronFunction
 chainEntryMigrated=false
-if migrateChainEntryState && [[ "${chainEntryMigrated}" == "true" ]]; then
+legacyRoutingCleared=false
+if migrateChainEntryState && legacyRoutingClear && [[ "${chainEntryMigrated}" == "true" || "${legacyRoutingCleared}" == "true" ]]; then
     reloadCore
 fi
 offerCoreRestart

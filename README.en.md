@@ -15,8 +15,9 @@ What I put the extra work into is **chained proxying**: an entry box, a relay
 and an exit chained into multiple hops; one machine can host several chains with
 traffic split across them, or pin each account to an exit (direct or a given
 chain); and existing third-party SS / Trojan / SOCKS5 nodes can be plugged in as
-exits. The rest covers a masquerade site, certificate
-issuance, subscriptions (one address that serves each client its own format), WARP routing,
+exits, and WARP, the machine's own IPv6 and unlock DNS / SNI are exits too, with
+the same routing rules. The rest covers a masquerade site, certificate
+issuance, subscriptions (one address that serves each client its own format),
 self-update and version rollback.
 Bilingual.
 
@@ -52,7 +53,7 @@ Github: https://github.com/Lynthar/Proxy-agent
 Description: Multi-Protocol Proxy Script
 1.Install
 2.Custom Combination Install
-3.Chain Proxy Management
+3.Chain Proxy and Routing
 4.Hysteria2 Management
 5.REALITY Management
 6.Tuic Management
@@ -60,7 +61,6 @@ Description: Multi-Protocol Proxy Script
 7.User Management
 8.Disguise Site Management
 9.Certificate Management
-11.Routing Tools
 12.Add New Port
 -------------------------Version Management-----------------------------
 16.Core Management

@@ -222,18 +222,16 @@ topoRenderHtml() {
          + item(($off | length) > 0; "<rect x=\"2\" y=\"1.5\" width=\"30\" height=\"11\" rx=\"3\" class=\"node node-off\"/>"; $L.legendOff)) as $legend
 
       # 按账号的表：人多、手机上看图不方便，一行答完「从哪出、开了哪些协议、用了多少、哪天到期」。按名字排，停用的放最后；
-      # 跟随默认的分流条件与按协议分流在表上方写一次，行里只写跟随默认
+      # 跟随默认的分流条件在表上方写一次，行里只写跟随默认
       | ($exits | map({key: .key, value: .}) | from_entries) as $exitByKey
       | ([$m.flows[] | .exit] | last) as $dflt
-      | ($m.inboundExits // [] | map(select(.inbound != "chain"))) as $protoIE
-      | ((($m.flows | length) > 1) or ($protoIE | length) > 0) as $hasRules
+      | (($m.flows | length) > 1) as $hasRules
       | def exitCell($k): "<span class=\"dot d\($exitByKey[$k].idx // 0)\"></span>\(($exitByKey[$k].name // $k) | str | @html)";
         (if ($m.accounts | length) == 0 then ""
          else "<h2>\($L.tableTitle // "" | @html)</h2>"
            + (if $hasRules then
-                "<p class=\"muted\">" + ((($L.tableRules // "%s") | @html) | split("%s") | .[0]) 
+                "<p class=\"muted\">" + ((($L.tableRules // "%s") | @html) | split("%s") | .[0])
                 + ([$m.flows[] | "\(.when | str | @html) → " + exitCell(.exit)]
-                   + [$protoIE[] | . as $ie | "\(([$inbounds[] | select((.id | tostring) == ($ie.inbound | tostring)) | .name] | first // "") | str | @html) → " + exitCell($ie.exit)]
                    | join("；"))
                 + ((($L.tableRules // "%s") | @html) | split("%s") | .[1:] | join("")) + "</p>"
               else "" end)
