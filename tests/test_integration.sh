@@ -3620,6 +3620,16 @@ ca_multi "{\"chains\": ${CA_EXITS}}"
 _caSetDefault=$(sed -n '/^setDefaultChain() {/,/^}/p' install.sh)
 _out=$(printf '5\n' | CA_SD="${_caSetDefault}" run_ca 'eval "${CA_SD}"; setDefaultChain; echo rc=$?' 2>&1)
 assert_equals "rc=1|direct" "$(tail -n 1 <<<"${_out}")|$(jq -r '.default_chain' "${CA_MULTI}")" "设默认出口：解锁 SNI 不能当默认，状态不动"
+# 入口删光了出口，表照留：列表里不能冒出空条目，测试不去测一个空出口
+ca_multi '{"chains": [], "default_chain": "us"}'
+_out=$(printf '1\n' | CA_SD="${_caSetDefault}" run_ca 'eval "${CA_SD}"; setDefaultChain; echo rc=$?' 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+assert_equals "rc=0|direct|0" "$(tail -n 1 <<<"${_out}")|$(jq -r '.default_chain' "${CA_MULTI}")|$(grep -cE '^ *[0-9]+\. *$' <<<"${_out}")" "设默认出口（出口表空着）：不列空条目，1 就是直连"
+_caStatus=$(sed -n '/^showMultiChainStatus() {/,/^}/p' install.sh)
+_out=$(CA_ST="${_caStatus}" run_ca 'eval "${CA_ST}"; singBoxDaemonRunning() { return 0; }; showMultiChainStatus' 2>&1)
+assert_equals "1|0" "$(grep -c '没有可用的出口' <<<"${_out}")|$(grep -c '•' <<<"${_out}")" "出口状态（出口表空着）：写明没有出口，不打空条目"
+_out=$(run_ca "testMultiChainConnection; echo rc=\$?" 2>&1)
+assert_equals "1|0|rc=0" "$(grep -c '没有可用的出口' <<<"${_out}")|$(grep -c '并行测试' <<<"${_out}")|$(tail -n 1 <<<"${_out}")" "测出口（出口表空着）：直接说没有出口，不去测一个空出口"
+ca_multi "{\"chains\": ${CA_EXITS}}"
 assert_equals "us 198.51.100.1:5001|v6 本机 IPv6|w4 WARP IPv4|nf 解锁 DNS 203.0.113.53|sn 解锁 SNI 203.0.113.80" \
     "$(run_ca "jq -c '.chains[]' '${CA_MULTI}' | while read -r c; do printf '%s %s|' \"\$(jq -r .name <<<\"\$c\")\" \"\$(chainExitTarget \"\$c\")\"; done" 2>&1 | sed 's/|$//')" \
     "出口的显示目标：链路是 ip:port，本机类出口是类型加地址族或服务器"

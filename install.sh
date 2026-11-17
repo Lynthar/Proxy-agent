@@ -14377,6 +14377,10 @@ testMultiChainConnection() {
     chains=$(jq -c '.chains[]' "${infoFile}")
     local chainCount
     chainCount=$(jq '.chains | length' "${infoFile}")
+    if [[ "${chainCount}" == "0" ]]; then
+        echoContent yellow " ---> $(t CHAIN_NO_CHAINS)"
+        return 0
+    fi
 
     echoContent yellow "$(t CHAIN_TESTING_PARALLEL "${chainCount}")\n"
 
@@ -14481,10 +14485,9 @@ showMultiChainStatus() {
     echoContent yellow "  $(t CHAIN_DEFAULT_OUTBOUND): ${defaultChain}"
     echoContent green "╠══════════════════════════════════════════════════════════════╣"
     echoContent yellow "  $(t CHAIN_STATUS_DETAILS):"
+    [[ "${chainCount}" == "0" ]] && echoContent yellow "    $(t CHAIN_NO_CHAINS)"
 
-    local chains
-    chains=$(jq -c '.chains[]' "${infoFile}")
-
+    # 出口表可以是空的（入口删光了出口表照留）：用进程替换读，空列表一轮都不跑，`<<<` 会多跑一轮空行
     while IFS= read -r chain; do
         local name isDefault
         name=$(echo "${chain}" | jq -r '.name')
@@ -14496,7 +14499,7 @@ showMultiChainStatus() {
         fi
 
         echoContent yellow "    • ${name}: $(chainExitTarget "${chain}")${defaultMark}"
-    done <<< "${chains}"
+    done < <(jq -c '.chains[]' "${infoFile}")
 
     echoContent green "╚══════════════════════════════════════════════════════════════╝"
 
@@ -14688,7 +14691,7 @@ setDefaultChain() {
     while IFS= read -r chain; do
         echoContent yellow "  ${index}. ${chain}"
         ((index++))
-    done <<< "${chains}"
+    done < <(jq -r '.chains[].name' "${infoFile}")
     echoContent yellow "  ${index}. $(t CHAIN_DEFAULT_DIRECT_OPTION)"
 
     read -r -p "$(t PROMPT_SELECT): " defaultChoice
