@@ -2910,15 +2910,16 @@ ACME_ENV_EOF
 }
 # 自定义端口
 customPortFunction() {
-    local historyCustomPortStatus= reuseLastPort=
+    local historyCustomPortStatus= reuseLastPort= name
+    name=$(getProtocolDisplayName 0)
     if [[ -n "${customPort}" || -n "${currentPort}" ]]; then
         echo
         if [[ -z "${lastInstallationConfig}" ]]; then
-            read -r -p "读取到上次安装时的端口，是否使用上次安装时的端口？[y/n]:" historyCustomPortStatus
+            read -r -p "$(t PORT_REUSE_PROMPT "${name}" "${currentPort}")" historyCustomPortStatus
             if isYesInput "${historyCustomPortStatus}"; then
                 port=${currentPort}
                 reuseLastPort=true
-                echoContent yellow "\n ---> 端口: ${port}"
+                echoContent yellow "\n ---> ${name} 端口: ${port}"
             fi
         elif [[ -n "${lastInstallationConfig}" ]]; then
             port=${currentPort}
@@ -2930,7 +2931,7 @@ customPortFunction() {
         echo
 
         if [[ -n "${btDomain}" ]]; then
-            echoContent yellow "请输入端口[不可与BT Panel/1Panel端口相同，回车随机]"
+            echoContent yellow "请输入 ${name} 的端口[不可与BT Panel/1Panel端口相同，回车随机]"
             # 回车随机生成 10000-30000；输入需为合法端口
             readValidPort "端口:" port "RANDOM" 10000 30000 || exit 1
         else
@@ -2943,7 +2944,7 @@ customPortFunction() {
         fi
 
         allowPort "${port}"
-        echoContent yellow "\n ---> 端口: ${port}"
+        echoContent yellow "\n ---> ${name} 端口: ${port}"
         if [[ -z "${btDomain}" ]]; then
             checkDNSIP "${domain}"
             removeNginxDefaultConf
@@ -3010,16 +3011,17 @@ portsTakenFor() {
 # pickInboundPort ID OLD_PORT DIR KEEP SKIP [EXTRA...] → 选定的端口打到 stdout，提示走 stderr；其余参数同 portsTakenFor
 # 跑在 $(…) / <(…) 里，所以不 exit：OLD_PORT 已被别的协议或程序占着就不再沿用，手输撞上已占端口就重问
 pickInboundPort() {
-    local id=$1 oldPort=$2 taken port= reuse= defaultPort= network
+    local id=$1 oldPort=$2 taken port= reuse= defaultPort= network name
     shift 2
+    name=$(getProtocolDisplayName "${id}")
     taken=$(portsTakenFor "${id}" "$@")
     if [[ -n "${oldPort}" ]]; then
         if portListed "${oldPort}" "${taken}"; then
-            echoContent yellow " ---> $(t PORT_REUSE_TAKEN "${oldPort}")" >&2
+            echoContent yellow " ---> $(t PORT_REUSE_TAKEN "${name}" "${oldPort}")" >&2
         elif [[ -n "${lastInstallationConfig}" ]]; then
             port=${oldPort}
         else
-            read -r -p "$(t PORT_REUSE_PROMPT "${oldPort}")" reuse
+            read -r -p "$(t PORT_REUSE_PROMPT "${name}" "${oldPort}")" reuse
             if isYesInput "${reuse}"; then
                 port=${oldPort}
             fi
@@ -3036,9 +3038,9 @@ pickInboundPort() {
     fi
     while [[ -z "${port}" ]]; do
         if [[ -n "${defaultPort}" ]]; then
-            readValidPort "$(t PORT_PROMPT_DEFAULT "${defaultPort}")" port "${defaultPort}" >&2 || continue
+            readValidPort "$(t PORT_PROMPT_DEFAULT "${name}" "${defaultPort}")" port "${defaultPort}" >&2 || continue
         else
-            readValidPort "$(t PORT_PROMPT_RANDOM)" port RANDOM 10000 30000 >&2 || continue
+            readValidPort "$(t PORT_PROMPT_RANDOM "${name}")" port RANDOM 10000 30000 >&2 || continue
         fi
         if portListed "${port}" "${taken}"; then
             echoContent yellow " ---> $(t PORT_TAKEN "${port}")" >&2
@@ -17222,13 +17224,13 @@ initRealityClientServersName() {
 initXrayRealityPort() {
     realityPort=$(pickInboundPort 7 "${xrayVLESSRealityPort}" "${XRAY_CONF_DIR}" "$@")
     allowPort "${realityPort}"
-    echoContent yellow "\n ---> 端口: ${realityPort}"
+    echoContent yellow "\n ---> $(getProtocolDisplayName 7) 端口: ${realityPort}"
 }
 # initXrayXHTTPort KEEP SKIP [EXTRA...] → 选 12 的对外端口写进 xHTTPort，同上
 initXrayXHTTPort() {
     xHTTPort=$(pickInboundPort 12 "${xrayVLESSRealityXHTTPort}" "${XRAY_CONF_DIR}" "$@")
     allowPort "${xHTTPort}"
-    echoContent yellow "\n ---> 端口: ${xHTTPort}"
+    echoContent yellow "\n ---> $(getProtocolDisplayName 12) 端口: ${xHTTPort}"
 }
 
 # reality管理

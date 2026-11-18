@@ -4623,6 +4623,8 @@ _ppRandom=$(pp_pick sb 1 '' '' '' '' '')
 assert_equals "yes" "$([[ ${_ppRandom:-0} -ge 10000 && ${_ppRandom:-0} -le 30000 ]] && echo yes || echo no)" "端口池：VLESS WS 不进池，空机器回车也是随机（${_ppRandom}）"
 assert_equals "2053" "$(pp_pick xray 7 '' '' '' '' '2053')" "端口池：手输的空闲端口照收"
 assert_equals "443" "$(LIVE_TCP=8443 pp_pick xray 7 '' '' '' '' '8443\n')" "端口池：手输撞上已占端口要重问，再回车取默认"
+assert_equals "PROMPT:PORT_PROMPT_DEFAULT VLESS+Reality+Vision 443|443" "$(pp_run 'exec 2>&1; t() { echo "$*"; }; readValidPort() { echo "PROMPT:$1"; port=$3; }; pickInboundPort 7 "" "${XRAY_CONF_DIR}" "" "" </dev/null' | grep -E '^(PROMPT:|[0-9]+$)' | paste -sd'|' -)" "端口提问：写明是哪个协议的端口（7）"
+assert_equals "PROMPT:PORT_PROMPT_RANDOM VLESS+WS[TLS]" "$(pp_run 'exec 2>&1; t() { echo "$*"; }; readValidPort() { echo "PROMPT:$1"; port=23456; }; pickInboundPort 1 "" "${SINGBOX_FRAGMENT_DIR}" "" "" </dev/null' | grep -m1 '^PROMPT:')" "端口提问：不进池的协议也写明协议名（1）"
 
 pp_xray 07_VLESS_vision_reality_inbounds.json '{"inbounds":[{"tag":"dokodemo-in-VLESSReality","port":443,"protocol":"dokodemo-door"},{"listen":"127.0.0.1","port":45987,"protocol":"vless"}]}'
 pp_xray 04_trojan_TCP_inbounds.json '{"inbounds":[{"listen":"127.0.0.1","port":8443,"protocol":"trojan"}]}'
@@ -5375,7 +5377,7 @@ assert_equals "allow 23456 udp" "$(run_isp "" 9 "")" "端口放行：TUIC 只放
 assert_equals "allow 23456|allow 23456 udp" "$(run_isp "" 10 "")" "端口放行：naive 两种都听，两种都放"
 assert_equals "allow 23456" "$(run_isp "")" "端口放行：订阅端口（nginx）只放 TCP"
 XH_FN=$(sed -n '/^initXrayXHTTPort() {/,/^}/p' install.sh)
-assert_equals "allow 23456" "$(env XH_FN="${XH_FN}" bash -c 'eval "${XH_FN}"; allowPort() { echo "allow $*"; }; pickInboundPort() { echo 23456; }; echoContent() { :; }; initXrayXHTTPort' 2>&1)" \
+assert_equals "allow 23456" "$(env XH_FN="${XH_FN}" bash -c 'eval "${XH_FN}"; allowPort() { echo "allow $*"; }; pickInboundPort() { echo 23456; }; echoContent() { :; }; getProtocolDisplayName() { :; }; initXrayXHTTPort' 2>&1)" \
     "端口放行：Xray 的 12（Reality 上的 XHTTP，TCP）不放 UDP"
 
 # --- 带域名安装中途退出：起步时在跑的服务按旧配置拉回来；写了新配置之后再退出就不管 ---
