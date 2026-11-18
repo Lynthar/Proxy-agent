@@ -1585,13 +1585,14 @@ debPackageInstalled() {
 }
 
 # allowPort PORT [TYPE] [SOURCE_IP] → 按在用的防火墙放行 PORT（a:b 是区间），TYPE 默认 tcp；SOURCE_IP 是单个地址，地址族在这里选，
-# 调用方不拼 /32（IPv6 拼上就成了整段网段）。放行失败 exit 1
+# 调用方不拼 /32（IPv6 拼上就成了整段网段）。放行失败 exit 1；没有一支接得住而入站默认拒绝时只提示，端口得用户自己放行
 allowPort() {
     local type=${2:-tcp}
-    local sourceIP=$3
+    local sourceIP=$3 handled=
     # 如果防火墙启动状态则添加相应的开放端口
     if debPackageInstalled ufw; then
         if ufw status | grep "Status: active" >/dev/null; then
+            handled=true
             # 不先 grep 查重（ufw 自己跳过已有的同一条）：443/tcp 是 8443/tcp 的子串，按子串查会把没放行的端口当成已放行
             if [[ -n "${sourceIP}" ]]; then
                 ufw allow from "${sourceIP}" to any port "$1" proto "${type}"
@@ -1603,6 +1604,7 @@ allowPort() {
     elif systemctl status firewalld 2>/dev/null | grep "active (running)" >/dev/null; then
         # 不写 --zone：加、查、检查都落在默认区。写死 public 的话，默认区不是 public 的机器上规则全落进没挂网卡的区，一条不生效
         local updateFirewalldStatus=
+        handled=true
         if [[ -n "${sourceIP}" ]]; then
             local family=ipv4
             [[ "${sourceIP}" == *:* ]] && family=ipv6
@@ -1627,16 +1629,34 @@ allowPort() {
         fi
     elif rc-update show 2>/dev/null | grep ufw >/dev/null; then
         if ufw status | grep "Status: active" >/dev/null; then
+            handled=true
             ufw allow "$1/${type}"
             checkUFWAllowPort "$1" "${type}"
         fi
     elif command -v nft >/dev/null 2>&1 && systemctl is-active --quiet nftables 2>/dev/null; then
         if nft list chain inet filter input >/dev/null 2>&1; then
+            handled=true
             allowPortNft "$1" "${type}" "${sourceIP}"
         fi
     elif debPackageInstalled netfilter-persistent && systemctl status netfilter-persistent 2>/dev/null | grep "active (exited)" >/dev/null; then
+        handled=true
         allowPortIptables "$1" "${type}" "${sourceIP}"
     fi
+    if [[ -z "${handled}" ]] && inboundDefaultDenies; then
+        echoContent yellow " ---> $(t FIREWALL_UNHANDLED "$1/${type}")"
+    fi
+}
+
+# inboundDefaultDenies → 0 = 入站默认拒绝：iptables 的 INPUT 策略是 DROP 或有一条无条件的 DROP / REJECT，
+# 或 nft 里挂在 input 钩子上的链策略是 drop。只给 allowPort 判断要不要提示用
+inboundDefaultDenies() {
+    local rules nl=$'\n' iptRe nftRe
+    iptRe="(^|${nl})(-P INPUT DROP|-A INPUT -j (DROP|REJECT))"
+    nftRe="hook input[^${nl}]*policy drop"
+    rules=$(iptables -S INPUT 2>/dev/null)
+    [[ "${rules}" =~ ${iptRe} ]] && return 0
+    rules=$(nft list ruleset 2>/dev/null)
+    [[ "${rules}" =~ ${nftRe} ]]
 }
 
 # allowPortNft PORT TYPE [SOURCE_IP] → 在 inet filter input 最前面插一条带 (Proxy-agent) 注释的放行，再写回开机加载的配置。
@@ -2935,10 +2955,15 @@ customPortFunction() {
 # listeningPorts tcp|udp → 本机此刻占着的端口，每行一个（TCP 只算 LISTEN，UDP 绑上就算）
 # 读 /proc/net：UDP 套接字没有 LISTEN 状态，按 lsof 的 LISTEN 过滤查不出来
 listeningPorts() {
-    local state= hex
+    local state= hex file files=()
     [[ "$1" == "tcp" ]] && state=0A
+    # 只读存在的表：内核关了 IPv6 就没有 tcp6 / udp6，awk 缺文件以非零退出，pipefail 下调用方接的管道跟着算失败、占着的端口判成空闲
+    for file in "/proc/net/$1" "/proc/net/${1}6"; do
+        [[ -r "${file}" ]] && files+=("${file}")
+    done
+    ((${#files[@]})) || return 0
     awk -v s="${state}" 'FNR > 1 && (s == "" || $4 == s) { split($2, a, ":"); print a[2] }' \
-        "/proc/net/$1" "/proc/net/${1}6" 2>/dev/null | sort -u | while read -r hex; do
+        "${files[@]}" | sort -u | while read -r hex; do
         printf '%d\n' "$((16#${hex}))"
     done
 }
@@ -3108,6 +3133,9 @@ installTLS() {
             if [[ ${installTLSCount} == "1" ]]; then
                 echoContent red " ---> TLS安装失败，请检查acme日志"
                 echoContent yellow "     日志文件: ${TLS_DIR}/acme.log"
+                if [[ -z "${dnsAPIType}" ]]; then
+                    echoContent yellow "     $(t TLS_FAIL_CHECK_PORT80)"
+                fi
                 exit 1
             fi
 

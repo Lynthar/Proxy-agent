@@ -5694,18 +5694,19 @@ assert_equals "9/9" "${_prog}" "sing-box 全量安装：最后一步是 9/9，�
 rm -rf "${AH_ROOT}"
 
 # --- 防火墙放行按「端口/协议」整条比对：443 是 8443 的子串，按子串查会把没放行的端口当成已放行 ---
-AP_FN=$(sed -n '/^allowPort() {/,/^}/p;/^debPackageInstalled() {/,/^}/p;/^allowPortIptables() {/,/^}/p;/^checkUFWAllowPort() {/,/^}/p' install.sh)
+AP_FN=$(sed -n '/^allowPort() {/,/^}/p;/^inboundDefaultDenies() {/,/^}/p;/^debPackageInstalled() {/,/^}/p;/^allowPortIptables() {/,/^}/p;/^checkUFWAllowPort() {/,/^}/p' install.sh)
 AP_DIR="${MOCK_ROOT}/allowport"
 # run_ap FIREWALL EXISTING PORT [TYPE] → 桩出 ufw 或 iptables（netfilter-persistent）防火墙，EXISTING 是已放行的「端口/协议」；
 # 打印 allowPort 真正下的放行命令与它的退出码。nftables 装着但没在跑（nft 在 PATH 里、服务 inactive）
 run_ap() {
     rm -rf "${AP_DIR}" && mkdir -p "${AP_DIR}/bin"
-    printf '#!/bin/sh\nexit 1\n' >"${AP_DIR}/bin/nft" && chmod +x "${AP_DIR}/bin/nft"
+    printf '#!/bin/sh\n[ "$1 $2" = "list ruleset" ] && [ -n "$AP_NFT" ] && { echo "$AP_NFT"; exit 0; }\nexit 1\n' >"${AP_DIR}/bin/nft" && chmod +x "${AP_DIR}/bin/nft"
     tr ' ' '\n' <<<"$2" | grep . >"${AP_DIR}/rules"
-    env AP_FN="${AP_FN}" AP_DIR="${AP_DIR}" AP_BIG="${AP_BIG:-}" FW="$1" PATH="${AP_DIR}/bin:${PATH}" bash -c '
+    env AP_FN="${AP_FN}" AP_DIR="${AP_DIR}" AP_BIG="${AP_BIG:-}" AP_INPUT="${AP_INPUT:-}" AP_NFT="${AP_NFT:-}" AP_UFW_OFF="${AP_UFW_OFF:-}" FW="$1" PATH="${AP_DIR}/bin:${PATH}" bash -c '
         set -o pipefail
         eval "${AP_FN}"
-        echoContent() { :; }
+        echoContent() { [[ "$1" != yellow ]] || echo "yellow:$2"; }
+        t() { echo "$*"; }
         netfilter-persistent() { :; }
         rc-update() { return 1; }
         dpkg-query() { [[ "$4" == "${FW/iptables/netfilter-persistent}" ]] && printf "install ok installed"; }
@@ -5716,6 +5717,7 @@ run_ap() {
         ufw() {
             if [[ "$1" == status ]]; then
                 # 状态行之后再分多次写一大段：读的一方要是命中就退出，写的一方会被 SIGPIPE 打断，pipefail 下整条管道算失败
+                [[ -z "${AP_UFW_OFF}" ]] || { echo "Status: inactive"; return 0; }
                 printf "Status: active\n%s\n" "$(sed "s/$/ ALLOW Anywhere/" "${AP_DIR}/rules")"
                 if [[ -n "${AP_BIG:-}" ]]; then for _ in $(seq 1 4000); do printf "%s\n" "60000:60100/udp ALLOW Anywhere # padding padding padding"; done; fi
             else
@@ -5729,6 +5731,7 @@ run_ap() {
             spec="$*"
             [[ "$1" == -C ]] && { grep -qx -- "${spec#-C }" "${AP_DIR}/${tool}" 2>/dev/null; return; }
             [[ "$1" == -L ]] && { sed "s/^/ACCEPT /" "${AP_DIR}/${tool}" 2>/dev/null; return 0; }
+            [[ "$1" == -S ]] && { printf "%s\n" "-P INPUT ACCEPT" ${AP_INPUT:+"${AP_INPUT}"}; return 0; }
             [[ "$1" == -I ]] && { echo "${tool} $*"; echo "${spec#-I }" >>"${AP_DIR}/${tool}"; }
             return 0
         }
@@ -5751,6 +5754,35 @@ assert_equals "0" "$(grep -hE 'dpkg -l *\|' install.sh lib/*.sh | grep -cvE '^[[
 assert_equals "iptables -I INPUT -p tcp --dport 443 -m comment --comment allow 443/tcp(Proxy-agent) -j ACCEPT|ip6tables -I INPUT -p tcp --dport 443 -m comment --comment allow 443/tcp(Proxy-agent) -j ACCEPT|rc=0" \
     "$(run_ap iptables "8443/tcp" 443)" "iptables：已放行 8443/tcp 时照样放行 443/tcp（nftables 装着没在跑，不走它）；IPv4、IPv6 各一条"
 assert_equals "rc=0" "$(run_ap iptables "443/tcp" 443)" "iptables：同一条规则已在就不重复加"
+# 没有一支接得住的机器：入站默认拒绝就提示这个端口没放行，默认放行就不出声
+assert_equals "rc=0" "$(run_ap none "" 80)" "认不出防火墙、入站默认放行：不提示"
+assert_equals "yellow: ---> FIREWALL_UNHANDLED 80/tcp|rc=0" "$(AP_INPUT="-P INPUT DROP" run_ap none "" 80)" "认不出防火墙、INPUT 策略 DROP：提示 80/tcp 没放行"
+assert_equals "yellow: ---> FIREWALL_UNHANDLED 443/udp|rc=0" "$(AP_INPUT="-A INPUT -j REJECT --reject-with icmp-host-prohibited" run_ap none "" 443 udp)" \
+    "认不出防火墙、INPUT 以无条件 REJECT 收尾：提示"
+assert_equals "rc=0" "$(AP_INPUT="-A INPUT -p tcp -m tcp --dport 25 -j DROP" run_ap none "" 80)" "认不出防火墙、只有带条件的 DROP：不提示"
+assert_equals "yellow: ---> FIREWALL_UNHANDLED 80/tcp|rc=0" "$(AP_NFT="		type filter hook input priority filter; policy drop;" run_ap none "" 80)" \
+    "认不出防火墙、nft 的 input 钩子链策略 drop：提示"
+assert_equals "yellow: ---> FIREWALL_UNHANDLED 80/tcp|rc=0" "$(AP_UFW_OFF=1 AP_NFT="		type filter hook input priority filter; policy drop;" run_ap ufw "" 80)" \
+    "装着 ufw 但没启用、nft 默认拒绝：提示"
+assert_equals "ufw allow 80/tcp|rc=0" "$(AP_INPUT="-P INPUT DROP" run_ap ufw "" 80)" "ufw 开着（它自己把 INPUT 设成 DROP）：照常放行，不提示"
+assert_equals "rc=0" "$(AP_INPUT="-P INPUT DROP" run_ap iptables "80/tcp" 80)" "netfilter-persistent 管着、INPUT 策略 DROP：不提示"
+
+# --- listeningPorts：内核关了 IPv6（没有 tcp6）时照样列出端口并返回 0，调用方接管道的占用检查才不会漏判 ---
+LP_DIR="${MOCK_ROOT}/procnet"
+mkdir -p "${LP_DIR}/both" "${LP_DIR}/v4only"
+printf '%s\n' 'sl local rem st' '0: 00000000:7CFF 00000000:0000 0A' | tee "${LP_DIR}/both/tcp" >"${LP_DIR}/v4only/tcp"
+printf '%s\n' 'sl local rem st' '0: 00000000000000000000000000000000:01BB 00000000000000000000000000000000:0000 0A' >"${LP_DIR}/both/tcp6"
+LP_FN=$(sed -n '/^listeningPorts() {/,/^}/p' install.sh)
+# run_lp DIR → 把函数里的 /proc/net 换成 DIR，在 pipefail 下跑：打印端口、函数退出码、接管道查 31999 的结果
+run_lp() {
+    env LP_FN="${LP_FN//\/proc\/net/$1}" bash -c 'set -o pipefail; eval "${LP_FN}"
+        out=$(listeningPorts tcp | paste -sd, -); listeningPorts tcp >/dev/null; rc=$?
+        if listeningPorts tcp | grep -x 31999 >/dev/null; then busy=busy; else busy=free; fi
+        echo "${out} rc=${rc} ${busy}"' 2>&1
+}
+assert_equals "443,31999 rc=0 busy" "$(run_lp "${LP_DIR}/both")" "listeningPorts：tcp 与 tcp6 都在，两张表的端口都列出"
+assert_equals "31999 rc=0 busy" "$(run_lp "${LP_DIR}/v4only")" "listeningPorts：没有 tcp6 时返回 0，占着的端口照样认得出"
+assert_equals " rc=0 free" "$(run_lp "${LP_DIR}/none")" "listeningPorts：两张表都没有时输出为空、返回 0"
 
 # --- 装了 ufw 的机器不装 iptables-persistent：两包互斥，apt -y 会卸掉 ufw，整机防火墙失效 ---
 BT_FN=$(sed -n '/^installBaseTools() {/,/^}/p;/^debPackageInstalled() {/,/^}/p' install.sh)
