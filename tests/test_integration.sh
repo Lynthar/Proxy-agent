@@ -3222,7 +3222,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试按账号选出口 ===${NC}"
 
-CA_FN_NAMES="singBoxProbeExitIP localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs writeXrayRouting localBlockInject chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic chainFileModify chainReadName chainReadFirstRule chainLinkBuild chainStoreExit chainFinishAdd addExternalNodeAsChain addChainToConfig validateChainName removeMultiChainOutbound xrayChainUnwire chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable multiChainRuleSetStatus legacyRoutingClear addXrayOutbound isValidIP isLocalBlockedIP ipv6Hex xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig chainRouteLazyResolve migrateChainRouteResolve chainExitDefs chainExitTarget chainExitIsSni chainWarpEnsureRegistered chainWarpFragment chainLocalExitFragment addLocalExitAsChain multiChainAddOne singBoxProbeEndpointIP migrateChainEntryState chainHopOutbounds chainReadManualExit addSingleChainOutbound chainIsExitMachine chainRefuseRemoteOnExit"
+CA_FN_NAMES="singBoxProbeExitIP localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs writeXrayRouting localBlockInject chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic chainFileModify chainReadName chainReadFirstRule chainLinkBuild chainStoreExit chainFinishAdd addExternalNodeAsChain addChainToConfig chainPickExit chainRestartSingBox chainReadPublicIP writeChainInbound chainExitCode chainRelayCode chainPrintHops chainInitEntryState validateChainName removeMultiChainOutbound xrayChainUnwire chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable multiChainRuleSetStatus legacyRoutingClear addXrayOutbound isValidIP isLocalBlockedIP ipv6Hex xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig chainRouteLazyResolve migrateChainRouteResolve chainExitDefs chainExitTarget chainExitIsSni chainWarpEnsureRegistered chainWarpFragment chainLocalExitFragment addLocalExitAsChain multiChainAddOne singBoxProbeEndpointIP migrateChainEntryState chainHopOutbounds chainReadManualExit addSingleChainOutbound chainIsExitMachine chainRefuseRemoteOnExit"
 CA_FNS=$(sed -n "$(for _f in ${CA_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_equals "$(wc -w <<<"${CA_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CA_FNS}")" "按账号选出口：每个函数都抽到了"
 CA_ROOT="${MOCK_ROOT}/chainacct.root"
@@ -3760,6 +3760,47 @@ _caRelaySetup=$(awk '/^setupChainRelay\(\) \{/{f=1; print; next} f && /^[a-zA-Z_
 _out=$(run_ca "${_caRelaySetup}"$'\n''planAction() { return 1; }; setupChainRelay; echo rc=$?' 2>&1 </dev/null)
 assert_contains "${_out}" "不能再当中继" "配中继（本机已有出口与规则）：拒绝并说明"
 assert_equals "rc=1" "$(tail -n 1 <<<"${_out}")" "配中继（本机已有出口与规则）：返回 1"
+# 出口与中继向导走到底：状态、入站片段、配置码都从同一份状态出来
+_caSetupFns=$(for _f in parseChainCode readValidPort chainRelayRouteJson _chainNormalizeBase64 _chainSplitHostPort _chainQueryGet _chainSS2022PasswordOK showExistingChainCode showRelayChainCode showChainStatus; do
+    sed -n "/^${_f}() {/,/^}/p" install.sh; done)
+_caSetupStubs='planAction() { return 1; }; ensureSingBoxInstalled() { :; }; getChainPublicIP() { echo "${CA_PUBIP}"; }; generateChainKey() { echo AAAAAAAAAAAAAAAAAAAAAA==; }
+    randomNum() { echo 23456; }; allowPort() { echo "allow $*" >>"${CA_CALLS}"; }; handleSingBox() { echo "singbox $1" >>"${CA_CALLS}"; }; sleep() { :; }
+    pgrep() { echo 4242; }; firewallDefaultDenies() { return 0; }'
+_caSetupRun() { run_ca "${_caExitSetup}"$'\n'"${_caRelaySetup}"$'\n'"${_caSetupFns}"$'\n'"${_caSetupStubs}"$'\n'"$1" 2>&1 | sed 's/\x1b\[[0-9;]*m//g'; }
+_caKeyB64=$(printf '%s' 'AAAAAAAAAAAAAAAAAAAAAA==' | base64 | tr -d '\n')
+ca_reset
+_out=$(printf '\n1\n1\n' | CA_PUBIP=203.0.113.5 _caSetupRun 'setupChainExit; echo rc=$?')
+_caExitCode="chain://ss2022@203.0.113.5:23456?key=${_caKeyB64}&method=2022-blake3-aes-128-gcm"
+assert_equals 'rc=0|{"role":"exit","ip":"203.0.113.5","port":23456,"method":"2022-blake3-aes-128-gcm","password":"AAAAAAAAAAAAAAAAAAAAAA==","allowed_ip":"","domain_strategy":"prefer_ipv4"}|chain_inbound 23456 AAAAAAAAAAAAAAAAAAAAAA==' \
+    "$(tail -n 1 <<<"${_out}")|$(jq -c '{role, ip, port, method, password, allowed_ip, domain_strategy}' "${CA_EXIT}")|$(jq -r '.inbounds[0] | "\(.tag) \(.listen_port) \(.password)"' "${CA_F}/chain_inbound.json")" \
+    "配出口（回车用随机端口、不限来源）：出口状态与入站片段对得上"
+assert_equals "1|routeConfig allow 23456 tcp merge singbox stop singbox start" "$(grep -cxF "${_caExitCode}" <<<"${_out}")|$(paste -sd ' ' - <"${CA_CALLS}")" \
+    "配出口：打出配置码；先写路由、放行端口，再合并并重启 sing-box"
+_out=$(CA_PUBIP=203.0.113.5 _caSetupRun 'singBoxDaemonRunning() { return 0; }; showChainStatus')
+assert_equals "1|1" "$(grep -c '允许连接: 所有IP' <<<"${_out}")|$(grep -cxF "${_caExitCode}" <<<"${_out}")" "出口的状态页：没限来源写成所有 IP，配置码与向导给的一样"
+ca_reset
+_out=$(printf '40001\n2\n198.51.100.9\n2\n' | CA_PUBIP=2001:db8::5 _caSetupRun 'setupChainExit; echo rc=$?')
+assert_equals 'rc=0|198.51.100.9 prefer_ipv6|1|1' \
+    "$(tail -n 1 <<<"${_out}")|$(jq -r '"\(.allowed_ip) \(.domain_strategy)"' "${CA_EXIT}")|$(grep -cF "chain://ss2022@[2001:db8::5]:40001?key=" <<<"${_out}")|$(grep -c 'allow 40001 tcp 198.51.100.9' "${CA_CALLS}")" \
+    "配出口（IPv6 公网地址、手填端口、限来源）：配置码里地址带方括号，防火墙只放行那个来源"
+ca_reset
+_out=$(printf '0\n' | CA_PUBIP=203.0.113.5 _caSetupRun 'setupChainExit; echo rc=$?')
+assert_equals "rc=1|no|" "$(tail -n 1 <<<"${_out}")|$([[ -e "${CA_EXIT}" ]] && echo yes || echo no)|$(cat "${CA_CALLS}")" "配出口（端口填 0）：拒绝，什么都没写"
+ca_reset
+_out=$(printf '%s\n\n' "${_caExitCode}" | CA_PUBIP=192.0.2.77 _caSetupRun 'setupChainRelay; echo rc=$?')
+_caRelayCode=$(grep -o 'chain://v2@[A-Za-z0-9+/=]*' <<<"${_out}" | head -n 1)
+assert_equals 'rc=0|relay 192.0.2.77 23456 2 203.0.113.5:23456|["192.0.2.77:23456","203.0.113.5:23456"]|no' \
+    "$(tail -n 1 <<<"${_out}")|$(jq -r '"\(.role) \(.ip) \(.port) \(.total_hops) \(.downstream_hops[0].ip):\(.downstream_hops[0].port)"' "${CA_RELAY}")|$(printf '%s' "${_caRelayCode#chain://v2@}" | base64 -d 2>/dev/null | jq -c 'map("\(.ip):\(.port)")')|$([[ -e "${CA_EXIT}" ]] && echo yes || echo no)" \
+    "配中继：中继状态记下游各跳，配置码是本机这一跳加下游"
+assert_equals "chain_inbound|chain_outbound|203.0.113.5|allow 23456 tcp merge singbox stop singbox start" \
+    "$(jq -r '.inbounds[0].tag' "${CA_F}/chain_inbound.json")|$(jq -r '.outbounds[-1].tag' "${CA_F}/chain_outbound.json")|$(jq -r '.route.rules[0].ip_cidr[0]' "${CA_F}/chain_route.json")|$(paste -sd ' ' - <"${CA_CALLS}")" \
+    "配中继：入站、出站、路由三个片段都写了，合并后重启 sing-box"
+assert_contains "${_out}" "→ 出口(203.0.113.5:23456) → 互联网" "配中继：收尾列出下游路径"
+_out=$(_caSetupRun 'singBoxDaemonRunning() { return 0; }; showChainStatus')
+assert_equals "1|1" "$(grep -c '→ 出口(203.0.113.5:23456) → 互联网' <<<"${_out}")|$(grep -cxF "${_caRelayCode}" <<<"${_out}")" "中继的状态页：列出下游，配置码与向导给的一样"
+_out=$(printf '%s\n\n' "${_caRelayCode}" | CA_PUBIP=192.0.2.88 _caSetupRun 'rm -f "${CHAIN_RELAY_INFO}" "${SINGBOX_FRAGMENT_DIR}"/chain_*.json; setupChainRelay; echo rc=$?')
+assert_equals "rc=0|3|192.0.2.77:23456,203.0.113.5:23456" "$(tail -n 1 <<<"${_out}")|$(jq -r '.total_hops' "${CA_RELAY}")|$(jq -r '[.downstream_hops[] | "\(.ip):\(.port)"] | join(",")' "${CA_RELAY}")" \
+    "配中继（下游本身是中继）：新格式的中继码能被再上一级读进去"
 ca_reset
 printf '%s\n' '{"role":"relay"}' >"${CA_RELAY}"
 _caEntrySetupNew=$(sed -n '/^setupMultiChainEntry() {/,/^}/p' install.sh)

@@ -621,7 +621,6 @@ if ! type t &>/dev/null; then
     MSG_CHAIN_RULES_TITLE="配置分流规则"
     MSG_CHAIN_CURRENT_CHAINS="当前出口"
     MSG_CHAIN_SELECT_CHAIN="选择要添加规则的出口编号"
-    MSG_CHAIN_INDEX="出口编号"
     MSG_CHAIN_INVALID_CHAIN="无效的选择"
     MSG_CHAIN_NO_CHAINS="没有可用的出口"
     MSG_CHAIN_NO_CONFIG="未找到链式与分流配置"
@@ -11207,43 +11206,16 @@ setupChainExit() {
         fi
     fi
 
-    # 生成随机端口 (10000-60000)
-    local chainPort
+    # 监听端口：回车用随机的 (10000-60000)
+    local chainPort chainKey publicIP chainMethod="2022-blake3-aes-128-gcm"
     chainPort=$(randomNum 10000 60000)
     echoContent yellow "\n$(t CHAIN_PORT_PROMPT "${chainPort}")"
-    read -r -p "$(t CHAIN_PORT):" inputPort
-    if [[ -n "${inputPort}" ]]; then
-        if [[ ! "${inputPort}" =~ ^[0-9]+$ ]] || [[ "${inputPort}" -lt 1 ]] || [[ "${inputPort}" -gt 65535 ]]; then
-            echoContent red " ---> $(t ERR_PORT_RANGE 1 65535)"
-            return 1
-        fi
-        chainPort=${inputPort}
-    fi
+    readValidPort "$(t CHAIN_PORT):" chainPort "${chainPort}" || return 1
 
-    # 生成密钥
-    local chainKey
     chainKey=$(generateChainKey)
     echoContent green "\n ---> $(t CHAIN_KEY_GENERATED)"
 
-    # 加密方法
-    local chainMethod="2022-blake3-aes-128-gcm"
-
-    # 获取公网IP
-    local publicIP
-    publicIP=$(getChainPublicIP)
-    if [[ -z "${publicIP}" ]]; then
-        echoContent yellow "\n$(t CHAIN_PUBLIC_IP_MANUAL)"
-        read -r -p "$(t CHAIN_PUBLIC_IP):" publicIP
-        if [[ -z "${publicIP}" ]]; then
-            echoContent red " ---> $(t CHAIN_IP_EMPTY)"
-            return 1
-        fi
-        if ! isValidIP "${publicIP}"; then
-            echoContent red " ---> $(t ERR_IP_INVALID)"
-            return 1
-        fi
-    fi
-    echoContent green " ---> $(t CHAIN_LOCAL_PUBLIC_IP): ${publicIP}"
+    chainReadPublicIP || return 1
 
     # 询问是否限制入口IP
     echoContent yellow "\n$(t CHAIN_EXIT_LIMIT_ASK)"
@@ -11289,55 +11261,15 @@ setupChainExit() {
     esac
     echoContent green " ---> $(t CHAIN_EXIT_STRATEGY_SET "${strategyDesc}")"
 
-    # 创建入站配置
-    # sniff/resolve 通过路由级 action 实现（见下方 chain_route.json），inbound 不再带 sniff 字段
-    cat <<EOF >${SINGBOX_FRAGMENT_DIR}/chain_inbound.json
-{
-    "inbounds": [
-        {
-            "type": "shadowsocks",
-            "tag": "chain_inbound",
-            "listen": "::",
-            "listen_port": ${chainPort},
-            "method": "${chainMethod}",
-            "password": "${chainKey}",
-            "multiplex": {
-                "enabled": true
-            }
-        }
-    ]
-}
-EOF
+    writeChainInbound "${chainPort}" "${chainMethod}" "${chainKey}" || return 1
+    # direct 出站不带 domain_strategy（1.14 起启动即失败），用户选的策略由 chain_route.json 里的 resolve 落地
+    singBoxConfigPath="${SINGBOX_FRAGMENT_DIR}/" ensureDirectOutbound || return 1
 
-    # 同步 direct 出站：不再写 domain_strategy（1.12 deprecated、1.14 移除）。
-    # 用户选的策略由 chain_route.json 的 action: resolve 路由级 action 落地。
-    cat <<EOF >${SINGBOX_FRAGMENT_DIR}/01_direct_outbound.json
-{
-    "outbounds": [
-        {
-            "type": "direct",
-            "tag": "direct"
-        }
-    ]
-}
-EOF
-
-    # 保存配置信息用于生成配置码（包含网络策略），原子写入避免半写入
-    # schema_version: 1 是当前字段集；未来字段调整请提升此版本号，并在读取端按版本兼容
+    # 出口状态：配置码、来源限制与网络策略都从这里读
     local __chainExitInfo
-    __chainExitInfo=$(cat <<EOF
-{
-    "schema_version": 1,
-    "role": "exit",
-    "ip": "${publicIP}",
-    "port": ${chainPort},
-    "method": "${chainMethod}",
-    "password": "${chainKey}",
-    "allowed_ip": "${allowedIP}",
-    "domain_strategy": "${domainStrategy}"
-}
-EOF
-)
+    __chainExitInfo=$(jq -n --arg ip "${publicIP}" --argjson port "${chainPort}" --arg method "${chainMethod}" --arg key "${chainKey}" \
+        --arg allowed "${allowedIP}" --arg strategy "${domainStrategy}" \
+        '{schema_version: 1, role: "exit", ip: $ip, port: $port, method: $method, password: $key, allowed_ip: $allowed, domain_strategy: $strategy}') || return 1
     writeChainInfoAtomic "${CHAIN_EXIT_INFO}" "${__chainExitInfo}" || return 1
     # 中继状态还在的话 chainExitSourceInject 不注入来源限制（分不清哪份是覆盖前留下的）
     rm -f "${CHAIN_RELAY_INFO}"
@@ -11356,7 +11288,53 @@ EOF
         echoContent green " ---> $(t CHAIN_PORT_OPENED "${chainPort}")"
     fi
 
-    # 出口只改了 sing-box，必须显式重启它：Xray 内核上 sing-box 是旁挂，reloadCore 只在装了 6 / 9 时才碰，出口会根本没起来
+    chainRestartSingBox || return 1
+
+    echoContent green "\n=============================================================="
+    echoContent green "$(t CHAIN_EXIT_SETUP_DONE)"
+    echoContent green "=============================================================="
+    echoContent yellow "\n$(t CHAIN_EXIT_CODE_TITLE)\n"
+    echoContent skyBlue "$(chainExitCode)"
+
+    echoContent yellow "\n$(t CHAIN_MANUAL_TITLE)"
+    echoContent green "  $(t CHAIN_IP_ADDRESS): ${publicIP}"
+    echoContent green "  $(t CHAIN_PORT): ${chainPort}"
+    echoContent green "  $(t CHAIN_KEY): ${chainKey}"
+    echoContent green "  $(t CHAIN_METHOD): ${chainMethod}"
+
+    echoContent yellow "\n$(t CHAIN_CODE_KEEP_SECRET)"
+}
+
+# chainReadPublicIP → 本机公网地址放进 publicIP：先自动取，取不到就问。没填或填的不是 IP 返回 1
+chainReadPublicIP() {
+    publicIP=$(getChainPublicIP)
+    if [[ -z "${publicIP}" ]]; then
+        echoContent yellow "\n$(t CHAIN_PUBLIC_IP_MANUAL)"
+        read -r -p "$(t CHAIN_PUBLIC_IP):" publicIP
+        if [[ -z "${publicIP}" ]]; then
+            echoContent red " ---> $(t CHAIN_IP_EMPTY)"
+            return 1
+        fi
+        if ! isValidIP "${publicIP}"; then
+            echoContent red " ---> $(t ERR_IP_INVALID)"
+            return 1
+        fi
+    fi
+    echoContent green " ---> $(t CHAIN_LOCAL_PUBLIC_IP): ${publicIP}"
+}
+
+# writeChainInbound PORT METHOD KEY → sing-box 片段 chain_inbound.json：出口与中继收链路流量的 SS2022 入站。
+# 入站不带 sniff：嗅探在 chain_route.json 里按路由动作做
+writeChainInbound() {
+    local content
+    content=$(jq -n --argjson port "$1" --arg method "$2" --arg key "$3" '{inbounds: [{type: "shadowsocks", tag: "chain_inbound",
+        listen: "::", listen_port: $port, method: $method, password: $key, multiplex: {enabled: true}}]}') || return 1
+    writeChainInfoAtomic "${SINGBOX_FRAGMENT_DIR}/chain_inbound.json" "${content}"
+}
+
+# chainRestartSingBox → 合并配置、重启 sing-box 并确认它起来了，没起来返回 1。链式向导只改 sing-box，必须显式重启它：
+# Xray 内核上 sing-box 是旁挂，reloadCore 只在装了 6 / 9 时才碰，不重启的话出口根本没起来
+chainRestartSingBox() {
     if ! singBoxMergeConfig; then
         return 1
     fi
@@ -11368,28 +11346,32 @@ EOF
         echoContent yellow "$(t CHAIN_SINGBOX_DEBUG) ${SINGBOX_BIN} run -c ${SINGBOX_MERGED_CONFIG}"
         return 1
     fi
+}
 
-    # 生成并显示配置码
-    echoContent green "\n=============================================================="
-    echoContent green "$(t CHAIN_EXIT_SETUP_DONE)"
-    echoContent green "=============================================================="
-    echoContent yellow "\n$(t CHAIN_EXIT_CODE_TITLE)\n"
+# chainExitCode → 按出口状态拼出口的配置码。IPv6 字面地址包成 [host]:port：入口按最后一个冒号拆主机与端口，不包会切错
+chainExitCode() {
+    jq -r '(if (.ip | test(":")) then "[" + .ip + "]" else .ip end) as $host
+        | "chain://ss2022@\($host):\(.port)?key=\(.password | @base64)&method=\(.method)"' "${CHAIN_EXIT_INFO}"
+}
 
-    # IPv6 字面地址必须用 [host]:port 包裹，否则入口的 host:port 拆分（依赖最后一个 `:`）会切错
-    local chainCode hostInCode="${publicIP}"
-    if [[ "${publicIP}" == *:* ]]; then
-        hostInCode="[${publicIP}]"
-    fi
-    chainCode="chain://ss2022@${hostInCode}:${chainPort}?key=$(echo -n "${chainKey}" | base64 | tr -d '\n')&method=${chainMethod}"
-    echoContent skyBlue "${chainCode}"
+# chainRelayCode → 按中继状态拼中继的配置码：本机这一跳在前，后面接下游各跳
+chainRelayCode() {
+    jq -r '([{ip, port, key: .password, method}] + .downstream_hops) | tojson | @base64 | "chain://v2@" + .' "${CHAIN_RELAY_INFO}"
+}
 
-    echoContent yellow "\n$(t CHAIN_MANUAL_TITLE)"
-    echoContent green "  $(t CHAIN_IP_ADDRESS): ${publicIP}"
-    echoContent green "  $(t CHAIN_PORT): ${chainPort}"
-    echoContent green "  $(t CHAIN_KEY): ${chainKey}"
-    echoContent green "  $(t CHAIN_METHOD): ${chainMethod}"
-
-    echoContent yellow "\n$(t CHAIN_CODE_KEEP_SECRET)"
+# chainPrintHops HOPS COLOR INDENT → 逐行打印一串下游节点：最后一个是出口，前面的是第几个中继
+chainPrintHops() {
+    local hops=$1 count i=0 addr
+    count=$(jq 'length' <<<"${hops}")
+    while ((i < count)); do
+        addr=$(jq -r --argjson i "${i}" '.[$i] | "\(.ip):\(.port)"' <<<"${hops}")
+        if ((i == count - 1)); then
+            echoContent "$2" "$3$(t CHAIN_PATH_EXIT "${addr}")"
+        else
+            echoContent "$2" "$3$(t CHAIN_PATH_RELAY "$((i + 1))" "${addr}")"
+        fi
+        ((i++))
+    done
 }
 
 # 显示现有配置码
@@ -11409,14 +11391,8 @@ showExistingChainCode() {
     echoContent green "$(t CHAIN_EXIT_EXISTING_TITLE)"
     echoContent green "=============================================================="
 
-    # IPv6 字面地址同样需要 [host]:port 包裹
-    local chainCode hostInCode="${publicIP}"
-    if [[ "${publicIP}" == *:* ]]; then
-        hostInCode="[${publicIP}]"
-    fi
-    chainCode="chain://ss2022@${hostInCode}:${port}?key=$(echo -n "${password}" | base64 | tr -d '\n')&method=${method}"
     echoContent yellow "\n$(t CHAIN_CODE):\n"
-    echoContent skyBlue "${chainCode}"
+    echoContent skyBlue "$(chainExitCode)"
 
     echoContent yellow "\n$(t CHAIN_MANUAL_INFO)"
     echoContent green "  $(t CHAIN_IP_ADDRESS): ${publicIP}"
@@ -11782,63 +11758,16 @@ setupChainRelay() {
     # 步骤2: 配置本机监听
     echoContent yellow "\n$(t CHAIN_RELAY_STEP_2)"
 
-    # 生成随机端口 (10000-60000)
-    local chainPort
+    local chainPort chainKey publicIP chainMethod="2022-blake3-aes-128-gcm"
     chainPort=$(randomNum 10000 60000)
     echoContent yellow "$(t CHAIN_PORT_PROMPT "${chainPort}")"
-    read -r -p "$(t CHAIN_PORT):" inputPort
-    if [[ -n "${inputPort}" ]]; then
-        if [[ ! "${inputPort}" =~ ^[0-9]+$ ]] || [[ "${inputPort}" -lt 1 ]] || [[ "${inputPort}" -gt 65535 ]]; then
-            echoContent red " ---> $(t ERR_PORT_RANGE 1 65535)"
-            return 1
-        fi
-        chainPort=${inputPort}
-    fi
-
-    # 生成密钥
-    local chainKey
+    readValidPort "$(t CHAIN_PORT):" chainPort "${chainPort}" || return 1
     chainKey=$(generateChainKey)
-    local chainMethod="2022-blake3-aes-128-gcm"
-
-    # 获取公网IP
-    local publicIP
-    publicIP=$(getChainPublicIP)
-    if [[ -z "${publicIP}" ]]; then
-        echoContent yellow "\n$(t CHAIN_PUBLIC_IP_MANUAL)"
-        read -r -p "$(t CHAIN_PUBLIC_IP):" publicIP
-        if [[ -z "${publicIP}" ]]; then
-            echoContent red " ---> $(t CHAIN_IP_EMPTY)"
-            return 1
-        fi
-        if ! isValidIP "${publicIP}"; then
-            echoContent red " ---> $(t ERR_IP_INVALID)"
-            return 1
-        fi
-    fi
-    echoContent green " ---> $(t CHAIN_LOCAL_PUBLIC_IP): ${publicIP}"
+    chainReadPublicIP || return 1
 
     # 步骤3: 生成配置
     echoContent yellow "\n$(t CHAIN_RELAY_STEP_3)"
-
-    # 创建入站配置 (接收上游流量)
-    # sniff 通过路由级 action 实现（见 chain_route.json）
-    cat <<EOF >${SINGBOX_FRAGMENT_DIR}/chain_inbound.json
-{
-    "inbounds": [
-        {
-            "type": "shadowsocks",
-            "tag": "chain_inbound",
-            "listen": "::",
-            "listen_port": ${chainPort},
-            "method": "${chainMethod}",
-            "password": "${chainKey}",
-            "multiplex": {
-                "enabled": true
-            }
-        }
-    ]
-}
-EOF
+    writeChainInbound "${chainPort}" "${chainMethod}" "${chainKey}" || return 1
 
     local chainOutboundJson
     if ! chainOutboundJson=$(chainHopOutbounds "${chainHops}") || [[ -z "${chainOutboundJson}" ]]; then
@@ -11853,28 +11782,11 @@ EOF
         return 1
     fi
 
-    # 构建新的 hops 数组 (本机 + 下游所有节点)
-    local newHops
-    newHops=$(jq -n --arg ip "${publicIP}" --argjson port "${chainPort}" \
-        --arg key "${chainKey}" --arg method "${chainMethod}" \
-        --argjson downstream "${chainHops}" \
-        '[{ip: $ip, port: $port, key: $key, method: $method}] + $downstream')
-
-    # 保存配置信息（原子写入）
+    # 中继状态：配置码按它拼（本机这一跳加下游各跳）
     local __chainRelayInfo
-    __chainRelayInfo=$(cat <<EOF
-{
-    "schema_version": 1,
-    "role": "relay",
-    "ip": "${publicIP}",
-    "port": ${chainPort},
-    "method": "${chainMethod}",
-    "password": "${chainKey}",
-    "downstream_hops": ${chainHops},
-    "total_hops": $((chainHopCount + 1))
-}
-EOF
-)
+    __chainRelayInfo=$(jq -n --arg ip "${publicIP}" --argjson port "${chainPort}" --arg method "${chainMethod}" --arg key "${chainKey}" \
+        --argjson hops "${chainHops}" --argjson total "$((chainHopCount + 1))" \
+        '{schema_version: 1, role: "relay", ip: $ip, port: $port, method: $method, password: $key, downstream_hops: $hops, total_hops: $total}') || return 1
     writeChainInfoAtomic "${CHAIN_RELAY_INFO}" "${__chainRelayInfo}" || return 1
     rm -f "${CHAIN_EXIT_INFO}"
 
@@ -11882,46 +11794,16 @@ EOF
     allowPort "${chainPort}" "tcp"
     echoContent green " ---> $(t CHAIN_PORT_OPENED "${chainPort}")"
 
-    # 合并配置并重启
-    if ! singBoxMergeConfig; then
-        return 1
-    fi
-    handleSingBox stop
-    handleSingBox start
-
-    # 验证启动成功
-    sleep 1
-    if ! singBoxDaemonRunning; then
-        echoContent red " ---> $(t CHAIN_SINGBOX_START_FAILED)"
-        echoContent yellow "$(t CHAIN_SINGBOX_DEBUG) ${SINGBOX_BIN} run -c ${SINGBOX_MERGED_CONFIG}"
-        return 1
-    fi
-
-    # 生成 V2 配置码
-    local newChainCode
-    newChainCode="chain://v2@$(echo -n "${newHops}" | base64 | tr -d '\n')"
+    chainRestartSingBox || return 1
 
     echoContent green "\n=============================================================="
     echoContent green "$(t CHAIN_RELAY_SETUP_DONE)"
     echoContent green "=============================================================="
     echoContent yellow "\n$(t CHAIN_RELAY_PATH "${chainHopCount}" "$((chainHopCount + 1))")"
     echoContent green "  $(t CHAIN_RELAY_PATH_SELF "${publicIP}:${chainPort}")"
+    chainPrintHops "${chainHops}" green "        "
 
-    i=1
-    while [[ $i -le ${chainHopCount} ]]; do
-        local hopIP hopPort
-        hopIP=$(echo "${chainHops}" | jq -r ".[$((i-1))].ip")
-        hopPort=$(echo "${chainHops}" | jq -r ".[$((i-1))].port")
-        if [[ $i -eq ${chainHopCount} ]]; then
-            echoContent green "        $(t CHAIN_PATH_EXIT "${hopIP}:${hopPort}")"
-        else
-            echoContent green "        $(t CHAIN_PATH_RELAY "${i}" "${hopIP}:${hopPort}")"
-        fi
-        ((i++))
-    done
-
-    echoContent yellow "\n$(t CHAIN_RELAY_CODE_TITLE)\n"
-    echoContent skyBlue "${newChainCode}"
+    showRelayChainCode
 
     echoContent yellow "\n$(t CHAIN_CODE_KEEP_SECRET)"
 }
@@ -12181,91 +12063,48 @@ showChainStatus() {
         chainIsExitMachine || return 0
     fi
 
-    local role=""
-    local exitIP=""
-    local exitPort=""
-    local status=""
-
-    # 检查是否为出口节点
+    # 出口与中继的框只差一行：出口写允许的来源，中继写总跳数并列出下游
+    local infoFile role extraLabel extraValue status
     if [[ -f "${CHAIN_EXIT_INFO}" ]]; then
+        infoFile="${CHAIN_EXIT_INFO}"
         role="$(t CHAIN_ROLE_EXIT)"
-        local ip port
-        ip=$(jq -r '.ip' ${CHAIN_EXIT_INFO})
-        port=$(jq -r '.port' ${CHAIN_EXIT_INFO})
-        local allowedIP
-        allowedIP=$(jq -r '.allowed_ip' ${CHAIN_EXIT_INFO})
-
-        # 检查 sing-box 是否运行
-        if singBoxDaemonRunning; then
-            status="✅ $(t CHAIN_STATUS_RUNNING)"
-        else
-            status="❌ $(t CHAIN_STATUS_STOPPED)"
-        fi
-
-        echoContent green "╔══════════════════════════════════════════════════════════════╗"
-        echoContent green "║  $(t CHAIN_STATUS_BOX_CHAIN)"
-        echoContent green "╠══════════════════════════════════════════════════════════════╣"
-        echoContent yellow "  $(t CHAIN_STATUS_ROLE): ${role}"
-        echoContent yellow "  $(t CHAIN_STATUS_LISTEN_PORT): ${port}"
-        echoContent yellow "  $(t CHAIN_STATUS_LOCAL_IP): ${ip}"
-        echoContent yellow "  $(t CHAIN_STATUS_ALLOWED): ${allowedIP:-$(t CHAIN_STATUS_ALLOW_ALL)}"
-        echoContent yellow "  $(t CHAIN_STATUS_RUN): ${status}"
-        echoContent green "╚══════════════════════════════════════════════════════════════╝"
-
-        # 显示配置码
-        showExistingChainCode
-
-    # 检查是否为中继节点
+        extraLabel="$(t CHAIN_STATUS_ALLOWED)"
+        extraValue=$(jq -r '.allowed_ip // ""' "${infoFile}")
+        extraValue=${extraValue:-$(t CHAIN_STATUS_ALLOW_ALL)}
     elif [[ -f "${CHAIN_RELAY_INFO}" ]]; then
+        infoFile="${CHAIN_RELAY_INFO}"
         role="$(t CHAIN_ROLE_RELAY)"
-        local ip port totalHops
-        ip=$(jq -r '.ip' ${CHAIN_RELAY_INFO})
-        port=$(jq -r '.port' ${CHAIN_RELAY_INFO})
-        totalHops=$(jq -r '.total_hops' ${CHAIN_RELAY_INFO})
-        local downstreamHops
-        downstreamHops=$(jq -r '.downstream_hops' ${CHAIN_RELAY_INFO})
-
-        # 检查 sing-box 是否运行
-        if singBoxDaemonRunning; then
-            status="✅ $(t CHAIN_STATUS_RUNNING)"
-        else
-            status="❌ $(t CHAIN_STATUS_STOPPED)"
-        fi
-
-        echoContent green "╔══════════════════════════════════════════════════════════════╗"
-        echoContent green "║  $(t CHAIN_STATUS_BOX_CHAIN)"
-        echoContent green "╠══════════════════════════════════════════════════════════════╣"
-        echoContent yellow "  $(t CHAIN_STATUS_ROLE): ${role}"
-        echoContent yellow "  $(t CHAIN_STATUS_LISTEN_PORT): ${port}"
-        echoContent yellow "  $(t CHAIN_STATUS_LOCAL_IP): ${ip}"
-        echoContent yellow "  $(t CHAIN_STATUS_TOTAL_HOPS): ${totalHops}"
-        echoContent yellow "  $(t CHAIN_STATUS_RUN): ${status}"
-        echoContent green "╠══════════════════════════════════════════════════════════════╣"
-        echoContent yellow "  $(t CHAIN_STATUS_DOWNSTREAM):"
-
-        local i=0
-        local hopCount
-        hopCount=$(echo "${downstreamHops}" | jq 'length')
-        while [[ $i -lt ${hopCount} ]]; do
-            local hopIP hopPort
-            hopIP=$(echo "${downstreamHops}" | jq -r ".[$i].ip")
-            hopPort=$(echo "${downstreamHops}" | jq -r ".[$i].port")
-            if [[ $i -eq $((hopCount - 1)) ]]; then
-                echoContent yellow "    $(t CHAIN_PATH_EXIT "${hopIP}:${hopPort}")"
-            else
-                echoContent yellow "    $(t CHAIN_PATH_RELAY "$((i+1))" "${hopIP}:${hopPort}")"
-            fi
-            ((i++))
-        done
-        echoContent green "╚══════════════════════════════════════════════════════════════╝"
-
-        # 显示配置码
-        showRelayChainCode
-
-    # 检查是否为入口节点
+        extraLabel="$(t CHAIN_STATUS_TOTAL_HOPS)"
+        extraValue=$(jq -r '.total_hops' "${infoFile}")
     else
         echoContent yellow "$(t CHAIN_NOTHING_CONFIGURED)"
         echoContent yellow "$(t CHAIN_USE_WIZARD "$(t CHAIN_MENU_WIZARD)")"
+        return 0
+    fi
+    status="❌ $(t CHAIN_STATUS_STOPPED)"
+    if singBoxDaemonRunning; then
+        status="✅ $(t CHAIN_STATUS_RUNNING)"
+    fi
+
+    echoContent green "╔══════════════════════════════════════════════════════════════╗"
+    echoContent green "║  $(t CHAIN_STATUS_BOX_CHAIN)"
+    echoContent green "╠══════════════════════════════════════════════════════════════╣"
+    echoContent yellow "  $(t CHAIN_STATUS_ROLE): ${role}"
+    echoContent yellow "  $(t CHAIN_STATUS_LISTEN_PORT): $(jq -r '.port' "${infoFile}")"
+    echoContent yellow "  $(t CHAIN_STATUS_LOCAL_IP): $(jq -r '.ip' "${infoFile}")"
+    echoContent yellow "  ${extraLabel}: ${extraValue}"
+    echoContent yellow "  $(t CHAIN_STATUS_RUN): ${status}"
+    if [[ "${infoFile}" == "${CHAIN_RELAY_INFO}" ]]; then
+        echoContent green "╠══════════════════════════════════════════════════════════════╣"
+        echoContent yellow "  $(t CHAIN_STATUS_DOWNSTREAM):"
+        chainPrintHops "$(jq -c '.downstream_hops' "${infoFile}")" yellow "    "
+    fi
+    echoContent green "╚══════════════════════════════════════════════════════════════╝"
+
+    if [[ "${infoFile}" == "${CHAIN_EXIT_INFO}" ]]; then
+        showExistingChainCode
+    else
+        showRelayChainCode
     fi
 }
 
@@ -12276,25 +12115,8 @@ showRelayChainCode() {
         return 1
     fi
 
-    local publicIP port method password downstreamHops
-    publicIP=$(jq -r '.ip' ${CHAIN_RELAY_INFO})
-    port=$(jq -r '.port' ${CHAIN_RELAY_INFO})
-    method=$(jq -r '.method' ${CHAIN_RELAY_INFO})
-    password=$(jq -r '.password' ${CHAIN_RELAY_INFO})
-    downstreamHops=$(jq -r '.downstream_hops' ${CHAIN_RELAY_INFO})
-
-    # 构建新的 hops 数组 (本机 + 下游所有节点)
-    local newHops
-    newHops=$(jq -n --arg ip "${publicIP}" --argjson port "${port}" \
-        --arg key "${password}" --arg method "${method}" \
-        --argjson downstream "${downstreamHops}" \
-        '[{ip: $ip, port: $port, key: $key, method: $method}] + $downstream')
-
-    local chainCode
-    chainCode="chain://v2@$(echo -n "${newHops}" | base64 | tr -d '\n')"
-
     echoContent yellow "\n$(t CHAIN_RELAY_CODE_TITLE)\n"
-    echoContent skyBlue "${chainCode}"
+    echoContent skyBlue "$(chainRelayCode)"
 }
 
 # singBoxProbeExitIP OUTBOUNDS_JSON TAG → 经 TAG 这个出站真取一次出口 IP，打到 stdout；取不到返回 1。
@@ -12483,12 +12305,6 @@ updateChainKey() {
             echoContent yellow " ---> $(t CANCELLED)"
             return 0
         fi
-        local port method
-        port=$(jq -r '.port' ${CHAIN_EXIT_INFO})
-        method=$(jq -r '.method' ${CHAIN_EXIT_INFO})
-        local publicIP
-        publicIP=$(jq -r '.ip' ${CHAIN_EXIT_INFO})
-
         # 生成新密钥
         local newKey
         newKey=$(generateChainKey)
@@ -12503,12 +12319,7 @@ updateChainKey() {
 
         echoContent green " ---> $(t CHAIN_KEY_UPDATED)"
         echoContent yellow "\n$(t CHAIN_NEW_CODE):\n"
-        local chainCode hostInCode="${publicIP}"
-        if [[ "${publicIP}" == *:* ]]; then
-            hostInCode="[${publicIP}]"
-        fi
-        chainCode="chain://ss2022@${hostInCode}:${port}?key=$(echo -n "${newKey}" | base64 | tr -d '\n')&method=${method}"
-        echoContent skyBlue "${chainCode}"
+        echoContent skyBlue "$(chainExitCode)"
         echoContent yellow "\n$(t CHAIN_UPDATE_ENTRY_HINT)"
 
     elif [[ -f "${CHAIN_RELAY_INFO}" ]]; then
@@ -12983,27 +12794,20 @@ setupMultiChainEntry() {
     esac
 }
 
+# chainInitEntryState → 写一份空的入口状态：没有出口、没有规则、默认直连
+chainInitEntryState() {
+    local state
+    state=$(jq -n --argjson bridge "${CHAIN_BRIDGE_PORT}" '{schema_version: 1, role: "entry", mode: "multi_chain", chains: [], rules: [],
+        default_chain: "direct", bridge_port: $bridge, has_xray: false}') || return 1
+    writeChainInfoAtomic "${CHAIN_MULTI_INFO}" "${state}"
+}
+
 # 交互式逐个添加链路
 setupMultiChainInteractive() {
     local chainCount=0
     local continueAdding="y"
 
-    # 初始化多链路信息文件（原子写入）
-    local __chainMultiInit
-    __chainMultiInit=$(cat <<'EOF'
-{
-    "schema_version": 1,
-    "role": "entry",
-    "mode": "multi_chain",
-    "chains": [],
-    "rules": [],
-    "default_chain": "direct",
-    "bridge_port": 31111,
-    "has_xray": false
-}
-EOF
-)
-    writeChainInfoAtomic "${CHAIN_MULTI_INFO}" "${__chainMultiInit}" || return 1
+    chainInitEntryState || return 1
 
     while isYesInput "${continueAdding}"; do
         ((chainCount++))
@@ -13046,22 +12850,7 @@ setupMultiChainBatch() {
     echoContent yellow "$(t CHAIN_BATCH_HINT)"
     echoContent yellow "$(t CHAIN_BATCH_END_HINT)\n"
 
-    # 初始化多链路信息文件（原子写入）
-    local __chainMultiInit
-    __chainMultiInit=$(cat <<'EOF'
-{
-    "schema_version": 1,
-    "role": "entry",
-    "mode": "multi_chain",
-    "chains": [],
-    "rules": [],
-    "default_chain": "direct",
-    "bridge_port": 31111,
-    "has_xray": false
-}
-EOF
-)
-    writeChainInfoAtomic "${CHAIN_MULTI_INFO}" "${__chainMultiInit}" || return 1
+    chainInitEntryState || return 1
 
     local chainIndex=0
     local line
@@ -13656,6 +13445,26 @@ chainRuleLabel() {
     esac
 }
 
+# chainPickExit PROMPT → 列出出口表（名字、目标、默认标记）让用户按序号选一个，名字放进 chainPicked；序号不对返回 1
+chainPickExit() {
+    local infoFile="${CHAIN_MULTI_INFO}" defaultChain index=1 entry name pick
+    defaultChain=$(jq -r '.default_chain' "${infoFile}")
+    while IFS= read -r entry; do
+        name=$(jq -r '.name' <<<"${entry}")
+        echoContent yellow "  ${index}. ${name} ($(chainExitTarget "${entry}"))$([[ "${name}" == "${defaultChain}" ]] && echo " $(t CHAIN_STATUS_DEFAULT_MARK)")"
+        ((index++))
+    done < <(jq -c '.chains[]' "${infoFile}")
+    read -r -p "$1" pick
+    chainPicked=""
+    if [[ "${pick}" =~ ^[1-9][0-9]{0,3}$ ]]; then
+        chainPicked=$(jq -r --argjson i "${pick}" '.chains[$i - 1].name // empty' "${infoFile}")
+    fi
+    if [[ -z "${chainPicked}" ]]; then
+        echoContent red " ---> $(t CHAIN_INVALID_CHAIN)"
+        return 1
+    fi
+}
+
 # 配置多链路分流规则
 configureMultiChainRules() {
     local infoFile="${CHAIN_MULTI_INFO}"
@@ -13678,23 +13487,9 @@ configureMultiChainRules() {
     echoContent red "=============================================================="
     echoContent yellow "$(t CHAIN_CURRENT_CHAINS):\n"
 
-    local index=1
-    while IFS= read -r chain; do
-        echoContent yellow "  ${index}. ${chain} ($(chainExitTarget "$(jq -c --arg n "${chain}" 'first(.chains[] | select(.name == $n))' "${infoFile}")"))"
-        ((index++))
-    done <<< "${chains}"
-
-    echoContent yellow "\n$(t CHAIN_SELECT_CHAIN):"
-    read -r -p "$(t CHAIN_INDEX): " chainIndex
-
-    # 获取选中的链路名称
-    local selectedChain
-    selectedChain=$(echo "${chains}" | sed -n "${chainIndex}p")
-
-    if [[ -z "${selectedChain}" ]]; then
-        echoContent red " ---> $(t CHAIN_INVALID_CHAIN)"
-        return 1
-    fi
+    local chainPicked
+    chainPickExit "$(t CHAIN_SELECT_CHAIN): " || return 1
+    local selectedChain="${chainPicked}"
 
     echoContent yellow "\n$(t CHAIN_RULE_FOR) [${selectedChain}] $(t CHAIN_RULE_TYPE_SELECT):\n"
     chainReadRule || return 1
@@ -13704,24 +13499,8 @@ configureMultiChainRules() {
     fi
 
     case "${chainRuleType}" in
-        preset)
-            addRuleToConfig "preset" "${chainRuleValue}" "${selectedChain}"
-            echoContent green " ---> $(t CHAIN_RULE_ADDED): $(chainRuleLabel "${chainRuleType}" "${chainRuleValue}") → ${selectedChain}"
-            ;;
-        custom)
-            addRuleToConfig "custom" "${chainRuleValue}" "${selectedChain}"
-            echoContent green " ---> $(t CHAIN_CUSTOM_RULE_ADDED) → ${selectedChain}"
-            ;;
-        ip_cidr)
-            addRuleToConfig "ip_cidr" "${chainRuleValue}" "${selectedChain}"
-            echoContent green " ---> $(t CHAIN_IP_CIDR_RULE_ADDED) → ${selectedChain}"
-            ;;
-        geoip)
-            addRuleToConfig "geoip" "${chainRuleValue}" "${selectedChain}"
-            echoContent green " ---> $(t CHAIN_GEOIP_RULE_ADDED): $(chainRuleLabel "${chainRuleType}" "${chainRuleValue}") → ${selectedChain}"
-            ;;
-        geosite)
-            addRuleToConfig "geosite" "${chainRuleValue}" "${selectedChain}"
+        preset | custom | ip_cidr | geoip | geosite)
+            addRuleToConfig "${chainRuleType}" "${chainRuleValue}" "${selectedChain}" || return 1
             echoContent green " ---> $(t CHAIN_RULE_ADDED): $(chainRuleLabel "${chainRuleType}" "${chainRuleValue}") → ${selectedChain}"
             ;;
         default)
@@ -13819,24 +13598,9 @@ finalizeMultiChainConfig() {
         configureXrayForMultiChain "${chainBridgePort}" || return 1
     fi
 
-    # 合并配置
     echoContent yellow "$(t CHAIN_MERGING_SINGBOX)"
-    if ! singBoxMergeConfig; then
-        return 1
-    fi
-
-    # 启动 sing-box
     echoContent yellow "$(t CHAIN_STARTING_SINGBOX)"
-    handleSingBox stop
-    handleSingBox start
-
-    # 验证 sing-box 启动成功
-    sleep 1
-    if ! singBoxDaemonRunning; then
-        echoContent red " ---> $(t CHAIN_SINGBOX_START_FAILED)"
-        echoContent yellow "$(t CHAIN_SINGBOX_DEBUG) ${SINGBOX_BIN} run -c ${SINGBOX_MERGED_CONFIG}"
-        return 1
-    fi
+    chainRestartSingBox || return 1
     echoContent green " ---> $(t CHAIN_SINGBOX_START_SUCCESS)"
 
     # 显示配置摘要
@@ -14342,37 +14106,17 @@ removeMultiChainOutbound() {
 
     echoContent yellow "\n$(t CHAIN_CURRENT_CHAINS):\n"
 
-    local chains
-    chains=$(jq -r '.chains[].name' "${infoFile}")
-    local chainCount defaultChain
+    local chainCount
     chainCount=$(jq '.chains | length' "${infoFile}")
-    defaultChain=$(jq -r '.default_chain' "${infoFile}")
 
     if [[ ${chainCount} -lt 1 ]]; then
         echoContent red " ---> $(t CHAIN_REMOVE_NONE)"
         return 1
     fi
 
-    local index=1
-    while IFS= read -r chain; do
-        local defaultMark=""
-        if [[ "${chain}" == "${defaultChain}" ]]; then
-            defaultMark=" $(t CHAIN_STATUS_DEFAULT_MARK)"
-        fi
-
-        echoContent yellow "  ${index}. ${chain} ($(chainExitTarget "$(jq -c --arg n "${chain}" 'first(.chains[] | select(.name == $n))' "${infoFile}")"))${defaultMark}"
-        ((index++))
-    done <<< "${chains}"
-
-    read -r -p "$(t CHAIN_REMOVE_PICK): " deleteIndex
-
-    local selectedChain
-    selectedChain=$(echo "${chains}" | sed -n "${deleteIndex}p")
-
-    if [[ -z "${selectedChain}" ]]; then
-        echoContent red " ---> $(t CHAIN_INVALID_CHAIN)"
-        return 1
-    fi
+    local chainPicked
+    chainPickExit "$(t CHAIN_REMOVE_PICK): " || return 1
+    local selectedChain="${chainPicked}"
 
     # 还有账号指定它为出口就不删：删了它们只能改走别的出口或直连，那是车主没选过的去向
     local mappedAccounts
