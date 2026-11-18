@@ -893,7 +893,7 @@ verifyCertKeyMatch() {
     local certHash keyHash
 
     # 检测密钥类型（ECC或RSA）
-    if openssl x509 -in "${certFile}" -noout -text 2>/dev/null | grep -q "EC Public Key\|id-ecPublicKey"; then
+    if openssl x509 -in "${certFile}" -noout -text 2>/dev/null | grep "EC Public Key\|id-ecPublicKey" >/dev/null; then
         # ECC证书
         certHash=$(openssl x509 -in "${certFile}" -pubkey -noout 2>/dev/null | openssl ec -pubin -outform DER 2>/dev/null | sha256sum | awk '{print $1}')
         keyHash=$(openssl ec -in "${keyFile}" -pubout -outform DER 2>/dev/null | sha256sum | awk '{print $1}')
@@ -1236,7 +1236,7 @@ readNginxSubscribe() {
                 subscribePort=
                 subscribeType=
             else
-                if ! grep "listen" "${nginxConfigPath}subscribe.conf" | grep -q "ssl"; then
+                if ! grep "listen" "${nginxConfigPath}subscribe.conf" | grep "ssl" >/dev/null; then
                     subscribeType="http"
                 fi
             fi
@@ -1578,14 +1578,20 @@ check1Panel() {
         fi
     fi
 }
+# debPackageInstalled NAME → 0=这个 deb 包装着。不经管道问 dpkg-query：pipefail 开着，`dpkg -l | grep -q` 里 grep 一命中就退出，
+# dpkg 还在写就被 SIGPIPE 打断，整条管道算失败，装着也判成没装，后面的放行端口就静默跳过了
+debPackageInstalled() {
+    [[ "$(dpkg-query -W -f '${Status}' "$1" 2>/dev/null)" == *"ok installed" ]]
+}
+
 # allowPort PORT [TYPE] [SOURCE_IP] → 按在用的防火墙放行 PORT（a:b 是区间），TYPE 默认 tcp；SOURCE_IP 是单个地址，地址族在这里选，
 # 调用方不拼 /32（IPv6 拼上就成了整段网段）。放行失败 exit 1
 allowPort() {
     local type=${2:-tcp}
     local sourceIP=$3
     # 如果防火墙启动状态则添加相应的开放端口
-    if command -v dpkg >/dev/null 2>&1 && dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+ufw"; then
-        if ufw status | grep -q "Status: active"; then
+    if debPackageInstalled ufw; then
+        if ufw status | grep "Status: active" >/dev/null; then
             # 不先 grep 查重（ufw 自己跳过已有的同一条）：443/tcp 是 8443/tcp 的子串，按子串查会把没放行的端口当成已放行
             if [[ -n "${sourceIP}" ]]; then
                 ufw allow from "${sourceIP}" to any port "$1" proto "${type}"
@@ -1594,7 +1600,7 @@ allowPort() {
             fi
             checkUFWAllowPort "$1" "${type}"
         fi
-    elif systemctl status firewalld 2>/dev/null | grep -q "active (running)"; then
+    elif systemctl status firewalld 2>/dev/null | grep "active (running)" >/dev/null; then
         # 不写 --zone：加、查、检查都落在默认区。写死 public 的话，默认区不是 public 的机器上规则全落进没挂网卡的区，一条不生效
         local updateFirewalldStatus=
         if [[ -n "${sourceIP}" ]]; then
@@ -1606,7 +1612,7 @@ allowPort() {
                 firewall-cmd --permanent --add-rich-rule="${richRule}"
                 checkFirewalldAllowPort "$1"
             fi
-        elif ! firewall-cmd --list-ports --permanent | grep -qw "$1/${type}"; then
+        elif ! firewall-cmd --list-ports --permanent | grep -w "$1/${type}" >/dev/null; then
             updateFirewalldStatus=true
             local firewallPort=$1
             if echo "${firewallPort}" | grep -q ":"; then
@@ -1619,8 +1625,8 @@ allowPort() {
         if echo "${updateFirewalldStatus}" | grep -q "true"; then
             firewall-cmd --reload
         fi
-    elif rc-update show 2>/dev/null | grep -q ufw; then
-        if ufw status | grep -q "Status: active"; then
+    elif rc-update show 2>/dev/null | grep ufw >/dev/null; then
+        if ufw status | grep "Status: active" >/dev/null; then
             ufw allow "$1/${type}"
             checkUFWAllowPort "$1" "${type}"
         fi
@@ -1628,7 +1634,7 @@ allowPort() {
         if nft list chain inet filter input >/dev/null 2>&1; then
             allowPortNft "$1" "${type}" "${sourceIP}"
         fi
-    elif command -v dpkg >/dev/null 2>&1 && dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+netfilter-persistent" && systemctl status netfilter-persistent 2>/dev/null | grep -q "active (exited)"; then
+    elif debPackageInstalled netfilter-persistent && systemctl status netfilter-persistent 2>/dev/null | grep "active (exited)" >/dev/null; then
         allowPortIptables "$1" "${type}" "${sourceIP}"
     fi
 }
@@ -1722,18 +1728,18 @@ allowPortIptables() {
 # firewallDefaultDenies → 0 = allowPort 会用的那个防火墙默认拒绝入站，按源放行才真把端口藏起来；
 # 没有在用的防火墙、默认放行、firewalld 默认区 target 是 ACCEPT（trusted）都返回 1。判断顺序必须与 allowPort 一致
 firewallDefaultDenies() {
-    if command -v dpkg >/dev/null 2>&1 && dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+ufw"; then
-        ufw status verbose 2>/dev/null | grep -q "Status: active" || return 1
-        ufw status verbose | grep -qE "Default: (deny|reject) \(incoming\)"
-    elif systemctl status firewalld 2>/dev/null | grep -q "active (running)"; then
+    if debPackageInstalled ufw; then
+        ufw status verbose 2>/dev/null | grep "Status: active" >/dev/null || return 1
+        ufw status verbose | grep -E "Default: (deny|reject) \(incoming\)" >/dev/null
+    elif systemctl status firewalld 2>/dev/null | grep "active (running)" >/dev/null; then
         [[ "$(firewall-cmd --permanent --zone="$(firewall-cmd --get-default-zone)" --get-target 2>/dev/null)" != "ACCEPT" ]]
-    elif rc-update show 2>/dev/null | grep -q ufw; then
-        ufw status verbose 2>/dev/null | grep -q "Status: active" || return 1
-        ufw status verbose | grep -qE "Default: (deny|reject) \(incoming\)"
+    elif rc-update show 2>/dev/null | grep ufw >/dev/null; then
+        ufw status verbose 2>/dev/null | grep "Status: active" >/dev/null || return 1
+        ufw status verbose | grep -E "Default: (deny|reject) \(incoming\)" >/dev/null
     elif command -v nft >/dev/null 2>&1 && systemctl is-active --quiet nftables 2>/dev/null; then
-        nft list chain inet filter input 2>/dev/null | grep -q "policy drop"
-    elif command -v dpkg >/dev/null 2>&1 && dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+netfilter-persistent" && systemctl status netfilter-persistent 2>/dev/null | grep -q "active (exited)"; then
-        iptables -S INPUT 2>/dev/null | head -n 1 | grep -qE "^-P INPUT (DROP|REJECT)"
+        nft list chain inet filter input 2>/dev/null | grep "policy drop" >/dev/null
+    elif debPackageInstalled netfilter-persistent && systemctl status netfilter-persistent 2>/dev/null | grep "active (exited)" >/dev/null; then
+        [[ "$(iptables -S INPUT 2>/dev/null)" =~ ^-P\ INPUT\ (DROP|REJECT) ]]
     else
         return 1
     fi
@@ -1753,7 +1759,7 @@ checkUFWAllowPort() {
 
 # 输出firewall-cmd端口开放状态
 checkFirewalldAllowPort() {
-    if firewall-cmd --list-ports --permanent | grep -q "$1" || firewall-cmd --list-rich-rules --permanent | grep -q "$1"; then
+    if firewall-cmd --list-ports --permanent | grep "$1" >/dev/null || firewall-cmd --list-rich-rules --permanent | grep "$1" >/dev/null; then
         echoContent green " ---> $1端口开放成功"
     else
         echoContent red " ---> $1端口开放失败"
@@ -2192,7 +2198,7 @@ installBaseTools() {
     fi
 
     # 装了 ufw 就不装 iptables-persistent：两包互斥，apt -y 会直接卸掉 ufw，用户的默认拒绝随之失效、整机全开
-    if ! command -v netfilter-persistent >/dev/null 2>&1 && ! dpkg-query -W -f '${Status}' ufw 2>/dev/null | grep -q 'ok installed'; then
+    if ! command -v netfilter-persistent >/dev/null 2>&1 && ! debPackageInstalled ufw; then
         if [[ "${release}" == "debian" || "${release}" == "ubuntu" ]]; then
             echoContent green " ---> $(t INSTALL_TOOL "iptables")"
             echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | debconf-set-selections
@@ -3108,7 +3114,7 @@ installTLS() {
             installTLSCount=1
             echo
 
-            if tail -n 10 ${TLS_DIR}/acme.log | grep -q "Could not validate email address as valid"; then
+            if tail -n 10 ${TLS_DIR}/acme.log | grep "Could not validate email address as valid" >/dev/null; then
                 echoContent red " ---> 邮箱无法通过SSL厂商验证，请重新输入"
                 echo
                 customSSLEmail "validate email"
@@ -3341,7 +3347,7 @@ ensureAlpineProcps() {
         return 0
     fi
     alpineProcpsTried=true
-    if ! pgrep -V 2>&1 | grep -q procps; then
+    if ! pgrep -V 2>&1 | grep procps >/dev/null; then
         echoContent green " ---> 安装procps"
         ${installType} procps >/dev/null 2>&1
         hash -r
@@ -5050,7 +5056,7 @@ shadowTlsInbound() {
 
 # destSupportsTls13 HOST → 0=目标在 443 上能谈 TLS 1.3。strict 模式只认这种目标，别的目标客户端全部握手失败、也不报错
 destSupportsTls13() {
-    echo | timeout 8 openssl s_client -connect "$1:443" -servername "$1" -tls1_3 2>/dev/null | grep -q 'TLSv1.3'
+    echo | timeout 8 openssl s_client -connect "$1:443" -servername "$1" -tls1_3 2>/dev/null | grep 'TLSv1.3' >/dev/null
 }
 
 # initShadowTlsConfig → 定 16 的握手目标与内层服务端密钥，写进 shadowTlsTarget、shadowTlsServerKey。重装时沿用，已发出去的节点才不失效
@@ -5116,7 +5122,7 @@ addPortHopping() {
         exit 1
     fi
     if [[ "${release}" == "centos" ]]; then
-        if ! systemctl status firewalld 2>/dev/null | grep -q "active (running)"; then
+        if ! systemctl status firewalld 2>/dev/null | grep "active (running)" >/dev/null; then
             echoContent red " ---> 未启动firewalld防火墙，无法设置端口跳跃。"
             exit 1
         fi
@@ -5155,7 +5161,7 @@ addPortHopping() {
             echoContent green "\n端口范围: ${portHoppingRange}\n"
             if [[ "${release}" == "centos" ]]; then
                 addFirewalldPortHopping "${portStart}" "${portEnd}" "${targetPort}"
-                if ! firewall-cmd --list-forward-ports | grep -q "toport=${targetPort}"; then
+                if ! firewall-cmd --list-forward-ports | grep "toport=${targetPort}" >/dev/null; then
                     echoContent red " ---> 端口跳跃添加失败"
                     exit 1
                 fi
@@ -5164,7 +5170,7 @@ addPortHopping() {
                 local hopRule=(PREROUTING -p udp --dport "${portStart}:${portEnd}" -m addrtype --dst-type LOCAL
                     -m comment --comment "Proxy-agent_${type}_portHopping" -j REDIRECT --to-ports "${targetPort}")
                 iptables -t nat -A "${hopRule[@]}"
-                if ! iptables-save | grep -q "Proxy-agent_${type}_portHopping"; then
+                if ! iptables-save | grep "Proxy-agent_${type}_portHopping" >/dev/null; then
                     echoContent red " ---> 端口跳跃添加失败"
                     exit 1
                 fi
@@ -5200,7 +5206,7 @@ readPortHopping() {
             { s = $1 + 0; e = (NF > 1 ? $2 : $1) + 0; if (min == "" || s < min) min = s; if (max == "" || e > max) max = e }
             END { if (min != "") print min, max }')
     else
-        if iptables-save | grep -q "Proxy-agent_${type}_portHopping"; then
+        if iptables-save | grep "Proxy-agent_${type}_portHopping" >/dev/null; then
             local portHopping=
             portHopping=$(iptables-save | grep "Proxy-agent_${type}_portHopping" | cut -d " " -f 8)
 
@@ -5274,7 +5280,8 @@ removeProtocolPortHopping() {
 # 端口跳跃菜单
 portHoppingMenu() {
     local type=$1
-    # 不能用 find | grep -q：grep 命中即退出，find 吃到 SIGPIPE，pipefail 下整条管道算失败，有 iptables 也常被判成没有
+    # 不能用 find | grep -q：grep 命中即退出，find 吃到 SIGPIPE，pipefail 下整条管道算失败，有 iptables 也常被判成没有。
+    # 全文件同理：外部命令的输出接 grep 一律写 `grep … >/dev/null`（读完才退出），`grep -q` 只跟在 echo / printf 后面
     if ! command -v iptables >/dev/null 2>&1; then
         echoContent red " ---> 无法识别iptables工具，无法使用端口跳跃，退出安装"
         exit 1
@@ -7942,7 +7949,7 @@ removeOwnFirewallRules() {
 # reportUninstallLeftovers → 列出还留在系统里、脚本不敢删的东西（可能是用户自己的配置），只列确实存在的
 reportUninstallLeftovers() {
     local lines=()
-    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep "Status: active" >/dev/null; then
         lines+=("$(t UNINSTALL_LEFT_UFW)")
     fi
     if systemctl is-active --quiet firewalld 2>/dev/null; then
@@ -7951,10 +7958,10 @@ reportUninstallLeftovers() {
             lines+=("$(t UNINSTALL_LEFT_MASQUERADE)")
         fi
     fi
-    if command -v semanage >/dev/null 2>&1 && semanage fcontext -l -C 2>/dev/null | grep -qE 'xray|sing-box'; then
+    if command -v semanage >/dev/null 2>&1 && semanage fcontext -l -C 2>/dev/null | grep -E 'xray|sing-box' >/dev/null; then
         lines+=("$(t UNINSTALL_LEFT_SELINUX)")
     fi
-    if command -v getsebool >/dev/null 2>&1 && getsebool httpd_can_network_relay 2>/dev/null | grep -q -- '--> on'; then
+    if command -v getsebool >/dev/null 2>&1 && getsebool httpd_can_network_relay 2>/dev/null | grep -- '--> on' >/dev/null; then
         lines+=("$(t UNINSTALL_LEFT_SELINUX_RELAY)")
     fi
     if [[ -f /etc/apt/sources.list.d/nginx.list || -f /etc/yum.repos.d/nginx.repo ]]; then
@@ -8144,7 +8151,7 @@ customUserEmail() {
 # xrayConfigTest → 用 `xray run -test` 校验整个 confdir（无副作用），不过时打出前 20 行原因并返回 1；没装 Xray 或它不认 -test 时放行
 xrayConfigTest() {
     local out
-    [[ -f "${XRAY_BIN}" ]] && ${XRAY_BIN} help run 2>/dev/null | grep -q -- "-test" || return 0
+    [[ -f "${XRAY_BIN}" ]] && ${XRAY_BIN} help run 2>/dev/null | grep -- "-test" >/dev/null || return 0
     out=$(${XRAY_BIN} run -test -confdir "${XRAY_CONF_DIR}" 2>&1) && return 0
     head -20 <<<"${out}"
     return 1
@@ -16144,7 +16151,7 @@ ensureSubscribeConfCurrent() {
     port=$(subscribeConfPort)
     [[ -n "${port}" ]] || return 0
     serverNameValue=$(grep -m1 'server_name' "${conf}" | awk '{print $2}' | tr -d ';')
-    if grep -m1 "listen" "${conf}" | grep -q " ssl" && [[ ! -f "${TLS_DIR}/${serverNameValue}.crt" || ! -f "${TLS_DIR}/${serverNameValue}.key" ]]; then
+    if grep -m1 "listen" "${conf}" | grep " ssl" >/dev/null && [[ ! -f "${TLS_DIR}/${serverNameValue}.crt" || ! -f "${TLS_DIR}/${serverNameValue}.key" ]]; then
         return 0
     fi
     grep -q '# carpool-page-begin' "${conf}" && hadPage=1
@@ -16207,7 +16214,7 @@ refreshSubscribeAfterInstall() {
     readInstallProtocolType
     readConfigHostPathUUID
     serverNameValue=${domain:-${currentHost}}
-    if ! grep -m1 "listen" "${nginxConfigPath}subscribe.conf" | grep -q " ssl" \
+    if ! grep -m1 "listen" "${nginxConfigPath}subscribe.conf" | grep " ssl" >/dev/null \
         || [[ -n "${serverNameValue}" && -f "${TLS_DIR}/${serverNameValue}.crt" && -f "${TLS_DIR}/${serverNameValue}.key" ]]; then
         grep -q '# carpool-page-begin' "${nginxConfigPath}subscribe.conf" && hadPage=1
         renderSubscribeConf "${port}" "${serverNameValue}"
@@ -17045,7 +17052,7 @@ initRealityMldsa65() {
         echoContent yellow "     预期路径: ${XRAY_BIN}"
         exit 1
     fi
-    if ${XRAY_BIN} tls ping "${realityServerName}:${realityDomainPort}" 2>/dev/null | grep -q "X25519MLKEM768"; then
+    if ${XRAY_BIN} tls ping "${realityServerName}:${realityDomainPort}" 2>/dev/null | grep "X25519MLKEM768" >/dev/null; then
         length=$(${XRAY_BIN} tls ping "${realityServerName}:${realityDomainPort}" | grep "Certificate chain's total length:" | awk '{print $5}' | head -1)
 
         if [ "$length" -gt 3500 ]; then
@@ -17073,7 +17080,7 @@ initRealityMldsa65() {
 }
 # realityDestBehindCloudflare DOMAIN → 0 = 目标挂在 Cloudflare 代理后面：Reality 会把 VPS 变成别人的免费中转。探测失败（无网/超时）按没挂
 realityDestBehindCloudflare() {
-    curl -s --connect-timeout 5 --max-time 10 "https://$1/cdn-cgi/trace" 2>/dev/null | grep -q "visit_scheme=https"
+    curl -s --connect-timeout 5 --max-time 10 "https://$1/cdn-cgi/trace" 2>/dev/null | grep "visit_scheme=https" >/dev/null
 }
 
 # checkRealityDest DOMAIN → 用户自己输的目标挂在 Cloudflare 代理后面时要二次确认，答否返回 1（由调用方重问）
@@ -17119,7 +17126,7 @@ initRealityClientServersName() {
             realityServerName=
             realityDomainPort=
         else
-            if ! tr ',' '\n' <<<"$(realityDestList)" | grep -qxF "${realityServerName}"; then
+            if ! tr ',' '\n' <<<"$(realityDestList)" | grep -xF "${realityServerName}" >/dev/null; then
                 echoContent yellow " ---> $(t REALITY_DEST_NOT_IN_LIST "${realityServerName}")"
             fi
             read -r -p "读取到上次安装设置的Reality域名，是否使用？[y/n]:" realityServerNameStatus
@@ -17597,7 +17604,7 @@ _doctorCheckCore() {
         _doctorRow "$(t DOCTOR_CHECK_CORE_VERSION)" skip "binary missing"
     fi
 
-    if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files "${serviceName}.service" 2>/dev/null | grep -q "^${serviceName}\.service"; then
+    if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files "${serviceName}.service" 2>/dev/null | grep "^${serviceName}\.service" >/dev/null; then
         if systemctl is-active --quiet "${serviceName}.service" 2>/dev/null; then
             _doctorRow "$(t DOCTOR_CHECK_SERVICE)" pass "systemd: ${serviceName}.service active"
         else
@@ -17937,7 +17944,7 @@ _doctorCheckFirewall() {
         else
             detected="firewalld: not running"
         fi
-    elif command -v nft >/dev/null 2>&1 && nft list ruleset 2>/dev/null | grep -q .; then
+    elif command -v nft >/dev/null 2>&1 && [[ -n "$(nft list ruleset 2>/dev/null)" ]]; then
         detected="nftables: ruleset present"
     elif command -v iptables >/dev/null 2>&1; then
         local rules
@@ -18384,7 +18391,7 @@ topoSshTarget() {
 # 端口在桥端口段里，两边内核早就按端口封了，成员写成解析到 127.0.0.1 的域名也连不到，开页面不用重启内核
 topoServe() {
     local page=$1 dir=$2 handler pid sshPart
-    if listeningPorts tcp | grep -qx "${TOPO_PAGE_PORT}"; then
+    if listeningPorts tcp | grep -x "${TOPO_PAGE_PORT}" >/dev/null; then
         echoContent red " ---> $(t TOPO_PORT_BUSY "${TOPO_PAGE_PORT}")"
         return 1
     fi

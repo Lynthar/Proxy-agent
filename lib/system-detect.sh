@@ -170,7 +170,7 @@ checkWgetShowProgress() {
         wgetShowProgressStatus=""
         return
     fi
-    if wget --help 2>&1 | grep -q "show-progress"; then
+    if wget --help 2>&1 | grep "show-progress" >/dev/null; then
         wgetShowProgressStatus="--show-progress"
     else
         wgetShowProgressStatus=""

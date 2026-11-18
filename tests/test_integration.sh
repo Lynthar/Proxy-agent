@@ -5694,7 +5694,7 @@ assert_equals "9/9" "${_prog}" "sing-box 全量安装：最后一步是 9/9，�
 rm -rf "${AH_ROOT}"
 
 # --- 防火墙放行按「端口/协议」整条比对：443 是 8443 的子串，按子串查会把没放行的端口当成已放行 ---
-AP_FN=$(sed -n '/^allowPort() {/,/^}/p;/^allowPortIptables() {/,/^}/p;/^checkUFWAllowPort() {/,/^}/p' install.sh)
+AP_FN=$(sed -n '/^allowPort() {/,/^}/p;/^debPackageInstalled() {/,/^}/p;/^allowPortIptables() {/,/^}/p;/^checkUFWAllowPort() {/,/^}/p' install.sh)
 AP_DIR="${MOCK_ROOT}/allowport"
 # run_ap FIREWALL EXISTING PORT [TYPE] → 桩出 ufw 或 iptables（netfilter-persistent）防火墙，EXISTING 是已放行的「端口/协议」；
 # 打印 allowPort 真正下的放行命令与它的退出码。nftables 装着但没在跑（nft 在 PATH 里、服务 inactive）
@@ -5702,25 +5702,22 @@ run_ap() {
     rm -rf "${AP_DIR}" && mkdir -p "${AP_DIR}/bin"
     printf '#!/bin/sh\nexit 1\n' >"${AP_DIR}/bin/nft" && chmod +x "${AP_DIR}/bin/nft"
     tr ' ' '\n' <<<"$2" | grep . >"${AP_DIR}/rules"
-    env AP_FN="${AP_FN}" AP_DIR="${AP_DIR}" FW="$1" PATH="${AP_DIR}/bin:${PATH}" bash -c '
+    env AP_FN="${AP_FN}" AP_DIR="${AP_DIR}" AP_BIG="${AP_BIG:-}" FW="$1" PATH="${AP_DIR}/bin:${PATH}" bash -c '
         set -o pipefail
         eval "${AP_FN}"
         echoContent() { :; }
         netfilter-persistent() { :; }
         rc-update() { return 1; }
-        if [[ "${FW}" == ufw ]]; then
-            dpkg() { echo "ii  ufw  0.36.2"; }
-        else
-            dpkg() { echo "ii  netfilter-persistent  1.0.20"; }
-        fi
+        dpkg-query() { [[ "$4" == "${FW/iptables/netfilter-persistent}" ]] && printf "install ok installed"; }
         systemctl() {
             [[ "$1 $2" == "status netfilter-persistent" ]] && { echo "Active: active (exited)"; return 0; }
             return 3
         }
         ufw() {
             if [[ "$1" == status ]]; then
-                # 一次写完：分两次写时 grep -q 可能先退出，SIGPIPE 被忽略的环境里 sed 的报错会混进断言
+                # 状态行之后再分多次写一大段：读的一方要是命中就退出，写的一方会被 SIGPIPE 打断，pipefail 下整条管道算失败
                 printf "Status: active\n%s\n" "$(sed "s/$/ ALLOW Anywhere/" "${AP_DIR}/rules")"
+                if [[ -n "${AP_BIG:-}" ]]; then for _ in $(seq 1 4000); do printf "%s\n" "60000:60100/udp ALLOW Anywhere # padding padding padding"; done; fi
             else
                 echo "ufw $*"
                 echo "$2" >>"${AP_DIR}/rules"
@@ -5746,12 +5743,17 @@ run_ap() {
 assert_equals "ufw allow 443/tcp|rc=0" "$(run_ap ufw "8443/tcp" 443)" "ufw：已放行 8443/tcp 时照样放行 443/tcp"
 assert_equals "ufw allow 443/udp|rc=0" "$(run_ap ufw "8443/udp 443/tcp" 443 udp)" "ufw：已放行 8443/udp 与 443/tcp 时照样放行 443/udp"
 assert_equals "ufw allow 30000:30020/udp|rc=0" "$(run_ap ufw "" 30000:30020 udp)" "ufw：端口区间照常放行"
+assert_equals "ufw allow 80/tcp|rc=0" "$(AP_BIG=1 run_ap ufw "" 80)" "ufw：状态输出很长时照样认出它开着并放行（管道下游不能命中就退出）"
+# 全文件的守门：外部命令的输出接 grep -q，命中即退出会让上游吃 SIGPIPE，pipefail 下把「有」判成「没有」
+assert_equals "" "$(grep -nE '\| *grep -q' install.sh lib/*.sh | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' | grep -vE '(echo|printf) [^|]*(\| *(sed|awk) [^|]*)?\| *grep -q' | grep -vE '\|\| grep -q' | cut -c1-120)" \
+    "管道守门：grep -q 只跟在 echo / printf 后面，外部命令的输出用 grep … >/dev/null"
+assert_equals "0" "$(grep -hE 'dpkg -l *\|' install.sh lib/*.sh | grep -cvE '^[[:space:]]*#')" "管道守门：查 deb 包装没装不经 dpkg -l 的管道"
 assert_equals "iptables -I INPUT -p tcp --dport 443 -m comment --comment allow 443/tcp(Proxy-agent) -j ACCEPT|ip6tables -I INPUT -p tcp --dport 443 -m comment --comment allow 443/tcp(Proxy-agent) -j ACCEPT|rc=0" \
     "$(run_ap iptables "8443/tcp" 443)" "iptables：已放行 8443/tcp 时照样放行 443/tcp（nftables 装着没在跑，不走它）；IPv4、IPv6 各一条"
 assert_equals "rc=0" "$(run_ap iptables "443/tcp" 443)" "iptables：同一条规则已在就不重复加"
 
 # --- 装了 ufw 的机器不装 iptables-persistent：两包互斥，apt -y 会卸掉 ufw，整机防火墙失效 ---
-BT_FN=$(sed -n '/^installBaseTools() {/,/^}/p' install.sh)
+BT_FN=$(sed -n '/^installBaseTools() {/,/^}/p;/^debPackageInstalled() {/,/^}/p' install.sh)
 # run_bt UFW_STATE → 桩掉包管理器（记下要装的包）与 dpkg-query（ufw 的安装状态），打印 installBaseTools 要装的包里跟防火墙有关的
 run_bt() {
     rm -rf "${AP_DIR}" && mkdir -p "${AP_DIR}"
@@ -6091,7 +6093,7 @@ assert_equals "iptables -I INPUT -p tcp -s 1.2.3.4 --dport 9443 -m comment --com
     "$(run_fw "" 0 'allowPortIptables 9443 tcp 1.2.3.4')" "iptables：IPv4 来源只进 iptables"
 FW_AP_FN=$(sed -n '/^allowPort() {/,/^}/p' install.sh)
 assert_contains "$(env FW_AP_FN="${FW_AP_FN}" bash -c 'eval "${FW_AP_FN}"
-    systemctl() { echo "active (running)"; }; dpkg() { :; }; checkFirewalldAllowPort() { :; }
+    systemctl() { echo "active (running)"; }; debPackageInstalled() { return 1; }; checkFirewalldAllowPort() { :; }
     firewall-cmd() { echo "firewall-cmd $*"; [[ "$1" != --permanent || "$2" != --query-rich-rule=* ]]; }
     allowPort 9443 tcp 2001:db8::1' 2>&1)" 'rule family="ipv6" source address="2001:db8::1" port protocol="tcp" port="9443" accept' \
     "firewalld：IPv6 来源的 rich rule 写 family=ipv6（写死 ipv4 加不上）"
