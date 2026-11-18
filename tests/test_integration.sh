@@ -1027,15 +1027,15 @@ assert_equals "chain_outbound|-" "$(hops_json '[{"ip":"192.0.2.1","port":1001,"k
     "chainHopOutbounds：单跳直接就是 chain_outbound"
 assert_equals "1" "$(hops_json '[]' >/dev/null 2>&1; [[ $? -ne 0 ]] && echo 1 || echo 0)" "chainHopOutbounds：没有跳时失败"
 
-# 加链路时设为默认：路由只看 default_chain，列表与状态按 is_default 标 [默认]，旧的不清就两条都标
+# 加链路时设为默认：默认出口只记在 default_chain 一处，路由、列表与状态页都从它读
 ADD_CHAIN_DIR=$(mktemp -d)
 mkdir -p "${ADD_CHAIN_DIR}/sing-box/conf/config"
 printf '%s\n' '{"default_chain":"old","chains":[{"name":"old","is_default":true}]}' >"${ADD_CHAIN_DIR}/sing-box/conf/chain_multi_info.json"
-env PROXY_AGENT_DIR="${ADD_CHAIN_DIR}" ADD_FN="${HOPS_FN}"$'\n'"$(sed -n '/^addChainToConfig() {/,/^}/p' install.sh)" bash -c '
-    source lib/constants.sh; eval "${ADD_FN}"
+env PROXY_AGENT_DIR="${ADD_CHAIN_DIR}" ADD_FN="${HOPS_FN}"$'\n'"$(sed -n '/^addChainToConfig() {/,/^}/p; /^chainFileModify() {/,/^}/p; /^writeChainInfoAtomic() {/,/^}/p' install.sh)" bash -c '
+    source lib/constants.sh; source lib/json-utils.sh; eval "${ADD_FN}"
     addChainToConfig new 192.0.2.9 1009 k 2022-blake3-aes-128-gcm true' >/dev/null 2>&1
-assert_equals "new|new" "$(jq -r '[.default_chain, ([.chains[] | select(.is_default) | .name] | join(","))] | join("|")' "${ADD_CHAIN_DIR}/sing-box/conf/chain_multi_info.json")" \
-    "addChainToConfig：设为默认时旧默认链路不再标默认"
+assert_equals "new|old,new" "$(jq -r '[.default_chain, ([.chains[].name] | join(","))] | join("|")' "${ADD_CHAIN_DIR}/sing-box/conf/chain_multi_info.json")" \
+    "addChainToConfig：设为默认时 default_chain 改指新出口，原有出口留着"
 rm -rf "${ADD_CHAIN_DIR}"
 
 HTTP_CLIENT_FN=$(sed -n '/^ensureSingBoxHttpClient() {/,/^}/p' install.sh)
@@ -3222,7 +3222,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试按账号选出口 ===${NC}"
 
-CA_FN_NAMES="singBoxProbeExitIP localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs writeXrayRouting localBlockInject chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic validateChainName removeMultiChainOutbound xrayChainUnwire chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable multiChainRuleSetStatus legacyRoutingClear addXrayOutbound isValidIP isLocalBlockedIP ipv6Hex xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig chainRouteLazyResolve migrateChainRouteResolve chainExitDefs chainExitTarget chainExitIsSni chainWarpEnsureRegistered chainWarpFragment chainLocalExitFragment addLocalExitAsChain multiChainAddOne singBoxProbeEndpointIP migrateChainEntryState chainHopOutbounds chainReadManualExit addSingleChainOutbound chainIsExitMachine chainRefuseRemoteOnExit"
+CA_FN_NAMES="singBoxProbeExitIP localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs writeXrayRouting localBlockInject chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic chainFileModify validateChainName removeMultiChainOutbound xrayChainUnwire chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable multiChainRuleSetStatus legacyRoutingClear addXrayOutbound isValidIP isLocalBlockedIP ipv6Hex xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig chainRouteLazyResolve migrateChainRouteResolve chainExitDefs chainExitTarget chainExitIsSni chainWarpEnsureRegistered chainWarpFragment chainLocalExitFragment addLocalExitAsChain multiChainAddOne singBoxProbeEndpointIP migrateChainEntryState chainHopOutbounds chainReadManualExit addSingleChainOutbound chainIsExitMachine chainRefuseRemoteOnExit"
 CA_FNS=$(sed -n "$(for _f in ${CA_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_equals "$(wc -w <<<"${CA_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CA_FNS}")" "按账号选出口：每个函数都抽到了"
 CA_ROOT="${MOCK_ROOT}/chainacct.root"
@@ -3603,7 +3603,7 @@ _out=$(printf '2\n' | run_ca "${_caAdd}; addLocalExitAsChain local; echo rc=\$?"
 assert_contains "${_out}" "这台机器没有 IPv6 网络" "加本机 IPv6 出口：本机没有 IPv6 路由时拒绝（不然规则命中的流量进黑洞）"
 assert_equals "rc=1|0" "$(tail -n 1 <<<"${_out}")|$(jq '.chains | length' "${CA_MULTI}")" "加本机 IPv6 出口：拒绝时状态不动"
 _out=$(printf '2\nv6out\n2\nb.com\n' | CA_ROUTE=2001:500:2::c run_ca "${_caAdd}; addLocalExitAsChain local; echo rc=\$?" 2>&1)
-assert_equals 'rc=0|{"name":"v6out","source":"local","is_default":false,"family":"ipv6"}|ipv6_only|rule custom b.com v6out' \
+assert_equals 'rc=0|{"name":"v6out","source":"local","family":"ipv6"}|ipv6_only|rule custom b.com v6out' \
     "$(tail -n 1 <<<"${_out}")|$(jq -c '.chains[0]' "${CA_MULTI}")|$(jq -r '.outbounds[0].domain_resolver.strategy' "${CA_F}/chain_outbound_v6out.json")|$(cat "${CA_CALLS}")" \
     "加本机 IPv6 出口：状态、出站片段、规则都写上"
 _out=$(printf '10.0.0.5\nsnbad\n2\na.com\n' | run_ca "${_caAdd}; addLocalExitAsChain sni; echo rc=\$?" 2>&1)
@@ -3612,8 +3612,8 @@ _out=$(printf '203.0.113.80\nsn\n5\n' | run_ca "${_caAdd}; addLocalExitAsChain s
 assert_contains "${_out}" "不能做默认出口" "加解锁 SNI 出口：选「默认」时说明原因"
 assert_equals "rc=1|1|no" "$(tail -n 1 <<<"${_out}")|$(jq '.chains | length' "${CA_MULTI}")|$([[ -e "${CA_F}/chain_outbound_sn.json" ]] && echo yes || echo no)" "加解锁 SNI 出口：选「默认」时不写状态也不留片段"
 _out=$(printf '203.0.113.53\nnf\n5\n' | run_ca "${_caAdd}; addLocalExitAsChain dns; echo rc=\$?" 2>&1)
-assert_equals "rc=0|nf|true|dns-nf" "$(tail -n 1 <<<"${_out}")|$(jq -r '.default_chain' "${CA_MULTI}")|$(jq -r '.chains[] | select(.name == "nf") | .is_default' "${CA_MULTI}")|$(jq -r '.dns.servers[0].tag' "${CA_F}/chain_outbound_nf.json")" \
-    "加解锁 DNS 出口：可以做默认出口，default_chain 与 is_default 一起改"
+assert_equals "rc=0|nf|dns-nf" "$(tail -n 1 <<<"${_out}")|$(jq -r '.default_chain' "${CA_MULTI}")|$(jq -r '.dns.servers[0].tag' "${CA_F}/chain_outbound_nf.json")" \
+    "加解锁 DNS 出口：可以做默认出口"
 _out=$(printf 'bad\n' | run_ca "${_caAdd}; addLocalExitAsChain dns; echo rc=\$?" 2>&1)
 assert_equals "rc=1" "$(tail -n 1 <<<"${_out}")" "加解锁 DNS 出口：不是 IP 的在输入处拒"
 ca_multi "{\"chains\": ${CA_EXITS}}"
@@ -3629,6 +3629,22 @@ _out=$(CA_ST="${_caStatus}" run_ca 'eval "${CA_ST}"; singBoxDaemonRunning() { re
 assert_equals "1|0" "$(grep -c '没有可用的出口' <<<"${_out}")|$(grep -c '•' <<<"${_out}")" "出口状态（出口表空着）：写明没有出口，不打空条目"
 _out=$(run_ca "testMultiChainConnection; echo rc=\$?" 2>&1)
 assert_equals "1|0|rc=0" "$(grep -c '没有可用的出口' <<<"${_out}")|$(grep -c '并行测试' <<<"${_out}")|$(tail -n 1 <<<"${_out}")" "测出口（出口表空着）：直接说没有出口，不去测一个空出口"
+# 默认出口只记在 default_chain：向导收尾时选的默认，状态页也要标出来
+ca_multi '{"has_xray": false}'
+_caFinPick='multiChainRestoreAccounts() { :; }; handleSingBox() { :; }; pgrep() { echo 4242; }; showMultiChainSummary() { :; }; testMultiChainConnection() { :; }; sleep() { :; }
+    singBoxDaemonRunning() { return 0; }; finalizeMultiChainConfig >/dev/null 2>&1; showMultiChainStatus'
+_out=$(printf '1\n' | CA_ST="${_caStatus}" run_ca "eval \"\${CA_ST}\"; ${_caFinPick}" 2>&1)
+assert_equals "us|1" "$(jq -r '.default_chain' "${CA_MULTI}")|$(grep -c 'us: .*\[默认\]' <<<"${_out}")" "向导收尾选了默认出口：状态页把它标成默认"
+ca_multi '{"has_xray": false, "chains": [{"name": "sn", "source": "sni", "server": "203.0.113.80"}]}'
+_out=$(printf '\n' | run_ca "${_caFinPick%finalizeMultiChainConfig*}finalizeMultiChainConfig" 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+assert_equals "1|0" "$(grep -c '1\. 不设置' <<<"${_out}")|$(grep -cE '^ *[0-9]+\. *$' <<<"${_out}")" "向导收尾（只有解锁 SNI 出口）：可选的默认出口是空的，不列空条目"
+# 状态改不成时旧文件原样留着：直接重定向再 mv 会在 jq 失败时把出口表写成空文件
+ca_multi '{}'
+_before=$(cat "${CA_MULTI}")
+_out=$(run_ca 'chainFileModify "${CHAIN_MULTI_INFO}" ".chains += [{port: \$p}]" --argjson p notjson; echo rc=$?' 2>&1)
+assert_equals "rc=1|same" "$(tail -n 1 <<<"${_out}")|$([[ "$(cat "${CA_MULTI}")" == "${_before}" ]] && echo same || echo changed)" "改链式状态：jq 失败时返回 1，原文件不动"
+_out=$(run_ca 'chainFileModify "${CHAIN_MULTI_INFO}" ".default_chain = \$n" --arg n hk; echo rc=$?' 2>&1)
+assert_equals "rc=0|hk|3" "$(tail -n 1 <<<"${_out}")|$(jq -r '.default_chain' "${CA_MULTI}")|$(jq '.chains | length' "${CA_MULTI}")" "改链式状态：成功时只动指定的字段"
 ca_multi "{\"chains\": ${CA_EXITS}}"
 assert_equals "us 198.51.100.1:5001|v6 本机 IPv6|w4 WARP IPv4|nf 解锁 DNS 203.0.113.53|sn 解锁 SNI 203.0.113.80" \
     "$(run_ca "jq -c '.chains[]' '${CA_MULTI}' | while read -r c; do printf '%s %s|' \"\$(jq -r .name <<<\"\$c\")\" \"\$(chainExitTarget \"\$c\")\"; done" 2>&1 | sed 's/|$//')" \
@@ -3792,14 +3808,14 @@ ca_migrate_entry() {
 ca_old_gone() { [[ ! -e "${CA_ENTRY}" && ! -e "${CA_F}/chain_outbound.json" ]] && echo gone || echo left; }
 ca_migrate_entry '{"schema_version":1,"role":"entry","exit_ip":"198.51.100.7","exit_port":5000,"method":"2022-blake3-aes-128-gcm","password":"k1","bridge_port":31111,"has_xray":true,"accounts":{"alice":"direct","bob":"chain_outbound"}}'
 assert_equals "rc=0|true|gone" "$(tail -n 1 <<<"${_out}")|$(ca_old_gone)" "迁移入口（单链路）：转了，旧状态与旧出站片段收掉"
-assert_equals '{"mode":"multi_chain","default_chain":"chain_1","has_xray":true,"accounts":{"alice":"direct","bob":"chain_1"},"chains":[{"name":"chain_1","ip":"198.51.100.7","port":5000,"method":"2022-blake3-aes-128-gcm","password":"k1","is_default":true,"bridge_port":31112}]}' \
+assert_equals '{"mode":"multi_chain","default_chain":"chain_1","has_xray":true,"accounts":{"alice":"direct","bob":"chain_1"},"chains":[{"name":"chain_1","ip":"198.51.100.7","port":5000,"method":"2022-blake3-aes-128-gcm","password":"k1","bridge_port":31112}]}' \
     "$(jq -c '{mode, default_chain, has_xray, accounts, chains}' "${CA_MULTI}")" "迁移入口（单链路）：出口叫 chain_1、仍是默认出口，指到链路的账号改指它并分到桥端口，直连的不变"
 assert_equals 'chain_1|198.51.100.7|5000|k1' "$(jq -r '.outbounds[-1] | "\(.tag)|\(.server)|\(.server_port)|\(.password)"' "${CA_F}/chain_outbound_chain_1.json")" "迁移入口（单链路）：出站片段按新名字重新生成"
 assert_equals "routeConfig" "$(cat "${CA_CALLS}")" "迁移入口：路由随之重新生成"
 assert_contains "${_out}" "[chain_1]" "迁移入口：告诉用户原来的出口现在叫什么"
 assert_equals "0" "$(grep -c '按协议分流' <<<"${_out}")" "迁移入口：没开过按协议分流的不提它"
 ca_migrate_entry '{"role":"entry","exit_ip":"198.51.100.7","exit_port":5000,"method":"m","password":"k1","has_xray":false,"default_chain":"direct","accounts":{"bob":"chain_outbound"}}'
-assert_equals 'direct|false|false|{"bob":"chain_1"}' "$(jq -r '"\(.default_chain)|\(.chains[0].is_default)|\(.has_xray)|\(.accounts | tojson)"' "${CA_MULTI}")" "迁移入口（默认直连）：默认出口仍是直连"
+assert_equals 'direct|false|{"bob":"chain_1"}' "$(jq -r '"\(.default_chain)|\(.has_xray)|\(.accounts | tojson)"' "${CA_MULTI}")" "迁移入口（默认直连）：默认出口仍是直连"
 ca_migrate_entry '{"role":"entry","mode":"multi_hop","hop_count":2,"hops":[{"ip":"192.0.2.1","port":40000,"key":"kr","method":"m"},{"ip":"198.51.100.30","port":44074,"key":"ke","method":"m"}],"has_xray":true}'
 assert_equals '["chain_1-hop-1:192.0.2.1:","chain_1:198.51.100.30:chain_1-hop-1"]|198.51.100.30:44074:ke' \
     "$(jq -c '[.outbounds[] | "\(.tag):\(.server):\(.detour // "")"]' "${CA_F}/chain_outbound_chain_1.json")|$(jq -r '.chains[0] | "\(.ip):\(.port):\(.password)"' "${CA_MULTI}")" \
@@ -5446,7 +5462,7 @@ ah_src() {
         awk -v n="${n}" 'f && /^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{/ {exit} index($0, n "() {") == 1 {f=1} f' install.sh
     done
 }
-AH_NAMES="singBoxProbeExitIP testChainConnection getExternalNodeById initExternalNodeFile updateChainKey writeChainInfoAtomic multiChainRestoreAccounts chainAccountAssignPorts chainAccountReadState setupMultiChainEntry removeUser shareQrCode removeSubscriptionFiles carpoolSubscribeMd5"
+AH_NAMES="singBoxProbeExitIP testChainConnection getExternalNodeById initExternalNodeFile updateChainKey writeChainInfoAtomic chainFileModify multiChainRestoreAccounts chainAccountAssignPorts chainAccountReadState setupMultiChainEntry removeUser shareQrCode removeSubscriptionFiles carpoolSubscribeMd5"
 AH_FN=$(ah_src ${AH_NAMES})
 assert_equals "$(wc -w <<<"${AH_NAMES}" | tr -d ' ')" "$(grep -cE '^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{$' <<<"${AH_FN}")" "链式与账号菜单：函数都抽到了"
 AH_ROOT="${MOCK_ROOT}/ah.root"

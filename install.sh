@@ -5565,6 +5565,15 @@ writeChainInfoAtomic() {
     return 1
 }
 
+# chainFileModify FILE FILTER [JQ_ARGS…] → 用 jq 改一份链式的 JSON（状态或片段）并原子写回。
+# jq 失败或结果不是单个 JSON 值时旧文件不动、返回 1：直接重定向再 mv 的话，jq 一失败就把状态写成空文件
+chainFileModify() {
+    local file=$1 filter=$2 content
+    shift 2
+    content=$(jq -c "$@" "${filter}" "${file}" 2>/dev/null) || content=""
+    writeChainInfoAtomic "${file}" "${content}"
+}
+
 # 合并 config：不先 rm 旧文件——merge 自带 O_TRUNC，先 rm 会制造"失败即丢文件"的窗口，
 # systemd 会进 restart loop。输出到 mktemp，sing-box check 通过才原子 mv。
 singBoxMergeConfig() {
@@ -12484,31 +12493,8 @@ updateChainKey() {
         local newKey
         newKey=$(generateChainKey)
 
-        # 更新入站配置 - 使用安全的临时文件（校验 jq 成功且产物是合法 JSON 再 mv，避免半写入）
-        local tmpInboundFile
-        tmpInboundFile=$(mktemp) || return 1
-        chmod 600 "${tmpInboundFile}"
-        if ! jq --arg key "${newKey}" '.inbounds[0].password = $key' \
-                ${SINGBOX_FRAGMENT_DIR}/chain_inbound.json > "${tmpInboundFile}" 2>/dev/null \
-            || ! jq -e . "${tmpInboundFile}" >/dev/null 2>&1; then
-            rm -f "${tmpInboundFile}"
-            echoContent red " ---> $(t CHAIN_INFO_WRITE_FAIL "${SINGBOX_FRAGMENT_DIR}/chain_inbound.json")"
-            return 1
-        fi
-        mv "${tmpInboundFile}" ${SINGBOX_FRAGMENT_DIR}/chain_inbound.json
-
-        # 更新信息文件 - 使用安全的临时文件（同上校验）
-        local tmpInfoFile
-        tmpInfoFile=$(mktemp) || return 1
-        chmod 600 "${tmpInfoFile}"
-        if ! jq --arg key "${newKey}" '.password = $key' \
-                ${CHAIN_EXIT_INFO} > "${tmpInfoFile}" 2>/dev/null \
-            || ! jq -e . "${tmpInfoFile}" >/dev/null 2>&1; then
-            rm -f "${tmpInfoFile}"
-            echoContent red " ---> $(t CHAIN_INFO_WRITE_FAIL "${CHAIN_EXIT_INFO}")"
-            return 1
-        fi
-        mv "${tmpInfoFile}" ${CHAIN_EXIT_INFO}
+        chainFileModify "${SINGBOX_FRAGMENT_DIR}/chain_inbound.json" '.inbounds[0].password = $key' --arg key "${newKey}" || return 1
+        chainFileModify "${CHAIN_EXIT_INFO}" '.password = $key' --arg key "${newKey}" || return 1
 
         if ! singBoxMergeConfig; then
             return 1
@@ -12559,31 +12545,8 @@ updateChainPort() {
         return 1
     fi
 
-    # 更新入站配置 - 使用安全的临时文件（校验 jq 成功且产物是合法 JSON 再 mv）
-    local tmpInboundFile
-    tmpInboundFile=$(mktemp) || return 1
-    chmod 600 "${tmpInboundFile}"
-    if ! jq --argjson port "${newPort}" '.inbounds[0].listen_port = $port' \
-            ${SINGBOX_FRAGMENT_DIR}/chain_inbound.json > "${tmpInboundFile}" 2>/dev/null \
-        || ! jq -e . "${tmpInboundFile}" >/dev/null 2>&1; then
-        rm -f "${tmpInboundFile}"
-        echoContent red " ---> $(t CHAIN_INFO_WRITE_FAIL "${SINGBOX_FRAGMENT_DIR}/chain_inbound.json")"
-        return 1
-    fi
-    mv "${tmpInboundFile}" ${SINGBOX_FRAGMENT_DIR}/chain_inbound.json
-
-    # 更新信息文件 - 使用安全的临时文件（同上校验）
-    local tmpInfoFile
-    tmpInfoFile=$(mktemp) || return 1
-    chmod 600 "${tmpInfoFile}"
-    if ! jq --argjson port "${newPort}" '.port = $port' \
-            "${infoFile}" > "${tmpInfoFile}" 2>/dev/null \
-        || ! jq -e . "${tmpInfoFile}" >/dev/null 2>&1; then
-        rm -f "${tmpInfoFile}"
-        echoContent red " ---> $(t CHAIN_INFO_WRITE_FAIL "${infoFile}")"
-        return 1
-    fi
-    mv "${tmpInfoFile}" "${infoFile}"
+    chainFileModify "${SINGBOX_FRAGMENT_DIR}/chain_inbound.json" '.inbounds[0].listen_port = $port' --argjson port "${newPort}" || return 1
+    chainFileModify "${infoFile}" '.port = $port' --argjson port "${newPort}" || return 1
 
     # 更新防火墙
     allowPort "${newPort}" "tcp"
@@ -12747,7 +12710,7 @@ migrateChainEntryState() {
     state=$(jq -c --argjson e "${entry}" --argjson bridge "${CHAIN_BRIDGE_PORT}" \
         --argjson xray "$([[ -f "${XRAY_CONF_DIR}/chain_outbound.json" ]] && echo true || echo false)" '
         (if .default_chain == "direct" and .protocol_routing.enabled != true then "direct" else $e.name end) as $dflt
-        | {schema_version: 1, role: "entry", mode: "multi_chain", chains: [$e + {is_default: ($dflt != "direct")}], rules: [], default_chain: $dflt,
+        | {schema_version: 1, role: "entry", mode: "multi_chain", chains: [$e], rules: [], default_chain: $dflt,
            bridge_port: $bridge, has_xray: (.has_xray // $xray), accounts: ((.accounts // {}) | map_values(if . == "direct" then . else $e.name end))}' <<<"${old}") || return 1
     if ! state=$(chainAccountAssignPorts "${state}"); then
         echoContent red " ---> $(t CHAIN_ACCOUNT_NO_BRIDGE_PORT "${CHAIN_BRIDGE_PORT}" "${CHAIN_BRIDGE_PORT_LAST}")"
@@ -13292,40 +13255,7 @@ addExternalChainToConfig() {
     server=$(echo "${node}" | jq -r '.server')
     port=$(echo "${node}" | jq -r '.server_port')
 
-    # 添加到 chains 数组 (标记为外部节点)
-    local tmpFile
-    tmpFile=$(mktemp)
-    chmod 600 "${tmpFile}"
-
-    jq --arg name "${name}" \
-       --arg server "${server}" \
-       --argjson port "${port}" \
-       --arg nodeType "${nodeType}" \
-       --arg nodeId "${nodeId}" \
-       --argjson isDefault "${isDefault}" \
-       '.chains += [{
-           "name": $name,
-           "ip": $server,
-           "port": $port,
-           "source": "external",
-           "external_node_id": $nodeId,
-           "external_type": $nodeType,
-           "is_default": $isDefault
-       }]' "${infoFile}" > "${tmpFile}"
-
-    mv "${tmpFile}" "${infoFile}"
-
-    # 如果设为默认链路，更新 default_chain
-    if [[ "${isDefault}" == "true" ]]; then
-        tmpFile=$(mktemp)
-        chmod 600 "${tmpFile}"
-        jq --arg name "${name}" '.default_chain = $name | .chains |= map(.is_default = (.name == $name))' "${infoFile}" > "${tmpFile}"
-        mv "${tmpFile}" "${infoFile}"
-    fi
-
-    # 生成链路出站配置文件 (使用外部节点配置)
-    # generateExternalOutboundConfig 现在通过 jq -n 输出已经合法的单个 outbound JSON 对象，
-    # 这里再用 jq -n --argjson 把它包进 {outbounds:[...]}，全程不做字符串拼接。
+    # 出站先生成：生成不出来就不往出口表里记
     local outboundConfig
     outboundConfig=$(generateExternalOutboundConfig "${nodeId}" "${name}")
 
@@ -13340,6 +13270,11 @@ addExternalChainToConfig() {
         echoContent red " ---> $(t EXT_CONFIG_FAILED)"
         return 1
     fi
+
+    chainFileModify "${infoFile}" '.chains += [{name: $name, ip: $server, port: $port, source: "external", external_node_id: $nodeId, external_type: $nodeType}]
+        | if $isDefault then .default_chain = $name else . end' \
+        --arg name "${name}" --arg server "${server}" --argjson port "${port}" --arg nodeType "${nodeType}" \
+        --arg nodeId "${nodeId}" --argjson isDefault "${isDefault}" || return 1
     printf '%s\n' "${wrapped}" > "${outFile}"
 
     return 0
@@ -13468,7 +13403,7 @@ addLocalExitAsChain() {
     [[ "${chainRuleType}" == "default" ]] && isDefault=true
 
     entry=$(jq -cn --arg name "${chainName}" --arg source "${kind}" --arg family "${family}" --arg server "${server}" '
-        {name: $name, source: $source, is_default: false}
+        {name: $name, source: $source}
         + (if $family != "" then {family: $family} else {} end) + (if $server != "" then {server: $server} else {} end)') || return 1
     if [[ "${kind}" == "warp" ]]; then
         fragment=$(chainWarpFragment "${chainName}")
@@ -13480,7 +13415,7 @@ addLocalExitAsChain() {
         return 1
     fi
     state=$(jq -c --argjson e "${entry}" --argjson d "${isDefault}" '.chains += [$e]
-        | if $d then .default_chain = $e.name | .chains |= map(.is_default = (.name == $e.name)) else . end' "${CHAIN_MULTI_INFO}") || return 1
+        | if $d then .default_chain = $e.name else . end' "${CHAIN_MULTI_INFO}") || return 1
     jsonWriteFile "${SINGBOX_FRAGMENT_DIR}/chain_outbound_${chainName}.json" "${fragment}" false || return 1
     if ! writeChainInfoAtomic "${CHAIN_MULTI_INFO}" "${state}"; then
         rm -f "${SINGBOX_FRAGMENT_DIR}/chain_outbound_${chainName}.json"
@@ -13656,35 +13591,10 @@ addChainToConfig() {
         return 1
     fi
 
-    # 添加到 chains 数组
-    local tmpFile
-    tmpFile=$(mktemp)
-    chmod 600 "${tmpFile}"
-
-    jq --arg name "${name}" \
-       --arg ip "${ip}" \
-       --argjson port "${port}" \
-       --arg key "${key}" \
-       --arg method "${method}" \
-       --argjson isDefault "${isDefault}" \
-       '.chains += [{
-           "name": $name,
-           "ip": $ip,
-           "port": $port,
-           "method": $method,
-           "password": $key,
-           "is_default": $isDefault
-       }]' "${infoFile}" > "${tmpFile}"
-
-    mv "${tmpFile}" "${infoFile}"
-
-    # 如果设为默认链路，更新 default_chain
-    if [[ "${isDefault}" == "true" ]]; then
-        tmpFile=$(mktemp)
-        chmod 600 "${tmpFile}"
-        jq --arg name "${name}" '.default_chain = $name | .chains |= map(.is_default = (.name == $name))' "${infoFile}" > "${tmpFile}"
-        mv "${tmpFile}" "${infoFile}"
-    fi
+    chainFileModify "${infoFile}" '.chains += [{name: $name, ip: $ip, port: $port, method: $method, password: $key}]
+        | if $isDefault then .default_chain = $name else . end' \
+        --arg name "${name}" --arg ip "${ip}" --argjson port "${port}" --arg key "${key}" --arg method "${method}" \
+        --argjson isDefault "${isDefault}" || return 1
 
     printf '%s\n' "${outboundJson}" > "${outFile}"
 
@@ -13697,21 +13607,8 @@ addRuleToConfig() {
     local ruleValue=$2
     local chainName=$3
 
-    local infoFile="${CHAIN_MULTI_INFO}"
-    local tmpFile
-    tmpFile=$(mktemp)
-    chmod 600 "${tmpFile}"
-
-    jq --arg type "${ruleType}" \
-       --arg value "${ruleValue}" \
-       --arg chain "${chainName}" \
-       '.rules += [{
-           "type": $type,
-           "value": $value,
-           "chain": $chain
-       }]' "${infoFile}" > "${tmpFile}"
-
-    mv "${tmpFile}" "${infoFile}"
+    chainFileModify "${CHAIN_MULTI_INFO}" '.rules += [{type: $type, value: $value, chain: $chain}]' \
+        --arg type "${ruleType}" --arg value "${ruleValue}" --arg chain "${chainName}"
 }
 
 # chainReadRule [later] → 交互选一条分流规则，结果放在 chainRuleType（none / preset / custom / ip_cidr / geoip / default / geosite）与 chainRuleValue。
@@ -13938,20 +13835,7 @@ configureMultiChainRules() {
             echoContent green " ---> $(t CHAIN_RULE_ADDED): $(chainRuleLabel "${chainRuleType}" "${chainRuleValue}") → ${selectedChain}"
             ;;
         default)
-            local tmpFile
-            tmpFile=$(mktemp)
-            chmod 600 "${tmpFile}"
-            jq --arg name "${selectedChain}" '.default_chain = $name' "${infoFile}" > "${tmpFile}"
-            mv "${tmpFile}" "${infoFile}"
-
-            # 更新链路的 is_default 标志
-            tmpFile=$(mktemp)
-            chmod 600 "${tmpFile}"
-            jq --arg name "${selectedChain}" '
-                .chains = [.chains[] | if .name == $name then .is_default = true else .is_default = false end]
-            ' "${infoFile}" > "${tmpFile}"
-            mv "${tmpFile}" "${infoFile}"
-
+            chainFileModify "${infoFile}" '.default_chain = $name' --arg name "${selectedChain}" || return 1
             echoContent green " ---> $(t CHAIN_SET_DEFAULT_SUCCESS "${selectedChain}")"
             ;;
     esac
@@ -13997,11 +13881,12 @@ finalizeMultiChainConfig() {
         local chains
         chains=$(jq -r '.chains[] | select(.source != "sni") | .name' "${infoFile}")
 
+        # 只有解锁 SNI 出口时这份列表是空的：用进程替换读，空列表一轮都不跑
         local index=1
         while IFS= read -r chain; do
             echoContent yellow "  ${index}. ${chain}"
             ((index++))
-        done <<< "${chains}"
+        done < <(printf '%s\n' "${chains}" | sed '/^$/d')
         echoContent yellow "  ${index}. $(t CHAIN_NO_DEFAULT_OPTION)"
 
         read -r -p "$(t PROMPT_SELECT) [${index}]: " defaultChoice
@@ -14011,11 +13896,7 @@ finalizeMultiChainConfig() {
             selectedDefault=$(echo "${chains}" | sed -n "${defaultChoice}p")
 
             if [[ -n "${selectedDefault}" ]]; then
-                local tmpFile
-                tmpFile=$(mktemp)
-                chmod 600 "${tmpFile}"
-                jq --arg name "${selectedDefault}" '.default_chain = $name' "${infoFile}" > "${tmpFile}"
-                mv "${tmpFile}" "${infoFile}"
+                chainFileModify "${infoFile}" '.default_chain = $name' --arg name "${selectedDefault}" || return 1
 
                 defaultChain="${selectedDefault}"
                 echoContent green " ---> $(t CHAIN_SET_DEFAULT_SUCCESS "${selectedDefault}")"
@@ -14033,12 +13914,7 @@ finalizeMultiChainConfig() {
         echoContent green " ---> $(t CHAIN_XRAY_DETECTED)"
     fi
 
-    # 更新 has_xray 标志
-    local tmpFile
-    tmpFile=$(mktemp)
-    chmod 600 "${tmpFile}"
-    jq --argjson hasXray "${hasXrayProtocols}" '.has_xray = $hasXray' "${infoFile}" > "${tmpFile}"
-    mv "${tmpFile}" "${infoFile}"
+    chainFileModify "${infoFile}" '.has_xray = $hasXray' --argjson hasXray "${hasXrayProtocols}" || return 1
 
     multiChainRestoreAccounts "${infoFile}" || return 1
 
@@ -14318,13 +14194,13 @@ showMultiChainSummary() {
     printf "  %-15s %-20s %-20s\n" "---------------" "--------------------" "--------------------"
 
     # 遍历链路
-    local chains
+    local chains defaultChain
     chains=$(jq -c '.chains[]' "${infoFile}")
+    defaultChain=$(jq -r '.default_chain' "${infoFile}")
 
     while IFS= read -r chain; do
-        local name isDefault
+        local name
         name=$(echo "${chain}" | jq -r '.name')
-        isDefault=$(echo "${chain}" | jq -r '.is_default')
 
         # 获取此链路的规则
         local ruleDesc
@@ -14342,16 +14218,12 @@ showMultiChainSummary() {
             ruleDesc=$(chainRuleLabel "${ruleType}" "${ruleValue}")
         fi
 
-        if [[ "${isDefault}" == "true" ]]; then
+        if [[ "${name}" == "${defaultChain}" ]]; then
             ruleDesc="$(t CHAIN_DEFAULT_ALL_TRAFFIC)"
         fi
 
         printf "  %-15s %-20s %-20s\n" "${name}" "$(chainExitTarget "${chain}")" "${ruleDesc}"
     done <<< "${chains}"
-
-    # 显示默认链路
-    local defaultChain
-    defaultChain=$(jq -r '.default_chain' "${infoFile}")
 
     if [[ "${defaultChain}" == "direct" ]]; then
         echoContent yellow "\n$(t CHAIN_DEFAULT_OUTBOUND_DIRECT)"
@@ -14489,12 +14361,11 @@ showMultiChainStatus() {
 
     # 出口表可以是空的（入口删光了出口表照留）：用进程替换读，空列表一轮都不跑，`<<<` 会多跑一轮空行
     while IFS= read -r chain; do
-        local name isDefault
+        local name
         name=$(echo "${chain}" | jq -r '.name')
-        isDefault=$(echo "${chain}" | jq -r '.is_default')
 
         local defaultMark=""
-        if [[ "${isDefault}" == "true" ]]; then
+        if [[ "${name}" == "${defaultChain}" ]]; then
             defaultMark=" $(t CHAIN_STATUS_DEFAULT_MARK)"
         fi
 
@@ -14583,8 +14454,9 @@ removeMultiChainOutbound() {
 
     local chains
     chains=$(jq -r '.chains[].name' "${infoFile}")
-    local chainCount
+    local chainCount defaultChain
     chainCount=$(jq '.chains | length' "${infoFile}")
+    defaultChain=$(jq -r '.default_chain' "${infoFile}")
 
     if [[ ${chainCount} -lt 1 ]]; then
         echoContent red " ---> $(t CHAIN_REMOVE_NONE)"
@@ -14593,11 +14465,8 @@ removeMultiChainOutbound() {
 
     local index=1
     while IFS= read -r chain; do
-        local isDefault
-        isDefault=$(jq -r ".chains[] | select(.name == \"${chain}\") | .is_default" "${infoFile}")
-
         local defaultMark=""
-        if [[ "${isDefault}" == "true" ]]; then
+        if [[ "${chain}" == "${defaultChain}" ]]; then
             defaultMark=" $(t CHAIN_STATUS_DEFAULT_MARK)"
         fi
 
@@ -14630,28 +14499,13 @@ removeMultiChainOutbound() {
         return 0
     fi
 
-    # 删除链路配置文件
-    rm -f "${SINGBOX_FRAGMENT_DIR}/chain_outbound_${selectedChain}.json"
-
-    # 从 info 文件中删除
-    local tmpFile
-    tmpFile=$(mktemp)
-    chmod 600 "${tmpFile}"
-
-    jq --arg name "${selectedChain}" '
-        .chains = [.chains[] | select(.name != $name)] |
-        .rules = [.rules[] | select(.chain != $name)]
-    ' "${infoFile}" > "${tmpFile}"
-    mv "${tmpFile}" "${infoFile}"
-
-    # 如果删除的是默认链路，重置为 direct
+    # 先改状态再删片段：状态没写成就什么都不动。删的是默认出口时默认回到直连
     local wasDefault
     wasDefault=$(jq -r ".default_chain" "${infoFile}")
+    chainFileModify "${infoFile}" '.chains = [.chains[] | select(.name != $name)] | .rules = [.rules[] | select(.chain != $name)]
+        | if .default_chain == $name then .default_chain = "direct" else . end' --arg name "${selectedChain}" || return 1
+    rm -f "${SINGBOX_FRAGMENT_DIR}/chain_outbound_${selectedChain}.json"
     if [[ "${wasDefault}" == "${selectedChain}" ]]; then
-        tmpFile=$(mktemp)
-        chmod 600 "${tmpFile}"
-        jq '.default_chain = "direct"' "${infoFile}" > "${tmpFile}"
-        mv "${tmpFile}" "${infoFile}"
         echoContent yellow " ---> $(t CHAIN_DEFAULT_RESET_DIRECT)"
     fi
 
@@ -14712,23 +14566,7 @@ setDefaultChain() {
         return 1
     fi
 
-    local tmpFile
-    tmpFile=$(mktemp)
-    chmod 600 "${tmpFile}"
-    jq --arg name "${newDefault}" '.default_chain = $name' "${infoFile}" > "${tmpFile}"
-    mv "${tmpFile}" "${infoFile}"
-
-    # 更新 is_default 标志
-    tmpFile=$(mktemp)
-    chmod 600 "${tmpFile}"
-    if [[ "${newDefault}" == "direct" ]]; then
-        jq '.chains = [.chains[] | .is_default = false]' "${infoFile}" > "${tmpFile}"
-    else
-        jq --arg name "${newDefault}" '
-            .chains = [.chains[] | if .name == $name then .is_default = true else .is_default = false end]
-        ' "${infoFile}" > "${tmpFile}"
-    fi
-    mv "${tmpFile}" "${infoFile}"
+    chainFileModify "${infoFile}" '.default_chain = $name' --arg name "${newDefault}" || return 1
 
     # 重新生成路由配置
     generateMultiChainRouteConfig
