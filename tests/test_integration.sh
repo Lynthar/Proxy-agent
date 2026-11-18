@@ -2779,6 +2779,7 @@ printf 'y\n' | run_cp 'carpoolDisable' >/dev/null 2>&1
 assert_equals "false|false|" "$(cp_state '"\(.enabled)|\(.pageEnabled)|\(.pageToken)"')" "关闭拼车：页面标志一起清"
 assert_equals "0" "$(find "${CP_ROOT}/subscribe/carpool" -type f 2>/dev/null | wc -l | tr -d ' ')" "关闭拼车：页面文件删光"
 assert_equals "0" "$(grep -c 'carpool' "${CP_ROOT}/nginx/subscribe.conf")" "关闭拼车：location 块撤掉"
+cp_reset_tree
 _out=$(printf '5\n9\n' | run_cp 'carpoolMenu' 2>&1)
 assert_contains "${_out}" "拼车页面与通知" "菜单 5：进入页面与通知子菜单"
 assert_contains "${_out}" "页面未开启 · Telegram 通知未配置" "菜单 5：状态行"
@@ -2924,6 +2925,10 @@ assert_contains "${_out}" "选择错误" "菜单：非法选项"
 jq '.enabled = false' "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/s.tmp" && mv "${CP_ROOT}/carpool/s.tmp" "${CP_ROOT}/carpool/state.json"
 _out=$(printf '1\n' | run_cp 'carpoolMenu' 2>&1)
 assert_contains "${_out}" "4.开启拼车" "菜单：关着时第 4 项是开启"
+assert_equals "1.查看用量|4.开启拼车" "$(grep -oE '[1-6]\.(查看用量|应用配置文件|清零已用流量|开启拼车|关闭拼车|页面与通知|成员管理)' <<<"${_out}" | paste -sd'|' -)" "菜单：关着时只列查看用量与开启拼车"
+for _n in 2 3 5 6; do
+    assert_contains "$(printf '%s\n' "${_n}" | run_cp 'carpoolMenu' 2>&1)" "选择错误" "菜单：关着时选 ${_n} 算选择错误"
+done
 assert_equals "3" "$(run_cp 'carpoolApply() { return 3; }; cronName=CarpoolApply; cronFunction' >/dev/null 2>&1; echo $?)" "cronFunction CarpoolApply：退出码原样带出"
 
 # 静态钉住挂钩位置

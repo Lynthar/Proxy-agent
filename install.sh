@@ -9759,30 +9759,33 @@ carpoolMemberMenu() {
 
 # carpoolMenu → 账号管理 → 拼车管理
 carpoolMenu() {
-    local choice
+    local choice on=
+    carpoolEnabled && on=1
     echoContent skyBlue "\n$(t CARPOOL_MENU_TITLE)"
     echoContent skyBlue "=============================================================="
     echoContent yellow "1.$(t CARPOOL_MENU_USAGE)"
-    echoContent yellow "2.$(t CARPOOL_MENU_APPLY)"
-    echoContent yellow "3.$(t CARPOOL_MENU_RESET)"
-    if carpoolEnabled; then
+    if [[ -n "${on}" ]]; then
+        echoContent yellow "2.$(t CARPOOL_MENU_APPLY)"
+        echoContent yellow "3.$(t CARPOOL_MENU_RESET)"
         echoContent yellow "4.$(t CARPOOL_MENU_DISABLE)"
+        echoContent yellow "5.$(t CARPOOL_MENU_PAGE)"
+        echoContent yellow "6.$(t CARPOOL_MENU_MEMBERS)"
     else
         echoContent yellow "4.$(t CARPOOL_MENU_ENABLE)"
     fi
-    echoContent yellow "5.$(t CARPOOL_MENU_PAGE)"
-    if carpoolEnabled; then
-        echoContent yellow "6.$(t CARPOOL_MENU_MEMBERS)"
-    fi
     echoContent skyBlue "=============================================================="
     read -r -p "$(t CARPOOL_MENU_PROMPT)" choice
+    # 关着时只认 1 和 4：其余几项都要拼车开着才有意义，编号不变是因为文档与脚本按编号引用
+    if [[ -z "${on}" && "${choice}" =~ ^[2356]$ ]]; then
+        choice=
+    fi
     case "${choice}" in
         1) carpoolShowUsage ;;
         2) carpoolApply ;;
         3) carpoolResetUsage ;;
-        4) if carpoolEnabled; then carpoolDisable; else carpoolEnable; fi ;;
+        4) if [[ -n "${on}" ]]; then carpoolDisable; else carpoolEnable; fi ;;
         5) carpoolPageMenu ;;
-        6) if carpoolEnabled; then carpoolMemberMenu; else echoContent red " ---> $(t CARPOOL_MENU_BAD_CHOICE)"; fi ;;
+        6) carpoolMemberMenu ;;
         *) echoContent red " ---> $(t CARPOOL_MENU_BAD_CHOICE)" ;;
     esac
 }
