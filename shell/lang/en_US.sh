@@ -376,7 +376,6 @@ MSG_CHAIN_NAME_HINT="Give this exit an identifier (letters, digits, underscores 
 MSG_CHAIN_NAME_PROMPT="Exit name"
 MSG_CHAIN_NAME_INVALID="Invalid name format, only letters, numbers, underscores allowed"
 MSG_CHAIN_NAME_EXISTS="An exit with this name already exists"
-MSG_CHAIN_RULES_HINT="Pick routing rules for this exit"
 MSG_CHAIN_RULE_LATER="Configure later"
 MSG_CHAIN_RULE_PRESET="Use preset rules"
 MSG_CHAIN_RULE_DEFAULT="Set as the default exit (gets all unmatched traffic)"

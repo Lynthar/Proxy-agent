@@ -376,7 +376,6 @@ MSG_CHAIN_NAME_HINT="请为这个出口设置标识名称 (仅限英文字母、
 MSG_CHAIN_NAME_PROMPT="出口名称"
 MSG_CHAIN_NAME_INVALID="名称格式无效，仅允许英文字母、数字、下划线"
 MSG_CHAIN_NAME_EXISTS="出口名称已存在"
-MSG_CHAIN_RULES_HINT="选择这个出口的分流规则"
 MSG_CHAIN_RULE_LATER="稍后统一配置"
 MSG_CHAIN_RULE_PRESET="使用预设规则"
 MSG_CHAIN_RULE_DEFAULT="设为默认出口 (接收所有未匹配规则的流量)"

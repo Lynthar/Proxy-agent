@@ -1031,7 +1031,7 @@ assert_equals "1" "$(hops_json '[]' >/dev/null 2>&1; [[ $? -ne 0 ]] && echo 1 ||
 ADD_CHAIN_DIR=$(mktemp -d)
 mkdir -p "${ADD_CHAIN_DIR}/sing-box/conf/config"
 printf '%s\n' '{"default_chain":"old","chains":[{"name":"old","is_default":true}]}' >"${ADD_CHAIN_DIR}/sing-box/conf/chain_multi_info.json"
-env PROXY_AGENT_DIR="${ADD_CHAIN_DIR}" ADD_FN="${HOPS_FN}"$'\n'"$(sed -n '/^addChainToConfig() {/,/^}/p; /^chainFileModify() {/,/^}/p; /^writeChainInfoAtomic() {/,/^}/p' install.sh)" bash -c '
+env PROXY_AGENT_DIR="${ADD_CHAIN_DIR}" ADD_FN="${HOPS_FN}"$'\n'"$(sed -n '/^addChainToConfig() {/,/^}/p; /^chainLinkBuild() {/,/^}/p; /^chainStoreExit() {/,/^}/p; /^chainFileModify() {/,/^}/p; /^writeChainInfoAtomic() {/,/^}/p' install.sh)" bash -c '
     source lib/constants.sh; source lib/json-utils.sh; eval "${ADD_FN}"
     addChainToConfig new 192.0.2.9 1009 k 2022-blake3-aes-128-gcm true' >/dev/null 2>&1
 assert_equals "new|old,new" "$(jq -r '[.default_chain, ([.chains[].name] | join(","))] | join("|")' "${ADD_CHAIN_DIR}/sing-box/conf/chain_multi_info.json")" \
@@ -3222,7 +3222,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试按账号选出口 ===${NC}"
 
-CA_FN_NAMES="singBoxProbeExitIP localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs writeXrayRouting localBlockInject chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic chainFileModify validateChainName removeMultiChainOutbound xrayChainUnwire chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable multiChainRuleSetStatus legacyRoutingClear addXrayOutbound isValidIP isLocalBlockedIP ipv6Hex xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig chainRouteLazyResolve migrateChainRouteResolve chainExitDefs chainExitTarget chainExitIsSni chainWarpEnsureRegistered chainWarpFragment chainLocalExitFragment addLocalExitAsChain multiChainAddOne singBoxProbeEndpointIP migrateChainEntryState chainHopOutbounds chainReadManualExit addSingleChainOutbound chainIsExitMachine chainRefuseRemoteOnExit"
+CA_FN_NAMES="singBoxProbeExitIP localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs writeXrayRouting localBlockInject chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic chainFileModify chainReadName chainReadFirstRule chainLinkBuild chainStoreExit chainFinishAdd addExternalNodeAsChain addChainToConfig validateChainName removeMultiChainOutbound xrayChainUnwire chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable multiChainRuleSetStatus legacyRoutingClear addXrayOutbound isValidIP isLocalBlockedIP ipv6Hex xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig chainRouteLazyResolve migrateChainRouteResolve chainExitDefs chainExitTarget chainExitIsSni chainWarpEnsureRegistered chainWarpFragment chainLocalExitFragment addLocalExitAsChain multiChainAddOne singBoxProbeEndpointIP migrateChainEntryState chainHopOutbounds chainReadManualExit addSingleChainOutbound chainIsExitMachine chainRefuseRemoteOnExit"
 CA_FNS=$(sed -n "$(for _f in ${CA_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_equals "$(wc -w <<<"${CA_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CA_FNS}")" "按账号选出口：每个函数都抽到了"
 CA_ROOT="${MOCK_ROOT}/chainacct.root"
@@ -3616,6 +3616,24 @@ assert_equals "rc=0|nf|dns-nf" "$(tail -n 1 <<<"${_out}")|$(jq -r '.default_chai
     "加解锁 DNS 出口：可以做默认出口"
 _out=$(printf 'bad\n' | run_ca "${_caAdd}; addLocalExitAsChain dns; echo rc=\$?" 2>&1)
 assert_equals "rc=1" "$(tail -n 1 <<<"${_out}")" "加解锁 DNS 出口：不是 IP 的在输入处拒"
+# 配置码 / 手动、外部节点、本机类三种向导共用命名、选规则与落盘那几步
+ca_multi '{"chains": []}'
+: >"${CA_CALLS}"
+jq -cn '{nodes: [{id: "n1", name: "used", type: "trojan", server: "192.0.2.30", server_port: 443, password: "p"}, {id: "n2", name: "free", type: "socks", server: "192.0.2.31", server_port: 1080}]}' \
+    >"${CA_ROOT}/sing-box/conf/external_node_info.json"
+_out=$(printf '2\nextout\n2\nc.com\n' | run_ca "${_caAdd}; addExternalNodeAsChain; echo rc=\$?" 2>&1)
+assert_equals 'rc=0|{"name":"extout","ip":"192.0.2.31","port":1080,"source":"external","external_node_id":"n2","external_type":"socks"}|extout|rule custom c.com extout' \
+    "$(tail -n 1 <<<"${_out}")|$(jq -c '.chains[0]' "${CA_MULTI}")|$(jq -r '.outbounds[0].tag' "${CA_F}/chain_outbound_extout.json")|$(cat "${CA_CALLS}")" \
+    "加外部节点出口：出口表条目、出站片段、规则都写上"
+assert_contains "${_out}" "外部节点: free (socks)" "加外部节点出口：结果里写明用的是哪个节点"
+_out=$(printf '203.0.113.9\n4000\nkey1\n\n\n5\n' | run_ca "${_caAdd}; addSingleChainOutbound manual; echo rc=\$?" 2>&1)
+assert_equals 'rc=0|chain_1|{"name":"chain_1","ip":"203.0.113.9","port":4000,"method":"2022-blake3-aes-128-gcm","password":"key1"}|203.0.113.9' \
+    "$(tail -n 1 <<<"${_out}")|$(jq -r '.default_chain' "${CA_MULTI}")|$(jq -c '.chains[1]' "${CA_MULTI}")|$(jq -r '.outbounds[0].server' "${CA_F}/chain_outbound_chain_1.json")" \
+    "手动加链路并设为默认：出口表条目、默认出口、出站片段都写上"
+assert_contains "${_out}" "目标: 203.0.113.9:4000" "手动加链路：结果里的目标是填的地址和端口"
+rm -f "${CA_MULTI}"
+_out=$(run_ca 'chainStoreExit "{\"name\":\"lost\"}" "{\"outbounds\":[]}" >/dev/null 2>&1; echo rc=$?' 2>&1)
+assert_equals "rc=1|no" "$(tail -n 1 <<<"${_out}")|$([[ -e "${CA_F}/chain_outbound_lost.json" ]] && echo yes || echo no)" "出口落盘：出口表没写成时不留出站片段"
 ca_multi "{\"chains\": ${CA_EXITS}}"
 _caSetDefault=$(sed -n '/^setDefaultChain() {/,/^}/p' install.sh)
 _out=$(printf '5\n' | CA_SD="${_caSetDefault}" run_ca 'eval "${CA_SD}"; setDefaultChain; echo rc=$?' 2>&1)

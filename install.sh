@@ -13183,101 +13183,20 @@ addExternalNodeAsChain() {
 
     echoContent green "\n ---> $(t EXT_SELECTED): ${nodeName}"
 
-    # 步骤2: 命名链路
-    echoContent yellow "\n$(t CHAIN_STEP_NAME)"
-    echoContent yellow "$(t CHAIN_NAME_HINT)"
+    local chainName
+    chainReadName || return 1
+    chainReadFirstRule || return 1
 
-    local defaultName
-    defaultName=$(generateNextChainName)
-
-    read -r -p "$(t CHAIN_NAME_PROMPT) [${defaultName}]: " inputName
-
-    local chainName="${inputName:-${defaultName}}"
-
-    # 验证名称格式
-    if ! validateChainName "${chainName}"; then
-        echoContent red " ---> $(t CHAIN_NAME_INVALID)"
-        return 1
-    fi
-
-    # 检查名称是否已存在
-    if isChainNameExists "${chainName}"; then
-        echoContent red " ---> $(t CHAIN_NAME_EXISTS)"
-        return 1
-    fi
-
-    # 步骤3: 设置分流规则
-    echoContent yellow "\n$(t CHAIN_STEP_RULES)"
-    echoContent yellow "$(t CHAIN_RULES_HINT):\n"
-    echoContent skyBlue "$(t CHAIN_DEFAULT_HINT)\n"
-    chainReadRule later || return 1
-    local isDefault=false
-    [[ "${chainRuleType}" == "default" ]] && isDefault=true
-
-    # 添加外部节点链路到配置
-    if ! addExternalChainToConfig "${chainName}" "${selectedNodeId}" "${isDefault}"; then
-        return 1
-    fi
-    case "${chainRuleType}" in
-        preset | custom | ip_cidr | geoip | geosite) addRuleToConfig "${chainRuleType}" "${chainRuleValue}" "${chainName}" ;;
-    esac
-
-    if [[ "${isDefault}" == "true" ]]; then
-        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}] ($(t DEFAULT_CHAIN))"
-    else
-        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
-    fi
-    echoContent green "   $(t EXT_NODE): ${nodeName} (${nodeType})"
-    echoContent green "   $(t RULES): $(chainRuleLabel "${chainRuleType}" "${chainRuleValue}")"
-
-    return 0
-}
-
-# 添加外部节点链路到配置文件
-addExternalChainToConfig() {
-    local name=$1
-    local nodeId=$2
-    local isDefault=${3:-false}
-
-    local infoFile="${CHAIN_MULTI_INFO}"
-
-    # 获取外部节点信息
-    local node
-    node=$(getExternalNodeById "${nodeId}")
-
-    if [[ -z "${node}" ]]; then
-        echoContent red " ---> $(t EXT_NODE_NOT_FOUND)"
-        return 1
-    fi
-
-    local nodeType server port
-    nodeType=$(echo "${node}" | jq -r '.type')
-    server=$(echo "${node}" | jq -r '.server')
-    port=$(echo "${node}" | jq -r '.server_port')
-
-    # 出站先生成：生成不出来就不往出口表里记
-    local outboundConfig
-    outboundConfig=$(generateExternalOutboundConfig "${nodeId}" "${name}")
-
-    if [[ -z "${outboundConfig}" ]]; then
+    # generateExternalOutboundConfig 给的是单个出站对象，包成片段
+    local outboundConfig fragment entry
+    outboundConfig=$(generateExternalOutboundConfig "${selectedNodeId}" "${chainName}")
+    if [[ -z "${outboundConfig}" ]] || ! fragment=$(jq -n --argjson ob "${outboundConfig}" '{outbounds: [$ob]}') || [[ -z "${fragment}" ]]; then
         echoContent red " ---> $(t EXT_CONFIG_FAILED)"
         return 1
     fi
-
-    local outFile="${SINGBOX_FRAGMENT_DIR}/chain_outbound_${name}.json"
-    local wrapped
-    if ! wrapped=$(jq -n --argjson ob "${outboundConfig}" '{outbounds: [$ob]}') || [[ -z "${wrapped}" ]]; then
-        echoContent red " ---> $(t EXT_CONFIG_FAILED)"
-        return 1
-    fi
-
-    chainFileModify "${infoFile}" '.chains += [{name: $name, ip: $server, port: $port, source: "external", external_node_id: $nodeId, external_type: $nodeType}]
-        | if $isDefault then .default_chain = $name else . end' \
-        --arg name "${name}" --arg server "${server}" --argjson port "${port}" --arg nodeType "${nodeType}" \
-        --arg nodeId "${nodeId}" --argjson isDefault "${isDefault}" || return 1
-    printf '%s\n' "${wrapped}" > "${outFile}"
-
-    return 0
+    entry=$(jq -c --arg name "${chainName}" '{name: $name, ip: .server, port: .server_port, source: "external", external_node_id: .id, external_type: .type}' \
+        <<<"${selectedNode}") || return 1
+    chainFinishAdd "${entry}" "${fragment}" "$(t EXT_NODE): ${nodeName} (${nodeType})"
 }
 
 # chainExitDefs → 出口条目的 jq 定义，拼在用到它的过滤器前面。exitResolver：出口自带的解析器（WARP、本机 IPv4 / IPv6、解锁 DNS），没有为 null。
@@ -13334,7 +13253,7 @@ chainLocalExitFragment() {
 
 # addLocalExitAsChain KIND → 向导：加一个不经别的机器的出口（warp / local / dns / sni），写出站片段与状态；路由由调用方随后重建
 addLocalExitAsChain() {
-    local kind=$1 family="" server="" pick probe entry fragment state chainName inputName defaultName isDefault=false
+    local kind=$1 family="" server="" pick probe entry fragment chainName
     case "${kind}" in
         warp | local)
             echoContent yellow "\n$(t CHAIN_EXIT_FAMILY_SELECT):"
@@ -13378,29 +13297,12 @@ addLocalExitAsChain() {
         chainWarpEnsureRegistered || return 1
     fi
 
-    echoContent yellow "\n$(t CHAIN_STEP_NAME)"
-    echoContent yellow "$(t CHAIN_NAME_HINT)"
-    defaultName=$(generateNextChainName)
-    read -r -p "$(t CHAIN_NAME_PROMPT) [${defaultName}]: " inputName
-    chainName="${inputName:-${defaultName}}"
-    if ! validateChainName "${chainName}"; then
-        echoContent red " ---> $(t CHAIN_NAME_INVALID)"
-        return 1
-    fi
-    if isChainNameExists "${chainName}"; then
-        echoContent red " ---> $(t CHAIN_NAME_EXISTS)"
-        return 1
-    fi
-
-    echoContent yellow "\n$(t CHAIN_STEP_RULES)"
-    echoContent yellow "$(t CHAIN_RULES_SELECT):\n"
-    echoContent skyBlue "$(t CHAIN_DEFAULT_HINT)\n"
-    chainReadRule later || return 1
+    chainReadName || return 1
+    chainReadFirstRule || return 1
     if [[ "${kind}" == "sni" && "${chainRuleType}" != "none" && "${chainRuleType}" != "preset" && "${chainRuleType}" != "custom" && "${chainRuleType}" != "geosite" ]]; then
         echoContent red " ---> $(t CHAIN_EXIT_SNI_NEEDS_DOMAIN)"
         return 1
     fi
-    [[ "${chainRuleType}" == "default" ]] && isDefault=true
 
     entry=$(jq -cn --arg name "${chainName}" --arg source "${kind}" --arg family "${family}" --arg server "${server}" '
         {name: $name, source: $source}
@@ -13414,20 +13316,7 @@ addLocalExitAsChain() {
         echoContent red " ---> $(t EXT_CONFIG_FAILED)"
         return 1
     fi
-    state=$(jq -c --argjson e "${entry}" --argjson d "${isDefault}" '.chains += [$e]
-        | if $d then .default_chain = $e.name else . end' "${CHAIN_MULTI_INFO}") || return 1
-    jsonWriteFile "${SINGBOX_FRAGMENT_DIR}/chain_outbound_${chainName}.json" "${fragment}" false || return 1
-    if ! writeChainInfoAtomic "${CHAIN_MULTI_INFO}" "${state}"; then
-        rm -f "${SINGBOX_FRAGMENT_DIR}/chain_outbound_${chainName}.json"
-        return 1
-    fi
-    case "${chainRuleType}" in
-        preset | custom | ip_cidr | geoip | geosite) addRuleToConfig "${chainRuleType}" "${chainRuleValue}" "${chainName}" ;;
-    esac
-
-    echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]$([[ "${isDefault}" == "true" ]] && echo " ($(t DEFAULT_CHAIN))")"
-    echoContent green "   $(t CHAIN_TARGET): $(chainExitTarget "${entry}")"
-    echoContent green "   $(t RULES): $(chainRuleLabel "${chainRuleType}" "${chainRuleValue}")"
+    chainFinishAdd "${entry}" "${fragment}" "$(t CHAIN_TARGET): $(chainExitTarget "${entry}")"
 }
 
 # chainRefuseRemoteOnExit → 本机是链式出口时拒绝添加通往别的机器的出口（配置码、外部节点、手动输入）并说明，返回 1
@@ -13514,91 +13403,92 @@ addSingleChainOutbound() {
     echoContent green "   $(t CHAIN_PORT): ${chainExitPort}"
     echoContent green "   $(t CHAIN_PROTOCOL): Shadowsocks 2022"
 
-    # 步骤2: 命名链路
+    local chainName
+    chainReadName || return 1
+    chainReadFirstRule || return 1
+    chainLinkBuild "${chainName}" "${chainExitIP}" "${chainExitPort}" "${chainExitKey}" "${chainExitMethod}" "${chainHops}" || return 1
+    local chainTarget="${chainExitIP}:${chainExitPort}"
+    [[ -n "${chainHops}" ]] && chainTarget=$(jq -r '[.[] | "\(.ip):\(.port)"] | join(" → ")' <<<"${chainHops}")
+    chainFinishAdd "${chainNewEntry}" "${chainNewFragment}" "$(t CHAIN_TARGET): ${chainTarget}"
+}
+
+# chainReadName → 向导的命名一步：读出口名放进 chainName，回车用下一个默认名。格式不对或已有同名返回 1
+chainReadName() {
+    local defaultName inputName
     echoContent yellow "\n$(t CHAIN_STEP_NAME)"
     echoContent yellow "$(t CHAIN_NAME_HINT)"
-
-    local defaultName
     defaultName=$(generateNextChainName)
-
     read -r -p "$(t CHAIN_NAME_PROMPT) [${defaultName}]: " inputName
-
-    local chainName="${inputName:-${defaultName}}"
-
-    # 验证名称格式
+    chainName="${inputName:-${defaultName}}"
     if ! validateChainName "${chainName}"; then
         echoContent red " ---> $(t CHAIN_NAME_INVALID)"
         return 1
     fi
-
-    # 检查名称是否已存在
     if isChainNameExists "${chainName}"; then
         echoContent red " ---> $(t CHAIN_NAME_EXISTS)"
         return 1
     fi
+}
 
-    # 步骤3: 设置分流规则
+# chainReadFirstRule → 向导的规则一步：比规则菜单多一项「稍后统一配置」，结果同 chainReadRule
+chainReadFirstRule() {
     echoContent yellow "\n$(t CHAIN_STEP_RULES)"
     echoContent yellow "$(t CHAIN_RULES_SELECT):\n"
     echoContent skyBlue "$(t CHAIN_DEFAULT_HINT)\n"
-    chainReadRule later || return 1
-    local isDefault=false
-    [[ "${chainRuleType}" == "default" ]] && isDefault=true
-
-    # 添加链路到配置
-    if ! addChainToConfig "${chainName}" "${chainExitIP}" "${chainExitPort}" "${chainExitKey}" "${chainExitMethod}" "${isDefault}" "${chainHops}"; then
-        return 1
-    fi
-    case "${chainRuleType}" in
-        preset | custom | ip_cidr | geoip | geosite) addRuleToConfig "${chainRuleType}" "${chainRuleValue}" "${chainName}" ;;
-    esac
-    local chainTarget
-    chainTarget=$(jq -r '[.[] | "\(.ip):\(.port)"] | join(" → ")' <<<"${chainHops}")
-
-    if [[ "${isDefault}" == "true" ]]; then
-        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}] ($(t DEFAULT_CHAIN))"
-    else
-        echoContent green "\n ---> $(t CHAIN_ADDED): [${chainName}]"
-    fi
-    echoContent green "   $(t CHAIN_TARGET): ${chainTarget}"
-    echoContent green "   $(t RULES): $(chainRuleLabel "${chainRuleType}" "${chainRuleValue}")"
-
-    return 0
+    chainReadRule later
 }
 
-# 添加链路到配置文件
-addChainToConfig() {
-    local name=$1
-    local ip=$2
-    local port=$3
-    local key=$4
-    local method=$5
-    local isDefault=${6:-false}
-    local hops=${7:-}
-
-    local infoFile="${CHAIN_MULTI_INFO}"
-
-    # 中继给的多跳码要经中继嵌套着拨（中继把发往下一跳的连接直连过去），只拨出口会静默绕过中继。
-    # 前面各跳的 tag 带 -，链路名不许有 -，撞不上别的链路
+# chainLinkBuild NAME IP PORT KEY METHOD [HOPS] → 一条链路的出口表条目与出站片段，放进 chainNewEntry / chainNewFragment。
+# 中继给的多跳码要经中继嵌套着拨（中继把发往下一跳的连接直连过去），只拨出口会静默绕过中继。
+# 前面各跳的 tag 带 -，出口名不许有 -，撞不上别的出口
+chainLinkBuild() {
+    local name=$1 hops=${6:-}
     if [[ -z "${hops}" ]]; then
-        hops=$(jq -n --arg ip "${ip}" --argjson port "${port}" --arg key "${key}" --arg method "${method}" \
+        hops=$(jq -n --arg ip "$2" --argjson port "$3" --arg key "$4" --arg method "$5" \
             '[{ip: $ip, port: $port, key: $key, method: $method}]') || return 1
     fi
-    local outFile="${SINGBOX_FRAGMENT_DIR}/chain_outbound_${name}.json"
-    local outboundJson
-    if ! outboundJson=$(chainHopOutbounds "${hops}" "${name}" "${name}-hop-") || [[ -z "${outboundJson}" ]]; then
+    if ! chainNewFragment=$(chainHopOutbounds "${hops}" "${name}" "${name}-hop-") || [[ -z "${chainNewFragment}" ]]; then
         echoContent red " ---> $(t CHAIN_OUTBOUND_WRITE_FAILED "${name}")"
         return 1
     fi
+    chainNewEntry=$(jq -cn --arg name "${name}" --arg ip "$2" --argjson port "$3" --arg key "$4" --arg method "$5" \
+        '{name: $name, ip: $ip, port: $port, method: $method, password: $key}')
+}
 
-    chainFileModify "${infoFile}" '.chains += [{name: $name, ip: $ip, port: $port, method: $method, password: $key}]
-        | if $isDefault then .default_chain = $name else . end' \
-        --arg name "${name}" --arg ip "${ip}" --argjson port "${port}" --arg key "${key}" --arg method "${method}" \
-        --argjson isDefault "${isDefault}" || return 1
+# chainStoreExit ENTRY FRAGMENT [IS_DEFAULT=false] → 出口落盘：出站片段 chain_outbound_<名字>.json 加出口表里的条目，
+# IS_DEFAULT 为 true 时同时设成默认出口。出口表没写成就把片段收回：留着的话合并时多出一个没人认的出站
+chainStoreExit() {
+    local entry=$1 file
+    file="${SINGBOX_FRAGMENT_DIR}/chain_outbound_$(jq -r '.name' <<<"${entry}").json"
+    if ! jsonWriteFile "${file}" "$2" false; then
+        echoContent red " ---> $(t EXT_CONFIG_FAILED)"
+        return 1
+    fi
+    if ! chainFileModify "${CHAIN_MULTI_INFO}" '.chains += [$e] | if $d then .default_chain = $e.name else . end' \
+        --argjson e "${entry}" --argjson d "${3:-false}"; then
+        rm -f "${file}"
+        return 1
+    fi
+}
 
-    printf '%s\n' "${outboundJson}" > "${outFile}"
+# chainFinishAdd ENTRY FRAGMENT DETAIL → 添加向导的收尾：出口落盘（chainRuleType 是 default 就设成默认出口）、记下第一条规则、
+# 打印结果。DETAIL 是结果里说明这个出口通向哪的那一行
+chainFinishAdd() {
+    local entry=$1 name isDefault=false
+    name=$(jq -r '.name' <<<"${entry}")
+    [[ "${chainRuleType}" == "default" ]] && isDefault=true
+    chainStoreExit "${entry}" "$2" "${isDefault}" || return 1
+    case "${chainRuleType}" in
+        preset | custom | ip_cidr | geoip | geosite) addRuleToConfig "${chainRuleType}" "${chainRuleValue}" "${name}" ;;
+    esac
+    echoContent green "\n ---> $(t CHAIN_ADDED): [${name}]$([[ "${isDefault}" == "true" ]] && echo " ($(t DEFAULT_CHAIN))")"
+    echoContent green "   $3"
+    echoContent green "   $(t RULES): $(chainRuleLabel "${chainRuleType}" "${chainRuleValue}")"
+}
 
-    return 0
+# addChainToConfig NAME IP PORT KEY METHOD [IS_DEFAULT] [HOPS] → 不问名字和规则，直接把一条链路记进出口表（批量导入用）
+addChainToConfig() {
+    chainLinkBuild "$1" "$2" "$3" "$4" "$5" "${7:-}" && chainStoreExit "${chainNewEntry}" "${chainNewFragment}" "${6:-false}"
 }
 
 # 添加规则到配置
