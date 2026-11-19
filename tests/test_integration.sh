@@ -3659,8 +3659,22 @@ _out=$(run_ca 'chainStoreExit "{\"name\":\"lost\"}" "{\"outbounds\":[]}" >/dev/n
 assert_equals "rc=1|no" "$(tail -n 1 <<<"${_out}")|$([[ -e "${CA_F}/chain_outbound_lost.json" ]] && echo yes || echo no)" "出口落盘：出口表没写成时不留出站片段"
 ca_multi "{\"chains\": ${CA_EXITS}}"
 _caSetDefault=$(sed -n '/^setDefaultChain() {/,/^}/p' install.sh)
-_out=$(printf '5\n' | CA_SD="${_caSetDefault}" run_ca 'eval "${CA_SD}"; setDefaultChain; echo rc=$?' 2>&1)
-assert_equals "rc=1|direct" "$(tail -n 1 <<<"${_out}")|$(jq -r '.default_chain' "${CA_MULTI}")" "设默认出口：解锁 SNI 不能当默认，状态不动"
+# ca_set_default INPUT → 跑一遍 setDefaultChain，打印去色的屏幕，最后一行 rc=…
+ca_set_default() {
+    : >"${CA_CALLS}"
+    printf "$1" | CA_SD="${_caSetDefault}" run_ca 'eval "${CA_SD}"; setDefaultChain; echo rc=$?' 2>&1 | sed 's/\x1b\[[0-9;]*m//g'
+}
+_out=$(ca_set_default '6\n')
+assert_equals "0|1|rc=1|direct|" "$(grep -c 'sn (' <<<"${_out}")|$(grep -cE '^ *5\. 直连.*\[默认\]' <<<"${_out}")|$(tail -n 1 <<<"${_out}")|$(jq -r '.default_chain' "${CA_MULTI}")|$(cat "${CA_CALLS}")" \
+    "设默认出口：解锁 SNI 不列出来，直连排最后并标着当前默认；超出范围的序号不改状态"
+_out=$(ca_set_default '1,2\n')
+assert_equals "rc=1|direct" "$(tail -n 1 <<<"${_out}")|$(jq -r '.default_chain' "${CA_MULTI}")" "设默认出口：「1,2」这类输入算无效，不把两个名字写进 default_chain"
+_out=$(ca_set_default '3\n')
+assert_equals "rc=0|w4|routeConfig merge reloadCore" "$(tail -n 1 <<<"${_out}")|$(jq -r '.default_chain' "${CA_MULTI}")|$(paste -sd ' ' - <"${CA_CALLS}")" "设默认出口：选中的出口写进状态并重新生成路由"
+_out=$(ca_set_default '\n')
+assert_equals "rc=0|w4|" "$(tail -n 1 <<<"${_out}")|$(jq -r '.default_chain' "${CA_MULTI}")|$(cat "${CA_CALLS}")" "设默认出口：回车保留当前默认，不重启内核"
+_out=$(ca_set_default '5\n')
+assert_equals "rc=0|direct" "$(tail -n 1 <<<"${_out}")|$(jq -r '.default_chain' "${CA_MULTI}")" "设默认出口：选最后一项改回直连"
 # 入口删光了出口，表照留：列表里不能冒出空条目，测试不去测一个空出口
 ca_multi '{"chains": [], "default_chain": "us"}'
 _out=$(printf '1\n' | CA_SD="${_caSetDefault}" run_ca 'eval "${CA_SD}"; setDefaultChain; echo rc=$?' 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
@@ -3678,7 +3692,11 @@ _out=$(printf '1\n' | CA_ST="${_caStatus}" run_ca "eval \"\${CA_ST}\"; ${_caFinP
 assert_equals "us|1" "$(jq -r '.default_chain' "${CA_MULTI}")|$(grep -c 'us: .*\[默认\]' <<<"${_out}")" "向导收尾选了默认出口：状态页把它标成默认"
 ca_multi '{"has_xray": false, "chains": [{"name": "sn", "source": "sni", "server": "203.0.113.80"}]}'
 _out=$(printf '\n' | run_ca "${_caFinPick%finalizeMultiChainConfig*}finalizeMultiChainConfig" 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
-assert_equals "1|0" "$(grep -c '1\. 不设置' <<<"${_out}")|$(grep -cE '^ *[0-9]+\. *$' <<<"${_out}")" "向导收尾（只有解锁 SNI 出口）：可选的默认出口是空的，不列空条目"
+assert_equals "1|0|direct" "$(grep -c '1\. 直连' <<<"${_out}")|$(grep -cE '^ *[0-9]+\. *$' <<<"${_out}")|$(jq -r '.default_chain' "${CA_MULTI}")" \
+    "向导收尾（只有解锁 SNI 出口）：只列直连，不列空条目，回车留着直连"
+ca_multi '{"has_xray": false}'
+_out=$(printf '1,2\n' | run_ca "${_caFinPick%finalizeMultiChainConfig*}finalizeMultiChainConfig; echo rc=\$?" 2>&1)
+assert_equals "rc=0|direct" "$(tail -n 1 <<<"${_out}")|$(jq -r '.default_chain' "${CA_MULTI}")" "向导收尾：选默认出口时输入无效就留着直连，向导照常走完"
 # 状态改不成时旧文件原样留着：直接重定向再 mv 会在 jq 失败时把出口表写成空文件
 ca_multi '{}'
 _before=$(cat "${CA_MULTI}")

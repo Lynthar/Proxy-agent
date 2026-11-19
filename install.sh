@@ -630,7 +630,7 @@ if ! type t &>/dev/null; then
     MSG_CHAIN_CONFIG_COMPLETE="链式与分流配置完成！"
     MSG_CHAIN_NO_DEFAULT_SET="当前未设置默认出口，未匹配规则的流量将直连访问"
     MSG_CHAIN_SET_DEFAULT_NOW="是否现在设置默认出口？"
-    MSG_CHAIN_NO_DEFAULT_OPTION="不设置 (未匹配流量直连)"
+    MSG_CHAIN_DEFAULT_DIRECT_OPTION="直连 (未匹配流量直连访问)"
     MSG_CHAIN_CONFIGURED_COUNT="已配置 %s 个出口"
     MSG_CHAIN_SET_DEFAULT_SUCCESS="已将 [%s] 设为默认出口"
     MSG_CHAIN_XRAY_DETECTED="检测到 Xray 的协议，会一并接进链式与分流"
@@ -13503,19 +13503,29 @@ chainRuleLabel() {
     esac
 }
 
-# chainPickExit PROMPT → 列出出口表（名字、目标、默认标记）让用户按序号选一个，名字放进 chainPicked；序号不对返回 1
+# chainPickExit PROMPT [default] → 列出出口表（名字、目标、默认标记）让用户按序号选一个，名字放进 chainPicked；序号不对返回 1。
+# default 是选默认出口：不列解锁 SNI（它只能靠域名规则落地），末尾加直连（得 direct），回车保留当前默认
 chainPickExit() {
-    local infoFile="${CHAIN_MULTI_INFO}" defaultChain index=1 entry name pick
+    local infoFile="${CHAIN_MULTI_INFO}" forDefault=false exits defaultChain index=1 current="" entry name pick
+    [[ "$2" == "default" ]] && forDefault=true
+    exits=$(jq -c --argjson d "${forDefault}" '[.chains[]? | select(($d and .source == "sni") | not)]' "${infoFile}") || return 1
     defaultChain=$(jq -r '.default_chain' "${infoFile}")
     while IFS= read -r entry; do
         name=$(jq -r '.name' <<<"${entry}")
+        [[ "${forDefault}" == "true" && "${name}" == "${defaultChain}" ]] && current=${index}
         echoContent yellow "  ${index}. ${name} ($(chainExitTarget "${entry}"))$([[ "${name}" == "${defaultChain}" ]] && echo " $(t CHAIN_STATUS_DEFAULT_MARK)")"
         ((index++))
-    done < <(jq -c '.chains[]' "${infoFile}")
-    read -r -p "$1" pick
+    done < <(jq -c '.[]' <<<"${exits}")
+    if [[ "${forDefault}" == "true" ]]; then
+        [[ "${defaultChain}" == "direct" ]] && current=${index}
+        echoContent yellow "  ${index}. $(t CHAIN_DEFAULT_DIRECT_OPTION)$([[ "${defaultChain}" == "direct" ]] && echo " $(t CHAIN_STATUS_DEFAULT_MARK)")"
+    fi
+    read -r -p "$1${current:+ [${current}]}: " pick
+    pick=${pick:-${current}}
     chainPicked=""
     if [[ "${pick}" =~ ^[1-9][0-9]{0,3}$ ]]; then
-        chainPicked=$(jq -r --argjson i "${pick}" '.chains[$i - 1].name // empty' "${infoFile}")
+        chainPicked=$(jq -r --argjson i "${pick}" '.[$i - 1].name // empty' <<<"${exits}")
+        [[ "${forDefault}" == "true" && "${pick}" == "${index}" ]] && chainPicked=direct
     fi
     if [[ -z "${chainPicked}" ]]; then
         echoContent red " ---> $(t CHAIN_INVALID_CHAIN)"
@@ -13546,7 +13556,7 @@ configureMultiChainRules() {
     echoContent yellow "$(t CHAIN_CURRENT_CHAINS):\n"
 
     local chainPicked
-    chainPickExit "$(t CHAIN_SELECT_CHAIN): " || return 1
+    chainPickExit "$(t CHAIN_SELECT_CHAIN)" || return 1
     local selectedChain="${chainPicked}"
 
     echoContent yellow "\n$(t CHAIN_RULE_FOR) [${selectedChain}] $(t CHAIN_RULE_TYPE_SELECT):\n"
@@ -13597,37 +13607,14 @@ finalizeMultiChainConfig() {
 
     echoContent yellow "\n$(t CHAIN_GENERATING)"
 
-    # 检查是否设置了默认链路
-    local defaultChain
-    defaultChain=$(jq -r '.default_chain' "${infoFile}")
-
-    if [[ "${defaultChain}" == "direct" ]]; then
+    # 还没有默认出口就问一次，回车或选错都留着直连
+    if [[ "$(jq -r '.default_chain' "${infoFile}")" == "direct" ]]; then
         echoContent yellow "\n$(t CHAIN_NO_DEFAULT_SET)"
         echoContent yellow "$(t CHAIN_SET_DEFAULT_NOW)\n"
-
-        local chains
-        chains=$(jq -r '.chains[] | select(.source != "sni") | .name' "${infoFile}")
-
-        # 只有解锁 SNI 出口时这份列表是空的：用进程替换读，空列表一轮都不跑
-        local index=1
-        while IFS= read -r chain; do
-            echoContent yellow "  ${index}. ${chain}"
-            ((index++))
-        done < <(printf '%s\n' "${chains}" | sed '/^$/d')
-        echoContent yellow "  ${index}. $(t CHAIN_NO_DEFAULT_OPTION)"
-
-        read -r -p "$(t PROMPT_SELECT) [${index}]: " defaultChoice
-
-        if [[ -n "${defaultChoice}" ]] && [[ "${defaultChoice}" != "${index}" ]]; then
-            local selectedDefault
-            selectedDefault=$(echo "${chains}" | sed -n "${defaultChoice}p")
-
-            if [[ -n "${selectedDefault}" ]]; then
-                chainFileModify "${infoFile}" '.default_chain = $name' --arg name "${selectedDefault}" || return 1
-
-                defaultChain="${selectedDefault}"
-                echoContent green " ---> $(t CHAIN_SET_DEFAULT_SUCCESS "${selectedDefault}")"
-            fi
+        local chainPicked
+        if chainPickExit "$(t PROMPT_SELECT)" default && [[ "${chainPicked}" != "direct" ]]; then
+            chainFileModify "${infoFile}" '.default_chain = $name' --arg name "${chainPicked}" || return 1
+            echoContent green " ---> $(t CHAIN_SET_DEFAULT_SUCCESS "${chainPicked}")"
         fi
     fi
 
@@ -14173,7 +14160,7 @@ removeMultiChainOutbound() {
     fi
 
     local chainPicked
-    chainPickExit "$(t CHAIN_REMOVE_PICK): " || return 1
+    chainPickExit "$(t CHAIN_REMOVE_PICK)" || return 1
     local selectedChain="${chainPicked}"
 
     # 还有账号指定它为出口就不删：删了它们只能改走别的出口或直连，那是车主没选过的去向
@@ -14221,7 +14208,7 @@ removeMultiChainOutbound() {
 
 # 设置默认链路
 setDefaultChain() {
-    local infoFile="${CHAIN_MULTI_INFO}"
+    local infoFile="${CHAIN_MULTI_INFO}" chainPicked newDefault
 
     if [[ ! -f "${infoFile}" ]]; then
         echoContent red " ---> $(t CHAIN_NO_CONFIG)"
@@ -14229,33 +14216,12 @@ setDefaultChain() {
     fi
 
     echoContent yellow "\n$(t CHAIN_DEFAULT_PICK):\n"
-
-    local chains
-    chains=$(jq -r '.chains[].name' "${infoFile}")
-
-    local index=1
-    while IFS= read -r chain; do
-        echoContent yellow "  ${index}. ${chain}"
-        ((index++))
-    done < <(jq -r '.chains[].name' "${infoFile}")
-    echoContent yellow "  ${index}. $(t CHAIN_DEFAULT_DIRECT_OPTION)"
-
-    read -r -p "$(t PROMPT_SELECT): " defaultChoice
-
-    local newDefault
-    if [[ "${defaultChoice}" == "${index}" ]]; then
-        newDefault="direct"
-    else
-        newDefault=$(echo "${chains}" | sed -n "${defaultChoice}p")
-    fi
-
-    if [[ -z "${newDefault}" ]]; then
-        echoContent red " ---> $(t CHAIN_INVALID_CHAIN)"
-        return 1
-    fi
-    if chainExitIsSni "${newDefault}"; then
-        echoContent red " ---> $(t CHAIN_EXIT_SNI_NEEDS_DOMAIN)"
-        return 1
+    chainPickExit "$(t PROMPT_SELECT)" default || return 1
+    newDefault=${chainPicked}
+    # 没换就不重启内核：重启会断开所有在用的连接
+    if [[ "${newDefault}" == "$(jq -r '.default_chain' "${infoFile}")" ]]; then
+        echoContent green " ---> $(t CHAIN_DEFAULT_SET_DONE "${newDefault}")"
+        return 0
     fi
 
     chainFileModify "${infoFile}" '.default_chain = $name' --arg name "${newDefault}" || return 1
