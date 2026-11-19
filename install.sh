@@ -1971,9 +1971,6 @@ readConfigHostPathUUID() {
             if [[ -z "${currentPath}" && -f "${configPath}15_VLESS_XHTTP_TLS_inbounds.json" ]]; then
                 currentPath=$(jq -r .inbounds[0].streamSettings.xhttpSettings.path "${configPath}15_VLESS_XHTTP_TLS_inbounds.json" | sed -e 's#^/##' -e 's#xhttp$##')
             fi
-            if [[ -z "${currentPath}" && -f "${configPath}12_VLESS_XHTTP_inbounds.json" ]]; then
-                currentPath=$(jq -r .inbounds[0].streamSettings.xhttpSettings.path "${configPath}12_VLESS_XHTTP_inbounds.json" | awk -F "[x][H][T][T][P]" '{print $1}' | awk -F "[/]" '{print $2}')
-            fi
         elif [[ "${coreKind}" == "2" && -f "${singBoxConfigPath}05_VMess_WS_inbounds.json" ]]; then
             singBoxVMessWSPath=$(jq -r .inbounds[0].transport.path "${singBoxConfigPath}05_VMess_WS_inbounds.json")
             currentPath=$(jq -r .inbounds[0].transport.path "${singBoxConfigPath}05_VMess_WS_inbounds.json" | awk -F "[/]" '{print $2}')
@@ -1988,6 +1985,10 @@ readConfigHostPathUUID() {
             currentPath=$(jq -r .inbounds[0].transport.path "${singBoxConfigPath}11_VMess_HTTPUpgrade_inbounds.json" | awk -F "[/]" '{print $2}')
             # currentPath=${currentPath::-2}
         fi
+    fi
+    # 12 的 path 不靠 0：只装 7、12 的机器没有带证书的入站，上面整段不进，path 读不回来的话链接和菜单 5 的重配都会写成 /xHTTP
+    if [[ -z "${currentPath}" && "${coreKind}" == "1" && -f "${configPath}12_VLESS_XHTTP_inbounds.json" ]]; then
+        currentPath=$(jq -r .inbounds[0].streamSettings.xhttpSettings.path "${configPath}12_VLESS_XHTTP_inbounds.json" | awk -F "[x][H][T][T][P]" '{print $1}' | awk -F "[/]" '{print $2}')
     fi
     if [[ -f "${PROXY_AGENT_DIR}/cdn" ]] && [[ -n "$(head -1 ${PROXY_AGENT_DIR}/cdn)" ]]; then
         currentCDNAddress=$(head -1 ${PROXY_AGENT_DIR}/cdn)
@@ -7492,7 +7493,8 @@ showAccounts() {
                     count=$((count + 1))
                     echo
                 fi
-            done < <(echo "${currentCDNAddress}" | tr ',' '\n')
+            # 链接里的地址是公网 IP，这一列只决定出几条；没装 0 时它是空的，也要出一条
+            done < <(echo "${currentCDNAddress:-direct}" | tr ',' '\n')
         done
     fi
     # VLESS XHTTP TLS

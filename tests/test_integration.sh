@@ -1809,6 +1809,24 @@ printf '%s\n' '{"inbounds":[{"listen_port":31300,"users":[{"name":"alice-VMess_H
     >"${ST_ROOT}/sing-box/conf/config/11_VMess_HTTPUpgrade_inbounds.json"
 printf '%s\n' 'server {' '    listen 31301;' '    server_name example.com;' >"${ST_ROOT}/nginx/sing_box_VMess_HTTPUpgrade.conf"
 assert_equals "example.com" "$(run_st_host | cut -d'|' -f1)" "身份源是 11（inbound 没有 tls）：域名照旧从 nginx 配置取"
+# 只装 7、12 的 Xray 机器：没有带证书的入站，12 的 path 也要读得回来，账号里要有它的链接（原来两样都没有）
+X12_ROOT="${MOCK_ROOT}/only712"
+mkdir -p "${X12_ROOT}/xray/conf" "${X12_ROOT}/nginx" && : >"${X12_ROOT}/xray/xray"
+printf '%s\n' '{"inbounds":[{"port":8443,"protocol":"dokodemo-door"},{"listen":"127.0.0.1","settings":{"clients":[{"id":"u1","email":"alice-vless_reality_vision"}]},"streamSettings":{"realitySettings":{"target":"dl.google.com:443","serverNames":["dl.google.com"]}}}]}' \
+    >"${X12_ROOT}/xray/conf/07_VLESS_vision_reality_inbounds.json"
+printf '%s\n' '{"inbounds":[{"port":2053,"settings":{"clients":[{"id":"u1","email":"alice-VLESS_Reality_XHTTP"}]},"streamSettings":{"xhttpSettings":{"path":"/abcdxHTTP"},"realitySettings":{"target":"dl.google.com:443","serverNames":["dl.google.com"]}}}]}' \
+    >"${X12_ROOT}/xray/conf/12_VLESS_XHTTP_inbounds.json"
+X12_FN=$(sed -n '/^readInstallType() {/,/^}/p;/^readInstallProtocolType() {/,/^}/p;/^readConfigHostPathUUID() {/,/^}/p;/^showAccounts() {/,/^}/p' install.sh)
+assert_equals "abcd||alice-VLESS_Reality_XHTTP abcdxHTTP" "$(env PROXY_AGENT_DIR="${X12_ROOT}" X12_FN="${X12_FN}" bash -c '
+    source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh
+    eval "${X12_FN}"
+    echoContent() { :; }; t() { :; }; getRealitySubscriptionPort() { echo 8443; }
+    defaultBase64Code() { [[ "$1" == vlessXHTTP ]] && echo "$3 $6"; return 0; }
+    nginxConfigPath="${PROXY_AGENT_DIR}/nginx/"
+    readInstallType; readInstallProtocolType; readConfigHostPathUUID
+    printf "%s|%s|" "${currentPath}" "${currentCDNAddress}"
+    showAccounts 2>/dev/null | grep . | paste -sd"|" -' 2>/dev/null)" "只装 7、12：12 的 path 读得回来，账号里有它的链接"
+rm -rf "${X12_ROOT:?}"
 rm -rf "${ST_ROOT}"
 
 # 生成器回归成空数组时，事务必须拒绝提交，而不是把该协议的用户清空再报成功
