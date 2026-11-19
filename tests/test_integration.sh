@@ -3827,6 +3827,10 @@ assert_equals 'rc=0|198.51.100.9 prefer_ipv6|1|1' \
 ca_reset
 _out=$(printf '0\n' | CA_PUBIP=203.0.113.5 _caSetupRun 'setupChainExit; echo rc=$?')
 assert_equals "rc=1|no|" "$(tail -n 1 <<<"${_out}")|$([[ -e "${CA_EXIT}" ]] && echo yes || echo no)|$(cat "${CA_CALLS}")" "配出口（端口填 0）：拒绝，什么都没写"
+run_ca 'writeChainInbound 40001 m k' >/dev/null 2>&1
+_out=$(printf 'y\n\n1\n1\n' | CA_PUBIP=203.0.113.5 _caSetupRun 'chainReleasePort() { echo "release $*" >>"${CA_CALLS}"; }; setupChainExit; echo rc=$?')
+assert_equals "rc=0|release 40001 23456 allow 23456 tcp" "$(tail -n 1 <<<"${_out}")|$(grep -E '^(release|allow)' "${CA_CALLS}" | paste -sd ' ' -)" \
+    "重配出口（换了端口）：先收回旧端口的放行，再放行新端口"
 ca_reset
 _out=$(printf '%s\n\n' "${_caExitCode}" | CA_PUBIP=192.0.2.77 _caSetupRun 'setupChainRelay; echo rc=$?')
 _caRelayCode=$(grep -o 'chain://v2@[A-Za-z0-9+/=]*' <<<"${_out}" | head -n 1)
@@ -4005,6 +4009,36 @@ assert_contains "${_out}" "出口节点" "卸载链式（出口机）：说本�
 assert_equals "0" "$(grep -c '单链路' <<<"${_out}")" "卸载链式（出口机）：不说成单链路模式"
 printf '%s\n' '{"role":"relay"}' >"${CA_ROOT}/sing-box/conf/chain_relay_info.json"
 assert_contains "$(printf 'n\n' | run_ca "${_caRemove}"$'\n''removeChainProxy' 2>&1)" "中继节点" "卸载链式（中继机，留着旧的出口状态）：按中继说"
+
+# --- 出口 / 中继入站的端口：卸载、改端口、重配都收回旧端口的放行，改端口时来源限制跟着走 ---
+_caPortStubs='chainReleasePort() { echo "release $*" >>"${CA_CALLS}"; }; allowPort() { echo "allow $1 $2 ${3:-any}" >>"${CA_CALLS}"; }
+    showExistingChainCode() { :; }; showRelayChainCode() { :; }; handleXray() { :; }'
+ca_reset
+run_ca "${_caPortStubs}; writeChainInbound 5000 m k; writeChainInbound 6000 m k; writeChainInbound 6000 m k" >/dev/null 2>&1
+assert_equals "release 5000 6000|release 6000 6000|6000" "$(paste -sd '|' - <"${CA_CALLS}")|$(jq -r '.inbounds[0].listen_port' "${CA_F}/chain_inbound.json")" \
+    "写出口 / 中继入站：第一次不收，盖掉旧入站时收回旧端口的放行，同一端口也收（来源限制可能变了）"
+_caPortFns=$(sed -n '/^updateChainPort() {/,/^}/p;/^readValidPort() {/,/^}/p' install.sh)
+printf '%s\n' '{"role":"exit","port":6000,"allowed_ip":"203.0.113.9"}' >"${CA_EXIT}"
+: >"${CA_CALLS}"
+_out=$(printf '\n' | run_ca "${_caPortFns}"$'\n'"${_caPortStubs}; updateChainPort; echo rc=\$?" 2>&1)
+assert_equals "rc=0|" "$(tail -n 1 <<<"${_out}")|$(cat "${CA_CALLS}")" "改出口端口（回车）：什么都不动"
+_out=$(printf '7000\n' | run_ca "${_caPortFns}"$'\n'"${_caPortStubs}; updateChainPort; echo rc=\$?" 2>&1)
+assert_equals "rc=0|allow 7000 tcp 203.0.113.9 merge reloadCore release 6000 7000|7000|7000" \
+    "$(tail -n 1 <<<"${_out}")|$(paste -sd ' ' - <"${CA_CALLS}")|$(jq -r .port "${CA_EXIT}")|$(jq -r '.inbounds[0].listen_port' "${CA_F}/chain_inbound.json")" \
+    "改出口端口：新端口照来源限制放行，生效之后收回旧端口"
+rm -f "${CA_EXIT}"
+printf '%s\n' '{"role":"relay","port":7000}' >"${CA_ROOT}/sing-box/conf/chain_relay_info.json"
+: >"${CA_CALLS}"
+printf '8000\n' | run_ca "${_caPortFns}"$'\n'"${_caPortStubs}; updateChainPort" >/dev/null 2>&1
+assert_equals "allow 8000 tcp any merge reloadCore release 7000 8000" "$(paste -sd ' ' - <"${CA_CALLS}")" "改中继端口：不限来源放行新端口，收回旧端口"
+: >"${CA_CALLS}"
+printf 'y\n' | run_ca "${_caRemove}"$'\n'"${_caPortStubs}; removeChainProxy" >/dev/null 2>&1
+assert_equals "reloadCore release 8000|no" "$(grep -E '^(reloadCore|release)' "${CA_CALLS}" | paste -sd ' ' -)|$([[ -e "${CA_F}/chain_inbound.json" ]] && echo yes || echo no)" \
+    "卸载链式（中继机）：入站删掉、内核重载之后收回它的端口"
+ca_reset
+ca_multi '{}'
+printf 'y\n' | run_ca "${_caRemove}"$'\n'"${_caPortStubs}; removeChainProxy" >/dev/null 2>&1
+assert_equals "0" "$(grep -c '^release' "${CA_CALLS}")" "卸载链式（纯入口）：没有对外的链式端口，不碰防火墙"
 
 # --- 菜单 ---
 ca_reset
@@ -6205,9 +6239,10 @@ assert_equals "bootStartup nginx|rc=0" "$(run_nt 0)" "installNginxTools：装上
 
 # --- 卸载收回带标记的放行：没标记的是用户自己的；ufw、firewalld 认不出，列出来不动 ---
 RF_FN=$(sed -n '/^sshListenPorts() {/,/^}/p;/^isOwnRuleOnSshPort() {/,/^}/p;/^removeOwnFirewallRules() {/,/^}/p' install.sh)
-# run_rf IPT_LIST NFT_LIST [SSH_LISTEN] [SSH_CONFIG] [SSH_CONNECTION] → 桩掉 iptables / nft / ss / sshd，打印删除、保存与保留提示
+# run_rf IPT_LIST NFT_LIST [SSH_LISTEN] [SSH_CONFIG] [SSH_CONNECTION] → 桩掉 iptables / nft / ss / sshd，打印删除、保存与保留提示；
+# RF_ARG 是传给 removeOwnFirewallRules 的 PORT/PROTO
 run_rf() {
-    env -u SSH_CONNECTION RF_FN="${RF_FN}" IPT="$1" IPT6="${IPT6:-}" NFT="$2" SSH_LISTEN="${3:-}" SSH_CONFIG="${4:-}" ${5:+SSH_CONNECTION="$5"} bash -c '
+    env -u SSH_CONNECTION RF_FN="${RF_FN}" IPT="$1" IPT6="${IPT6:-}" RF_ARG="${RF_ARG:-}" NFT="$2" SSH_LISTEN="${3:-}" SSH_CONFIG="${4:-}" ${5:+SSH_CONNECTION="$5"} bash -c '
         eval "${RF_FN}"
         t() { echo "$1"; }
         echoContent() { echo "$2"; }
@@ -6225,7 +6260,7 @@ run_rf() {
             esac
         }
         systemctl() { return 1; }
-        removeOwnFirewallRules' 2>&1 | paste -sd'|' -
+        removeOwnFirewallRules ${RF_ARG:+"${RF_ARG}"}' 2>&1 | paste -sd'|' -
 }
 RF_IPT='num target\n1 ACCEPT tcp dpt:22 /* ssh */\n2 ACCEPT udp dpt:443 /* allow 443/udp(Proxy-agent) */\n3 ACCEPT tcp dpt:80\n4 ACCEPT tcp dpt:443 /* allow 443/tcp(Proxy-agent) */\n'
 RF_NFT='\t\ttcp dport 22 accept comment "mine" # handle 3\n\t\tip saddr 0.0.0.0/0 tcp dport 443 counter packets 0 bytes 0 accept comment "allow 443/tcp(Proxy-agent)" # handle 7\n'
@@ -6240,6 +6275,27 @@ assert_equals "${RF_KEEP}" "$(run_rf "${RF_IPT_SSH}" "${RF_NFT_SSH}" "" 2222)" "
 assert_equals "${RF_KEEP}" "$(run_rf "${RF_IPT_SSH}" "${RF_NFT_SSH}" "" "" "1.2.3.4 5555 10.0.0.1 2222")" "卸载：这条 SSH 连接自己的端口也算"
 assert_equals "iptables -D INPUT 4|iptables -D INPUT 2|ip6tables -D INPUT 1|persist save" \
     "$(IPT6='num target\n1 ACCEPT tcp dpt:443 /* allow 443/tcp(Proxy-agent) */\n' run_rf "${RF_IPT}" "")" "卸载：ip6tables 里带标记的放行也收回"
+assert_equals "iptables -D INPUT 4|persist save|nft delete rule inet filter input handle 7" "$(RF_ARG=443/tcp run_rf "${RF_IPT}" "${RF_NFT}")" \
+    "收回一个端口：只删这个端口、这个协议带标记的放行"
+assert_equals "" "$(RF_ARG=44/tcp run_rf "${RF_IPT}" "${RF_NFT}")" "收回一个端口：44 不会连带删掉 443"
+
+# --- 链式入站换端口或卸载：带标记的收回；ufw、firewalld 认不出，端口不再用时提示用户自己删 ---
+CR_FN=$(sed -n '/^chainReleasePort() {/,/^}/p' install.sh)
+# run_cr UFW_STATUS FIREWALLD_RC PORT [NEW_PORT] → 桩掉收回、ufw 与 systemctl，打印收回的端口、提示与返回值
+run_cr() {
+    env CR_FN="${CR_FN}" UFW_STATUS="$1" FWD_RC="$2" bash -c '
+        eval "${CR_FN}"
+        t() { echo "$1 $2"; }
+        echoContent() { echo "$2"; }
+        removeOwnFirewallRules() { echo "remove $1"; }
+        ufw() { echo "${UFW_STATUS}"; }
+        systemctl() { return "${FWD_RC}"; }
+        chainReleasePort "$@"; echo "rc=$?"' _ "${@:3}" 2>&1 | paste -sd'|' -
+}
+assert_equals "remove 5000/tcp| ---> CHAIN_PORT_RULE_LEFT 5000|rc=0" "$(run_cr 'Status: active' 1 5000)" "收回链式端口（ufw）：带标记的照收，ufw 那条提示用户自己删"
+assert_equals "remove 5000/tcp|rc=0" "$(run_cr 'Status: active' 1 5000 5000)" "收回链式端口（ufw，重配同一端口）：端口还在用，不提示"
+assert_equals "remove 5000/tcp| ---> CHAIN_PORT_RULE_LEFT 5000|rc=0" "$(run_cr 'Status: inactive' 0 5000 6000)" "收回链式端口（firewalld，换了端口）：旧端口提示用户自己删"
+assert_equals "remove 5000/tcp|rc=0" "$(run_cr 'Status: inactive' 1 5000)" "收回链式端口（iptables / nft）：收回就够了，不提示"
 
 # --- allowPort 的 nft 与 iptables 分支 ---
 FW_FNS=$(sed -n '/^allowPortNft() {/,/^}/p;/^nftSaveOwnRules() {/,/^}/p;/^nftablesConfFile() {/,/^}/p;/^allowPortIptables() {/,/^}/p;/^ipv6Hex() {/,/^}/p' install.sh)

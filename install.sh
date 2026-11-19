@@ -7956,10 +7956,11 @@ isOwnRuleOnSshPort() {
     [[ -n "${port}" ]] && grep -qxF "${port}" <<<"$2"
 }
 
-# removeOwnFirewallRules → 收回 allowPort 留下的放行，只认带 (Proxy-agent) 注释的（iptables、nft），sshd 在用的端口除外。
-# ufw、firewalld 的放行没有标记，认不出是不是用户自己加的，不动，由 reportUninstallLeftovers 列出来
+# removeOwnFirewallRules [PORT/PROTO] → 收回 allowPort 留下的放行，只认带 (Proxy-agent) 注释的（iptables、nft），sshd 在用的端口除外；
+# 给了 PORT/PROTO 只收这一个。ufw、firewalld 的放行没有标记，认不出是不是用户自己加的，不动，由调用方提示用户
 removeOwnFirewallRules() {
-    local line changed= sshPorts tool
+    local line changed= sshPorts tool mark="(Proxy-agent)"
+    [[ -n "${1:-}" ]] && mark="allow $1(Proxy-agent)"
     sshPorts=$(sshListenPorts)
     for tool in iptables ip6tables; do
         command -v "${tool}" >/dev/null 2>&1 || continue
@@ -7971,7 +7972,7 @@ removeOwnFirewallRules() {
                 continue
             fi
             "${tool}" -D INPUT "${line%% *}" && changed=true
-        done < <("${tool}" -L INPUT -n --line-numbers 2>/dev/null | grep -F '(Proxy-agent)' | sort -rn)
+        done < <("${tool}" -L INPUT -n --line-numbers 2>/dev/null | grep -F "${mark}" | sort -rn)
     done
     if [[ -n "${changed}" ]] && command -v netfilter-persistent >/dev/null 2>&1; then
         netfilter-persistent save >/dev/null 2>&1
@@ -7985,7 +7986,7 @@ removeOwnFirewallRules() {
                 continue
             fi
             nft delete rule inet filter input handle "${line##* }" && changed=true
-        done < <(nft -a list chain inet filter input | grep -F '(Proxy-agent)')
+        done < <(nft -a list chain inet filter input | grep -F "${mark}")
         if [[ -n "${changed}" ]] && systemctl is-active --quiet nftables 2>/dev/null; then
             nftSaveOwnRules
         fi
@@ -11381,13 +11382,29 @@ chainReadPublicIP() {
     echoContent green " ---> $(t CHAIN_LOCAL_PUBLIC_IP): ${publicIP}"
 }
 
-# writeChainInbound PORT METHOD KEY → sing-box 片段 chain_inbound.json：出口与中继收链路流量的 SS2022 入站。
-# 入站不带 sniff：嗅探在 chain_route.json 里按路由动作做
+# writeChainInbound PORT METHOD KEY → sing-box 片段 chain_inbound.json：出口与中继收链路流量的 SS2022 入站。入站不带 sniff：
+# 嗅探在 chain_route.json 里按路由动作做。盖掉旧入站时收回旧端口的放行，端口相同也收（来源限制可能变了），调用方随后 allowPort
 writeChainInbound() {
-    local content
+    local content old
+    old=$(jq -r '.inbounds[0].listen_port // empty' "${SINGBOX_FRAGMENT_DIR}/chain_inbound.json" 2>/dev/null)
     content=$(jq -n --argjson port "$1" --arg method "$2" --arg key "$3" '{inbounds: [{type: "shadowsocks", tag: "chain_inbound",
         listen: "::", listen_port: $port, method: $method, password: $key, multiplex: {enabled: true}}]}') || return 1
-    writeChainInfoAtomic "${SINGBOX_FRAGMENT_DIR}/chain_inbound.json" "${content}"
+    writeChainInfoAtomic "${SINGBOX_FRAGMENT_DIR}/chain_inbound.json" "${content}" || return 1
+    if [[ -n "${old}" ]]; then
+        chainReleasePort "${old}" "$1"
+    fi
+}
+
+# chainReleasePort PORT [NEW_PORT] → 收回出口 / 中继入站在 PORT 上的放行（只认带标记的，同 removeOwnFirewallRules）。
+# PORT 不再用（没给 NEW_PORT 或两者不同）而防火墙是 ufw、firewalld 时，那条放行认不出是谁加的，提示用户自己删
+chainReleasePort() {
+    removeOwnFirewallRules "$1/tcp"
+    [[ "$1" == "${2:-}" ]] && return 0
+    if { command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep "Status: active" >/dev/null; } ||
+        systemctl is-active --quiet firewalld 2>/dev/null; then
+        echoContent yellow " ---> $(t CHAIN_PORT_RULE_LEFT "$1")"
+    fi
+    return 0
 }
 
 # chainRestartSingBox → 合并配置、重启 sing-box 并确认它起来了，没起来返回 1。链式向导只改 sing-box，必须显式重启它：
@@ -12401,29 +12418,26 @@ updateChainPort() {
         return 1
     fi
 
-    local oldPort
+    local oldPort newPort allowedIP
     oldPort=$(jq -r '.port' "${infoFile}")
+    # 出口的来源限制跟着端口走，中继没有这一项
+    allowedIP=$(jq -r '.allowed_ip // ""' "${infoFile}")
 
-    read -r -p "$(t CHAIN_PORT_NEW_PROMPT "${oldPort}")" newPort
-    if [[ -z "${newPort}" ]]; then
+    readValidPort "$(t CHAIN_PORT_NEW_PROMPT "${oldPort}")" newPort "${oldPort}" || return 1
+    if [[ "${newPort}" == "${oldPort}" ]]; then
         return 0
-    fi
-
-    if [[ ! "${newPort}" =~ ^[0-9]+$ ]] || [[ "${newPort}" -lt 1 ]] || [[ "${newPort}" -gt 65535 ]]; then
-        echoContent red " ---> $(t ERR_PORT_RANGE 1 65535)"
-        return 1
     fi
 
     chainFileModify "${SINGBOX_FRAGMENT_DIR}/chain_inbound.json" '.inbounds[0].listen_port = $port' --argjson port "${newPort}" || return 1
     chainFileModify "${infoFile}" '.port = $port' --argjson port "${newPort}" || return 1
 
-    # 更新防火墙
-    allowPort "${newPort}" "tcp"
+    allowPort "${newPort}" "tcp" "${allowedIP}"
 
     if ! singBoxMergeConfig; then
         return 1
     fi
     reloadCore
+    chainReleasePort "${oldPort}" "${newPort}"
 
     echoContent green " ---> $(t CHAIN_PORT_UPDATED "${newPort}")"
 
@@ -12494,6 +12508,10 @@ removeChainProxy() {
         return 0
     fi
 
+    # 出口 / 中继入站的端口先记下，片段删掉、内核重载之后收回它的放行
+    local chainPort
+    chainPort=$(jq -r '.inbounds[0].listen_port // empty' "${SINGBOX_FRAGMENT_DIR}/chain_inbound.json" 2>/dev/null)
+
     # 出口 / 中继的片段、各角色的状态文件（含旧版入口留下的 chain_entry_info.json）
     rm -f ${SINGBOX_FRAGMENT_DIR}/chain_inbound.json
     rm -f ${SINGBOX_FRAGMENT_DIR}/chain_outbound.json
@@ -12538,6 +12556,9 @@ removeChainProxy() {
         echoContent yellow " ---> $(t CHAIN_REMOVE_MERGE_WARN)"
     fi
     reloadCore
+    if [[ -n "${chainPort}" ]]; then
+        chainReleasePort "${chainPort}"
+    fi
 
     echoContent green " ---> $(t CHAIN_REMOVE_DONE)"
 }
