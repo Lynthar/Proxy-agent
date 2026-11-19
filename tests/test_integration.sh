@@ -1935,7 +1935,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试拼车钩子与 tick ===${NC}"
 
-CP_FN_NAMES="applyAccountChangeAllProtocols carpoolUserinfoUsageDropped carpoolSyncUserinfo nginxPids xrayConfigTest readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled xrayDaemonRunning carpoolCurrentClientsMap crontabHas crontabReplace ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolMachineStep carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolGuardAccountMenu carpoolCheckPrerequisites carpoolPickApiPort carpoolApiReady carpoolAllAccounts carpoolFillUuids carpoolRemoveCron removeSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable stdinIsTty carpoolApply carpoolResetUsage carpoolShowUsage carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolInsertPageBlock carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMembersClean carpoolMembersEditApply carpoolPickMember carpoolAsk carpoolShowProtocolChoices carpoolShowMemberLinks carpoolMemberAdd carpoolMemberEdit carpoolMemberMenu carpoolMenu addUser removeUser cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget"
+CP_FN_NAMES="subscribeIsMerged subscribeLocationsFile subscribeAuthority applyAccountChangeAllProtocols carpoolUserinfoUsageDropped carpoolSyncUserinfo nginxPids xrayConfigTest readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled xrayDaemonRunning carpoolCurrentClientsMap crontabHas crontabReplace ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolMachineStep carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolGuardAccountMenu carpoolCheckPrerequisites carpoolPickApiPort carpoolApiReady carpoolAllAccounts carpoolFillUuids carpoolRemoveCron removeSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable stdinIsTty carpoolApply carpoolResetUsage carpoolShowUsage carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolInsertPageBlock carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMembersClean carpoolMembersEditApply carpoolPickMember carpoolAsk carpoolShowProtocolChoices carpoolShowMemberLinks carpoolMemberAdd carpoolMemberEdit carpoolMemberMenu carpoolMenu addUser removeUser cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget"
 CP_FNS=$(sed -n "$(for _f in ${CP_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_not_empty "${CP_FNS}" "拼车：抽到 install.sh 原文"
 assert_equals "$(wc -w <<<"${CP_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CP_FNS}")" "拼车：每个函数都抽到了（抽不到说明函数体里出现了顶格的 }）"
@@ -3092,7 +3092,7 @@ cp_reset_tree
 : >"${CP_CALLS}"
 run_cp 'carpoolSyncUserinfo' >/dev/null 2>&1
 assert_equals "no|" "$([[ -e "${CP_UI_FILE}" ]] && echo yes || echo no)|$(grep -E '^nginx' "${CP_CALLS}" || true)" "用量头：旧模板的机器不写也不重载"
-RSC_FN=$(sed -n '/^renderSubscribeConf() {/,/^EOF$/p' install.sh)
+RSC_FN=$(awk '/^subscribeConfMaps\(\) \{/{f=1} /^subscribeIsMerged\(\) \{/{f=0} f' install.sh)
 assert_contains "${RSC_FN}" 'include ${PROXY_AGENT_DIR}/subscribe_userinfo*.map;' "用量头：模板用通配 include，文件缺失时 nginx -t 照过"
 assert_equals "2" "$(grep -c 'add_header Subscription-Userinfo \\$paSubUserinfo always;' <<<"${RSC_FN}")" "用量头：通用地址与定格式地址都带这个头"
 assert_equals "${CP_ROOT}/subscribe_userinfo.map" "$(env PROXY_AGENT_DIR="${CP_ROOT}" bash -c 'source lib/constants.sh; printf %s "${SUBSCRIBE_USERINFO_MAP}"')" "用量头：常量里的路径与模板通配的文件名对得上"
@@ -5158,6 +5158,136 @@ awk '/^    location \/ \{/ && !d { print "    # carpool-page-begin"; print "    
 upg_ensure >/dev/null
 assert_equals "1" "$(grep -c '# carpool-page-begin' "${UPG_CONF}")" "订阅升级：拼车页面块补回、只有一份"
 assert_equals "yes" "$(awk '/carpool-page-end/{e=NR} /^    location \/ \{/{l=NR} END{print (e && l && e < l) ? "yes" : "no"}' "${UPG_CONF}")" "订阅升级：页面块在 location / 之前"
+
+# --- 订阅并口：location 做成片段，由 0 的两个回落站点或 Reality 的本机目标站点 include；没有站点能带时退回独立端口 ---
+MG_FN="${UPG_FN}
+$(sed -n '/^readNginxSubscribe() {/,/^}/p;/^carpoolEnsureNginxLocation() {/,/^}/p' install.sh)"
+MG_ROOT="${MOCK_ROOT}/submerge"
+MG_NGX="${MG_ROOT}/nginx"
+# mg_run CODE → 在安装根指向 MG_ROOT 的干净 bash 里跑；nginx -t 的返回码取 MG_T_RC，allowPort 与 nginx 的调用记进 calls
+mg_run() {
+    env PROXY_AGENT_DIR="${MG_ROOT}" MG_FN="${MG_FN}" MG_T_RC="${MG_T_RC:-0}" MG_CORE="${MG_CORE:-1}" V2RAY_LANG=zh_CN bash -c '
+        source lib/i18n.sh; source lib/constants.sh; source lib/utils.sh; source lib/carpool.sh
+        eval "${MG_FN}"
+        nginx() {
+            echo "nginx $*" >>"${PROXY_AGENT_DIR}/calls"
+            [[ "$1" == "-v" ]] && echo "nginx version: nginx/1.27.3" >&2
+            [[ "$1" == "-t" ]] && return "${MG_T_RC}"
+            return 0
+        }
+        pgrep() { echo 1; }; curl() { return 0; }; listeningPorts() { :; }
+        allowPort() { echo "allowPort $*" >>"${PROXY_AGENT_DIR}/calls"; }
+        nginxConfigPath="${PROXY_AGENT_DIR}/nginx/"; nginxStaticPath=/var/www/html; coreKind=${MG_CORE}
+        '"$1" 2>&1
+}
+# mg_reset [alone] [dest] → 重建目录；alone 放一份旧版脚本写的 alone.conf（没有 include）与 0 的入站，dest 放 reality_dest.conf
+mg_reset() {
+    rm -rf "${MG_ROOT:?}"
+    mkdir -p "${MG_NGX}" "${MG_ROOT}/tls" "${MG_ROOT}/carpool" "${MG_ROOT}/xray/conf" "${MG_ROOT}/sing-box/conf/config"
+    : >"${MG_ROOT}/calls"
+    if [[ " $* " == *" alone "* ]]; then
+        printf '%s\n' 'server {' '    listen 127.0.0.1:31300;' '    server_name _;' '    return 403;' '}' \
+            'server {' '    listen 127.0.0.1:31302 http2;' '    server_name a.example.org;' '    root /var/www/html;' '    location / {' '    }' '}' \
+            'server {' '    listen 127.0.0.1:31300 proxy_protocol;' '    server_name a.example.org;' '    root /var/www/html;' '    location / {' '    }' '}' >"${MG_NGX}/alone.conf"
+        printf '%s\n' '{"inbounds":[{"port":8443,"protocol":"vless"}]}' >"${MG_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
+    fi
+    if [[ " $* " == *" dest "* ]]; then
+        printf '%s\n' 'server {' '    listen 127.0.0.1:31305 ssl;' '    server_name r.example.org;' '    root /var/www/html;' '    location / {' '    }' '}' >"${MG_NGX}/reality_dest.conf"
+    fi
+}
+mg_xray7() { printf '{"inbounds":[{"port":443,"protocol":"dokodemo-door"},{"listen":"127.0.0.1","streamSettings":{"realitySettings":{"target":"%s"}}}]}\n' "$1" >"${MG_ROOT}/xray/conf/07_VLESS_vision_reality_inbounds.json"; }
+mg_sb7() { printf '{"inbounds":[{"listen_port":2053,"tls":{"reality":{"handshake":{"server":"%s","server_port":31305}}}}]}\n' "$1" >"${MG_ROOT}/sing-box/conf/config/07_VLESS_vision_reality_inbounds.json"; }
+MG_READ='readNginxSubscribe; echo "${subscribeType}|${subscribePort}|${subscribeDomain}"'
+
+assert_equals "2|1" "$(sed -n '/^updateRedirectNginxConf() {/,/^writeHttpRedirectNginxConf() {/p' install.sh | grep -c 'include ${nginxConfigPath}subscribe_locations\*\.inc;')|$(sed -n '/^renderRealityLocalDest() {/,/^EOF$/p' install.sh | grep -c 'include ${nginxConfigPath}subscribe_locations\*\.inc;')" \
+    "并口模板：0 的两个回落站点与 Reality 本机目标站点都带通配 include（片段不在时 nginx -t 照过）"
+mg_reset alone
+assert_equals "rc=1" "$(mg_run 'subscribeMergedHost; echo "rc=$?"')" "并口宿主：alone.conf 还没 include 片段时不算"
+assert_equals "8443 a.example.org" "$(mg_run 'subscribeMergedHost any')" "并口宿主：Xray 的 0 在，端口取它的入站、域名取回落站点的 server_name"
+assert_equals "rc=1" "$(MG_CORE=2 mg_run 'subscribeMergedHost any; echo "rc=$?"')" "并口宿主：sing-box 内核不认 alone.conf（它的 0 没有回落站点）"
+_mgOut=$(mg_run 'subscribeTryMerge; echo "rc=$?"')
+assert_contains "${_mgOut}" "rc=0" "并入：有 0 就并成，不问端口"
+assert_contains "${_mgOut}" "共用 8443 端口" "并入：说明订阅走哪个端口"
+assert_equals "2" "$(grep -c 'include .*subscribe_locations\*\.inc;' "${MG_NGX}/alone.conf")" "并入：两个回落站点都 include 片段（0 按 ALPN 分流，只进一个就有一半客户端 404）"
+assert_equals "yes" "$(awk '/subscribe_locations/{i=NR} /location \/ \{/{ if (i != NR - 1) bad = 1 } END{print bad ? "no" : "yes"}' "${MG_NGX}/alone.conf")" "并入：include 紧挨在各自的 location / 之前"
+assert_equals "# merged a.example.org|0|2" "$(sed -n 2p "${MG_NGX}/subscribe.conf")|$(grep -c '^server' "${MG_NGX}/subscribe.conf")|$(grep -c '^map ' "${MG_NGX}/subscribe.conf")" \
+    "并入：subscribe.conf 只剩标记行与两个 map，没有 server 块"
+assert_equals "2" "$(grep -c '^    location ~ "\^/s/' "${MG_NGX}/subscribe_locations.inc")" "并入：两个订阅 location 进片段"
+assert_equals "https|8443|a.example.org" "$(mg_run "${MG_READ}")" "并入后读订阅：端口是 0 的端口、域名是站点的域名"
+assert_equals "a.example.org:8443|a.example.org" "$(mg_run 'subscribeType=https; subscribePort=8443; subscribeAuthority a.example.org; subscribePort=443; subscribeAuthority a.example.org' | paste -sd'|' -)" \
+    "订阅地址：https 的 443 不写端口，其余照写"
+_mgBefore=$(cat "${MG_NGX}/alone.conf")
+mg_run 'subscribeEnsureIncludes'
+assert_equals "${_mgBefore}" "$(cat "${MG_NGX}/alone.conf")" "并入：include 已在就不重复加"
+# 拼车页面块进片段；装机收尾重写片段时补回
+mg_run 'carpoolEnsureNginxLocation on' >/dev/null
+assert_equals "1|0" "$(grep -c '# carpool-page-begin' "${MG_NGX}/subscribe_locations.inc")|$(grep -c 'carpool-page' "${MG_NGX}/subscribe.conf")" "并口下开拼车页面：块进片段，不进 subscribe.conf"
+mg_run 'subscribeSettleMerged' >/dev/null
+assert_equals "1|2" "$(grep -c '# carpool-page-begin' "${MG_NGX}/subscribe_locations.inc")|$(grep -c 'paSubUserinfo always' "${MG_NGX}/subscribe_locations.inc")" "并口对账（宿主还在）：片段重写，拼车页面块补回、只有一份"
+# 0 没了、也没有本机目标的 7：退回独立端口
+rm -f "${MG_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
+assert_equals "||" "$(mg_run "${MG_READ}")" "并口的宿主没了：读订阅当没装（不给出连不上的地址）"
+: >"${MG_ROOT}/tls/a.example.org.crt"; : >"${MG_ROOT}/tls/a.example.org.key"
+_mgOut=$(mg_run 'subscribeSettleMerged')
+_mgPort=$(grep -m1 'listen' "${MG_NGX}/subscribe.conf" | awk '{print $2}')
+assert_equals "yes" "$([[ ${_mgPort:-0} -ge 10000 && ${_mgPort:-0} -le 30000 ]] && echo yes || echo no)" "并口对账（宿主没了）：退回独立端口，端口自动挑（${_mgPort}）"
+assert_equals "1|no|1" "$(grep -c "^allowPort ${_mgPort}\$" "${MG_ROOT}/calls")|$([[ -e "${MG_NGX}/subscribe_locations.inc" ]] && echo yes || echo no)|$(grep -c 'server_name a.example.org;' "${MG_NGX}/subscribe.conf")" \
+    "退回独立端口：端口放行、片段删掉、域名用并口时记下的"
+assert_equals "1" "$(grep -c '# carpool-page-begin' "${MG_NGX}/subscribe.conf")" "退回独立端口：拼车页面块跟过来"
+assert_contains "${_mgOut}" "订阅改用独立端口 ${_mgPort}" "退回独立端口：提示里写明新端口与链接变了"
+assert_equals "https|${_mgPort}|a.example.org" "$(mg_run "currentHost=a.example.org; ${MG_READ}")" "退回之后读订阅：就是普通的独立端口订阅"
+
+# 没有 0，7 的目标是本机域名：跟 7 的端口；目标是外站或 reality_dest.conf 只是残留就不算
+mg_reset dest
+mg_xray7 "dl.google.com:443"
+assert_equals "rc=1" "$(mg_run 'subscribeMergedHost any; echo "rc=$?"')" "并口宿主：7 的目标是外站，reality_dest.conf 只是残留，不算"
+assert_equals "rc=1|no" "$(mg_run 'subscribeTryMerge; echo "rc=$?"')|$([[ -e "${MG_NGX}/subscribe.conf" ]] && echo yes || echo no)" "并入：没有宿主返回 1，不留文件"
+mg_xray7 "127.0.0.1:31305"
+assert_equals "443 r.example.org" "$(mg_run 'subscribeMergedHost any')" "并口宿主：Xray 的 7 目标是本机，端口取它的对外端口"
+mg_run 'subscribeTryMerge' >/dev/null
+assert_equals "1|https|443|r.example.org" "$(grep -c 'subscribe_locations' "${MG_NGX}/reality_dest.conf")|$(mg_run "${MG_READ}")" "并入 7：reality_dest.conf include 片段，订阅走 7 的端口"
+mg_reset dest
+mg_sb7 "127.0.0.1"
+assert_equals "2053 r.example.org" "$(MG_CORE=2 mg_run 'subscribeMergedHost any')" "并口宿主：sing-box 内核的 7 握手目标是本机，端口取 listen_port"
+mg_sb7 "dl.google.com"
+assert_equals "rc=1" "$(MG_CORE=2 mg_run 'subscribeMergedHost any; echo "rc=$?"')" "并口宿主：sing-box 的 7 握手目标是外站，不算"
+# 0 与本机目标的 7 都在：按 0 的端口给地址，两个站点都带着片段
+mg_reset alone dest
+mg_xray7 "127.0.0.1:31305"
+mg_run 'subscribeTryMerge' >/dev/null
+assert_equals "https|8443|a.example.org|2|1" "$(mg_run "${MG_READ}")|$(grep -c 'subscribe_locations' "${MG_NGX}/alone.conf")|$(grep -c 'subscribe_locations' "${MG_NGX}/reality_dest.conf")" \
+    "0 与本机目标的 7 都在：地址按 0 的端口，三个站点都 include"
+# nginx -t 不过：动过的文件逐字还原
+mg_reset alone
+_mgBefore=$(cat "${MG_NGX}/alone.conf")
+assert_equals "rc=1" "$(MG_T_RC=1 mg_run 'subscribeTryMerge; echo "rc=$?"')" "并入（nginx -t 不过）：返回 1"
+assert_equals "${_mgBefore}|no|no|0" "$(cat "${MG_NGX}/alone.conf")|$([[ -e "${MG_NGX}/subscribe.conf" ]] && echo yes || echo no)|$([[ -e "${MG_NGX}/subscribe_locations.inc" ]] && echo yes || echo no)|$(find "${MG_NGX}" -name '*.bak' | wc -l | tr -d ' ')" \
+    "并入（nginx -t 不过）：alone.conf 逐字还原，不留并口文件与备份"
+# 已有独立端口的订阅不自动并：装机收尾按原端口重写；账号管理里的入口确认后才并
+MG_OLD_SUB='server {\n    listen 50188 so_keepalive=on;\n    root /var/www/html;\n    # sing-box\n    location / {\n    }\n}\n'
+mg_reset alone
+printf "${MG_OLD_SUB}" >"${MG_NGX}/subscribe.conf"
+assert_equals "rc=1" "$(mg_run 'subscribeIsMerged; echo "rc=$?"')" "已有独立端口的订阅：不算并口"
+_mgBefore=$(cat "${MG_NGX}/subscribe.conf")
+mg_run 'handleNginx() { :; }; carpoolRefreshSubscribe() { :; }; carpoolEnabled() { return 1; }; subscribeMergeExisting <<<"n"' >/dev/null
+assert_equals "${_mgBefore}" "$(cat "${MG_NGX}/subscribe.conf")" "并到节点端口：答 n 什么都不动"
+_mgOut=$(mg_run 'handleNginx() { echo "handleNginx $*"; }; carpoolRefreshSubscribe() { echo refreshed; }; carpoolEnabled() { return 1; }; subscribeMergeExisting <<<"y"')
+assert_equals "# merged a.example.org" "$(sed -n 2p "${MG_NGX}/subscribe.conf")" "并到节点端口：答 y 后改成并口"
+assert_contains "$(paste -sd'|' - <<<"${_mgOut}")" "handleNginx stop|handleNginx start force|refreshed" "并到节点端口：nginx 重起、订阅文件按新地址重建"
+assert_contains "$(mg_run 'subscribeMergeExisting <<<"y"')" "现在并不了" "并到节点端口：已经并口的机器给出说明，不重复并"
+# 旧版脚本的自偷把 Reality 目标写成「域名:订阅端口」：这种机器订阅端口不能撤
+mg_reset alone
+printf "${MG_OLD_SUB}" >"${MG_NGX}/subscribe.conf"
+mg_xray7 "a.example.org:50188"
+_mgBefore=$(cat "${MG_NGX}/subscribe.conf")
+_mgOut=$(mg_run 'subscribeMergeExisting <<<"y"')
+assert_equals "${_mgBefore}" "$(cat "${MG_NGX}/subscribe.conf")" "并到节点端口：Reality 目标指着订阅端口时不并（并了那个端口没人听，Reality 全断）"
+assert_contains "${_mgOut}" "主菜单 5 重选一次 Reality 目标" "并到节点端口：告诉用户先重选目标"
+assert_equals "rc=1" "$(mg_run 'subscribeTryMerge; echo "rc=$?"')" "并入：订阅端口被 Reality 当目标时返回 1，文件不动"
+mg_xray7 "127.0.0.1:31305"
+assert_equals "rc=1" "$(mg_run 'subscribePortIsRealityTarget 50188; echo "rc=$?"')" "目标换成新写法（127.0.0.1:31305）后不再拦"
+mg_sb7 "a.example.org"
+assert_equals "rc=0|rc=1" "$(MG_CORE=2 mg_run 'subscribePortIsRealityTarget 31305; echo "rc=$?"')|$(MG_CORE=2 mg_run 'subscribePortIsRealityTarget 50188; echo "rc=$?"')" "sing-box 的握手端口同样认"
 assert_equals "0" "$(grep -c 'location = /old' "${UPG_CONF}")" "订阅升级：页面块是按当前模板重新生成的"
 
 run_upg "" 1 >/dev/null
@@ -5420,6 +5550,7 @@ run_rs() {
         for f in ensureAlpineProcps labelNginxPorts echoContent subscribeConfPort readInstallType readInstallProtocolType readConfigHostPathUUID \
             renderSubscribeConf carpoolEnsureNginxLocation bootStartup carpoolRefreshSubscribe sleep nginx; do eval "$f() { :; }"; done
         subscribeConfPort() { echo 50930; }
+        subscribeIsMerged() { return 1; }
         systemctl() { echo "systemctl $*"; [[ "$1" == start ]] && : >"${RS_DIR}/up"; return 0; }
         pgrep() { [[ -f "${RS_DIR}/up" ]] && echo 42; return 0; }
         nginxConfigPath="${RS_DIR}/nginx/" release=debian selectCustomInstallType="${SEL}"

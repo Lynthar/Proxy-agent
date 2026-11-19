@@ -1226,7 +1226,19 @@ readCustomPort() {
 
 # 读取nginx订阅端口
 readNginxSubscribe() {
+    local mergedHost
     subscribeType="https"
+    # 并口：端口与域名取自带着订阅的那个站点（0 或目标是本机的 7），没有站点能带时算没装
+    if [[ -f "${nginxConfigPath}subscribe.conf" ]] && grep -q '^# merged' "${nginxConfigPath}subscribe.conf"; then
+        subscribePort=
+        if mergedHost=$(subscribeMergedHost); then
+            subscribePort=${mergedHost%% *}
+            subscribeDomain=${mergedHost#* }
+        else
+            subscribeType=
+        fi
+        return 0
+    fi
     if [[ -f "${nginxConfigPath}subscribe.conf" ]]; then
         if grep -q "sing-box" "${nginxConfigPath}subscribe.conf"; then
             subscribePort=$(grep -m1 "listen" "${nginxConfigPath}subscribe.conf" | awk '{print $2}')
@@ -2607,6 +2619,7 @@ server {
 	add_header X-Frame-Options "SAMEORIGIN" always;
 
 	${xhttpLocation}
+	include ${nginxConfigPath}subscribe_locations*.inc;
 	location / {
 		try_files \$uri \$uri/ =404;
 	}
@@ -2629,6 +2642,7 @@ server {
 	# 安全头部
 	server_tokens off;
 
+	include ${nginxConfigPath}subscribe_locations*.inc;
 	location / {
 		try_files \$uri \$uri/ =404;
 	}
@@ -9262,7 +9276,8 @@ carpoolInsertPageBlock() {
     local blockFile rc=0
     blockFile=$(mktemp "${CARPOOL_DIR}/.nginx.XXXXXX") || return 1
     carpoolNginxLocationBlock "${CARPOOL_PAGE_DIR}" >"${blockFile}"
-    awk -v f="${blockFile}" '/^    location \/ \{/ && !done { while ((getline line < f) > 0) print line; close(f); done = 1 } { print }' "$1" >"$2" || rc=1
+    awk -v f="${blockFile}" 'function put() { while ((getline line < f) > 0) print line; close(f); done = 1 }
+        /^    location \/ \{/ && !done { put() } { print } END { if (!done) put() }' "$1" >"$2" || rc=1
     rm -f "${blockFile}"
     return "${rc}"
 }
@@ -9306,7 +9321,8 @@ carpoolSyncUserinfo() {
 # carpoolEnsureNginxLocation on|off → subscribe.conf 里加 / 删页面的 location 块（按标记判重）；
 # 改完过 nginx -t，不过就还原，不动订阅现有 location 的形状
 carpoolEnsureNginxLocation() {
-    local conf="${nginxConfigPath}subscribe.conf" has=
+    local conf has=
+    conf=$(subscribeLocationsFile)
     [[ -f "${conf}" ]] || return 0
     grep -q '# carpool-page-begin' "${conf}" && has=1
     if [[ "$1" == "on" && -z "${has}" ]]; then
@@ -9388,7 +9404,7 @@ carpoolPageUrlBase() {
     if [[ "${subscribeType}" == "http" ]]; then
         domain="$(getPublicIP):${subscribePort}"
     else
-        domain="${currentHost}:${subscribePort}"
+        domain=$(subscribeAuthority "${currentHost:-${subscribeDomain}}")
     fi
     printf '%s://%s/s/carpool/\n' "${subscribeType}" "${domain}"
 }
@@ -16006,6 +16022,9 @@ manageAccount() {
     echoContent yellow "4.添加用户"
     echoContent yellow "5.删除用户"
     echoContent yellow "6.$(t CARPOOL_MENU_ENTRY)"
+    if ! subscribeIsMerged && [[ -n "$(subscribeConfPort)" ]] && subscribeMergedHost any >/dev/null; then
+        echoContent yellow "7.$(t SUBSCRIBE_MERGE_MENU)"
+    fi
     echoContent red "=============================================================="
     read -r -p "请输入:" manageAccountStatus
     if [[ "${manageAccountStatus}" == "1" ]]; then
@@ -16020,6 +16039,8 @@ manageAccount() {
         removeUser
     elif [[ "${manageAccountStatus}" == "6" ]]; then
         carpoolMenu
+    elif [[ "${manageAccountStatus}" == "7" ]]; then
+        subscribeMergeExisting
     else
         echoContent red " ---> 选择错误"
     fi
@@ -16043,6 +16064,13 @@ installSubscribe() {
                 exit 1
             fi
         fi
+        if subscribeTryMerge; then
+            bootStartup nginx
+            handleNginx stop
+            handleNginx start
+            return 0
+        fi
+        rm -f "${nginxConfigPath}subscribe_locations.inc"
         echoContent yellow "开始配置订阅，请输入订阅的端口\n"
 
         mapfile -t result < <(initSingBoxPort "${subscribePort}")
@@ -16068,6 +16096,220 @@ installSubscribe() {
     fi
     if [[ -z $(nginxPids) ]]; then
         handleNginx start
+    fi
+}
+
+# subscribeConfMaps / subscribeConfLocations → 订阅的 http 级 map 与两个 location，独立端口与并口两种形态共用同一份文本。
+# 文件名一律是 32 位十六进制 md5，location 只收这种名字；正则带花括号必须加引号；map 求值会冲掉 $1，文件名用命名捕获
+subscribeConfMaps() {
+    cat <<EOF
+map \$http_user_agent \$paSubFormat {
+    default                            default;
+    "~*^karing/"                       sing-box;
+    "~*^hiddifynext"                   sing-box;
+    "~*^(?:nekobox|throne)/"           default;
+    "~^SF[AIMT]\b"                     sing-box;
+    "~*^clash\.meta/"                  clashMeta;
+    "~*^(?:clash|mihomo|flclash|stash)" clashMetaProfiles;
+    "~*sing-?box"                      sing-box;
+}
+map \$uri \$paSubUserinfo {
+    default "";
+    include ${PROXY_AGENT_DIR}/subscribe_userinfo*.map;
+}
+EOF
+}
+subscribeConfLocations() {
+    cat <<EOF
+    location ~ "^/s/(?<paSubKey>[0-9a-f]{32})\$" {
+        default_type 'text/plain; charset=utf-8';
+        add_header Profile-Update-Interval 12 always;
+        add_header Subscription-Userinfo \$paSubUserinfo always;
+        add_header Vary User-Agent always;
+        root ${SUBSCRIBE_DIR};
+        try_files /\$paSubFormat/\$paSubKey /default/\$paSubKey =404;
+    }
+    location ~ "^/s/(clashMeta|default|clashMetaProfiles|sing-box|sing-box_profiles)/([0-9a-f]{32})\$" {
+        default_type 'text/plain; charset=utf-8';
+        add_header Profile-Update-Interval 12 always;
+        add_header Subscription-Userinfo \$paSubUserinfo always;
+        alias ${SUBSCRIBE_DIR}/\$1/\$2;
+    }
+EOF
+}
+
+# subscribeIsMerged → 0 = 订阅没有自己的端口：subscribe.conf 只剩 map，location 在 subscribe_locations.inc 里，
+# 由 0 的两个回落站点（alone.conf）与 Reality 的本机目标站点（reality_dest.conf）include
+subscribeIsMerged() {
+    [[ -n "${nginxConfigPath}" && -f "${nginxConfigPath}subscribe.conf" ]] && grep -q '^# merged' "${nginxConfigPath}subscribe.conf"
+}
+
+# subscribeLocationsFile → 订阅的 location 所在的文件：并口时是片段，独立端口时是 subscribe.conf；拼车页面块也插在这里
+subscribeLocationsFile() {
+    if subscribeIsMerged; then
+        echo "${nginxConfigPath}subscribe_locations.inc"
+    else
+        echo "${nginxConfigPath}subscribe.conf"
+    fi
+}
+
+# subscribeMergedHost [any] → 输出「端口 域名」：并口的订阅此刻从哪个对外端口取得到；没有能带它的站点返回 1。
+# 先看 Xray 的 0（alone.conf），再看目标是本机的 7（reality_dest.conf）。默认要求站点已 include 片段，any 不看（判断能不能并时用）
+subscribeMergedHost() {
+    local any=${1:-} conf file port= name=
+    conf="${nginxConfigPath}alone.conf"
+    file="${XRAY_CONF_DIR}/02_VLESS_TCP_inbounds.json"
+    if [[ "${coreKind:-1}" != "2" && -f "${conf}" && -f "${file}" ]] && { [[ -n "${any}" ]] || grep -q 'subscribe_locations' "${conf}"; }; then
+        port=$(jq -r '.inbounds[0].port // empty' "${file}" 2>/dev/null)
+        name=$(awk '$1 == "server_name" && $2 != "_;" { sub(/;$/, "", $2); print $2; exit }' "${conf}")
+    fi
+    conf="${nginxConfigPath}reality_dest.conf"
+    if [[ -z "${port}" || -z "${name}" ]] && [[ -f "${conf}" ]] && { [[ -n "${any}" ]] || grep -q 'subscribe_locations' "${conf}"; }; then
+        port=
+        file="${XRAY_CONF_DIR}/07_VLESS_vision_reality_inbounds.json"
+        if [[ "${coreKind:-1}" != "2" && -f "${file}" ]]; then
+            port=$(jq -r 'select((.inbounds[1].streamSettings.realitySettings.target // "") | startswith("127.0.0.1:")) | .inbounds[0].port // empty' "${file}" 2>/dev/null)
+        fi
+        file="${SINGBOX_FRAGMENT_DIR}/07_VLESS_vision_reality_inbounds.json"
+        if [[ -z "${port}" && "${coreKind:-2}" != "1" && -f "${file}" ]]; then
+            port=$(jq -r 'select(.inbounds[0].tls.reality.handshake.server == "127.0.0.1") | .inbounds[0].listen_port // empty' "${file}" 2>/dev/null)
+        fi
+        name=$(awk '$1 == "server_name" { sub(/;$/, "", $2); print $2; exit }' "${conf}")
+    fi
+    [[ "${port}" =~ ^[0-9]+$ && -n "${name}" ]] || return 1
+    echo "${port} ${name}"
+}
+
+# subscribePortIsRealityTarget PORT → 0 = 有 Reality 入站的目标指着这个端口。旧版脚本的「用本机域名当目标」写的是
+# `域名:<订阅端口>`，这时订阅端口一撤 Reality 的每次握手都没处转，所以这种机器先重选一次目标才能并
+subscribePortIsRealityTarget() {
+    local port=$1 files=()
+    [[ "${port}" =~ ^[0-9]+$ ]] || return 1
+    mapfile -t files < <(ls "${XRAY_CONF_DIR}"/*_inbounds.json "${SINGBOX_FRAGMENT_DIR}"/*_inbounds.json 2>/dev/null)
+    ((${#files[@]})) || return 1
+    jq --arg p "${port}" '[.inbounds[]? | (.streamSettings.realitySettings.target? // "" | tostring | endswith(":" + $p)),
+        ((.tls.reality.handshake.server_port? // "" | tostring) == $p)] | any' "${files[@]}" 2>/dev/null | grep -x true >/dev/null
+}
+
+# subscribeAuthority HOST → 订阅地址里的「主机[:端口]」，https 的 443 不写端口。先调 readNginxSubscribe
+subscribeAuthority() {
+    if [[ "${subscribeType}" == "https" && "${subscribePort}" == "443" ]]; then
+        echo "$1"
+    else
+        echo "$1:${subscribePort}"
+    fi
+}
+
+# subscribeEnsureIncludes → 给 alone.conf 的两个回落站点和 reality_dest.conf 补上片段的 include（旧版脚本写的没有）。
+# 通配写法：片段不在时 nginx -t 照过。只在 `location / {` 前插，已有就不动
+subscribeEnsureIncludes() {
+    local conf line="include ${nginxConfigPath}subscribe_locations*.inc;"
+    for conf in "${nginxConfigPath}alone.conf" "${nginxConfigPath}reality_dest.conf"; do
+        [[ -f "${conf}" ]] || continue
+        grep -q 'subscribe_locations' "${conf}" && continue
+        awk -v inc="${line}" '/^[[:space:]]*location \/ \{/ { match($0, /^[[:space:]]*/); print substr($0, 1, RLENGTH) inc } { print }' "${conf}" >"${conf}.inc.tmp" \
+            && cat "${conf}.inc.tmp" >"${conf}"
+        rm -f "${conf}.inc.tmp"
+    done
+}
+
+# renderSubscribeMerged DOMAIN → 写并口形态：subscribe.conf 只有 map 与标记行（记着域名，退回独立端口时要用），location 进片段。
+# 片段里原有的拼车页面块由调用方补回
+renderSubscribeMerged() {
+    {
+        printf '# proxy-agent subscribe.conf r%s\n# merged %s\n' "${SUBSCRIBE_CONF_REVISION}" "$1"
+        subscribeConfMaps
+    } >"${nginxConfigPath}subscribe.conf"
+    subscribeConfLocations >"${nginxConfigPath}subscribe_locations.inc"
+}
+
+# subscribeRewriteMerged DOMAIN → 按当前模板重写并口的两个文件，片段里原有的拼车页面块补回
+subscribeRewriteMerged() {
+    local inc="${nginxConfigPath}subscribe_locations.inc" hadPage=
+    grep -qs '# carpool-page-begin' "${inc}" && hadPage=1
+    renderSubscribeMerged "$1"
+    if [[ -n "${hadPage}" ]] && carpoolInsertPageBlock "${inc}" "${inc}.new"; then
+        cat "${inc}.new" >"${inc}"
+    fi
+    rm -f "${inc}.new"
+}
+
+# subscribeSettleMerged → 装机收尾或换了 Reality 目标之后给并口的订阅对一次账：还有站点带着就按它的域名重写，
+# 没有了就退回独立端口。调用方随后要让 nginx 重读
+subscribeSettleMerged() {
+    local host
+    subscribeEnsureIncludes
+    if host=$(subscribeMergedHost); then
+        subscribeRewriteMerged "${host#* }"
+    else
+        subscribeUnmerge
+    fi
+}
+
+# subscribeTryMerge → 有能带订阅的站点就写成并口并返回 0；没有、或写完 nginx -t 不过，就把动过的文件还原并返回 1。
+# 只在订阅还没装（或并口的宿主没了）时调：不问端口、不装伪装站，宿主那边都有了
+subscribeTryMerge() {
+    local host conf bak=() hadPage= f inc="${nginxConfigPath}subscribe_locations.inc"
+    host=$(subscribeMergedHost any) || return 1
+    subscribePortIsRealityTarget "$(subscribeConfPort)" && return 1
+    for f in subscribe.conf subscribe_locations.inc alone.conf reality_dest.conf; do
+        conf="${nginxConfigPath}${f}"
+        rm -f "${conf}.merge.bak"
+        [[ -f "${conf}" ]] && cp -f "${conf}" "${conf}.merge.bak" && bak+=("${conf}")
+    done
+    grep -qs '# carpool-page-begin' "$(subscribeLocationsFile)" && hadPage=1
+    subscribeEnsureIncludes
+    renderSubscribeMerged "${host#* }"
+    if [[ -n "${hadPage}" ]] && carpoolInsertPageBlock "${inc}" "${inc}.new"; then
+        cat "${inc}.new" >"${inc}"
+    fi
+    rm -f "${inc}.new"
+    if subscribeMergedHost >/dev/null && nginx -t >/dev/null 2>&1; then
+        for conf in "${bak[@]}"; do rm -f "${conf}.merge.bak"; done
+        echoContent green " ---> $(t SUBSCRIBE_MERGED "${host%% *}")"
+        return 0
+    fi
+    rm -f "${nginxConfigPath}subscribe.conf" "${nginxConfigPath}subscribe_locations.inc"
+    for conf in "${bak[@]}"; do mv -f "${conf}.merge.bak" "${conf}"; done
+    return 1
+}
+
+# subscribeUnmerge → 并口的订阅没有站点能带了（这次没装 0、7 的目标也不是本机域名）：退回独立端口，端口自动挑、放行，
+# 域名用并口时记下的。订阅链接跟着变，提示里写明新端口
+subscribeUnmerge() {
+    local conf="${nginxConfigPath}subscribe.conf" name port hadPage=
+    name=$(sed -n 's/^# merged \(.*\)$/\1/p' "${conf}")
+    grep -qs '# carpool-page-begin' "${nginxConfigPath}subscribe_locations.inc" && hadPage=1
+    port=$(firstFreePort "$(listeningPorts tcp)" $(shuf -i 10000-30000 -n 20 2>/dev/null)) || port=$((RANDOM % 20001 + 10000))
+    rm -f "${nginxConfigPath}subscribe_locations.inc"
+    allowPort "${port}"
+    renderSubscribeConf "${port}" "${name}"
+    [[ -n "${hadPage}" ]] && carpoolEnsureNginxLocation on
+    echoContent yellow " ---> $(t SUBSCRIBE_UNMERGED "${port}")"
+}
+
+# subscribeMergeExisting → 账号管理里的入口：把已有的独立端口订阅并到 0 或 7 的端口。订阅链接会变，先确认；失败原样还原
+subscribeMergeExisting() {
+    local host answer conf="${nginxConfigPath}subscribe.conf"
+    if subscribeIsMerged || [[ -z "$(subscribeConfPort)" ]] || ! host=$(subscribeMergedHost any); then
+        echoContent yellow " ---> $(t SUBSCRIBE_MERGE_UNAVAILABLE)"
+        return 0
+    fi
+    if subscribePortIsRealityTarget "$(subscribeConfPort)"; then
+        echoContent yellow " ---> $(t SUBSCRIBE_MERGE_REALITY_TARGET "$(subscribeConfPort)")"
+        return 0
+    fi
+    read -r -p "$(t SUBSCRIBE_MERGE_CONFIRM "${host%% *}")" answer
+    isYesInput "${answer}" || return 0
+    if ! subscribeTryMerge; then
+        echoContent red " ---> $(t SUBSCRIBE_MERGE_FAILED)"
+        return 1
+    fi
+    handleNginx stop
+    handleNginx start force
+    carpoolRefreshSubscribe
+    if carpoolEnabled; then
+        carpoolRenderPages
     fi
 }
 
@@ -16111,20 +16353,7 @@ renderSubscribeConf() {
     # 通用地址按 UA 给格式：规则锚定开头（Hiddify / NekoBox / Karing 的 UA 带着别家的名字），map 求值会冲掉 $1，文件名用命名捕获
     cat <<EOF >${nginxConfigPath}subscribe.conf
 # proxy-agent subscribe.conf r${SUBSCRIBE_CONF_REVISION}
-map \$http_user_agent \$paSubFormat {
-    default                            default;
-    "~*^karing/"                       sing-box;
-    "~*^hiddifynext"                   sing-box;
-    "~*^(?:nekobox|throne)/"           default;
-    "~^SF[AIMT]\b"                     sing-box;
-    "~*^clash\.meta/"                  clashMeta;
-    "~*^(?:clash|mihomo|flclash|stash)" clashMetaProfiles;
-    "~*sing-?box"                      sing-box;
-}
-map \$uri \$paSubUserinfo {
-    default "";
-    include ${PROXY_AGENT_DIR}/subscribe_userinfo*.map;
-}
+$(subscribeConfMaps)
 server {
     ${nginxSubscribeListen}
     ${serverName}
@@ -16138,20 +16367,7 @@ server {
     client_max_body_size 100m;
     server_tokens off;
     root ${nginxStaticPath};
-    location ~ "^/s/(?<paSubKey>[0-9a-f]{32})\$" {
-        default_type 'text/plain; charset=utf-8';
-        add_header Profile-Update-Interval 12 always;
-        add_header Subscription-Userinfo \$paSubUserinfo always;
-        add_header Vary User-Agent always;
-        root ${SUBSCRIBE_DIR};
-        try_files /\$paSubFormat/\$paSubKey /default/\$paSubKey =404;
-    }
-    location ~ "^/s/(clashMeta|default|clashMetaProfiles|sing-box|sing-box_profiles)/([0-9a-f]{32})\$" {
-        default_type 'text/plain; charset=utf-8';
-        add_header Profile-Update-Interval 12 always;
-        add_header Subscription-Userinfo \$paSubUserinfo always;
-        alias ${SUBSCRIBE_DIR}/\$1/\$2;
-    }
+$(subscribeConfLocations)
     location / {
     }
 }
@@ -16181,6 +16397,18 @@ ensureSubscribeConfCurrent() {
     local conf="${nginxConfigPath}subscribe.conf" port serverNameValue hadPage=
     [[ -n "${nginxConfigPath}" && -f "${conf}" ]] && command -v nginx >/dev/null 2>&1 || return 0
     [[ "$(head -1 "${conf}")" == "# proxy-agent subscribe.conf r${SUBSCRIBE_CONF_REVISION}" ]] && return 0
+    if subscribeIsMerged; then
+        cp -f "${conf}" "${conf}.upgrade.bak" && cp -f "${nginxConfigPath}subscribe_locations.inc" "${nginxConfigPath}subscribe_locations.inc.upgrade.bak" || return 0
+        subscribeRewriteMerged "$(sed -n 's/^# merged \(.*\)$/\1/p' "${conf}")"
+        if nginx -t >/dev/null 2>&1; then
+            rm -f "${conf}.upgrade.bak" "${nginxConfigPath}subscribe_locations.inc.upgrade.bak"
+            carpoolReloadNginx
+        else
+            mv -f "${conf}.upgrade.bak" "${conf}"
+            mv -f "${nginxConfigPath}subscribe_locations.inc.upgrade.bak" "${nginxConfigPath}subscribe_locations.inc"
+        fi
+        return 0
+    fi
     port=$(subscribeConfPort)
     [[ -n "${port}" ]] || return 0
     serverNameValue=$(grep -m1 'server_name' "${conf}" | awk '{print $2}' | tr -d ';')
@@ -16225,6 +16453,7 @@ server {
     ssl_protocols TLSv1.2 TLSv1.3;
     server_tokens off;
     root ${nginxStaticPath};
+    include ${nginxConfigPath}subscribe_locations*.inc;
     location / {
     }
 }
@@ -16240,14 +16469,17 @@ subscribeConfPort() {
 # refreshSubscribeAfterInstall → 安装流程收尾：订阅装过就按原端口重写配置（域名换了跟着换，拼车页面的 location 补回去），
 # 再用原 salt 静默重建订阅文件，订阅地址不变、内容换成这次装出来的账号。原来是 https、这次没有该域名的证书就不降级，文件不动
 refreshSubscribeAfterInstall() {
-    local port serverNameValue hadPage=
+    local port serverNameValue hadPage= merged=
+    subscribeIsMerged && merged=1
     port=$(subscribeConfPort)
-    [[ -n "${port}" ]] && command -v nginx >/dev/null 2>&1 || return 0
+    [[ -n "${port}${merged}" ]] && command -v nginx >/dev/null 2>&1 || return 0
     readInstallType
     readInstallProtocolType
     readConfigHostPathUUID
     serverNameValue=${domain:-${currentHost}}
-    if ! grep -m1 "listen" "${nginxConfigPath}subscribe.conf" | grep " ssl" >/dev/null \
+    if [[ -n "${merged}" ]]; then
+        subscribeSettleMerged
+    elif ! grep -m1 "listen" "${nginxConfigPath}subscribe.conf" | grep " ssl" >/dev/null \
         || [[ -n "${serverNameValue}" && -f "${TLS_DIR}/${serverNameValue}.crt" && -f "${TLS_DIR}/${serverNameValue}.key" ]]; then
         grep -q '# carpool-page-begin' "${nginxConfigPath}subscribe.conf" && hadPage=1
         renderSubscribeConf "${port}" "${serverNameValue}"
@@ -16262,6 +16494,7 @@ refreshSubscribeAfterInstall() {
 # 卸载订阅
 unInstallSubscribe() {
     rm -rf "${nginxConfigPath}subscribe.conf" >/dev/null 2>&1
+    rm -f "${nginxConfigPath}subscribe_locations.inc"
 }
 
 # 添加订阅
@@ -16840,7 +17073,7 @@ subscribe() {
                         currentDomain="$(getPublicIP):${subscribePort}"
                     else
                         # 只剩 14 / 16 时入站里没有域名，用订阅自己的 server_name，否则链接成了 https://:端口
-                        currentDomain="${currentHost:-${subscribeDomain}}:${subscribePort}"
+                        currentDomain=$(subscribeAuthority "${currentHost:-${subscribeDomain}}")
                     fi
                 fi
                 # 三种格式的文件不管打不打印都要重建：上面已经删光了 clashMeta，只建 default 会让所有人的 Clash 订阅 404
@@ -17277,6 +17510,11 @@ manageReality() {
     fi
 
     reloadCore
+    # 并口的订阅可能正靠 7 的本机目标带着：目标换走就退回独立端口，nginx 重读后新端口才有人听
+    if subscribeIsMerged; then
+        subscribeSettleMerged
+        nginx -t >/dev/null 2>&1 && carpoolReloadNginx
+    fi
     # 没配过订阅的（菜单 19 装的 Reality）不拖进订阅初始化：那里答 n 就退出，开好的端口和下载的站点文件都留着
     readNginxSubscribe
     if [[ -n "${subscribePort}" ]]; then

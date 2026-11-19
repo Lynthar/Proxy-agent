@@ -146,14 +146,29 @@ activeState() {
 
 # subPort / subKey → 订阅的端口与本账号订阅地址里的 md5
 subPort() {
-    grep -oE 'listen [0-9]+ ssl so_keepalive' /etc/nginx/conf.d/subscribe.conf 2>/dev/null | awk '{print $2}' | head -n 1
+    PROXY_AGENT_DIR="${INSTALL_ROOT}" bash -c 'source "${PROXY_AGENT_DIR}/install.sh"
+        nginxConfigPath=/etc/nginx/conf.d/
+        readInstallType; readInstallProtocolType; readConfigHostPathUUID; readNginxSubscribe; printf "%s\n" "${subscribePort}"' 2>/dev/null | tail -n 1
+}
+# subMode → 订阅的形态：merged（并在节点端口上）、standalone（自己的端口）或 none
+subMode() {
+    if grep -q '^# merged' /etc/nginx/conf.d/subscribe.conf 2>/dev/null; then
+        echo merged
+    elif [[ -f /etc/nginx/conf.d/subscribe.conf ]]; then
+        echo standalone
+    else
+        echo none
+    fi
 }
 subKey() {
     ls "${INSTALL_ROOT}/subscribe/default/" 2>/dev/null | head -n 1
 }
 # fetchSub DOMAIN UA OUT → 以 UA 取通用订阅地址存进 OUT，打印 HTTP 状态码
 fetchSub() {
-    curl -sS -o "$3" -w '%{http_code}' --max-time 15 -A "$2" "https://$1:$(subPort)/s/$(subKey)" 2>/dev/null
+    local port
+    port=$(subPort)
+    [[ "${port}" =~ ^[0-9]+$ ]] || { echo "no-port"; return 0; }
+    curl -sS -o "$3" -w '%{http_code}' --max-time 15 -A "$2" "https://$1:${port}/s/$(subKey)" 2>/dev/null
 }
 
 # 客户端：官方 sing-box 最新稳定版，系统信任库里有测试 CA，订阅里的 server_name 照常校验
@@ -263,12 +278,17 @@ assert_equals "301 https://${DOMAIN_A}/" "$(curl -s -o /dev/null -w '%{http_code
 assert_contains "$(crontab -l 2>/dev/null)" "install.sh RenewTLS" "crontab 里有证书维护任务"
 
 echo ""
-echo -e "${YELLOW}=== 菜单 7 → 2：订阅（端口回车随机、伪装站不重装、salt 回车随机）===${NC}"
-s2Out=$(runMenu "7\n2\n\n\n\n")
+echo -e "${YELLOW}=== 菜单 7 → 2：订阅（有 0 就并在它的端口上，不问端口；salt 回车随机）===${NC}"
+s2Out=$(runMenu "7\n2\n\n")
 s2Rc=$?
 assert_equals "0" "${s2Rc}" "装订阅退出码 0"
 noNoise "装订阅" "${s2Out}"
-assert_contains "$(cat /etc/nginx/conf.d/subscribe.conf 2>/dev/null)" "server_name ${DOMAIN_A};" "subscribe.conf 用 ${DOMAIN_A}"
+assert_equals "merged 443 0" "$(subMode) $(subPort) $(grep -c 'listen' /etc/nginx/conf.d/subscribe.conf 2>/dev/null)" "订阅并在 0 的 443 上，nginx 不为它另开端口"
+assert_contains "${s2Out}" "https://${DOMAIN_A}/s/" "打印的订阅地址不带端口"
+for _proto in --http1.1 --http2; do
+    assert_equals "200" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "${_proto}" "https://${DOMAIN_A}/s/$(subKey)")" "订阅经 443 回落取得到（${_proto#--}：0 按 ALPN 分到两个回落站点）"
+done
+assert_equals "404" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://${DOMAIN_A}/s/00000000000000000000000000000000")" "不存在的订阅键在 443 上是伪装站的 404"
 subKeyA=$(subKey)
 assert_not_empty "${subKeyA}" "订阅目录里有本账号的订阅文件"
 assert_equals "200" "$(fetchSub "${DOMAIN_A}" 'sing-box 1.14.4' "${WORK}/sub-sb.json")" "sing-box 的 UA 取订阅 200"
@@ -410,7 +430,7 @@ assert_contains "${s5Out}" "路径格式非法" "path 输错：报错后重问�
 sleep 2
 assert_equals "active active active" "$(activeState)" "重装后旁挂的 sing-box 也起来了（端口自检停过它）"
 assert_equals "${subKeyA}" "$(subKey)" "订阅地址的 md5 没变（沿用 salt），成员手里的订阅地址照常可用"
-assert_contains "$(cat /etc/nginx/conf.d/subscribe.conf 2>/dev/null)" "server_name ${DOMAIN_B};" "subscribe.conf 换成 ${DOMAIN_B}"
+assert_contains "$(cat /etc/nginx/conf.d/subscribe.conf 2>/dev/null)" "# merged ${DOMAIN_B}" "并口的订阅跟着换成 ${DOMAIN_B}"
 assert_contains "$(cat /etc/nginx/conf.d/reality_dest.conf 2>/dev/null)" "server_name ${DOMAIN_B};" "reality_dest.conf 换成 ${DOMAIN_B}"
 assert_equals "${DOMAIN_B}" "$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0]' "${XRAY_CONF_DIR}/07_VLESS_vision_reality_inbounds.json" 2>/dev/null)" \
     "Reality 的 serverNames 换成 ${DOMAIN_B}"
@@ -565,6 +585,8 @@ s8Out=$(runMenu "2\n1\n7\ny\n")
 assert_equals "0" "$?" "只装 Reality 退出码 0"
 noNoise "只装 Reality" "${s8Out}"
 assert_equals "active" "$(systemctl is-active nginx 2>/dev/null)" "nginx 还在跑"
+assert_equals "merged $(jq -r '.inbounds[0].port' "${XRAY_CONF_DIR}/07_VLESS_vision_reality_inbounds.json" 2>/dev/null)" "$(subMode) $(subPort)" \
+    "0 没了：订阅改跟目标是本机域名的 7 的端口，仍不另开端口"
 assert_equals "200" "$(fetchSub "${DOMAIN_B}" 'sing-box 1.14.4' "${WORK}/sub-sb.json")" "订阅照样 200"
 probeSub "只留 Reality" "${WORK}/sub-sb.json"
 assert_equals "vless" "${probedTypes}" "订阅里只剩 Reality，且能用（本机伪装站在 nginx 上）"
@@ -588,6 +610,8 @@ assert_equals "sing-box nginx" "$(for s in xray sing-box nginx; do [[ "$(systemc
     "只剩 sing-box 与 nginx 在跑"
 assert_equals "publicKey:${xrayRealityPub}" "$(cat "${SINGBOX_FRAGMENT_DIR}/reality_key" 2>/dev/null)" "reality_key 记的是沿用的 Xray 公钥"
 assert_equals "200" "$(fetchSub "${DOMAIN_B}" 'sing-box 1.14.4' "${WORK}/sub-sb.json")" "sing-box 内核下取订阅 200"
+assert_equals "merged $(jq -r '.inbounds[0].listen_port' "${SINGBOX_FRAGMENT_DIR}/07_VLESS_vision_reality_inbounds.json" 2>/dev/null)" "$(subMode) $(subPort)" \
+    "sing-box 内核：订阅跟 7 的端口（它的 0 没有回落站点，带不了）"
 assert_equals "${xrayRealityPub}" "$(jq -r '.outbounds[] | select(.tls.reality.enabled == true) | .tls.reality.public_key' "${WORK}/sub-sb.json" | head -n 1)" \
     "订阅里 Reality 节点的 public_key 就是这把公钥"
 probeSub "sing-box 全装" "${WORK}/sub-sb.json"
@@ -647,6 +671,8 @@ assert_equals "${sbRealityKeepBefore}" "$(sbRealityKeep)" "sing-box 菜单 5：�
 assert_equals "${sbOthersBefore}" "$(sbOtherFragments)" "sing-box 菜单 5：7 以外的片段（含 reality_key）一个字节没动"
 assert_equals "active active" "$(systemctl is-active sing-box nginx 2>/dev/null | paste -sd' ' -)" "sing-box 菜单 5 之后 sing-box 与 nginx 都在跑"
 assert_equals "200" "$(fetchSub "${DOMAIN_B}" 'sing-box 1.14.4' "${WORK}/sub-sb.json")" "sing-box 菜单 5 之后取订阅 200"
+assert_equals "standalone" "$(subMode)" "7 的目标换成外站：没有协议能带订阅了，退回独立端口"
+assert_contains "${sbR1Out}" "own port $(subPort)" "退回独立端口时说明新端口与链接变了"
 sbRealityTag=$(jq -r '.outbounds[] | select(.tls.reality.enabled == true) | .tag' "${WORK}/sub-sb.json" | head -n 1)
 assert_equals "dl.google.com" "$(jq -r --arg t "${sbRealityTag}" '.outbounds[] | select(.tag == $t) | .tls.server_name' "${WORK}/sub-sb.json")" \
     "sing-box 菜单 5：订阅里 Reality 节点的 server_name 跟着换"
@@ -664,6 +690,7 @@ assert_equals "${sbRealityKeepBefore}" "$(sbRealityKeep)" "sing-box 菜单 5 换
 assert_equals "${sbOthersBefore}" "$(sbOtherFragments)" "sing-box 菜单 5 换回之后 7 以外的片段仍一个字节没动"
 assert_contains "$(cat /etc/nginx/conf.d/reality_dest.conf 2>/dev/null)" "server_name ${DOMAIN_B};" "sing-box 菜单 5：选了本机域名时重写 reality_dest.conf"
 assert_equals "200" "$(fetchSub "${DOMAIN_B}" 'sing-box 1.14.4' "${WORK}/sub-sb.json")" "sing-box 菜单 5 换回之后取订阅 200"
+assert_equals "standalone" "$(subMode)" "目标换回本机域名：已经退回独立端口的订阅不自动并回去"
 probeSub "sing-box 菜单 5 换回本机域名" "${WORK}/sub-sb.json"
 assert_equals "${sbFullTypes}" "${probedTypes}" "sing-box 菜单 5 换回之后订阅里的节点与全装时一样，都能用（nginx 重读了新写的 reality_dest.conf）"
 
