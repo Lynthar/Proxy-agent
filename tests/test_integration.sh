@@ -619,8 +619,8 @@ run_cs() {
         xrayDaemonRunning() { [[ -f "${PROXY_AGENT_DIR}/xray.up" ]]; }
         singBoxDaemonRunning() { [[ -f "${PROXY_AGENT_DIR}/sb.up" ]]; }
         reloadCore() { echo RELOAD; }
-        for f in labelCoreBinary removeLegacyAllowInsecure ensureRealityMinClientVer ensureXrayDirectStrategy ensureCorePortTargets migrateChainEntryState legacyRoutingClear \
-            ensureCarpoolXray writeXrayRouting carpoolCollectBeforeStop sleep; do eval "$f() { :; }"; done
+        for f in ownCoreBinary labelCoreBinary removeLegacyAllowInsecure ensureXrayLogPaths ensureRealityMinClientVer ensureXrayDirectStrategy ensureCorePortTargets \
+            migrateChainEntryState legacyRoutingClear ensureCarpoolXray writeXrayRouting carpoolCollectBeforeStop sleep; do eval "$f() { :; }"; done
         find() { echo found; }
         systemctl() { [[ "$1" == start ]] && touch "${PROXY_AGENT_DIR}/xray.up"; return 0; }
         eval "${CS_FNS}"
@@ -1427,7 +1427,7 @@ sb_with() {
     sleep 0.3
     env PROXY_AGENT_DIR="${SB_ALIVE_DIR}" SB_FNS="${SB_ALIVE_FN}"$'\n'"$(sed -n '/^handleSingBox() {/,/^}/p' install.sh)" bash -c '
         source lib/constants.sh; eval "${SB_FNS}"
-        ensureAlpineProcps() { :; }; labelCoreBinary() { :; }; sleep() { :; }; echoContent() { echo "$2"; }
+        ensureAlpineProcps() { :; }; ownCoreBinary() { :; }; labelCoreBinary() { :; }; sleep() { :; }; echoContent() { echo "$2"; }
         '"${code}" 2>&1
     kill "${pid}" 2>/dev/null; wait "${pid}" 2>/dev/null
 }
@@ -4490,12 +4490,14 @@ echo ""
 
 echo -e "${YELLOW}=== 测试 updateGeoSite 失败语义 ===${NC}"
 
-GEO_FN=$(sed -n '/^fetchGeoFiles() {/,/^}/p;/^updateGeoSite() {/,/^}/p' install.sh)
+GEO_FN=$(sed -n '/^verifySHA256() {/,/^}/p;/^fetchGeoFiles() {/,/^}/p;/^updateGeoSite() {/,/^}/p' install.sh)
+GEO_NEW_SUM=$(printf new | { sha256sum 2>/dev/null || shasum -a 256; } | awk '{print $1}')
 assert_not_empty "${GEO_FN}" "updateGeoSite：抽到函数原文"
 GEO_DIR="${MOCK_ROOT}/geo/xray/"
 mkdir -p "${GEO_DIR}conf"
 
-# 子 shell 里跑：桩掉 curl、wget 与内核重载。ok = 写 -O 目标，empty = 成功但文件是空的，别的 = 下载失败；记下 wget 取的地址与 curl 有没有被调
+# 子 shell 里跑：桩掉 curl、wget 与内核重载。ok = 写 -O 目标（.sha256sum 写对的哈希），empty = 成功但文件是空的，
+# badsum / nosum = 文件照下、哈希对不上 / 取不到，别的 = 下载失败；记下 wget 取的地址与 curl 有没有被调
 run_update_geo() (
     configPath="${GEO_DIR}conf/"
     release="debian"; wgetShowProgressStatus=""
@@ -4503,12 +4505,15 @@ run_update_geo() (
     [[ "${2:-}" == "mv-fail" ]] && mv() { return 1; }
     curl() { : >"${GEO_DIR}curl-called"; }
     wget() {
-        local out=""
-        printf '%s\n' "${*: -1}" >>"${GEO_DIR}wget-urls"
+        local out="" url="${*: -1}"
+        printf '%s\n' "${url}" >>"${GEO_DIR}wget-urls"
         while [[ $# -gt 0 ]]; do [[ "$1" == "-O" ]] && out="$2"; shift; done
-        case "${GEO_WGET_MODE}" in
-            ok) printf 'new' >"${out}" ;;
-            empty) : >"${out}" ;;
+        case "${GEO_WGET_MODE}:${url}" in
+            nosum:*.sha256sum) return 8 ;;
+            badsum:*.sha256sum) printf '%064d  x\n' 0 >"${out}" ;;
+            *:*.sha256sum) printf '%s  %s\n' "${GEO_NEW_SUM}" "${url##*/}" >"${out}" ;;
+            ok:* | badsum:* | nosum:*) printf 'new' >"${out}" ;;
+            empty:*) : >"${out}" ;;
             *) return 8 ;;
         esac
     }
@@ -4531,6 +4536,11 @@ run_update_geo empty
 assert_equals "1" "$?" "updateGeoSite：下到空文件算失败"
 assert_equals "old old" "$(geo_files)" "updateGeoSite：下到空文件时旧 geo 文件原样保留"
 
+for _mode in badsum nosum; do
+    run_update_geo "${_mode}"
+    assert_equals "1 old old 0" "$? $(geo_files) $(geo_staging_left)" "updateGeoSite：上游的 .sha256sum ${_mode/badsum/对不上}${_mode/nosum/取不到}时返回 1，旧文件原样、不留暂存目录"
+done
+
 # 发布失败：mv 整体失败（一个都没换），以及 geoip.dat 被同名目录占着（只换掉 geosite）
 rm -f "${GEO_DIR}reloaded"
 run_update_geo ok mv-fail
@@ -4549,23 +4559,26 @@ assert_equals "0" "$?" "updateGeoSite：两个文件都下到后返回 0"
 assert_equals "yes" "$([[ -e "${GEO_DIR}reloaded" ]] && echo yes || echo no)" "updateGeoSite：发布成功后重载内核"
 assert_equals "new new" "$(geo_files)" "updateGeoSite：两个文件都换成了新的"
 assert_equals "no" "$([[ -e "${GEO_DIR}curl-called" ]] && echo yes || echo no)" "updateGeoSite：不查 GitHub API（未认证额度按出口 IP 算，用完就取不到版本号）"
-assert_equals "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat|https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" \
-    "$(paste -sd'|' - <"${GEO_DIR}wget-urls")" "updateGeoSite：走 releases/latest/download 的固定地址"
+_geoBase=https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download
+assert_equals "${_geoBase}/geosite.dat|${_geoBase}/geosite.dat.sha256sum|${_geoBase}/geoip.dat|${_geoBase}/geoip.dat.sha256sum" \
+    "$(paste -sd'|' - <"${GEO_DIR}wget-urls")" "updateGeoSite：文件与它的 .sha256sum 都走 releases/latest/download 的固定地址"
 
 # installXray：默认配置不读 geo，下载失败不中止安装（服务这时已停），但要说出来
-IX_FN=$(sed -n '/^fetchGeoFiles() {/,/^}/p;/^installXray() {/,/^}/p' install.sh)
+IX_FN=$(sed -n '/^verifySHA256() {/,/^}/p;/^fetchGeoFiles() {/,/^}/p;/^installXray() {/,/^}/p' install.sh)
 IX_DIR="${MOCK_ROOT}/installxray/xray"
-# run_ix GEO_MODE → 新装 Xray：桩掉版本解析、下载、解压；GEO_MODE 是 ok 或 fail，打印输出与退出码
+# run_ix GEO_MODE [DGST] → 新装 Xray：桩掉版本解析、下载、解压；GEO_MODE 是 ok 或 fail，DGST 是 .dgst 里取到的哈希（给空串就是没取到），
+# 下载的 zip 内容是 zip；打印输出与退出码
 run_ix() {
     mkdir -p "${IX_DIR}"
     find "${IX_DIR}" -type f -delete
     printf 'old' >"${IX_DIR}/geosite.dat"
-    env IX_FN="${IX_FN}" IX_DIR="${IX_DIR}" GEO_MODE="$1" bash -c '
+    env IX_FN="${IX_FN}" IX_DIR="${IX_DIR}" GEO_MODE="$1" GEO_NEW_SUM="${GEO_NEW_SUM}" \
+        IX_DGST="${2-$(printf zip | { sha256sum 2>/dev/null || shasum -a 256; } | awk '{print $1}')}" bash -c '
         eval "${IX_FN}"
         XRAY_DIR="${IX_DIR}" XRAY_BIN="${IX_DIR}/xray" release=debian xrayCoreCPUVendor=Xray-linux-64 wgetShowProgressStatus= totalProgress=1
         readInstallType() { :; }
         resolveXrayVersion() { echo v26.3.27; }
-        extractXrayHash() { :; }
+        extractXrayHash() { echo "${IX_DGST}"; }
         echoContent() { echo "$2"; }
         t() { echo "$1"; }
         curl() { echo curl-called; }
@@ -4579,6 +4592,8 @@ run_ix() {
             done
             case "${url}" in
                 *.dat) [[ "${GEO_MODE}" == ok ]] || return 8; printf new >"${out}" ;;
+                *.dat.sha256sum) printf "%s  x\n" "${GEO_NEW_SUM}" >"${out}" ;;
+                *.zip) printf zip >"${dir}/${url##*/}" ;;
                 *) : >"${dir}/${url##*/}" ;;
             esac
         }
@@ -4595,6 +4610,11 @@ assert_contains "${ixOut}" "GEO_DOWNLOAD_FAILED" "installXray：geo 下载失败
 assert_contains "${ixOut}" "GEO_INSTALL_SKIPPED" "installXray：geo 下载失败说明后果与补救"
 assert_equals "yes old" "$([[ -f "${IX_DIR}/xray" ]] && echo yes || echo no) $(cat "${IX_DIR}/geosite.dat")" "installXray：geo 下载失败时内核照常就位，已有的 geo 不动"
 assert_equals "0" "$(find "${IX_DIR}" -maxdepth 1 -name 'geo-update.*' | wc -l | tr -d ' ')" "installXray：geo 下载失败不留暂存目录"
+ixOut=$(run_ix ok "")
+assert_equals "rc=1 XRAY_DIGEST_MISSING no" "$(grep -oE 'rc=[0-9]+|XRAY_DIGEST_MISSING' <<<"${ixOut}" | sort -r | paste -sd' ' -) $([[ -e "${IX_DIR}/xray" || -e "${IX_DIR}/Xray-linux-64.zip" ]] && echo yes || echo no)" \
+    "installXray：取不到 .dgst 里的哈希就不装（同 sing-box 拿不到 digest），下载的包删掉"
+ixOut=$(run_ix ok "$(printf '%064d' 0)" </dev/null)
+assert_contains "${ixOut}" "rc=1" "installXray：哈希对不上不装"
 assert_equals "new new" "$(geo_files)" "updateGeoSite：成功后两个 geo 文件都换成新版"
 assert_equals "0" "$(geo_staging_left)" "updateGeoSite：成功后不留暂存目录"
 
@@ -5633,7 +5653,7 @@ run_rs() {
     env RS_FN="${RS_FN}" RS_DIR="${RS_DIR}" PROXY_AGENT_DIR="${RS_DIR}" SEL="$1" bash -c '
         eval "${RS_FN}"
         for f in ensureAlpineProcps labelNginxPorts echoContent subscribeConfPort readInstallType readInstallProtocolType readConfigHostPathUUID \
-            renderSubscribeConf carpoolEnsureNginxLocation bootStartup carpoolRefreshSubscribe sleep nginx; do eval "$f() { :; }"; done
+            renderSubscribeConf carpoolEnsureNginxLocation bootStartup carpoolRefreshSubscribe settlePortRules sleep nginx; do eval "$f() { :; }"; done
         subscribeConfPort() { echo 50930; }
         subscribeIsMerged() { return 1; }
         systemctl() { echo "systemctl $*"; [[ "$1" == start ]] && : >"${RS_DIR}/up"; return 0; }
@@ -6095,7 +6115,7 @@ run_mt() {
 assert_equals "" "$(run_mt manageTuic)" "TUIC 菜单：没有端口跳跃入口（三种订阅都带不了区间，服务端 DNAT 白开）"
 assert_equals "hop hysteria2" "$(run_mt manageHysteria)" "Hysteria2 菜单：端口跳跃入口还在"
 
-HOP_ADD_FN=$(sed -n '/^addPortHopping() {/,/^}/p' install.sh)
+HOP_ADD_FN=$(sed -n '/^addPortHopping() {/,/^}/p;/^portHoppingRule() {/,/^}/p' install.sh)
 # run_hop_add [NO_V6] → 桩掉 iptables / ip6tables，打印加规则的调用；NO_V6 非空时 ip6tables 的 nat 表不可用
 run_hop_add() {
     env HOP_ADD_FN="${HOP_ADD_FN}" NO_V6="${1:-}" bash -c '
@@ -6107,13 +6127,14 @@ run_hop_add() {
         ip6tables() { if [[ "$*" == "-t nat -S PREROUTING" ]]; then [[ -z "${NO_V6}" ]]; else echo "ip6tables $*"; fi; }
         iptables-save() { echo "Proxy-agent_hysteria2_portHopping"; }
         netfilter-persistent() { :; }
+        portHoppingBootHook() { echo "hook $*"; }
         release=debian
         echo 30000-30010 | addPortHopping hysteria2 443' 2>&1
 }
 _hopRule="PREROUTING -p udp --dport 30000:30010 -m addrtype --dst-type LOCAL -m comment --comment Proxy-agent_hysteria2_portHopping -j REDIRECT --to-ports 443"
-assert_equals "iptables -t nat -A ${_hopRule}|ip6tables -t nat -A ${_hopRule}" "$(run_hop_add | paste -sd'|' -)" \
-    "加端口跳跃：IPv4、IPv6 各一条，只改发给本机的包，不放行区间"
-assert_equals "iptables -t nat -A ${_hopRule}|notice PORT_HOPPING_NO_IPV6" "$(run_hop_add no | paste -sd'|' -)" \
+assert_equals "iptables -t nat -A ${_hopRule}|ip6tables -t nat -A ${_hopRule}|hook hysteria2 on 30000 30010 443" "$(run_hop_add | paste -sd'|' -)" \
+    "加端口跳跃：IPv4、IPv6 各一条，只改发给本机的包，不放行区间；挂上 sing-box 启动前的补规则钩子"
+assert_equals "iptables -t nat -A ${_hopRule}|notice PORT_HOPPING_NO_IPV6|hook hysteria2 on 30000 30010 443" "$(run_hop_add no | paste -sd'|' -)" \
     "加端口跳跃：ip6tables 的 nat 表用不了时只加 IPv4，并明说"
 
 mkdir -p "${AP_DIR}/bin" && printf '#!/bin/sh\nexit 0\n' >"${AP_DIR}/bin/iptables" && chmod +x "${AP_DIR}/bin/iptables"
@@ -6191,6 +6212,7 @@ run_rh_ipt() {
         }
         exec 3>&1
         netfilter-persistent() { echo "persist $*" >&3; }
+        portHoppingBootHook() { :; }
         release=debian
         removeProtocolPortHopping "$0" "$1"' "$1" "$2" 2>&1 | paste -sd'|' -
 }
@@ -6245,7 +6267,7 @@ run_nt() {
         eval "${NT_FN}"
         release=debian; installType=nt_install
         nt_install() { return "${NT_RC}"; }
-        apt() { :; }; tee() { cat >/dev/null; }; curl() { :; }; mv() { :; }; lsb_release() { echo bookworm; }
+        addNginxAptRepo() { :; }
         echoContent() { echo "$2"; }; t() { echo "$1"; }; bootStartup() { echo "bootStartup $1"; }
         installNginxTools; echo "rc=$?"' 2>&1 | paste -sd'|' -
 }
@@ -7025,6 +7047,290 @@ assert_equals "false" "$(jq '.inbounds[1].streamSettings.realitySettings.show' "
 rm -f "${RLS_ROOT}/12_VLESS_XHTTP_inbounds.json"
 run_rls 'setRealityLogShow true; echo rc=$?' >"${MOCK_ROOT}/rls.out" 2>&1
 assert_contains "$(cat "${MOCK_ROOT}/rls.out")" "rc=0" "Reality 日志开关：没装 12 时只改 07、照常返回 0"
+
+# ============================================================================
+# 测试：核心二进制属主、Xray 日志目录、nginx.org 签名钥、收回不再用的端口、doctor 的防火墙与 nginx 更新、跳跃规则的启动前钩子
+# ============================================================================
+
+echo -e "${YELLOW}=== 测试 二进制属主、日志目录、nginx 签名钥、端口收回、doctor、跳跃钩子 ===${NC}"
+
+# --- ownCoreBinary：stat / chown / chmod 桩掉（CI 不是 root） ---
+OC_FN=$(sed -n '/^ownCoreBinary() {/,/^}/p' install.sh)
+run_oc() {
+    env OC_FN="${OC_FN}" OC_STAT="$1" OC_FILE="$2" bash -c '
+        eval "${OC_FN}"
+        stat() { echo "${OC_STAT}"; }
+        chown() { echo "chown $*"; }
+        chmod() { echo "chmod $*"; }
+        ownCoreBinary "${OC_FILE}"; echo "rc=$?"' 2>&1 | paste -sd'|' -
+}
+: >"${MOCK_ROOT}/oc-bin"
+assert_equals "chown 0:0 ${MOCK_ROOT}/oc-bin|chmod 755 ${MOCK_ROOT}/oc-bin|rc=0" "$(run_oc 1001:1001:655 "${MOCK_ROOT}/oc-bin")" \
+    "ownCoreBinary：属主是上游打包机的 uid、模式 655 时收成 root:root 0755"
+assert_equals "rc=0" "$(run_oc 0:0:755 "${MOCK_ROOT}/oc-bin")" "ownCoreBinary：已经是 root:root 0755 就不碰"
+assert_equals "rc=0" "$(run_oc 1001:1001:655 "${MOCK_ROOT}/oc-missing")" "ownCoreBinary：二进制不在就不碰"
+assert_equals "1 1 1" "$(grep -c 'tar --no-same-owner -xzf "${singBoxTarFile}"' install.sh) $(sed -n '/^handleSingBox() {/,/^}/p' install.sh | grep -c 'ownCoreBinary "${SINGBOX_BIN}"') $(sed -n '/^handleXray() {/,/^}/p' install.sh | grep -c 'ownCoreBinary "${XRAY_BIN}"')" \
+    "sing-box 解包不照搬包里的属主；两个内核启动前都收一次属主"
+assert_equals "" "$(grep -nE 'chmod 655' install.sh)" "核心与 warp-reg 的二进制不用 655（属主没有执行位、属组可写）"
+
+# --- ensureXrayLogPaths：/tmp/Proxy-agent 下的日志改到 Xray 目录，别处的不动 ---
+EL_FN=$(sed -n '/^ensureXrayLogPaths() {/,/^}/p' install.sh)
+EL_ROOT="${MOCK_ROOT}/xraylog"
+# run_el LOG_JSON → 写成 00_log.json 跑一次，打印提示与改后的 .log
+run_el() {
+    rm -rf "${EL_ROOT:?}" && mkdir -p "${EL_ROOT}/xray/conf"
+    printf '%s\n' "$1" >"${EL_ROOT}/xray/conf/00_log.json"
+    env EL_FN="${EL_FN}" PROXY_AGENT_DIR="${EL_ROOT}" bash -c '
+        source lib/constants.sh; source lib/json-utils.sh
+        eval "${EL_FN}"
+        echoContent() { echo "$2"; }; t() { echo "$1 $2"; }
+        ensureXrayLogPaths' 2>&1
+    jq -c .log "${EL_ROOT}/xray/conf/00_log.json"
+}
+assert_equals " ---> XRAY_LOG_MOVED ${EL_ROOT}/xray/|{\"access\":\"${EL_ROOT}/xray/access.log\",\"error\":\"${EL_ROOT}/xray/error.log\",\"loglevel\":\"warning\",\"dnsLog\":false}" \
+    "$(run_el '{"log":{"access":"/tmp/Proxy-agent/access.log","error":"/tmp/Proxy-agent/error.log","loglevel":"warning","dnsLog":false}}' | paste -sd'|' -)" \
+    "ensureXrayLogPaths：最小日志模式写在 /tmp/Proxy-agent 的两个文件都改到 Xray 目录，别的字段不动"
+assert_equals "{\"access\":\"/var/log/x.log\",\"error\":\"${EL_ROOT}/xray/error.log\"}" \
+    "$(run_el '{"log":{"access":"/var/log/x.log","error":"/tmp/Proxy-agent/error.log"}}' | tail -1)" "ensureXrayLogPaths：只改落在 /tmp/Proxy-agent 下的那个"
+assert_equals '{"error":"/etc/Proxy-agent/xray/error.log","loglevel":"warning"}' \
+    "$(run_el '{"log":{"error":"/etc/Proxy-agent/xray/error.log","loglevel":"warning"}}' | paste -sd'|' -)" "ensureXrayLogPaths：日志不在 /tmp/Proxy-agent 下就不改、不提示"
+assert_equals "0" "$(find "${EL_ROOT}" -name '*.bak*' | wc -l | tr -d ' ')" "ensureXrayLogPaths：不留备份文件"
+assert_equals "" "$(grep -n 'tmpLogDir\|mkdir -p "/tmp/Proxy-agent' install.sh)" "最小日志模式不再往 /tmp/Proxy-agent 写"
+
+# --- addNginxAptRepo：系统路径挪到 MOCK_ROOT 下；gpg、curl、apt、lsb_release 桩掉 ---
+AN_ROOT="${MOCK_ROOT}/nginxrepo"
+AN_FN=$(sed -n '/^addNginxAptRepo() {/,/^}/p' install.sh | sed "s|/etc/apt/|${AN_ROOT}/etc/apt/|g; s|/usr/share/keyrings/|${AN_ROOT}/keyrings/|g")
+AN_OFFICIAL=$'pub:-:2048:1:ABF5BD827BD9BF62:1313747554:1811172661::-:::scSC::::::23::0:\nfpr:::::::::573BFD6B3D8FBC641079A6ABABF5BD827BD9BF62:\nuid:-::::1716564661::F18C::nginx signing key <signing-key@nginx.com>::::::'
+AN_OTHER=$'pub:-:4096:1:2FD21310B49F6B46:1716988950:::-:::scSC::::::23::0:\nfpr:::::::::8540A6F18833A80E9C1653A42FD21310B49F6B46:\nuid:-::::1716988950::7E7F::nginx signing key <signing-key-2@nginx.com>::::'
+AN_SUB=$'pub:-:4096:1:2FD21310B49F6B46:1716988950:::-:::scSC::::::23::0:\nfpr:::::::::8540A6F18833A80E9C1653A42FD21310B49F6B46:\nsub:-:2048:1:ABF5BD827BD9BF62:1313747554::::::e::::::23:\nfpr:::::::::573BFD6B3D8FBC641079A6ABABF5BD827BD9BF62:'
+# run_an COLONS [CURL_RC] [LSB] → gpg 的 import-show 打印 COLONS；打印提示与退出码
+run_an() {
+    rm -rf "${AN_ROOT:?}" && mkdir -p "${AN_ROOT}/etc/apt/sources.list.d" "${AN_ROOT}/etc/apt/preferences.d" "${AN_ROOT}/etc/apt/trusted.gpg.d" "${AN_ROOT}/tmp"
+    : >"${AN_ROOT}/etc/apt/trusted.gpg.d/nginx_signing.asc"
+    env AN_FN="${AN_FN}" AN_COLONS="$1" AN_CURL_RC="${2:-0}" AN_LSB="${3-trixie}" TMPDIR="${AN_ROOT}/tmp" PROXY_AGENT_DIR="${AN_ROOT}" bash -c '
+        source lib/constants.sh
+        eval "${AN_FN}"
+        gpg() {
+            if [[ "$*" == *--import-options* ]]; then printf "%s\n" "${AN_COLONS}"
+            elif [[ "$*" == *--dearmor* ]]; then cat; fi
+        }
+        curl() {
+            [[ "${AN_CURL_RC}" == 0 ]] || return "${AN_CURL_RC}"
+            local out=
+            while [[ $# -gt 0 ]]; do [[ "$1" == -o ]] && out=$2; shift; done
+            printf KEY >"${out}"
+        }
+        lsb_release() { [[ -n "${AN_LSB}" ]] && echo "${AN_LSB}"; }
+        apt() { :; }
+        echoContent() { echo "$2"; }; t() { echo "$1"; }
+        addNginxAptRepo debian; echo "rc=$?"' 2>&1 | paste -sd'|' -
+}
+assert_equals " ---> NGINX_REPO_NO_AUTO_UPDATE|rc=0" "$(run_an "${AN_OTHER}"$'\n'"${AN_OFFICIAL}")" "addNginxAptRepo：钥文件里有官网那把（另有别的钥也行）就配源"
+assert_equals "deb [signed-by=${AN_ROOT}/keyrings/nginx-archive-keyring.gpg] https://nginx.org/packages/mainline/debian trixie nginx" \
+    "$(cat "${AN_ROOT}/etc/apt/sources.list.d/nginx.list")" "addNginxAptRepo：源只认这把钥（signed-by），走 mainline"
+assert_equals "KEY 644 no" "$(cat "${AN_ROOT}/keyrings/nginx-archive-keyring.gpg") $(stat -c %a "${AN_ROOT}/keyrings/nginx-archive-keyring.gpg" 2>/dev/null || stat -f %Lp "${AN_ROOT}/keyrings/nginx-archive-keyring.gpg") $([[ -e "${AN_ROOT}/etc/apt/trusted.gpg.d/nginx_signing.asc" ]] && echo yes || echo no)" \
+    "addNginxAptRepo：钥写进 keyrings、644；trusted.gpg.d 里对所有源生效的那份收掉"
+assert_equals $'Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900' "$(cat "${AN_ROOT}/etc/apt/preferences.d/99nginx")" "addNginxAptRepo：优先级设置照旧"
+assert_equals "0" "$(find "${AN_ROOT}/tmp" -mindepth 1 | wc -l | tr -d ' ')" "addNginxAptRepo：临时钥文件与 gpg 临时目录都删掉"
+# an_untouched → 失败时什么都没配：没有 nginx.list、没有 keyring，旧的那份也还在，不留临时文件
+an_untouched() {
+    echo "$([[ -e "${AN_ROOT}/etc/apt/sources.list.d/nginx.list" || -e "${AN_ROOT}/keyrings/nginx-archive-keyring.gpg" ]] && echo written || echo clean)" \
+        "$([[ -e "${AN_ROOT}/etc/apt/trusted.gpg.d/nginx_signing.asc" ]] && echo old-kept)" "$(find "${AN_ROOT}/tmp" -mindepth 1 | wc -l | tr -d ' ')"
+}
+assert_equals " ---> NGINX_KEY_FPR_MISMATCH|rc=1" "$(run_an "${AN_OTHER}")" "addNginxAptRepo：没有官网那把就不配，返回 1"
+assert_equals "clean old-kept 0" "$(an_untouched)" "addNginxAptRepo：指纹不对时什么都不写，不留临时文件"
+assert_equals " ---> NGINX_KEY_FPR_MISMATCH|rc=1" "$(run_an "${AN_SUB}")" "addNginxAptRepo：官网那把的指纹只出现在子钥上不算"
+assert_equals " ---> NGINX_KEY_DOWNLOAD_FAILED|rc=1|clean old-kept 0" "$(run_an "${AN_OFFICIAL}" 22)|$(an_untouched)" "addNginxAptRepo：钥没下下来（curl -f 失败）就不配"
+assert_equals " ---> NGINX_REPO_TOOLS_MISSING|rc=1|clean old-kept 0" "$(run_an "${AN_OFFICIAL}" 0 "")|$(an_untouched)" "addNginxAptRepo：取不到发行版代号就不配"
+assert_equals "" "$(grep -n 'nginx_signing.key "\|/tmp/nginx_signing' install.sh)" "nginx 签名钥不再经固定的 /tmp 文件名"
+rm -rf "${AN_ROOT:?}"
+
+# --- releaseDroppedPorts / settlePortRules：配置不用了、也没有程序在听才收 ---
+RP_FN=$(sed -n '/^proxyPortsInUse() {/,/^}/p;/^releaseDroppedPorts() {/,/^}/p;/^settlePortRules() {/,/^}/p' install.sh)$'\n'"$(sed -n '/^portListed() {/,/^}/p' lib/utils.sh)"
+# run_rp CODE → RP_X_TCP / RP_X_UDP / RP_S_TCP / RP_S_UDP 是两个内核配置里的端口，RP_SUB 是订阅端口，RP_LISTEN_TCP / _UDP 是在听的；
+# RP_OWN_HIT、RP_REVOKE_HIT 是删得到的那条（PORT/PROTO）。打印删除调用与提示
+run_rp() {
+    env RP_FN="${RP_FN}" bash -c '
+        eval "${RP_FN}"
+        XRAY_CONF_DIR=X SINGBOX_FRAGMENT_DIR=S
+        configuredPorts() { local v="RP_$1_${2^^}"; printf "%b" "${!v:-}"; }
+        subscribeConfPort() { printf "%b" "${RP_SUB:-}"; }
+        listeningPorts() { local v="RP_LISTEN_${1^^}"; printf "%b" "${!v:-}"; }
+        removeOwnFirewallRules() { echo "own $1"; [[ "${RP_OWN_HIT:-}" == "$1" ]]; }
+        revokePort() { echo "revoke $*"; [[ "${RP_REVOKE_HIT:-}" == "$1/$2" ]]; }
+        echoContent() { echo "$2"; }; t() { echo "$1 $2"; }
+        '"$1" 2>&1 | paste -sd'|' -
+}
+assert_equals "443/tcp|8443/tcp|443/udp|50930/tcp" "$(RP_X_TCP='443\n' RP_S_TCP='8443\n' RP_S_UDP='443\n' RP_SUB='50930\n' run_rp proxyPortsInUse)" \
+    "proxyPortsInUse：两个内核的协议端口按网络列，加上独立端口的订阅"
+assert_equals "own 2053/tcp|revoke 2053 tcp| ---> PORT_RULE_RELEASED 2053/tcp" \
+    "$(RP_X_TCP='443\n8443\n' RP_LISTEN_TCP='443\n8443\n' RP_REVOKE_HIT=2053/tcp run_rp 'releaseDroppedPorts "$(printf "443/tcp\n2053/tcp\n8443/tcp\n")"')" \
+    "releaseDroppedPorts：配置里不再有、也没有程序在听的 2053 收回，还在用的不碰"
+assert_equals "" "$(RP_LISTEN_TCP='2053\n' RP_REVOKE_HIT=2053/tcp run_rp 'releaseDroppedPorts 2053/tcp')" "releaseDroppedPorts：配置不用了但还有程序在听（可能是用户自己的服务）就不收"
+assert_equals "own 2053/tcp|revoke 2053 tcp" "$(run_rp 'releaseDroppedPorts 2053/tcp')" "releaseDroppedPorts：没删到规则就不说收回了"
+assert_equals "own 443/udp|revoke 443 udp| ---> PORT_RULE_RELEASED 443/udp" "$(RP_X_TCP='443\n' RP_LISTEN_TCP='443\n' RP_OWN_HIT=443/udp run_rp 'releaseDroppedPorts "$(printf "443/tcp\n443/udp\n")"')" \
+    "releaseDroppedPorts：同端口按协议分开算（卸了 Hysteria2 的 443/udp，Xray 的 443/tcp 留着）"
+assert_equals "own 50930/tcp|revoke 50930 tcp| ---> PORT_RULE_RELEASED 50930/tcp" "$(RP_X_TCP='443\n' RP_LISTEN_TCP='443\n' RP_REVOKE_HIT=50930/tcp run_rp 'releaseDroppedPorts "$(printf "443/tcp\n50930/tcp\n")"')" \
+    "releaseDroppedPorts：订阅并到节点端口后，原来的独立订阅端口收回"
+assert_equals "" "$(RP_REVOKE_HIT=2053/tcp run_rp 'releaseDroppedPorts ""; unset portsAtStart; settlePortRules')" "settlePortRules：没记过起点（定时任务、测试）就什么都不收"
+assert_equals "own 2053/tcp|revoke 2053 tcp| ---> PORT_RULE_RELEASED 2053/tcp|after 443/tcp" \
+    "$(RP_X_TCP='443\n' RP_LISTEN_TCP='443\n' RP_REVOKE_HIT=2053/tcp run_rp 'portsAtStart=$(printf "443/tcp\n2053/tcp\n"); settlePortRules; echo "after ${portsAtStart}"; settlePortRules')" \
+    "settlePortRules：比起点收回，再把现在记成新起点（第二次不重复收）"
+assert_equals "2 1 1" "$(sed -n '/^refreshSubscribeAfterInstall() {/,/^}/p' install.sh | grep -c 'settlePortRules') $(sed -n '/^subscribeMergeExisting() {/,/^}/p' install.sh | grep -c 'settlePortRules') $(tail -3 install.sh | grep -c '^portsAtStart=$(proxyPortsInUse)$')" \
+    "安装流程收尾（两条出口都算）、订阅并口之后收回；起点在进菜单前记"
+assert_equals "0" "$(sed -n '/^unInstall() {/,/^}/p' install.sh | grep -c 'settlePortRules\|refreshSubscribeAfterInstall')" "整机卸载不走这条（ufw、firewalld 的放行整机卸载照旧不收）"
+
+# --- doctor 的防火墙：认出了工具还要看默认策略 ---
+DF_FN=$(sed -n '/^_doctorRow() {/,/^}/p;/^_doctorCheckFirewall() {/,/^}/p' install.sh)
+# run_df UFW_STATUS DENIES → ufw 桩打印 UFW_STATUS；DENIES 非空时 firewallDefaultDenies 判默认拒绝
+run_df() {
+    env DF_FN="${DF_FN}" DF_UFW="$1" DF_DENIES="${2:-}" bash -c '
+        eval "${DF_FN}"
+        _doctorSection() { :; }; _doctorCheckFirewallPorts() { :; }
+        ufw() { echo "${DF_UFW}"; }
+        firewallDefaultDenies() { [[ -n "${DF_DENIES}" ]]; }
+        inboundDefaultDenies() { return 1; }
+        echoContent() { echo "$2"; }; t() { echo "$1${2:+ $2}"; }
+        _doctorCheckFirewall' 2>&1 | tr -s ' '
+}
+assert_equals " [DOCTOR_STATUS_WARN] DOCTOR_CHECK_FIREWALL — DOCTOR_DETAIL_FIREWALL_DEFAULT_ALLOW ufw: Status: inactive" "$(run_df "Status: inactive")" \
+    "doctor 防火墙：ufw 装了没开，入站默认放行，判警告"
+assert_equals " [DOCTOR_STATUS_PASS] DOCTOR_CHECK_FIREWALL — ufw: Status: active" "$(run_df "Status: active" yes)" "doctor 防火墙：开着、默认拒绝，判通过"
+
+# --- 认得出的放行：ufw 已加的规则、firewalld 的永久配置、带标记的 iptables / nft ---
+AL_FN=$(sed -n '/^ufwAllowedPorts() {/,/^}/p;/^firewalldAllowedPorts() {/,/^}/p;/^ownMarkedAllowedPorts() {/,/^}/p;/^portAllowedIn() {/,/^}/p' install.sh)
+AL_UFW=$'Added user rules (see \'ufw status\' for running firewall):\nufw allow 27771/tcp comment \'SSH (vpssec)\'\nufw allow 80/tcp
+ufw allow from 203.0.113.5 to any port 40000 proto tcp\nufw allow 53\nufw limit 22/tcp\nufw allow 30000:31000/udp
+ufw allow proto tcp from any to any port 8443,2083\nufw allow OpenSSH\nufw allow out 25/tcp\nufw route allow 9000/tcp\nufw deny 23/tcp
+ufw allow in on eth0 to any port 2096 proto tcp'
+AL_RICH='rule family="ipv4" source address="203.0.113.5" port port="40000" protocol="tcp" accept
+rule family="ipv4" source address="203.0.113.5" port port="5000" protocol="tcp" reject'
+run_al() {
+    env AL_FN="${AL_FN}" AL_UFW="${AL_UFW}" AL_RICH="${AL_RICH}" bash -c '
+        eval "${AL_FN}"
+        ufw() { printf "%s\n" "${AL_UFW}"; }
+        firewall-cmd() {
+            case "$*" in
+                "--permanent --list-ports") echo "8443/tcp 30000-31000/udp" ;;
+                "--permanent --list-services") echo "ssh https" ;;
+                "--permanent --service=ssh --get-ports") echo "22/tcp" ;;
+                "--permanent --service=https --get-ports") echo "443/tcp" ;;
+                "--permanent --list-rich-rules") printf "%s\n" "${AL_RICH}" ;;
+            esac
+        }
+        iptables() { printf "%s\n" "-A INPUT -p tcp -m tcp --dport 443 -m comment --comment \"allow 443/tcp(Proxy-agent)\" -j ACCEPT" "-A INPUT -p tcp --dport 22 -j ACCEPT"; }
+        ip6tables() { echo "-A INPUT -p udp -m udp --dport 443 -m comment --comment \"allow 443/udp(Proxy-agent)\" -j ACCEPT"; }
+        nft() { echo "udp dport 30000-31000 counter packets 0 bytes 0 accept comment \"allow 30000:31000/udp(Proxy-agent)\""; }
+        '"$1" 2>&1 | paste -sd' ' -
+}
+assert_equals "27771/tcp 80/tcp 40000/tcp 53/tcp 53/udp 22/tcp 30000:31000/udp 8443/tcp 2083/tcp 2096/tcp" "$(run_al ufwAllowedPorts)" \
+    "ufwAllowedPorts：简写、限来源、限网卡、多端口、区间都认，没写协议的两个都算；应用名、出站、转发、拒绝的不算"
+assert_equals "8443/tcp 30000:31000/udp 40000/tcp" "$(run_al firewalldAllowedPorts)" "firewalldAllowedPorts：直接放行的端口、accept 的富规则；reject 的不算"
+assert_equals "22/tcp 443/tcp" "$(run_al 'firewalldAllowedPorts services')" "firewalldAllowedPorts services：区里各服务带的端口另列"
+assert_equals "30000:31000/udp 443/tcp 443/udp" "$(run_al ownMarkedAllowedPorts)" "ownMarkedAllowedPorts：只认带 (Proxy-agent) 注释的"
+assert_equals "yes yes no no" "$(for e in 443/tcp 30500/udp 30500/tcp 2053/tcp; do run_al "portAllowedIn ${e} \"\$(printf '443/tcp\n30000:31000/udp\n')\" && echo yes || echo no"; done | paste -sd' ' -)" \
+    "portAllowedIn：同协议的单端口或区间盖住才算"
+
+# --- doctor 的端口对账 ---
+DP_FN=$(sed -n '/^_doctorRow() {/,/^}/p;/^_doctorCheckFirewallPorts() {/,/^}/p;/^portAllowedIn() {/,/^}/p' install.sh)$'\n'"$(sed -n '/^portListed() {/,/^}/p' lib/utils.sh)"
+# run_dp → DP_ALLOWED 是 ufw 认出的放行，DP_MARKED 是带标记的，DP_INUSE 是配置里在用的，DP_LISTEN_TCP / _UDP 是在听的，DP_UID 默认 0
+run_dp() {
+    env DP_FN="${DP_FN}" bash -c '
+        eval "${DP_FN}"
+        id() { echo "${DP_UID:-0}"; }
+        ufw() { :; }
+        ufwAllowedPorts() { printf "%b" "${DP_ALLOWED:-}"; }
+        ownMarkedAllowedPorts() { printf "%b" "${DP_MARKED:-}"; }
+        proxyPortsInUse() { printf "%b" "${DP_INUSE:-}"; }
+        sshListenPorts() { echo 27771; }
+        listeningPorts() { local v="DP_LISTEN_${1^^}"; printf "%b" "${!v:-}"; }
+        echoContent() { echo "$2"; }; t() { echo "$1${2:+ $2}${3:+ $3}"; }
+        _doctorCheckFirewallPorts' 2>&1 | tr -s ' ' | paste -sd'|' -
+}
+assert_equals " [DOCTOR_STATUS_WARN] DOCTOR_CHECK_PORTS_ALLOWED — DOCTOR_DETAIL_PORTS_NOT_ALLOWED ufw 443/udp 8443/tcp| [DOCTOR_STATUS_WARN] DOCTOR_CHECK_PORTS_IDLE — DOCTOR_DETAIL_PORTS_IDLE 2053/tcp" \
+    "$(DP_ALLOWED='27771/tcp\n80/tcp\n443/tcp\n2053/tcp\n30000:31000/udp\n' DP_INUSE='443/tcp\n8443/tcp\n443/udp\n30500/udp\n' DP_LISTEN_TCP='443\n8443\n27771\n' DP_LISTEN_UDP='443\n' run_dp)" \
+    "doctor 端口对账：配置里有、ufw 没放行的列出来（区间盖住的不算）；放行了没人听的列出来，sshd 的端口与 80/tcp 不算"
+assert_equals " [DOCTOR_STATUS_PASS] DOCTOR_CHECK_PORTS_ALLOWED — ufw| [DOCTOR_STATUS_WARN] DOCTOR_CHECK_PORTS_IDLE — DOCTOR_DETAIL_PORTS_IDLE 42356/udp" \
+    "$(DP_ALLOWED='443/tcp\n' DP_MARKED='42356/udp\n' DP_INUSE='443/tcp\n' DP_LISTEN_TCP='443\n42356\n' run_dp)" "doctor 端口对账：带标记的放行也查有没有人听（同端口 TCP 有人听不算 UDP）"
+assert_equals " [DOCTOR_STATUS_SKIP] DOCTOR_CHECK_PORTS_ALLOWED — DOCTOR_DETAIL_NEED_ROOT" "$(DP_UID=1000 run_dp)" "doctor 端口对账：不是 root 读不到配置与规则，跳过"
+# firewalld：服务带的端口算放行，但不进「没人听」（dhcpv6-client 的 546/udp、cockpit 的 9090/tcp 是系统自带的，没有常驻监听）
+DPF_FN=$(sed -n '/^_doctorRow() {/,/^}/p;/^_doctorCheckFirewallPorts() {/,/^}/p;/^portAllowedIn() {/,/^}/p' install.sh)$'\n'"$(sed -n '/^portListed() {/,/^}/p' lib/utils.sh)"
+assert_equals " [DOCTOR_STATUS_PASS] DOCTOR_CHECK_PORTS_ALLOWED — firewalld| [DOCTOR_STATUS_WARN] DOCTOR_CHECK_PORTS_IDLE — DOCTOR_DETAIL_PORTS_IDLE 23456/tcp" \
+    "$(env DPF_FN="${DPF_FN}" bash -c '
+        eval "${DPF_FN}"
+        id() { echo 0; }
+        command() { [[ "$*" == "-v ufw" ]] && return 1; builtin command "$@"; }
+        systemctl() { [[ "$*" == "is-active --quiet firewalld" ]]; }
+        firewalldAllowedPorts() { if [[ "${1:-}" == services ]]; then printf "443/tcp\n546/udp\n9090/tcp\n22/tcp\n"; else printf "23456/tcp\n"; fi; }
+        ownMarkedAllowedPorts() { :; }
+        proxyPortsInUse() { echo 443/tcp; }
+        sshListenPorts() { echo 22; }
+        listeningPorts() { [[ "$1" == tcp ]] && echo 443; }
+        echoContent() { echo "$2"; }; t() { echo "$1${2:+ $2}${3:+ $3}"; }
+        _doctorCheckFirewallPorts' 2>&1 | tr -s ' ' | paste -sd'|' -)" \
+    "doctor 端口对账（firewalld）：443 靠 https 服务放行也算；服务带的端口不进「没人听」，直接放行的才进"
+
+# --- doctor 的 nginx 更新：只管 nginx.org 源装的；按本机索引比版本 ---
+NU_FN=$(sed -n '/^_doctorRow() {/,/^}/p;/^_doctorCheckNginxUpdate() {/,/^}/p' install.sh | sed "s|/etc/apt/sources.list.d/nginx.list|${MOCK_ROOT}/nginx.list|")
+# run_nu INSTALLED CANDIDATE → apt-cache policy 桩；dpkg --compare-versions 按字串比（够用）
+run_nu() {
+    env NU_FN="${NU_FN}" NU_I="$1" NU_C="$2" bash -c '
+        eval "${NU_FN}"
+        apt-cache() { printf "nginx:\n  Installed: %s\n  Candidate: %s\n" "${NU_I}" "${NU_C}"; }
+        dpkg() { [[ "$1" == --compare-versions && "$3" == gt && "$2" > "$4" ]]; }
+        echoContent() { echo "$2"; }; t() { echo "$1${2:+ $2}${3:+ $3}"; }
+        _doctorCheckNginxUpdate' 2>&1 | tr -s ' '
+}
+: >"${MOCK_ROOT}/nginx.list"
+assert_equals " [DOCTOR_STATUS_WARN] DOCTOR_CHECK_NGINX_UPDATE — DOCTOR_DETAIL_NGINX_OUTDATED 1.31.8-1~trixie 1.31.9-1~trixie" "$(run_nu 1.31.8-1~trixie 1.31.9-1~trixie)" \
+    "doctor nginx 更新：源里有更新的版本就警告（自动安全更新不管 nginx.org 源）"
+assert_equals " [DOCTOR_STATUS_PASS] DOCTOR_CHECK_NGINX_UPDATE — 1.31.9-1~trixie" "$(run_nu 1.31.9-1~trixie 1.31.9-1~trixie)" "doctor nginx 更新：已是最新就通过"
+assert_equals " [DOCTOR_STATUS_SKIP] DOCTOR_CHECK_NGINX_UPDATE — DOCTOR_DETAIL_NGINX_NOT_INSTALLED" "$(run_nu "(none)" 1.31.9-1~trixie)" "doctor nginx 更新：没装就跳过"
+rm -f "${MOCK_ROOT}/nginx.list"
+assert_equals "" "$(run_nu 1.31.8-1~trixie 1.31.9-1~trixie)" "doctor nginx 更新：没配 nginx.org 源就不出这一行"
+
+# --- 端口跳跃的启动前钩子：/etc 挪到 MOCK_ROOT 下；systemctl 桩掉 ---
+HB_ROOT="${MOCK_ROOT}/hophook"
+HB_FN=$(sed -n '/^portHoppingRule() {/,/^}/p;/^portHoppingBootHook() {/,/^}/p' install.sh | sed "s|/etc/|${HB_ROOT}/etc/|g")
+# run_hb CODE → 打印 daemon-reload 与 CODE 的输出
+run_hb() {
+    env HB_FN="${HB_FN}" bash -c '
+        eval "${HB_FN}"
+        systemctl() { echo "systemctl $*"; }
+        '"$1" 2>&1 | paste -sd'|' -
+}
+hb_dropin="${HB_ROOT}/etc/systemd/system/sing-box.service.d/port-hopping-hysteria2.conf"
+rm -rf "${HB_ROOT:?}" && mkdir -p "${HB_ROOT}/etc/systemd/system" && : >"${HB_ROOT}/etc/systemd/system/sing-box.service"
+assert_equals "systemctl daemon-reload|rc=0" "$(run_hb 'portHoppingBootHook hysteria2 on 30000 30010 443; echo "rc=$?"')" "跳跃钩子（systemd）：写 drop-in 后 daemon-reload"
+assert_equals "[Service]" "$(head -1 "${hb_dropin}")" "跳跃钩子（systemd）：drop-in 是 [Service] 段"
+assert_equals "rc=0" "$(run_hb 'portHoppingBootHook hysteria2 on 30000 30010 443; echo "rc=$?"')" "跳跃钩子（systemd）：内容没变就不再 daemon-reload"
+# 钩子里的命令真拿 sh 跑一遍：iptables / ip6tables 换成记账的假命令，-C 按 HB_HAVE 判有没有
+mkdir -p "${HB_ROOT}/bin"
+printf '#!/bin/sh\necho "$(basename "$0") $*" >>"%s/calls"\ncase "$*" in *" -C "*) [ -n "$HB_HAVE" ] ;; *) exit 0 ;; esac\n' "${HB_ROOT}" >"${HB_ROOT}/bin/iptables"
+cp "${HB_ROOT}/bin/iptables" "${HB_ROOT}/bin/ip6tables" && chmod +x "${HB_ROOT}/bin/iptables" "${HB_ROOT}/bin/ip6tables"
+hb_cmd=$(sed -n "s/^ExecStartPre=+\/bin\/sh -c '\(.*\)'$/\1/p" "${hb_dropin}")
+_hopRule="PREROUTING -p udp --dport 30000:30010 -m addrtype --dst-type LOCAL -m comment --comment Proxy-agent_hysteria2_portHopping -j REDIRECT --to-ports 443"
+rm -f "${HB_ROOT}/calls"; env PATH="${HB_ROOT}/bin:${PATH}" HB_HAVE= sh -c "${hb_cmd}"; _rc=$?
+assert_equals "0|iptables -t nat -C ${_hopRule}|iptables -t nat -A ${_hopRule}|ip6tables -t nat -C ${_hopRule}|ip6tables -t nat -A ${_hopRule}" "${_rc}|$(paste -sd'|' - <"${HB_ROOT}/calls")" \
+    "跳跃钩子（systemd）：启动前规则不在就补上，IPv4、IPv6 各一条，退出码 0（失败也不拦 sing-box）"
+rm -f "${HB_ROOT}/calls"; env PATH="${HB_ROOT}/bin:${PATH}" HB_HAVE=1 sh -c "${hb_cmd}"
+assert_equals "iptables -t nat -C ${_hopRule}|ip6tables -t nat -C ${_hopRule}" "$(paste -sd'|' - <"${HB_ROOT}/calls")" "跳跃钩子（systemd）：规则已在（netfilter-persistent 补过）就不重复加"
+assert_equals "systemctl daemon-reload|gone" "$({ run_hb 'portHoppingBootHook hysteria2 off'; [[ -e "${hb_dropin%/*}" ]] || echo gone; } | paste -sd'|' -)" "跳跃钩子（systemd）：撤掉时连空目录一起删"
+assert_equals "" "$(run_hb 'portHoppingBootHook hysteria2 off')" "跳跃钩子（systemd）：没挂过就什么都不做"
+rm -rf "${HB_ROOT:?}/etc" && mkdir -p "${HB_ROOT}/etc/init.d" "${HB_ROOT}/etc/conf.d" && : >"${HB_ROOT}/etc/init.d/sing-box"
+printf 'export FOO=1\n' >"${HB_ROOT}/etc/conf.d/sing-box"
+run_hb 'portHoppingBootHook hysteria2 on 30000 30010 443' >/dev/null
+assert_equals "export FOO=1|start_pre() { iptables -t nat -C ${_hopRule} 2>/dev/null || iptables -t nat -A ${_hopRule} 2>/dev/null; ip6tables -t nat -C ${_hopRule} 2>/dev/null || ip6tables -t nat -A ${_hopRule} 2>/dev/null; true; }" \
+    "$(paste -sd'|' - <"${HB_ROOT}/etc/conf.d/sing-box")" "跳跃钩子（OpenRC）：conf.d 里加一行 start_pre，用户自己的行留着"
+run_hb 'portHoppingBootHook hysteria2 off' >/dev/null
+assert_equals "export FOO=1" "$(cat "${HB_ROOT}/etc/conf.d/sing-box")" "跳跃钩子（OpenRC）：撤掉只删自己那行"
+rm -f "${HB_ROOT}/etc/conf.d/sing-box"; run_hb 'portHoppingBootHook hysteria2 on 30000 30010 443; portHoppingBootHook hysteria2 off' >/dev/null
+assert_equals "no" "$([[ -e "${HB_ROOT}/etc/conf.d/sing-box" ]] && echo yes || echo no)" "跳跃钩子（OpenRC）：conf.d 只剩自己那行时撤掉就删文件"
+rm -rf "${HB_ROOT:?}/etc"
+assert_equals "1|0" "$(run_hb 'portHoppingBootHook hysteria2 on 30000 30010 443; echo $?; portHoppingBootHook hysteria2 off; echo $?')" "跳跃钩子：两种服务都没有时，挂返回 1（调用方黄字提示重启会丢），撤返回 0"
+assert_equals "1 1" "$(sed -n '/^deletePortHoppingRules() {/,/^}/p' install.sh | grep -c 'portHoppingBootHook "${type}" off') $(sed -n '/^removeProtocolPortHopping() {/,/^}/p' install.sh | grep -c 'portHoppingBootHook "${type}" off')" \
+    "删跳跃、卸协议都撤钩子（卸协议时规则不在也撤，不然下次启动按旧端口补回来）"
+rm -rf "${HB_ROOT:?}"
 
 echo "=============================================="
 echo -e "${YELLOW}测试结果汇总${NC}"

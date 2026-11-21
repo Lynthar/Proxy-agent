@@ -2387,25 +2387,53 @@ ensureCronService() {
     fi
     echoContent green " ---> $(t CRON_SERVICE_STARTED "${serviceName}")"
 }
+# addNginxAptRepo debian|ubuntu → 配 nginx.org 的 mainline 源，签名钥只给这个源用（signed-by）。钥文件里没有官网公布的那把
+# （NGINX_SIGNING_KEY_FPR）就不配、返回 1。钥下到 mktemp 里：固定的 /tmp 文件名能被别的本地账号抢先放一把自己的
+addNginxAptRepo() {
+    local keyring=/usr/share/keyrings/nginx-archive-keyring.gpg key gpgHome fprs codename
+    apt install gnupg ca-certificates lsb-release -y >/dev/null 2>&1
+    if ! command -v gpg >/dev/null 2>&1 || ! codename=$(lsb_release -cs 2>/dev/null) || [[ -z "${codename}" ]]; then
+        echoContent red " ---> $(t NGINX_REPO_TOOLS_MISSING)"
+        return 1
+    fi
+    key=$(mktemp) || return 1
+    if ! gpgHome=$(mktemp -d); then
+        rm -f "${key}"
+        return 1
+    fi
+    if ! curl -fsSL -o "${key}" https://nginx.org/keys/nginx_signing.key; then
+        rm -rf "${key}" "${gpgHome}"
+        echoContent red " ---> $(t NGINX_KEY_DOWNLOAD_FAILED)"
+        return 1
+    fi
+    # 只取主钥的指纹（紧跟 pub 的那行 fpr）；官网的核对办法就是看里面有没有这一把，别的钥可以有
+    fprs=$(gpg --homedir "${gpgHome}" --dry-run --quiet --no-keyring --import --import-options import-show --with-colons "${key}" 2>/dev/null |
+        awk -F: '$1 == "pub" {want = 1; next} $1 == "fpr" && want {print $10} {want = 0}')
+    if ! grep -qxF "${NGINX_SIGNING_KEY_FPR}" <<<"${fprs}"; then
+        rm -rf "${key}" "${gpgHome}"
+        echoContent red " ---> $(t NGINX_KEY_FPR_MISMATCH "${NGINX_SIGNING_KEY_FPR}")"
+        return 1
+    fi
+    if ! mkdir -p "${keyring%/*}" || ! gpg --homedir "${gpgHome}" --dearmor <"${key}" >"${keyring}.new" ||
+        ! chmod 644 "${keyring}.new" || ! mv -f "${keyring}.new" "${keyring}"; then
+        rm -rf "${key}" "${gpgHome}" "${keyring}.new"
+        echoContent red " ---> $(t NGINX_KEY_DOWNLOAD_FAILED)"
+        return 1
+    fi
+    rm -rf "${key}" "${gpgHome}"
+    # trusted.gpg.d 里的钥对所有 apt 源都生效，脚本以前放在这里的同一把收掉
+    rm -f /etc/apt/trusted.gpg.d/nginx_signing.asc
+    echo "deb [signed-by=${keyring}] https://nginx.org/packages/mainline/$1 ${codename} nginx" >/etc/apt/sources.list.d/nginx.list
+    printf 'Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900\n' >/etc/apt/preferences.d/99nginx
+    apt update >/dev/null 2>&1
+    echoContent yellow " ---> $(t NGINX_REPO_NO_AUTO_UPDATE)"
+}
+
 # 安装Nginx
 installNginxTools() {
 
-    if [[ "${release}" == "debian" ]]; then
-        apt install gnupg2 ca-certificates lsb-release -y >/dev/null 2>&1
-        echo "deb https://nginx.org/packages/mainline/debian $(lsb_release -cs) nginx" | tee /etc/apt/sources.list.d/nginx.list >/dev/null 2>&1
-        echo -e "Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900\n" | tee /etc/apt/preferences.d/99nginx >/dev/null 2>&1
-        curl -o /tmp/nginx_signing.key https://nginx.org/keys/nginx_signing.key >/dev/null 2>&1
-        mv /tmp/nginx_signing.key /etc/apt/trusted.gpg.d/nginx_signing.asc
-        apt update >/dev/null 2>&1
-
-    elif [[ "${release}" == "ubuntu" ]]; then
-        apt install gnupg2 ca-certificates lsb-release -y >/dev/null 2>&1
-        echo "deb https://nginx.org/packages/mainline/ubuntu $(lsb_release -cs) nginx" | tee /etc/apt/sources.list.d/nginx.list >/dev/null 2>&1
-        echo -e "Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900\n" | tee /etc/apt/preferences.d/99nginx >/dev/null 2>&1
-        curl -o /tmp/nginx_signing.key https://nginx.org/keys/nginx_signing.key >/dev/null 2>&1
-        mv /tmp/nginx_signing.key /etc/apt/trusted.gpg.d/nginx_signing.asc
-        apt update >/dev/null 2>&1
-
+    if [[ "${release}" == "debian" || "${release}" == "ubuntu" ]]; then
+        addNginxAptRepo "${release}" || return 1
     elif [[ "${release}" == "centos" ]]; then
         ${installType} yum-utils >/dev/null 2>&1
         cat <<EOF >/etc/yum.repos.d/nginx.repo
@@ -2629,6 +2657,7 @@ updateRedirectNginxConf() {
     server {
     		listen 127.0.0.1:31300;
     		server_name _;
+    		server_tokens off;
     		return 403;
     }
 EOF
@@ -2741,6 +2770,7 @@ server {
 	${nginxH2Conf}
 
 	server_name ${domain};
+	server_tokens off;
 	root ${nginxStaticPath};
     ${singBoxNginxSSL}
 
@@ -3051,6 +3081,44 @@ portsTakenFor() {
         done < <(listeningPorts "${net}")
     done
     if (($#)); then printf '%s\n' "$@"; fi
+}
+
+# proxyPortsInUse → 本脚本配置里在用的对外端口，一行一个 PORT/tcp 或 PORT/udp：两个内核的协议入站，加上独立端口的订阅
+proxyPortsInUse() {
+    local net port
+    for net in tcp udp; do
+        while IFS= read -r port; do
+            [[ -n "${port}" ]] && printf '%s/%s\n' "${port}" "${net}"
+        done < <(configuredPorts "${XRAY_CONF_DIR}" "${net}"; configuredPorts "${SINGBOX_FRAGMENT_DIR}" "${net}")
+    done
+    port=$(subscribeConfPort)
+    [[ -n "${port}" ]] && printf '%s/tcp\n' "${port}"
+    return 0
+}
+
+# releaseDroppedPorts BEFORE → BEFORE（早先一次 proxyPortsInUse 的输出）里配置已经不用、本机也没有程序在听的端口，收回它的放行：
+# 带标记的（removeOwnFirewallRules）和 ufw / firewalld 上 allowPort 不限来源加的那一条（revokePort）。
+# 还有程序在听的不动（可能是用户自己的服务）；ufw 上用户手加过一模一样的那条也会被删
+releaseDroppedPorts() {
+    local now entry hit
+    now=$(proxyPortsInUse)
+    while IFS= read -r entry; do
+        [[ -n "${entry}" ]] || continue
+        grep -qxF "${entry}" <<<"${now}" && continue
+        portListed "${entry%/*}" "$(listeningPorts "${entry#*/}")" && continue
+        hit=
+        removeOwnFirewallRules "${entry}" && hit=1
+        revokePort "${entry%/*}" "${entry#*/}" && hit=1
+        [[ -n "${hit}" ]] && echoContent green " ---> $(t PORT_RULE_RELEASED "${entry}")"
+    done < <(sort -u <<<"$1")
+    return 0
+}
+
+# settlePortRules → 改完协议、端口或订阅之后调：比本次运行开始时（portsAtStart）收回不再用的端口，再把现在记成新的起点，
+# 菜单里连着做几件事时各比各的。portsAtStart 没记过（定时任务、测试）就什么都不收
+settlePortRules() {
+    releaseDroppedPorts "${portsAtStart:-}"
+    portsAtStart=$(proxyPortsInUse)
 }
 
 # pickInboundPort ID OLD_PORT DIR KEEP SKIP [EXTRA...] → 选定的端口打到 stdout，提示走 stderr；其余参数同 portsTakenFor
@@ -3659,6 +3727,12 @@ labelNginxPorts() {
     fi
 }
 
+# ownCoreBinary BIN → 启动前把核心二进制收成 root:root 0755：属主或属组可写的话，那个账号就能改写 root 跑的程序
+ownCoreBinary() {
+    [[ -f "$1" && "$(stat -c '%u:%g:%a' "$1" 2>/dev/null)" != "0:0:755" ]] || return 0
+    chown 0:0 "$1" && chmod 755 "$1"
+}
+
 # labelCoreBinary BIN → SELinux 没禁用时把核心二进制登记成 bin_t 并 restorecon：留在 etc_t 下 systemd 拉起后跑在 init_t，
 # 连本机回环（Reality 的 dokodemo 那一跳）、拨目标站都被拒，bin_t 才跑成第三方服务的常规域 unconfined_service_t。
 # 登记按路径，换版本、全盘 relabel 都照样适用；没有 semanage 又装不上时退回 chcon。只告警不失败
@@ -3779,14 +3853,15 @@ installSingBox() {
             fi
             echoContent green " ---> 文件校验通过"
 
-            if ! tar -xzf "${singBoxTarFile}" -C "${SINGBOX_DIR}/" ||
+            # 包里记的属主是上游打包机的 uid（1001），root 解包默认照搬：那个 uid 的本地账号就能改写 root 跑的二进制
+            if ! tar --no-same-owner -xzf "${singBoxTarFile}" -C "${SINGBOX_DIR}/" ||
                 ! mv "${SINGBOX_DIR}/${singBoxPackage}/sing-box" ${SINGBOX_BIN}; then
                 rm -rf ${SINGBOX_DIR}/sing-box-*
                 echoContent red " ---> $(t SINGBOX_UNPACK_FAILED "${singBoxTarFileName}")"
                 return 1
             fi
             rm -rf ${SINGBOX_DIR}/sing-box-*
-            chmod 655 ${SINGBOX_BIN}
+            chmod 755 ${SINGBOX_BIN}
 
             # 包与本机的架构或 libc 不配时文件在、exec 却报 not found，配置与服务都会建在它上面
             if ! ${SINGBOX_BIN} version >/dev/null 2>&1; then
@@ -3909,25 +3984,25 @@ installXray() {
             fi
             return 1
         else
-            # 校验SHA256
             local expectedHash
             expectedHash=$(extractXrayHash "${xrayDgstFile}")
-            if [[ -n "${expectedHash}" ]]; then
-                echoContent green " ---> 验证文件完整性..."
-                if ! verifySHA256 "${xrayZipFile}" "${expectedHash}"; then
-                    echoContent red " ---> 文件校验失败，可能已被篡改，请重新下载"
-                    rm -f "${xrayZipFile}" "${xrayDgstFile}"
-                    read -r -p "是否重新尝试？[y/n]" retryStatus
-                    if isYesInput "${retryStatus}"; then
-                        installXray "$1" "$2"
-                        return $?
-                    fi
-                    return 1
-                fi
-                echoContent green " ---> 文件校验通过"
-            else
-                echoContent yellow " ---> 警告: 未能获取校验信息，跳过完整性验证"
+            if [[ -z "${expectedHash}" ]]; then
+                rm -f "${xrayZipFile}" "${xrayDgstFile}"
+                echoContent red " ---> $(t XRAY_DIGEST_MISSING "${xrayCoreCPUVendor}.zip")"
+                return 1
             fi
+            echoContent green " ---> 验证文件完整性..."
+            if ! verifySHA256 "${xrayZipFile}" "${expectedHash}"; then
+                echoContent red " ---> 文件校验失败，可能已被篡改，请重新下载"
+                rm -f "${xrayZipFile}" "${xrayDgstFile}"
+                read -r -p "是否重新尝试？[y/n]" retryStatus
+                if isYesInput "${retryStatus}"; then
+                    installXray "$1" "$2"
+                    return $?
+                fi
+                return 1
+            fi
+            echoContent green " ---> 文件校验通过"
 
             unzip -o "${xrayZipFile}" -d ${XRAY_DIR} >/dev/null
             rm -f "${xrayZipFile}" "${xrayDgstFile}"
@@ -3937,7 +4012,7 @@ installXray() {
                 echoContent yellow " ---> $(t GEO_INSTALL_SKIPPED)"
             fi
 
-            chmod 655 ${XRAY_BIN}
+            chmod 755 ${XRAY_BIN}
         fi
     else
         if [[ -z "${lastInstallationConfig}" ]]; then
@@ -4038,16 +4113,25 @@ xrayVersionManageMenu() {
     fi
 }
 
-# fetchGeoFiles DIR → 把 DIR 里的 geosite.dat、geoip.dat 换成最新版，失败返回 1（已打印原因）。两个都下到才换，中途失败时 DIR 里还是旧文件。
+# fetchGeoFiles DIR → 把 DIR 里的 geosite.dat、geoip.dat 换成最新版，失败返回 1（已打印原因）。两个都下到、校验过才换，中途失败时 DIR 里还是旧文件。
 # 走 releases/latest/download 的固定地址，不查 GitHub API：未认证额度按出口 IP 算，一小时 60 次，用完就取不到版本号
 fetchGeoFiles() {
-    local geoDir=$1 stagingDir file
+    local geoDir=$1 stagingDir file hash base="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download"
     stagingDir=$(mktemp -d "${geoDir}geo-update.XXXXXX") || return 1
     for file in geosite.dat geoip.dat; do
-        if ! wget -q --timeout=30 --tries=3 ${wgetShowProgressStatus} -O "${stagingDir}/${file}" "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/${file}" \
+        if ! wget -q --timeout=30 --tries=3 ${wgetShowProgressStatus} -O "${stagingDir}/${file}" "${base}/${file}" \
             || [[ ! -s "${stagingDir}/${file}" ]]; then
             rm -rf "${stagingDir}"
             echoContent red " ---> $(t GEO_DOWNLOAD_FAILED "${file}")"
+            return 1
+        fi
+        # 上游每个文件旁边发一份「哈希  文件名」；同源，挡的是截断与损坏
+        hash=
+        wget -q --timeout=30 --tries=3 -O "${stagingDir}/${file}.sha256sum" "${base}/${file}.sha256sum" &&
+            hash=$(awk 'NR == 1 {print $1}' "${stagingDir}/${file}.sha256sum")
+        if [[ ! "${hash}" =~ ^[0-9a-fA-F]{64}$ ]] || ! verifySHA256 "${stagingDir}/${file}" "${hash}"; then
+            rm -rf "${stagingDir}"
+            echoContent red " ---> $(t GEO_VERIFY_FAILED "${file}")"
             return 1
         fi
     done
@@ -4115,17 +4199,19 @@ updateXray() {
 
         local expectedHash
         expectedHash=$(extractXrayHash "${xrayDgstFile}")
-        if [[ -n "${expectedHash}" ]]; then
-            if ! verifySHA256 "${xrayZipFile}" "${expectedHash}"; then
-                rm -f "${xrayZipFile}" "${xrayDgstFile}"
-                [[ -f "${xrayBakBin}" ]] && mv -f "${xrayBakBin}" ${XRAY_BIN}
-                echoContent red " ---> $(t UPDATE_CORE_VERIFY_FAIL_KEEP)"
-                return 1
-            fi
-            echoContent green " ---> 文件校验通过"
-        else
-            echoContent yellow " ---> 警告: 未能获取校验信息，跳过完整性验证"
+        if [[ -z "${expectedHash}" ]]; then
+            rm -f "${xrayZipFile}" "${xrayDgstFile}"
+            [[ -f "${xrayBakBin}" ]] && mv -f "${xrayBakBin}" ${XRAY_BIN}
+            echoContent red " ---> $(t UPDATE_CORE_DIGEST_MISSING_KEEP "${xrayCoreCPUVendor}.zip")"
+            return 1
         fi
+        if ! verifySHA256 "${xrayZipFile}" "${expectedHash}"; then
+            rm -f "${xrayZipFile}" "${xrayDgstFile}"
+            [[ -f "${xrayBakBin}" ]] && mv -f "${xrayBakBin}" ${XRAY_BIN}
+            echoContent red " ---> $(t UPDATE_CORE_VERIFY_FAIL_KEEP)"
+            return 1
+        fi
+        echoContent green " ---> 文件校验通过"
 
         if ! unzip -o "${xrayZipFile}" -d ${XRAY_DIR} >/dev/null || [[ ! -f "${XRAY_BIN}" ]]; then
             rm -f "${xrayZipFile}" "${xrayDgstFile}"
@@ -4134,7 +4220,7 @@ updateXray() {
             return 1
         fi
         rm -f "${xrayZipFile}" "${xrayDgstFile}" "${xrayBakBin}"
-        chmod 655 ${XRAY_BIN}
+        chmod 755 ${XRAY_BIN}
         handleXray stop
         handleXray start
     else
@@ -4296,7 +4382,10 @@ handleSingBox() {
     ensureAlpineProcps
     local startResult=0
     local mergeResult=0
-    [[ "$1" == "start" ]] && labelCoreBinary "${SINGBOX_BIN}"
+    if [[ "$1" == "start" ]]; then
+        ownCoreBinary "${SINGBOX_BIN}"
+        labelCoreBinary "${SINGBOX_BIN}"
+    fi
 
     if [[ -f "/etc/systemd/system/sing-box.service" ]]; then
         if [[ "$1" == "start" ]]; then
@@ -4393,6 +4482,17 @@ removeLegacyAllowInsecure() {
         else
             echoContent yellow " ---> $(t XRAY_ALLOWINSECURE_STRIP_FAILED)"
         fi
+    fi
+}
+
+# ensureXrayLogPaths → 落在 /tmp/Proxy-agent 下的日志改到 Xray 目录：别的本地账号能抢先建好那个目录读日志、放符号链接让 root
+# 往任意文件追加；/tmp 开机清空后目录没了，Xray 打不开日志文件就以 23 退出，服务单元不再重试
+ensureXrayLogPaths() {
+    local file="${XRAY_CONF_DIR}/00_log.json" dir
+    [[ -f "${file}" ]] && grep -F '"/tmp/Proxy-agent/' "${file}" >/dev/null || return 0
+    dir=$(jq -n --arg d "${XRAY_DIR}/" '$d')
+    if jsonModifyFile "${file}" ".log |= with_entries(if (.key == \"access\" or .key == \"error\") and (.value | type) == \"string\" and (.value | startswith(\"/tmp/Proxy-agent/\")) then .value = (${dir} + (.value | ltrimstr(\"/tmp/Proxy-agent/\"))) else . end)" false; then
+        echoContent yellow " ---> $(t XRAY_LOG_MOVED "${XRAY_DIR}/")"
     fi
 }
 
@@ -4654,8 +4754,10 @@ handleXray() {
     local startResult=0 started=
 
     if [[ "$1" == "start" ]]; then
+        ownCoreBinary "${XRAY_BIN}"
         labelCoreBinary "${XRAY_BIN}"
         removeLegacyAllowInsecure
+        ensureXrayLogPaths
         ensureRealityMinClientVer
         ensureXrayDirectStrategy
         ensureCorePortTargets || echoContent yellow " ---> $(t CORE_PORT_TARGET_FAILED)"
@@ -5241,9 +5343,8 @@ addPortHopping() {
                     exit 1
                 fi
             else
-                # 只改发给本机地址的包：本机替 Docker、WireGuard 转发出去的同段 UDP 不能被截到 Hysteria2 上
-                local hopRule=(PREROUTING -p udp --dport "${portStart}:${portEnd}" -m addrtype --dst-type LOCAL
-                    -m comment --comment "Proxy-agent_${type}_portHopping" -j REDIRECT --to-ports "${targetPort}")
+                local hopRule=()
+                read -ra hopRule <<<"$(portHoppingRule "${type}" "${portStart}" "${portEnd}" "${targetPort}")"
                 iptables -t nat -A "${hopRule[@]}"
                 if ! iptables-save | grep "Proxy-agent_${type}_portHopping" >/dev/null; then
                     echoContent red " ---> 端口跳跃添加失败"
@@ -5252,8 +5353,11 @@ addPortHopping() {
                 if ! ip6tables -t nat -S PREROUTING >/dev/null 2>&1 || ! ip6tables -t nat -A "${hopRule[@]}"; then
                     echoContent yellow " ---> $(t PORT_HOPPING_NO_IPV6)"
                 fi
-                # 没有 netfilter-persistent（装了 ufw 的机器不装它）规则只活到重启，要明说，不能只报成功
-                if ! command -v netfilter-persistent >/dev/null 2>&1 || ! netfilter-persistent save >/dev/null 2>&1; then
+                if command -v netfilter-persistent >/dev/null 2>&1; then
+                    netfilter-persistent save >/dev/null 2>&1
+                fi
+                # 挂不上的话规则只活到重启，要明说，不能只报成功
+                if ! portHoppingBootHook "${type}" on "${portStart}" "${portEnd}" "${targetPort}"; then
                     echoContent yellow " ---> $(t PORT_HOPPING_NOT_PERSISTENT)"
                 fi
             fi
@@ -5267,6 +5371,53 @@ addPortHopping() {
 firewallForwardPortSpecs() {
     [[ -n "$1" ]] || return 0
     firewall-cmd --list-forward-ports | sed -nE "s/^port=([0-9]+(-[0-9]+)?):proto=udp:toport=$1:toaddr=\$/\1/p"
+}
+
+# portHoppingRule TYPE START END TARGET → nat 表里那条跳跃规则的参数（链名起，不带 -t nat 与 -A / -C），各参数都不含空格。
+# 只改发给本机地址的包：本机替 Docker、WireGuard 转发出去的同段 UDP 不能被截到 Hysteria2 上
+portHoppingRule() {
+    echo "PREROUTING -p udp --dport $2:$3 -m addrtype --dst-type LOCAL -m comment --comment Proxy-agent_$1_portHopping -j REDIRECT --to-ports $4"
+}
+
+# portHoppingBootHook TYPE on START END TARGET | TYPE off → sing-box 每次启动前补回 iptables 的跳跃规则（-C 查到就不加），
+# systemd 写 drop-in，OpenRC 写 conf.d 的 start_pre。没有 netfilter-persistent 的机器（装了 ufw 的都是）规则只活到重启，
+# 订阅里的跳跃区间也从活规则读，丢了一起丢。on 时两种服务都没有返回 1
+portHoppingBootHook() {
+    local type=$1 dropIn="/etc/systemd/system/sing-box.service.d/port-hopping-$1.conf" confD=/etc/conf.d/sing-box
+    local rule cmd= tool kept want
+    if [[ "$2" == "on" ]]; then
+        rule=$(portHoppingRule "${type}" "$3" "$4" "$5")
+        for tool in iptables ip6tables; do
+            cmd+="${tool} -t nat -C ${rule} 2>/dev/null || ${tool} -t nat -A ${rule} 2>/dev/null; "
+        done
+        cmd+="true"
+    fi
+    if [[ -f /etc/systemd/system/sing-box.service ]]; then
+        want=$'[Service]\nExecStartPre=+/bin/sh -c '"'${cmd}'"
+        if [[ "$2" == "on" ]]; then
+            [[ "$(cat "${dropIn}" 2>/dev/null)" == "${want}" ]] && return 0
+            mkdir -p "${dropIn%/*}" && printf '%s\n' "${want}" >"${dropIn}" || return 1
+        elif [[ -e "${dropIn}" ]]; then
+            rm -f "${dropIn}"
+            rmdir "${dropIn%/*}" 2>/dev/null
+        else
+            return 0
+        fi
+        systemctl daemon-reload
+    elif [[ -f /etc/init.d/sing-box ]]; then
+        # 只认、只动自己的那一行（带类型标记）；init 脚本不定义 start_pre，openrc-run 先读 conf.d，这里定义的就是启动前钩子
+        kept=$(grep -vF "Proxy-agent_${type}_portHopping" "${confD}" 2>/dev/null)
+        want=${kept}
+        [[ "$2" == "on" ]] && want=${kept:+${kept}$'\n'}"start_pre() { ${cmd}; }"
+        [[ "${want}" == "$(cat "${confD}" 2>/dev/null)" ]] && return 0
+        if [[ -z "${want}" ]]; then
+            rm -f "${confD}"
+        else
+            printf '%s\n' "${want}" >"${confD}" || return 1
+        fi
+    else
+        [[ "$2" != "on" ]]
+    fi
 }
 
 # 读取端口跳跃的配置
@@ -5329,6 +5480,7 @@ deletePortHoppingRules() {
         if [[ -n "${changed}" ]] && command -v netfilter-persistent >/dev/null 2>&1; then
             netfilter-persistent save >/dev/null 2>&1
         fi
+        portHoppingBootHook "${type}" off
     fi
 }
 
@@ -5340,6 +5492,8 @@ removeProtocolPortHopping() {
     if [[ "${release}" == "centos" ]]; then
         [[ -n "${targetPort}" ]] && systemctl is-active --quiet firewalld || return 0
     else
+        # 规则这会儿不在（重启后 sing-box 还没起过）也要撤钩子，不然下次启动又按旧端口补回来
+        portHoppingBootHook "${type}" off
         command -v iptables >/dev/null 2>&1 || return 0
     fi
     readPortHopping "${type}" "${targetPort}"
@@ -7987,9 +8141,9 @@ isOwnRuleOnSshPort() {
 }
 
 # removeOwnFirewallRules [PORT/PROTO] → 收回 allowPort 留下的放行，只认带 (Proxy-agent) 注释的（iptables、nft），sshd 在用的端口除外；
-# 给了 PORT/PROTO 只收这一个。ufw、firewalld 的放行没有标记，这里不动：整机卸载列出来让用户处理，链式端口另走 revokePort
+# 给了 PORT/PROTO 只收这一个，删到了返回 0。ufw、firewalld 的放行没有标记，这里不动：整机卸载列出来让用户处理，单个端口另走 revokePort
 removeOwnFirewallRules() {
-    local line changed= sshPorts tool mark="(Proxy-agent)"
+    local line changed= removed=1 sshPorts tool mark="(Proxy-agent)"
     [[ -n "${1:-}" ]] && mark="allow $1(Proxy-agent)"
     sshPorts=$(sshListenPorts)
     for tool in iptables ip6tables; do
@@ -8001,7 +8155,7 @@ removeOwnFirewallRules() {
                 echoContent yellow " ---> $(t UNINSTALL_KEEP_SSH_RULE)"
                 continue
             fi
-            "${tool}" -D INPUT "${line%% *}" && changed=true
+            "${tool}" -D INPUT "${line%% *}" && changed=true && removed=0
         done < <("${tool}" -L INPUT -n --line-numbers 2>/dev/null | grep -F "${mark}" | sort -rn)
     done
     if [[ -n "${changed}" ]] && command -v netfilter-persistent >/dev/null 2>&1; then
@@ -8015,12 +8169,13 @@ removeOwnFirewallRules() {
                 echoContent yellow " ---> $(t UNINSTALL_KEEP_SSH_RULE)"
                 continue
             fi
-            nft delete rule inet filter input handle "${line##* }" && changed=true
+            nft delete rule inet filter input handle "${line##* }" && changed=true && removed=0
         done < <(nft -a list chain inet filter input | grep -F "${mark}")
         if [[ -n "${changed}" ]] && systemctl is-active --quiet nftables 2>/dev/null; then
             nftSaveOwnRules
         fi
     fi
+    return "${removed}"
 }
 
 # reportUninstallLeftovers → 列出还留在系统里、脚本不敢删的东西（可能是用户自己的配置），只列确实存在的
@@ -10832,7 +10987,7 @@ checkLog() {
         echoContent yellow "1.warning(默认)"
         echoContent yellow "2.info"
         echoContent yellow "3.debug"
-        echoContent yellow "4.最小日志(写入/tmp，适合无盘/调试完毕后使用)"
+        echoContent yellow "4.$(t LOG_MINIMAL_ITEM)"
         read -r -p "请选择:" selectLogLevel
         local targetAccessPath=""
         case ${selectLogLevel} in
@@ -10846,14 +11001,13 @@ checkLog() {
             currentLogLevel="debug"
             ;;
         4)
-            local tmpLogDir="/tmp/Proxy-agent"
-            mkdir -p "${tmpLogDir}"
+            # 不放 /tmp，理由见 ensureXrayLogPaths
             currentLogLevel="warning"
-            writeLogConfig "${tmpLogDir}/access.log" "${tmpLogDir}/error.log" "${currentLogLevel}"
+            writeLogConfig "${XRAY_DIR}/access.log" "${XRAY_DIR}/error.log" "${currentLogLevel}"
             setRealityLogShow "false"
             reloadCore
             echoContent green "\n ---> 已切换为最小日志模式"
-            echoContent yellow " ---> access/error 将写入 ${tmpLogDir}/，系统临时目录会在重启或周期清理时自动清空，如需立即清理可执行 [rm -f ${tmpLogDir}/*.log]"
+            echoContent yellow " ---> $(t LOG_MINIMAL_WHERE "${XRAY_DIR}/")"
             checkLog 1
             ;;
         esac
@@ -10995,7 +11149,7 @@ installWarpReg() {
                 exit 1
             fi
             mv -f "${warpRegTmp}" ${WARP_DIR}/warp-reg
-            chmod 655 ${WARP_DIR}/warp-reg
+            chmod 755 ${WARP_DIR}/warp-reg
 
         else
             echoContent yellow " ---> 放弃安装"
@@ -16341,6 +16495,7 @@ subscribeMergeExisting() {
     if carpoolEnabled; then
         carpoolRenderPages
     fi
+    settlePortRules
 }
 
 # renderSubscribeConf PORT SERVER_NAME → 不交互地写 subscribe.conf：有 SERVER_NAME 的证书就是 https，没有就是 http。
@@ -16502,7 +16657,10 @@ refreshSubscribeAfterInstall() {
     local port serverNameValue hadPage= merged=
     subscribeIsMerged && merged=1
     port=$(subscribeConfPort)
-    [[ -n "${port}${merged}" ]] && command -v nginx >/dev/null 2>&1 || return 0
+    if [[ -z "${port}${merged}" ]] || ! command -v nginx >/dev/null 2>&1; then
+        settlePortRules
+        return 0
+    fi
     readInstallType
     readInstallProtocolType
     readConfigHostPathUUID
@@ -16520,6 +16678,7 @@ refreshSubscribeAfterInstall() {
     handleNginx start force
     # 与拼车恢复成员时同一条静默重建：订阅端口读不出来（域名对不上）就跳过，不会掉进交互
     carpoolRefreshSubscribe
+    settlePortRules
 }
 # 卸载订阅
 unInstallSubscribe() {
@@ -18253,10 +18412,131 @@ _doctorCheckFirewall() {
         detected="iptables: ${rules} rules"
     fi
 
-    if [[ -n "${detected}" ]]; then
+    if [[ -z "${detected}" ]]; then
+        _doctorRow "$(t DOCTOR_CHECK_FIREWALL)" warn "no firewall manager detected"
+    elif firewallDefaultDenies || inboundDefaultDenies; then
         _doctorRow "$(t DOCTOR_CHECK_FIREWALL)" pass "${detected}"
     else
-        _doctorRow "$(t DOCTOR_CHECK_FIREWALL)" warn "no firewall manager detected"
+        _doctorRow "$(t DOCTOR_CHECK_FIREWALL)" warn "$(t DOCTOR_DETAIL_FIREWALL_DEFAULT_ALLOW "${detected}")"
+    fi
+    _doctorCheckFirewallPorts
+}
+
+# ufwAllowedPorts → ufw 已加的放行（开没开都算），一行一个 PORT/PROTO 或 START:END/PROTO，没写协议的 tcp、udp 各一行。
+# 应用名（OpenSSH 之类）、出站、转发的规则不认；ufw 跑不了（不是 root）返回 1
+ufwAllowedPorts() {
+    local added
+    added=$(ufw show added 2>/dev/null) || return 1
+    awk '$1 == "ufw" && ($2 == "allow" || $2 == "limit") && $3 != "out" {
+        sub(/ comment .*/, "")
+        spec = ""; proto = ""
+        for (i = 3; i <= NF; i++) {
+            if ($i == "port" && i < NF) spec = $(i + 1)
+            if ($i == "proto" && i < NF) proto = $(i + 1)
+        }
+        if (spec == "") {
+            spec = $NF
+            if (split(spec, a, "/") == 2) { spec = a[1]; proto = a[2] }
+        }
+        if (spec !~ /^[0-9][0-9,:]*$/) next
+        n = split(spec, items, ",")
+        for (j = 1; j <= n; j++) {
+            if (proto == "tcp" || proto == "udp") print items[j] "/" proto
+            else if (proto == "") { print items[j] "/tcp"; print items[j] "/udp" }
+        }
+    }' <<<"${added}"
+}
+
+# firewalldAllowedPorts [services] → firewalld 默认区（allowPort 加规则的那个区）永久配置里直接放行的端口与带端口的 accept 富规则，
+# 给了 services 打印的是区里各服务带的端口（ssh、dhcpv6-client 这类系统自带的）。格式同 ufwAllowedPorts（区间的 - 换成 :）
+firewalldAllowedPorts() {
+    local service
+    if [[ "${1:-}" == "services" ]]; then
+        for service in $(firewall-cmd --permanent --list-services 2>/dev/null); do
+            firewall-cmd --permanent --service="${service}" --get-ports 2>/dev/null
+        done
+    else
+        firewall-cmd --permanent --list-ports 2>/dev/null
+    fi | tr ' ' '\n' | sed -nE 's/^([0-9]+)(-([0-9]+))?\/(tcp|udp)$/\1:\3\/\4/p' | sed 's/:\//\//'
+    [[ "${1:-}" == "services" ]] && return 0
+    firewall-cmd --permanent --list-rich-rules 2>/dev/null |
+        sed -nE 's/.* port port="([0-9]+)(-([0-9]+))?" protocol="(tcp|udp)".* accept$/\1:\3\/\4/p' | sed 's/:\//\//'
+}
+
+# ownMarkedAllowedPorts → iptables、ip6tables、nft 里带 (Proxy-agent) 注释的放行，格式同 ufwAllowedPorts
+ownMarkedAllowedPorts() {
+    {
+        iptables -S INPUT 2>/dev/null
+        ip6tables -S INPUT 2>/dev/null
+        nft list chain inet filter input 2>/dev/null
+    } | grep -oE 'allow [0-9:]+/(tcp|udp)\(Proxy-agent\)' | sed -E 's/^allow //; s/\(Proxy-agent\)$//' | sort -u
+}
+
+# portAllowedIn PORT/PROTO ALLOWED → 0 = ALLOWED（上面几个函数的输出）里有一条盖住它：同协议，单端口相等或落在区间里
+portAllowedIn() {
+    awk -F/ -v port="${1%/*}" -v proto="${1#*/}" '$2 == proto {
+        n = split($1, r, ":"); lo = r[1] + 0; hi = (n > 1 ? r[2] : r[1]) + 0
+        if (port + 0 >= lo && port + 0 <= hi) found = 1
+    } END {exit !found}' <<<"$2"
+}
+
+# _doctorCheckFirewallPorts → 只读对账两件事：本脚本配置里在用的端口在 ufw / firewalld 里有没有放行（ufw 没开也看，开之前查得出漏的），
+# 放行了的单个端口有没有程序在听。只认得出 ufwAllowedPorts 等三个函数说的写法；firewalld 服务带的端口只算放行，
+# 与 sshd 的端口、给证书用的 80/tcp 一样不算没人听（dhcpv6-client 这类没有常驻的监听）
+_doctorCheckFirewallPorts() {
+    local allowed= services= tool= inUse entry missing= idle= sshPorts
+    if [[ "$(id -u)" != "0" ]]; then
+        _doctorRow "$(t DOCTOR_CHECK_PORTS_ALLOWED)" skip "$(t DOCTOR_DETAIL_NEED_ROOT)"
+        return
+    fi
+    if command -v ufw >/dev/null 2>&1; then
+        tool=ufw
+        allowed=$(ufwAllowedPorts) || tool=
+    elif systemctl is-active --quiet firewalld 2>/dev/null; then
+        tool=firewalld
+        allowed=$(firewalldAllowedPorts)
+        services=$(firewalldAllowedPorts services)
+    fi
+    if [[ -z "${tool}" ]]; then
+        _doctorRow "$(t DOCTOR_CHECK_PORTS_ALLOWED)" skip "$(t DOCTOR_DETAIL_PORTS_UNCHECKED)"
+    else
+        inUse=$(proxyPortsInUse | sort -u)
+        while IFS= read -r entry; do
+            [[ -n "${entry}" ]] && ! portAllowedIn "${entry}" "${allowed}"$'\n'"${services}" && missing+=" ${entry}"
+        done <<<"${inUse}"
+        if [[ -n "${missing}" ]]; then
+            _doctorRow "$(t DOCTOR_CHECK_PORTS_ALLOWED)" warn "$(t DOCTOR_DETAIL_PORTS_NOT_ALLOWED "${tool}" "${missing# }")"
+        else
+            _doctorRow "$(t DOCTOR_CHECK_PORTS_ALLOWED)" pass "${tool}"
+        fi
+    fi
+    allowed=$(printf '%s\n%s\n' "${allowed}" "$(ownMarkedAllowedPorts)" | grep -E '^[0-9]+/(tcp|udp)$' | sort -u)
+    sshPorts=$(sshListenPorts)
+    while IFS= read -r entry; do
+        [[ -n "${entry}" && "${entry}" != "80/tcp" ]] || continue
+        grep -qxF "${entry%/*}" <<<"${sshPorts}" && continue
+        portListed "${entry%/*}" "$(listeningPorts "${entry#*/}")" || idle+=" ${entry}"
+    done <<<"${allowed}"
+    if [[ -n "${idle}" ]]; then
+        _doctorRow "$(t DOCTOR_CHECK_PORTS_IDLE)" warn "$(t DOCTOR_DETAIL_PORTS_IDLE "${idle# }")"
+    else
+        _doctorRow "$(t DOCTOR_CHECK_PORTS_IDLE)" pass
+    fi
+}
+
+# _doctorCheckNginxUpdate → nginx.org 源装的 nginx 不在系统自动安全更新的范围里：按本机现有的软件包索引比已装版本与可装的最新版
+_doctorCheckNginxUpdate() {
+    [[ -f /etc/apt/sources.list.d/nginx.list ]] && command -v apt-cache >/dev/null 2>&1 || return 0
+    local policy installed candidate
+    policy=$(LC_ALL=C apt-cache policy nginx 2>/dev/null)
+    installed=$(awk '$1 == "Installed:" {print $2}' <<<"${policy}")
+    candidate=$(awk '$1 == "Candidate:" {print $2}' <<<"${policy}")
+    if [[ -z "${installed}" || "${installed}" == "(none)" ]]; then
+        _doctorRow "$(t DOCTOR_CHECK_NGINX_UPDATE)" skip "$(t DOCTOR_DETAIL_NGINX_NOT_INSTALLED)"
+    elif [[ -n "${candidate}" && "${candidate}" != "(none)" ]] && dpkg --compare-versions "${candidate}" gt "${installed}"; then
+        _doctorRow "$(t DOCTOR_CHECK_NGINX_UPDATE)" warn "$(t DOCTOR_DETAIL_NGINX_OUTDATED "${installed}" "${candidate}")"
+    else
+        _doctorRow "$(t DOCTOR_CHECK_NGINX_UPDATE)" pass "${installed}"
     fi
 }
 
@@ -18278,6 +18558,7 @@ doctor() {
     _doctorCheckNetwork
     _doctorCheckCert
     _doctorCheckSecurity
+    _doctorCheckNginxUpdate
     _doctorCheckFirewall
 
     echoContent skyBlue "\n=============================================================="
@@ -18849,4 +19130,5 @@ if migrateChainEntryState && legacyRoutingClear && [[ "${chainEntryMigrated}" ==
     reloadCore
 fi
 offerCoreRestart
+portsAtStart=$(proxyPortsInUse)
 menu

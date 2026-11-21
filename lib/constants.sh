@@ -80,6 +80,9 @@ readonly XHTTP_TLS_LOCAL_PORT=31307
 # reality verification failed。升级菜单可显式装最新版；sing-box 修好前别动
 readonly XRAY_PINNED_VERSION="v26.3.27"
 
+# nginx.org 官网（linux_packages.html）公布的软件包签名钥指纹：Debian / Ubuntu 配 nginx.org 源前，下到的钥文件里必须有这一把
+readonly NGINX_SIGNING_KEY_FPR="573BFD6B3D8FBC641079A6ABABF5BD827BD9BF62"
+
 # 拼车要的 api.listen 自 Xray 1.8.12 起才有；只拦手动回钉旧核的机器
 readonly CARPOOL_XRAY_MIN_VERSION="1.8.12"
 
