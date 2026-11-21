@@ -1602,7 +1602,7 @@ allowPort() {
     local type=${2:-tcp}
     local sourceIP=$3 handled=
     # 如果防火墙启动状态则添加相应的开放端口
-    if debPackageInstalled ufw; then
+    if debPackageInstalled ufw || rc-update show 2>/dev/null | grep ufw >/dev/null; then
         if ufw status | grep "Status: active" >/dev/null; then
             handled=true
             # 不先 grep 查重（ufw 自己跳过已有的同一条）：443/tcp 是 8443/tcp 的子串，按子串查会把没放行的端口当成已放行
@@ -1618,9 +1618,8 @@ allowPort() {
         local updateFirewalldStatus=
         handled=true
         if [[ -n "${sourceIP}" ]]; then
-            local family=ipv4
-            [[ "${sourceIP}" == *:* ]] && family=ipv6
-            local richRule="rule family=\"${family}\" source address=\"${sourceIP}\" port protocol=\"${type}\" port=\"$1\" accept"
+            local richRule
+            richRule=$(firewalldRichRule "$1" "${type}" "${sourceIP}")
             if ! firewall-cmd --permanent --query-rich-rule="${richRule}" >/dev/null 2>&1; then
                 updateFirewalldStatus=true
                 firewall-cmd --permanent --add-rich-rule="${richRule}"
@@ -1639,12 +1638,6 @@ allowPort() {
         if echo "${updateFirewalldStatus}" | grep -q "true"; then
             firewall-cmd --reload
         fi
-    elif rc-update show 2>/dev/null | grep ufw >/dev/null; then
-        if ufw status | grep "Status: active" >/dev/null; then
-            handled=true
-            ufw allow "$1/${type}"
-            checkUFWAllowPort "$1" "${type}"
-        fi
     elif command -v nft >/dev/null 2>&1 && systemctl is-active --quiet nftables 2>/dev/null; then
         if nft list chain inet filter input >/dev/null 2>&1; then
             handled=true
@@ -1657,6 +1650,46 @@ allowPort() {
     if [[ -z "${handled}" ]] && inboundDefaultDenies; then
         echoContent yellow " ---> $(t FIREWALL_UNHANDLED "$1/${type}")"
     fi
+}
+
+# firewalldRichRule PORT TYPE SOURCE_IP → allowPort 限来源时在 firewalld 上加的 rich rule，地址族按 SOURCE_IP 选
+firewalldRichRule() {
+    local family=ipv4
+    [[ "$3" == *:* ]] && family=ipv6
+    echo "rule family=\"${family}\" source address=\"$3\" port protocol=\"$2\" port=\"$1\" accept"
+}
+
+# revokePort PORT TYPE [SOURCE_IP] → 删掉 allowPort 同样参数在 ufw / firewalld 上加的那一条，同端口的别的规则不碰；没找到返回 1。
+# 用户事先手加过一模一样的也会被删，只拿它收脚本自己独占的端口。ufw 关着也删（规则存着，一开又生效）；sshd 在用的端口留着
+revokePort() {
+    local ufwRule=() fwdRemove=() rich revoked=1
+    if command -v ufw >/dev/null 2>&1; then
+        ufwRule=(allow "$1/$2")
+        [[ -n "${3:-}" ]] && ufwRule=(allow from "$3" to any port "$1" proto "$2")
+        # show added 列的是加规则时的命令原文；ufw 删不存在的规则也返回 0，不先查就分不清删没删到
+        ufw show added 2>/dev/null | grep -xF "ufw ${ufwRule[*]}" >/dev/null || ufwRule=()
+    fi
+    if systemctl is-active --quiet firewalld 2>/dev/null; then
+        if [[ -n "${3:-}" ]]; then
+            rich=$(firewalldRichRule "$1" "$2" "$3")
+            firewall-cmd --permanent --query-rich-rule="${rich}" >/dev/null 2>&1 && fwdRemove=(--remove-rich-rule="${rich}")
+        elif firewall-cmd --permanent --list-ports 2>/dev/null | tr ' ' '\n' | grep -xF "$1/$2" >/dev/null; then
+            # 整项比对，不用 --query-port：它把落在用户区间里的端口也算有，删了会把那段区间拆开
+            fwdRemove=(--remove-port="$1/$2")
+        fi
+    fi
+    [[ ${#ufwRule[@]} -gt 0 || ${#fwdRemove[@]} -gt 0 ]] || return 1
+    if grep -qxF "$1" <<<"$(sshListenPorts)"; then
+        echoContent yellow " ---> $(t UNINSTALL_KEEP_SSH_RULE)"
+        return 0
+    fi
+    if [[ ${#ufwRule[@]} -gt 0 ]] && ufw delete "${ufwRule[@]}" >/dev/null; then
+        revoked=0
+    fi
+    if [[ ${#fwdRemove[@]} -gt 0 ]] && firewall-cmd --permanent "${fwdRemove[@]}" >/dev/null && firewall-cmd --reload >/dev/null; then
+        revoked=0
+    fi
+    return "${revoked}"
 }
 
 # inboundDefaultDenies → 0 = 入站默认拒绝：iptables 的 INPUT 策略是 DROP 或有一条无条件的 DROP / REJECT，
@@ -1760,14 +1793,11 @@ allowPortIptables() {
 # firewallDefaultDenies → 0 = allowPort 会用的那个防火墙默认拒绝入站，按源放行才真把端口藏起来；
 # 没有在用的防火墙、默认放行、firewalld 默认区 target 是 ACCEPT（trusted）都返回 1。判断顺序必须与 allowPort 一致
 firewallDefaultDenies() {
-    if debPackageInstalled ufw; then
+    if debPackageInstalled ufw || rc-update show 2>/dev/null | grep ufw >/dev/null; then
         ufw status verbose 2>/dev/null | grep "Status: active" >/dev/null || return 1
         ufw status verbose | grep -E "Default: (deny|reject) \(incoming\)" >/dev/null
     elif systemctl status firewalld 2>/dev/null | grep "active (running)" >/dev/null; then
         [[ "$(firewall-cmd --permanent --zone="$(firewall-cmd --get-default-zone)" --get-target 2>/dev/null)" != "ACCEPT" ]]
-    elif rc-update show 2>/dev/null | grep ufw >/dev/null; then
-        ufw status verbose 2>/dev/null | grep "Status: active" >/dev/null || return 1
-        ufw status verbose | grep -E "Default: (deny|reject) \(incoming\)" >/dev/null
     elif command -v nft >/dev/null 2>&1 && systemctl is-active --quiet nftables 2>/dev/null; then
         nft list chain inet filter input 2>/dev/null | grep "policy drop" >/dev/null
     elif debPackageInstalled netfilter-persistent && systemctl status netfilter-persistent 2>/dev/null | grep "active (exited)" >/dev/null; then
@@ -7957,7 +7987,7 @@ isOwnRuleOnSshPort() {
 }
 
 # removeOwnFirewallRules [PORT/PROTO] → 收回 allowPort 留下的放行，只认带 (Proxy-agent) 注释的（iptables、nft），sshd 在用的端口除外；
-# 给了 PORT/PROTO 只收这一个。ufw、firewalld 的放行没有标记，认不出是不是用户自己加的，不动，由调用方提示用户
+# 给了 PORT/PROTO 只收这一个。ufw、firewalld 的放行没有标记，这里不动：整机卸载列出来让用户处理，链式端口另走 revokePort
 removeOwnFirewallRules() {
     local line changed= sshPorts tool mark="(Proxy-agent)"
     [[ -n "${1:-}" ]] && mark="allow $1(Proxy-agent)"
@@ -11383,26 +11413,36 @@ chainReadPublicIP() {
 }
 
 # writeChainInbound PORT METHOD KEY → sing-box 片段 chain_inbound.json：出口与中继收链路流量的 SS2022 入站。入站不带 sniff：
-# 嗅探在 chain_route.json 里按路由动作做。盖掉旧入站时收回旧端口的放行，端口相同也收（来源限制可能变了），调用方随后 allowPort
+# 嗅探在 chain_route.json 里按路由动作做。盖掉旧入站时收回旧端口的放行，端口相同也收（来源限制可能变了），调用方随后 allowPort。
+# 要在新的出口 / 中继状态写下之前调：旧入站的来源限制从旧状态里读
 writeChainInbound() {
-    local content old
+    local content old oldSource
     old=$(jq -r '.inbounds[0].listen_port // empty' "${SINGBOX_FRAGMENT_DIR}/chain_inbound.json" 2>/dev/null)
+    oldSource=$(chainInboundAllowedIP)
     content=$(jq -n --argjson port "$1" --arg method "$2" --arg key "$3" '{inbounds: [{type: "shadowsocks", tag: "chain_inbound",
         listen: "::", listen_port: $port, method: $method, password: $key, multiplex: {enabled: true}}]}') || return 1
     writeChainInfoAtomic "${SINGBOX_FRAGMENT_DIR}/chain_inbound.json" "${content}" || return 1
     if [[ -n "${old}" ]]; then
-        chainReleasePort "${old}" "$1"
+        chainReleasePort "${old}" "${oldSource}" "$1"
     fi
 }
 
-# chainReleasePort PORT [NEW_PORT] → 收回出口 / 中继入站在 PORT 上的放行（只认带标记的，同 removeOwnFirewallRules）。
-# PORT 不再用（没给 NEW_PORT 或两者不同）而防火墙是 ufw、firewalld 时，那条放行认不出是谁加的，提示用户自己删
+# chainInboundAllowedIP → chain_inbound 放行时限定的来源：出口限了入口 IP 就打印它。中继状态在时入站是中继的，不限来源（同 chainExitSourceInject）
+chainInboundAllowedIP() {
+    [[ -f "${CHAIN_EXIT_INFO}" && ! -f "${CHAIN_RELAY_INFO}" ]] || return 0
+    jq -r '.allowed_ip // "" | strings' "${CHAIN_EXIT_INFO}" 2>/dev/null
+}
+
+# chainReleasePort PORT SOURCE_IP [NEW_PORT] → 收回出口 / 中继入站在 PORT 上的放行：带标记的（removeOwnFirewallRules），
+# 和 ufw / firewalld 上 allowPort PORT tcp SOURCE_IP 加的那一条（revokePort）。PORT 不再用（没给 NEW_PORT 或两者不同）、
+# ufw 或 firewalld 开着却没删到那一条时，提示用户自己查（那一条可能被改过、删过，或来源限制和状态里的对不上）
 chainReleasePort() {
     removeOwnFirewallRules "$1/tcp"
-    [[ "$1" == "${2:-}" ]] && return 0
+    revokePort "$1" tcp "$2" && return 0
+    [[ "$1" == "${3:-}" ]] && return 0
     if { command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep "Status: active" >/dev/null; } ||
         systemctl is-active --quiet firewalld 2>/dev/null; then
-        echoContent yellow " ---> $(t CHAIN_PORT_RULE_LEFT "$1")"
+        echoContent yellow " ---> $(t CHAIN_PORT_RULE_NOT_FOUND "$1")"
     fi
     return 0
 }
@@ -12437,7 +12477,7 @@ updateChainPort() {
         return 1
     fi
     reloadCore
-    chainReleasePort "${oldPort}" "${newPort}"
+    chainReleasePort "${oldPort}" "${allowedIP}" "${newPort}"
 
     echoContent green " ---> $(t CHAIN_PORT_UPDATED "${newPort}")"
 
@@ -12508,9 +12548,10 @@ removeChainProxy() {
         return 0
     fi
 
-    # 出口 / 中继入站的端口先记下，片段删掉、内核重载之后收回它的放行
-    local chainPort
+    # 出口 / 中继入站的端口与来源限制先记下，片段与状态删掉、内核重载之后收回它的放行
+    local chainPort chainSource
     chainPort=$(jq -r '.inbounds[0].listen_port // empty' "${SINGBOX_FRAGMENT_DIR}/chain_inbound.json" 2>/dev/null)
+    chainSource=$(chainInboundAllowedIP)
 
     # 出口 / 中继的片段、各角色的状态文件（含旧版入口留下的 chain_entry_info.json）
     rm -f ${SINGBOX_FRAGMENT_DIR}/chain_inbound.json
@@ -12557,7 +12598,7 @@ removeChainProxy() {
     fi
     reloadCore
     if [[ -n "${chainPort}" ]]; then
-        chainReleasePort "${chainPort}"
+        chainReleasePort "${chainPort}" "${chainSource}"
     fi
 
     echoContent green " ---> $(t CHAIN_REMOVE_DONE)"

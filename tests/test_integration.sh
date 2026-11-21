@@ -3245,7 +3245,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试按账号选出口 ===${NC}"
 
-CA_FN_NAMES="singBoxProbeExitIP localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs writeXrayRouting localBlockInject chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic chainFileModify chainReadName chainReadFirstRule chainLinkBuild chainStoreExit chainFinishAdd addExternalNodeAsChain addChainToConfig chainPickExit chainRestartSingBox chainReadPublicIP writeChainInbound chainExitCode chainRelayCode chainPrintHops chainInitEntryState validateChainName removeMultiChainOutbound xrayChainUnwire chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable multiChainRuleSetStatus legacyRoutingClear addXrayOutbound isValidIP isLocalBlockedIP ipv6Hex xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig chainRouteLazyResolve migrateChainRouteResolve chainExitDefs chainExitTarget chainExitIsSni chainWarpEnsureRegistered chainWarpFragment chainLocalExitFragment addLocalExitAsChain multiChainAddOne singBoxProbeEndpointIP migrateChainEntryState chainHopOutbounds chainReadManualExit addSingleChainOutbound chainIsExitMachine chainRefuseRemoteOnExit"
+CA_FN_NAMES="singBoxProbeExitIP localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs writeXrayRouting localBlockInject chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountApply xrayConfigTest chainAccountSave chainAccountForget chainAccountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic chainFileModify chainReadName chainReadFirstRule chainLinkBuild chainStoreExit chainFinishAdd addExternalNodeAsChain addChainToConfig chainPickExit chainRestartSingBox chainReadPublicIP writeChainInbound chainInboundAllowedIP chainExitCode chainRelayCode chainPrintHops chainInitEntryState validateChainName removeMultiChainOutbound xrayChainUnwire chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable multiChainRuleSetStatus legacyRoutingClear addXrayOutbound isValidIP isLocalBlockedIP ipv6Hex xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig chainRouteLazyResolve migrateChainRouteResolve chainExitDefs chainExitTarget chainExitIsSni chainWarpEnsureRegistered chainWarpFragment chainLocalExitFragment addLocalExitAsChain multiChainAddOne singBoxProbeEndpointIP migrateChainEntryState chainHopOutbounds chainReadManualExit addSingleChainOutbound chainIsExitMachine chainRefuseRemoteOnExit"
 CA_FNS=$(sed -n "$(for _f in ${CA_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_equals "$(wc -w <<<"${CA_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CA_FNS}")" "按账号选出口：每个函数都抽到了"
 CA_ROOT="${MOCK_ROOT}/chainacct.root"
@@ -3828,8 +3828,8 @@ ca_reset
 _out=$(printf '0\n' | CA_PUBIP=203.0.113.5 _caSetupRun 'setupChainExit; echo rc=$?')
 assert_equals "rc=1|no|" "$(tail -n 1 <<<"${_out}")|$([[ -e "${CA_EXIT}" ]] && echo yes || echo no)|$(cat "${CA_CALLS}")" "配出口（端口填 0）：拒绝，什么都没写"
 run_ca 'writeChainInbound 40001 m k' >/dev/null 2>&1
-_out=$(printf 'y\n\n1\n1\n' | CA_PUBIP=203.0.113.5 _caSetupRun 'chainReleasePort() { echo "release $*" >>"${CA_CALLS}"; }; setupChainExit; echo rc=$?')
-assert_equals "rc=0|release 40001 23456 allow 23456 tcp" "$(tail -n 1 <<<"${_out}")|$(grep -E '^(release|allow)' "${CA_CALLS}" | paste -sd ' ' -)" \
+_out=$(printf 'y\n\n1\n1\n' | CA_PUBIP=203.0.113.5 _caSetupRun 'chainReleasePort() { echo "release $1 ${2:-any} $3" >>"${CA_CALLS}"; }; setupChainExit; echo rc=$?')
+assert_equals "rc=0|release 40001 any 23456 allow 23456 tcp" "$(tail -n 1 <<<"${_out}")|$(grep -E '^(release|allow)' "${CA_CALLS}" | paste -sd ' ' -)" \
     "重配出口（换了端口）：先收回旧端口的放行，再放行新端口"
 ca_reset
 _out=$(printf '%s\n\n' "${_caExitCode}" | CA_PUBIP=192.0.2.77 _caSetupRun 'setupChainRelay; echo rc=$?')
@@ -4011,30 +4011,45 @@ printf '%s\n' '{"role":"relay"}' >"${CA_ROOT}/sing-box/conf/chain_relay_info.jso
 assert_contains "$(printf 'n\n' | run_ca "${_caRemove}"$'\n''removeChainProxy' 2>&1)" "中继节点" "卸载链式（中继机，留着旧的出口状态）：按中继说"
 
 # --- 出口 / 中继入站的端口：卸载、改端口、重配都收回旧端口的放行，改端口时来源限制跟着走 ---
-_caPortStubs='chainReleasePort() { echo "release $*" >>"${CA_CALLS}"; }; allowPort() { echo "allow $1 $2 ${3:-any}" >>"${CA_CALLS}"; }
+_caPortStubs='chainReleasePort() { echo "release $1 ${2:-any}${3:+ $3}" >>"${CA_CALLS}"; }; allowPort() { echo "allow $1 $2 ${3:-any}" >>"${CA_CALLS}"; }
     showExistingChainCode() { :; }; showRelayChainCode() { :; }; handleXray() { :; }'
 ca_reset
 run_ca "${_caPortStubs}; writeChainInbound 5000 m k; writeChainInbound 6000 m k; writeChainInbound 6000 m k" >/dev/null 2>&1
-assert_equals "release 5000 6000|release 6000 6000|6000" "$(paste -sd '|' - <"${CA_CALLS}")|$(jq -r '.inbounds[0].listen_port' "${CA_F}/chain_inbound.json")" \
+assert_equals "release 5000 any 6000|release 6000 any 6000|6000" "$(paste -sd '|' - <"${CA_CALLS}")|$(jq -r '.inbounds[0].listen_port' "${CA_F}/chain_inbound.json")" \
     "写出口 / 中继入站：第一次不收，盖掉旧入站时收回旧端口的放行，同一端口也收（来源限制可能变了）"
+printf '%s\n' '{"role":"exit","port":6000,"allowed_ip":"203.0.113.9"}' >"${CA_EXIT}"
+: >"${CA_CALLS}"
+run_ca "${_caPortStubs}; writeChainInbound 6500 m k" >/dev/null 2>&1
+assert_equals "release 6000 203.0.113.9 6500" "$(cat "${CA_CALLS}")" "盖掉限来源的出口入站：收回时带上旧状态里的来源，按它找那一条"
+printf '%s\n' '{"role":"relay","port":6500}' >"${CA_ROOT}/sing-box/conf/chain_relay_info.json"
+: >"${CA_CALLS}"
+run_ca "${_caPortStubs}; writeChainInbound 6000 m k" >/dev/null 2>&1
+assert_equals "release 6500 any 6000" "$(cat "${CA_CALLS}")" "中继状态也在时入站是中继的：收回不带来源"
+rm -f "${CA_ROOT}/sing-box/conf/chain_relay_info.json"
 _caPortFns=$(sed -n '/^updateChainPort() {/,/^}/p;/^readValidPort() {/,/^}/p' install.sh)
 printf '%s\n' '{"role":"exit","port":6000,"allowed_ip":"203.0.113.9"}' >"${CA_EXIT}"
 : >"${CA_CALLS}"
 _out=$(printf '\n' | run_ca "${_caPortFns}"$'\n'"${_caPortStubs}; updateChainPort; echo rc=\$?" 2>&1)
 assert_equals "rc=0|" "$(tail -n 1 <<<"${_out}")|$(cat "${CA_CALLS}")" "改出口端口（回车）：什么都不动"
 _out=$(printf '7000\n' | run_ca "${_caPortFns}"$'\n'"${_caPortStubs}; updateChainPort; echo rc=\$?" 2>&1)
-assert_equals "rc=0|allow 7000 tcp 203.0.113.9 merge reloadCore release 6000 7000|7000|7000" \
+assert_equals "rc=0|allow 7000 tcp 203.0.113.9 merge reloadCore release 6000 203.0.113.9 7000|7000|7000" \
     "$(tail -n 1 <<<"${_out}")|$(paste -sd ' ' - <"${CA_CALLS}")|$(jq -r .port "${CA_EXIT}")|$(jq -r '.inbounds[0].listen_port' "${CA_F}/chain_inbound.json")" \
     "改出口端口：新端口照来源限制放行，生效之后收回旧端口"
 rm -f "${CA_EXIT}"
 printf '%s\n' '{"role":"relay","port":7000}' >"${CA_ROOT}/sing-box/conf/chain_relay_info.json"
 : >"${CA_CALLS}"
 printf '8000\n' | run_ca "${_caPortFns}"$'\n'"${_caPortStubs}; updateChainPort" >/dev/null 2>&1
-assert_equals "allow 8000 tcp any merge reloadCore release 7000 8000" "$(paste -sd ' ' - <"${CA_CALLS}")" "改中继端口：不限来源放行新端口，收回旧端口"
+assert_equals "allow 8000 tcp any merge reloadCore release 7000 any 8000" "$(paste -sd ' ' - <"${CA_CALLS}")" "改中继端口：不限来源放行新端口，收回旧端口"
 : >"${CA_CALLS}"
 printf 'y\n' | run_ca "${_caRemove}"$'\n'"${_caPortStubs}; removeChainProxy" >/dev/null 2>&1
-assert_equals "reloadCore release 8000|no" "$(grep -E '^(reloadCore|release)' "${CA_CALLS}" | paste -sd ' ' -)|$([[ -e "${CA_F}/chain_inbound.json" ]] && echo yes || echo no)" \
+assert_equals "reloadCore release 8000 any|no" "$(grep -E '^(reloadCore|release)' "${CA_CALLS}" | paste -sd ' ' -)|$([[ -e "${CA_F}/chain_inbound.json" ]] && echo yes || echo no)" \
     "卸载链式（中继机）：入站删掉、内核重载之后收回它的端口"
+run_ca 'writeChainInbound 9000 m k' >/dev/null 2>&1
+printf '%s\n' '{"role":"exit","port":9000,"allowed_ip":"2001:db8::9"}' >"${CA_EXIT}"
+: >"${CA_CALLS}"
+printf 'y\n' | run_ca "${_caRemove}"$'\n'"${_caPortStubs}; removeChainProxy" >/dev/null 2>&1
+assert_equals "release 9000 2001:db8::9|no" "$(grep '^release' "${CA_CALLS}")|$([[ -e "${CA_EXIT}" ]] && echo yes || echo no)" \
+    "卸载链式（限来源的出口机）：来源在删状态之前记下，收回时按它找那一条"
 ca_reset
 ca_multi '{}'
 printf 'y\n' | run_ca "${_caRemove}"$'\n'"${_caPortStubs}; removeChainProxy" >/dev/null 2>&1
@@ -6279,23 +6294,133 @@ assert_equals "iptables -D INPUT 4|persist save|nft delete rule inet filter inpu
     "收回一个端口：只删这个端口、这个协议带标记的放行"
 assert_equals "" "$(RF_ARG=44/tcp run_rf "${RF_IPT}" "${RF_NFT}")" "收回一个端口：44 不会连带删掉 443"
 
-# --- 链式入站换端口或卸载：带标记的收回；ufw、firewalld 认不出，端口不再用时提示用户自己删 ---
+# --- 链式入站换端口或卸载：带标记的收回，ufw、firewalld 上删 allowPort 加的那一条；没删到、端口又不再用时提示 ---
 CR_FN=$(sed -n '/^chainReleasePort() {/,/^}/p' install.sh)
-# run_cr UFW_STATUS FIREWALLD_RC PORT [NEW_PORT] → 桩掉收回、ufw 与 systemctl，打印收回的端口、提示与返回值
+# run_cr UFW_STATUS FIREWALLD_RC REVOKE_RC PORT SOURCE [NEW_PORT] → 桩掉收回、revokePort、ufw 与 systemctl，打印调用、提示与返回值
 run_cr() {
-    env CR_FN="${CR_FN}" UFW_STATUS="$1" FWD_RC="$2" bash -c '
+    env CR_FN="${CR_FN}" UFW_STATUS="$1" FWD_RC="$2" REVOKE_RC="$3" bash -c '
         eval "${CR_FN}"
         t() { echo "$1 $2"; }
         echoContent() { echo "$2"; }
         removeOwnFirewallRules() { echo "remove $1"; }
+        revokePort() { echo "revoke $1 $2 ${3:-any}"; return "${REVOKE_RC}"; }
         ufw() { echo "${UFW_STATUS}"; }
         systemctl() { return "${FWD_RC}"; }
-        chainReleasePort "$@"; echo "rc=$?"' _ "${@:3}" 2>&1 | paste -sd'|' -
+        chainReleasePort "$@"; echo "rc=$?"' _ "${@:4}" 2>&1 | paste -sd'|' -
 }
-assert_equals "remove 5000/tcp| ---> CHAIN_PORT_RULE_LEFT 5000|rc=0" "$(run_cr 'Status: active' 1 5000)" "收回链式端口（ufw）：带标记的照收，ufw 那条提示用户自己删"
-assert_equals "remove 5000/tcp|rc=0" "$(run_cr 'Status: active' 1 5000 5000)" "收回链式端口（ufw，重配同一端口）：端口还在用，不提示"
-assert_equals "remove 5000/tcp| ---> CHAIN_PORT_RULE_LEFT 5000|rc=0" "$(run_cr 'Status: inactive' 0 5000 6000)" "收回链式端口（firewalld，换了端口）：旧端口提示用户自己删"
-assert_equals "remove 5000/tcp|rc=0" "$(run_cr 'Status: inactive' 1 5000)" "收回链式端口（iptables / nft）：收回就够了，不提示"
+assert_equals "remove 5000/tcp|revoke 5000 tcp 203.0.113.9|rc=0" "$(run_cr 'Status: active' 1 0 5000 203.0.113.9)" \
+    "收回链式端口（ufw）：带标记的照收，ufw 上按端口与来源删那一条，删到了不提示"
+assert_equals "remove 5000/tcp|revoke 5000 tcp any| ---> CHAIN_PORT_RULE_NOT_FOUND 5000|rc=0" "$(run_cr 'Status: active' 1 1 5000 '')" \
+    "收回链式端口（ufw，没找到那一条）：提示用户自己查"
+assert_equals "remove 5000/tcp|revoke 5000 tcp any|rc=0" "$(run_cr 'Status: active' 1 1 5000 '' 5000)" "收回链式端口（重配同一端口，没找到那一条）：端口还在用，不提示"
+assert_equals "remove 5000/tcp|revoke 5000 tcp any| ---> CHAIN_PORT_RULE_NOT_FOUND 5000|rc=0" "$(run_cr 'Status: inactive' 0 1 5000 '' 6000)" \
+    "收回链式端口（firewalld，换了端口、没找到那一条）：提示"
+assert_equals "remove 5000/tcp|revoke 5000 tcp any|rc=0" "$(run_cr 'Status: inactive' 1 1 5000 '')" "收回链式端口（iptables / nft）：收回带标记的就够了，不提示"
+
+# --- revokePort：只删 allowPort 同样参数加的那一条（ufw 整行、firewalld 整项），同端口的别的规则不碰 ---
+RP_FN=$(sed -n '/^revokePort() {/,/^}/p;/^firewalldRichRule() {/,/^}/p;/^allowPort() {/,/^}/p;/^debPackageInstalled() {/,/^}/p;/^inboundDefaultDenies() {/,/^}/p' install.sh)
+RP_DIR="${MOCK_ROOT}/revokeport"
+# run_rp UFW FIREWALLD CODE → UFW 是 ufw 的状态（active / inactive / alpine 为 OpenRC 上开着，空为没装），FIREWALLD 非空为在跑；
+# 规则存在 RP_DIR 的 ufw（show added 的命令原文）、ports、rich 里，桩出的 ufw / firewall-cmd 照真的加删，加删记在 stderr（被测函数会丢掉 stdout）。打印改动、提示与 CODE 的输出
+run_rp() {
+    env RP_FN="${RP_FN}" RP_DIR="${RP_DIR}" UFW="$1" FWD="$2" RP_SSH="${RP_SSH:-}" RP_UFW_FAIL="${RP_UFW_FAIL:-}" bash -c '
+        set -o pipefail
+        eval "${RP_FN}"
+        t() { echo "$1"; }
+        echoContent() { [[ "$1" != yellow ]] || echo "yellow:$2"; }
+        sshListenPorts() { [[ -z "${RP_SSH}" ]] || echo "${RP_SSH}"; echo 22; }
+        checkUFWAllowPort() { :; }; checkFirewalldAllowPort() { :; }
+        dpkg-query() { [[ -n "${UFW}" && "${UFW}" != alpine && "$4" == ufw ]] && printf "install ok installed"; }
+        rc-update() { [[ "${UFW}" == alpine ]] && echo "                  ufw | boot"; }
+        systemctl() {
+            [[ -n "${FWD}" && "$*" == *firewalld* ]] || return 3
+            [[ "$1" == status ]] && echo "   Active: active (running)"
+            return 0
+        }
+        has() { grep -xF -- "$2" "${RP_DIR}/$1" >/dev/null; }
+        drop() { grep -vxF -- "$2" "${RP_DIR}/$1" >"${RP_DIR}/tmp"; cat "${RP_DIR}/tmp" >"${RP_DIR}/$1"; }
+        if [[ -n "${UFW}" ]]; then
+            ufw() {
+                local line
+                case "$1" in
+                    status) [[ "${UFW}" == inactive ]] && echo "Status: inactive" || echo "Status: active" ;;
+                    show) echo "Added user rules (see '"'"'ufw status'"'"' for running firewall):"; cat "${RP_DIR}/ufw" ;;
+                    allow) line="ufw $*"; has ufw "${line}" || echo "${line}" >>"${RP_DIR}/ufw"; echo "${line}" >&2 ;;
+                    delete) shift; line="ufw $*"; echo "ufw delete $*" >&2; has ufw "${line}" && drop ufw "${line}"; [[ -z "${RP_UFW_FAIL}" ]] ;;
+                esac
+            }
+        fi
+        firewall-cmd() {
+            local a
+            for a in "$@"; do
+                case "${a}" in
+                    --permanent) ;;
+                    --list-ports) paste -sd" " - <"${RP_DIR}/ports" ;;
+                    --list-rich-rules) cat "${RP_DIR}/rich" ;;
+                    --query-rich-rule=*) has rich "${a#*=}" || return 1 ;;
+                    --add-rich-rule=*) echo "${a#*=}" >>"${RP_DIR}/rich"; echo "fw ${a}" >&2 ;;
+                    --add-port=*) echo "${a#*=}" >>"${RP_DIR}/ports"; echo "fw ${a}" >&2 ;;
+                    --remove-rich-rule=*) has rich "${a#*=}" && drop rich "${a#*=}"; echo "fw ${a}" >&2 ;;
+                    --remove-port=*) has ports "${a#*=}" && drop ports "${a#*=}"; echo "fw ${a}" >&2 ;;
+                    --reload) echo "fw reload" >&2 ;;
+                    *) return 2 ;;
+                esac
+            done
+        }
+        eval "$0"' "$3" 2>&1 | paste -sd'|' -
+}
+# rp_reset UFW_RULES PORTS RICH → 每个参数一行一条
+rp_reset() { rm -rf "${RP_DIR}" && mkdir -p "${RP_DIR}" && printf '%b' "$1" >"${RP_DIR}/ufw" && printf '%b' "$2" >"${RP_DIR}/ports" && printf '%b' "$3" >"${RP_DIR}/rich"; }
+RP_UFW='ufw allow 443/tcp\nufw allow 8443/tcp\nufw allow 5000/udp\nufw allow 5000\nufw limit 5000/tcp\nufw allow from 198.51.100.1 to any port 5000 proto tcp\nufw allow from 203.0.113.9 to any port 5000 proto tcp\n'
+rp_reset "${RP_UFW}" '' ''
+assert_equals "rc=1" "$(run_rp active '' 'revokePort 5000 tcp; echo rc=$?')" "ufw：同端口只有 UDP、不带协议、limit、限来源的规则时，不限来源的那一条算没找到，什么都不删"
+assert_equals "$(printf '%b' "${RP_UFW}")" "$(cat "${RP_DIR}/ufw")" "ufw：没找到时一条规则都没动"
+assert_equals "ufw delete allow from 203.0.113.9 to any port 5000 proto tcp|rc=0|0|6" \
+    "$(run_rp active '' 'revokePort 5000 tcp 203.0.113.9; echo rc=$?')|$(grep -c '203.0.113.9' "${RP_DIR}/ufw")|$(wc -l <"${RP_DIR}/ufw" | tr -d ' ')" \
+    "ufw：限来源的按来源删那一条，别的来源、别的形状都留着"
+assert_equals "ufw delete allow 443/tcp|rc=0|1" "$(run_rp inactive '' 'revokePort 443 tcp; echo rc=$?')|$(grep -cx 'ufw allow 8443/tcp' "${RP_DIR}/ufw")" \
+    "ufw 关着也删存着的那一条；删 443 不连带 8443"
+assert_equals "ufw delete allow 8443/tcp|rc=1" "$(RP_UFW_FAIL=1 run_rp active '' 'revokePort 8443 tcp; echo rc=$?')" "ufw 删失败：返回 1，调用方照没删到处理"
+rp_reset 'ufw allow 2222/tcp\n' '' ''
+assert_equals "yellow: ---> UNINSTALL_KEEP_SSH_RULE|rc=0|ufw allow 2222/tcp" "$(RP_SSH=2222 run_rp active '' 'revokePort 2222 tcp; echo rc=$?')|$(cat "${RP_DIR}/ufw")" \
+    "sshd 在用的端口：找到了也留着，说一声"
+assert_equals "rc=1" "$(RP_SSH=2222 run_rp active '' 'revokePort 3333 tcp; echo rc=$?')" "sshd 在用别的端口、这个端口没有那一条：不提 sshd"
+rp_reset '' '443/tcp\n8443/tcp\n50000-50100/tcp\n' 'rule family="ipv4" source address="198.51.100.1" port protocol="tcp" port="9443" accept\nrule family="ipv6" source address="2001:db8::1" port protocol="tcp" port="9443" accept\n'
+assert_equals "rc=1|3" "$(run_rp '' on 'revokePort 50050 tcp; echo rc=$?')|$(wc -l <"${RP_DIR}/ports" | tr -d ' ')" "firewalld：落在用户端口区间里的不算那一条，不删（删了会拆开区间）"
+assert_equals "rc=1" "$(run_rp '' on 'revokePort 844 tcp; echo rc=$?')" "firewalld：只有 8443/tcp 时 844 算没找到（整项比，不按子串）"
+assert_equals "fw --remove-port=443/tcp|fw reload|rc=0|8443/tcp 50000-50100/tcp" "$(run_rp '' on 'revokePort 443 tcp; echo rc=$?')|$(paste -sd' ' - <"${RP_DIR}/ports")" \
+    "firewalld：不限来源的按端口整项删再 reload，8443 不动"
+assert_equals "fw --remove-rich-rule=rule family=\"ipv6\" source address=\"2001:db8::1\" port protocol=\"tcp\" port=\"9443\" accept|fw reload|rc=0|198.51.100.1" \
+    "$(run_rp '' on 'revokePort 9443 tcp 2001:db8::1; echo rc=$?')|$(grep -o 'address="[^"]*"' "${RP_DIR}/rich" | cut -d'"' -f2)" \
+    "firewalld：IPv6 来源按 family=ipv6 的 rich rule 删，另一条来源的留着"
+assert_equals "rc=1" "$(run_rp '' '' 'revokePort 443 tcp; echo rc=$?')" "ufw 没装、firewalld 没在跑：返回 1"
+# 放行再收回要回到原样：revokePort 认的形状必须和 allowPort 加的一致
+for _rp in "active|" "active|203.0.113.9" "alpine|203.0.113.9" "alpine|2001:db8::2" "|" "|203.0.113.9" "|2001:db8::2"; do
+    _ufw=${_rp%%|*} _src=${_rp#*|} _fwd=on
+    [[ -n "${_ufw}" ]] && _fwd=
+    rp_reset 'ufw allow 22/tcp\n' '22/tcp\n' ''
+    _out=$(run_rp "${_ufw}" "${_fwd}" "allowPort 41000 tcp ${_src}; revokePort 41000 tcp ${_src}; echo rc=\$?")
+    assert_equals "rc=0|ufw allow 22/tcp|22/tcp|" "${_out##*|}|$(cat "${RP_DIR}/ufw")|$(cat "${RP_DIR}/ports")|$(cat "${RP_DIR}/rich")" \
+        "放行再收回（${_ufw:-firewalld}，来源 ${_src:-不限}）：规则回到原样"
+done
+assert_contains "$(rp_reset '' '' ''; run_rp alpine '' 'allowPort 41000 tcp 203.0.113.9')" "ufw allow from 203.0.113.9 to any port 41000 proto tcp" \
+    "Alpine 上的 ufw 也按来源放行"
+# firewallDefaultDenies 判的必须是 allowPort 会用的那个防火墙：两边第一层分支的条件逐行相同
+_fwConds() { sed -n "/^$1() {/,/^}/p" install.sh | awk '/^    fi$/ {exit} /^    (if|elif) / {sub(/^    (if|elif) /, ""); print}'; }
+assert_equals "4|$(_fwConds allowPort)" "$(_fwConds firewallDefaultDenies | wc -l | tr -d ' ')|$(_fwConds firewallDefaultDenies)" \
+    "firewallDefaultDenies 与 allowPort 按同样的顺序认防火墙（四支条件逐行相同）"
+FD_FN=$(sed -n '/^firewallDefaultDenies() {/,/^}/p;/^debPackageInstalled() {/,/^}/p' install.sh)
+# run_fd UFW_SOURCE VERBOSE → UFW_SOURCE 是 deb 或 alpine，ufw status verbose 打印 VERBOSE；打印 firewallDefaultDenies 的返回值
+run_fd() {
+    env FD_FN="${FD_FN}" SRC="$1" VERBOSE="$2" bash -c 'set -o pipefail; eval "${FD_FN}"
+        dpkg-query() { [[ "${SRC}" == deb ]] && printf "install ok installed"; }
+        rc-update() { [[ "${SRC}" == alpine ]] && echo "                  ufw | default"; }
+        systemctl() { return 3; }
+        ufw() { printf "%b\n" "${VERBOSE}"; }
+        firewallDefaultDenies; echo "rc=$?"'
+}
+assert_equals "rc=0|rc=1|rc=0|rc=1" "$(run_fd alpine 'Status: active\nDefault: deny (incoming), allow (outgoing)')|$(run_fd alpine 'Status: inactive')|$(run_fd deb 'Status: active\nDefault: reject (incoming), allow (outgoing)')|$(run_fd deb 'Status: active\nDefault: allow (incoming), allow (outgoing)')" \
+    "firewallDefaultDenies：Alpine（OpenRC）与 Debian 上的 ufw 开着且默认拒绝才算，关着或默认放行不算"
 
 # --- allowPort 的 nft 与 iptables 分支 ---
 FW_FNS=$(sed -n '/^allowPortNft() {/,/^}/p;/^nftSaveOwnRules() {/,/^}/p;/^nftablesConfFile() {/,/^}/p;/^allowPortIptables() {/,/^}/p;/^ipv6Hex() {/,/^}/p' install.sh)
@@ -6353,7 +6478,7 @@ assert_equals "ip6tables -I INPUT -p tcp -s 2001:db8::1 --dport 9443 -m comment 
     "$(run_fw "" 0 'allowPortIptables 9443 tcp 2001:db8::1')" "iptables：IPv6 来源只进 ip6tables（iptables -s 不认 IPv6）"
 assert_equals "iptables -I INPUT -p tcp -s 1.2.3.4 --dport 9443 -m comment --comment allow 9443/tcp(Proxy-agent) -j ACCEPT|persist save" \
     "$(run_fw "" 0 'allowPortIptables 9443 tcp 1.2.3.4')" "iptables：IPv4 来源只进 iptables"
-FW_AP_FN=$(sed -n '/^allowPort() {/,/^}/p' install.sh)
+FW_AP_FN=$(sed -n '/^allowPort() {/,/^}/p;/^firewalldRichRule() {/,/^}/p' install.sh)
 assert_contains "$(env FW_AP_FN="${FW_AP_FN}" bash -c 'eval "${FW_AP_FN}"
     systemctl() { echo "active (running)"; }; debPackageInstalled() { return 1; }; checkFirewalldAllowPort() { :; }
     firewall-cmd() { echo "firewall-cmd $*"; [[ "$1" != --permanent || "$2" != --query-rich-rule=* ]]; }
