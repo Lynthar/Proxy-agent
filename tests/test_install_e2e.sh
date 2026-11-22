@@ -453,14 +453,14 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
         "$(crontab -l 2>/dev/null | grep -F 'install.sh UpdateGeo')" "crontab 里的 UpdateGeo 行带安装根前缀"
 fi
 
-# 菜单 7 → 4 / 7 → 5：从菜单加一个账号再删掉，账户事务在两种内核上都真走一遍（加完、删完菜单再读到 EOF 算选择错误，退出码不看）
+# 菜单 7 → 2 加一个账号，7 → 1 在列表里选他（按名字排，e2eadd 是 1 号）→ 8 删掉：账户事务在两种内核上都真走一遍（菜单读到输入结束就退出，退出码不看）
 echo ""
-echo -e "${YELLOW}=== 菜单 7 → 4 / 7 → 5：添加、删除用户 ===${NC}"
+echo -e "${YELLOW}=== 菜单 7 → 2 / 7 → 1 → 8：添加、删除用户 ===${NC}"
 accountNames() { jq -r '[.inbounds[] | (.settings.clients // .users)[]? | (.email // .name) | sub("-[^-]*$"; "")] | join(" ")' "${realityConf}" 2>/dev/null; }
-addOut=$(printf '7\n4\n1\n33333333-4444-5555-6666-777777777777\ne2eadd\n' | V2RAY_LANG=en pasly 2>&1)
+addOut=$(printf '7\n2\n1\n33333333-4444-5555-6666-777777777777\ne2eadd\n' | V2RAY_LANG=en pasly 2>&1)
 assert_equals "${E2E_USER} e2eadd" "$(accountNames)" "菜单添加用户：新账号写进 Reality 入站"
 assert_equals "" "$(grep -F 'None of the installed protocols' <<<"${addOut}" || true)" "菜单添加用户：没有误报「没有带账号的协议」"
-printf '7\n5\n2\ny\n' | V2RAY_LANG=en pasly >/dev/null 2>&1
+printf '7\n1\n1\n8\ny\n' | V2RAY_LANG=en pasly >/dev/null 2>&1
 assert_equals "${E2E_USER}" "$(accountNames)" "菜单删除用户：按编号删掉刚加的那个，原账号还在"
 
 # listenAddrs PORT → 该 TCP 端口上 LISTEN 的本地地址（/proc/net/tcp{,6} 的十六进制形式），每行一个
@@ -525,7 +525,7 @@ assert_equals "" "$(listenAddrs 31210)" "关掉之后端口撤掉"
 assert_equals "" "$(pgrep -f 'TCP-LISTEN:31210' || true)" "关掉之后 socat 不留"
 
 # ============================================================================
-# 拼车（只有 Xray 内核能开）：菜单 7 → 6 → 4 开启，真实流量要被 cron 那条 tick 记进成员名下；增删成员、回滚不倒回用量，再到期停用、关闭时恢复
+# 拼车（只有 Xray 内核能开）：菜单 7 → 3 → 1 开启，真实流量要被 cron 那条 tick 记进成员名下；增删成员、回滚不倒回用量，再到期停用、关闭时恢复
 # ============================================================================
 
 # runCarpoolTick CRON_LINE [AT] → 把 crontab 那一行原样执行一次，打印它这次追加进日志的内容，返回它的退出码。
@@ -563,13 +563,14 @@ carpoolIntact() {
     assert_equals "${carpoolCron}" "$(crontab -l 2>/dev/null | grep -F 'install.sh CarpoolTick')" "$1：CarpoolTick 的 cron 行还在"
 }
 
-# applyMembers [tty] → 菜单 7 → 6 → 2 应用 members.json，打印去色后的输出，退出码随 pasly。
-# 带 tty 时经 util-linux 的 script 给它一个终端、对删除确认答 y；pty 的换行是 \r\n，去掉，外面套 timeout 防挂住
+# applyMembers [tty] → 菜单 7 → 3 → 2 应用 members.json，打印去色后的输出，退出码随 pasly。
+# 带 tty 时经 util-linux 的 script 给它一个终端、对删除确认答 y，再 0、0、回车一层层退出（pty 上读不到输入结束，菜单会一直等）；
+# pty 的换行是 \r\n，去掉，外面套 timeout 防挂住
 applyMembers() {
     if [[ "${1:-}" == "tty" ]]; then
-        printf '7\n6\n2\ny\n' | timeout 120 script -qec 'V2RAY_LANG=en pasly' /dev/null 2>&1 | tr -d '\r' | sed 's/\x1b\[[0-9;]*m//g'
+        printf '7\n3\n2\ny\n0\n0\n\n' | timeout 120 script -qec 'V2RAY_LANG=en pasly' /dev/null 2>&1 | tr -d '\r' | sed 's/\x1b\[[0-9;]*m//g'
     else
-        printf '7\n6\n2\n' | V2RAY_LANG=en pasly 2>&1 | sed 's/\x1b\[[0-9;]*m//g'
+        printf '7\n3\n2\n' | V2RAY_LANG=en pasly 2>&1 | sed 's/\x1b\[[0-9;]*m//g'
     fi
     return "${PIPESTATUS[1]}"
 }
@@ -608,9 +609,9 @@ midTransferDown() {
 
 if [[ "${E2E_CORE}" == "xray" ]]; then
     echo ""
-    echo -e "${YELLOW}=== 菜单 7 → 6 → 4：开启拼车 ===${NC}"
+    echo -e "${YELLOW}=== 菜单 7 → 3 → 1：开启拼车 ===${NC}"
     carpoolDir="${INSTALL_ROOT}/carpool"
-    carpoolOut=$(printf '7\n6\n4\n' | V2RAY_LANG=en pasly 2>&1)
+    carpoolOut=$(printf '7\n3\n1\n' | V2RAY_LANG=en pasly 2>&1)
     carpoolRc=$?
     carpoolOut=$(sed 's/\x1b\[[0-9;]*m//g' <<<"${carpoolOut}")
     carpoolState=$(cat "${carpoolDir}/state.json" 2>/dev/null)
@@ -691,7 +692,7 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
     done
 
     echo ""
-    echo -e "${YELLOW}=== 菜单 7 → 6 → 2：文件里加一个成员并应用，新成员用自己的 UUID 连得上 ===${NC}"
+    echo -e "${YELLOW}=== 菜单 7 → 3 → 2：文件里加一个成员并应用，新成员用自己的 UUID 连得上 ===${NC}"
     E2E_GUEST="e2eguest"
     membersBefore=$(cat "${carpoolDir}/members.json")
     # 不写 uuid：应用时由 Xray 现生成，state 里记下
@@ -727,7 +728,8 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
         removeOut=$(applyMembers tty)
         removeRc=$?
         [[ ${removeRc} -ne 0 ]] && tail -n 20 <<<"${removeOut}"
-        assert_equals "0" "${removeRc}" "在 tty 上确认删除，应用退出码 0"
+        assert_equals "0" "${removeRc}" "在 tty 上确认删除、应用完一层层退出菜单，退出码 0（没有挂到超时）"
+        assert_contains "${removeOut}" " ---> Config applied" "在 tty 上确认删除后应用成功"
         assert_contains "${removeOut}" "Remove member ${E2E_GUEST} (account and subscription files)?" "确认提示点名 ${E2E_GUEST}"
         assert_equals "0" "$(jq --arg id "${guestUUID}" '[.inbounds[1].settings.clients[]? | select(.id == $id)] | length' "${realityConf}" 2>/dev/null)" \
             "${E2E_GUEST} 已从 Reality 入站拿掉"
@@ -940,8 +942,8 @@ if [[ "${E2E_CORE}" == "xray" ]]; then
     fi
 
     echo ""
-    echo -e "${YELLOW}=== 菜单 7 → 6 → 4：关闭拼车，到期的也一并恢复 ===${NC}"
-    disableOut=$(printf '7\n6\n4\ny\ny\n' | V2RAY_LANG=en pasly 2>&1)
+    echo -e "${YELLOW}=== 菜单 7 → 3 → 1：关闭拼车，到期的也一并恢复 ===${NC}"
+    disableOut=$(printf '7\n3\n1\ny\ny\n' | V2RAY_LANG=en pasly 2>&1)
     disableRc=$?
     disableOut=$(sed 's/\x1b\[[0-9;]*m//g' <<<"${disableOut}")
     carpoolState=$(cat "${carpoolDir}/state.json" 2>/dev/null)

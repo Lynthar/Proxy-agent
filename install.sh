@@ -7461,8 +7461,23 @@ getRealitySubscriptionPort() {
     fi
 }
 
-# 账号
+# accountViewSelect NAME → 调用方的 accountViewOnly 非空且不等于 NAME 时，把当前 shell 的 stdout 换成 /dev/null，等于时换回原来的。
+# 只能在每个账号一轮的管道子 shell 里调（`… | while read`）：它换的是整个 shell 的 stdout，在主 shell 里调后面的输出全丢。
+# 调用方要声明 `local accountViewOut=`，第一次调用在子 shell 里存下原来的 stdout
+accountViewSelect() {
+    [[ -n "${accountViewOnly}" ]] || return 0
+    [[ -n "${accountViewOut}" ]] || exec {accountViewOut}>&1
+    if [[ "$1" == "${accountViewOnly}" ]]; then
+        exec >&"${accountViewOut}"
+    else
+        exec >/dev/null
+    fi
+}
+
+# showAccounts PROGRESS [NAME] → 打印各协议的账号，并整份重写 subscribe_local。给了 NAME 只打印这个账号，
+# 别的账号照样生成、输出丢掉：subscribe 与删用户都读 subscribe_local，少一个人他的订阅就没了
 showAccounts() {
+    local accountViewOnly=$2 accountViewOut=
     readInstallType
     readInstallProtocolType
     readConfigHostPathUUID
@@ -7481,6 +7496,7 @@ showAccounts() {
         jq .inbounds[0].settings.clients//.inbounds[0].users ${configPath}02_VLESS_TCP_inbounds.json | jq -c '.[]' | while read -r user; do
             local email=
             email=$(echo "${user}" | jq -r .email//.name)
+            accountViewSelect "${email%-*}"
 
             echoContent skyBlue "\n ---> 账号:${email}"
             echo
@@ -7495,6 +7511,7 @@ showAccounts() {
         jq .inbounds[0].settings.clients//.inbounds[0].users ${configPath}03_VLESS_WS_inbounds.json | jq -c '.[]' | while read -r user; do
             local email=
             email=$(echo "${user}" | jq -r .email//.name)
+            accountViewSelect "${email%-*}"
 
             local vlessWSPort=${currentDefaultPort}
             if [[ "${coreKind}" == "2" ]]; then
@@ -7534,6 +7551,7 @@ showAccounts() {
         jq .inbounds[0].settings.clients//.inbounds[0].users ${configPath}05_VMess_WS_inbounds.json | jq -c '.[]' | while read -r user; do
             local email=
             email=$(echo "${user}" | jq -r .email//.name)
+            accountViewSelect "${email%-*}"
 
             local vmessPort=${currentDefaultPort}
             if [[ "${coreKind}" == "2" ]]; then
@@ -7558,6 +7576,7 @@ showAccounts() {
         jq .inbounds[0].settings.clients//.inbounds[0].users ${configPath}04_trojan_TCP_inbounds.json | jq -c '.[]' | while read -r user; do
             local email=
             email=$(echo "${user}" | jq -r .email//.name)
+            accountViewSelect "${email%-*}"
             echoContent skyBlue "\n ---> 账号:${email}"
 
             defaultBase64Code trojan "${currentDefaultPort}${singBoxTrojanPort}" "${email}" "$(echo "${user}" | jq -r .password)"
@@ -7581,6 +7600,7 @@ showAccounts() {
         fi
 
         jq -r -c '.inbounds[]|.users[]' "${path}06_hysteria2_inbounds.json" | while read -r user; do
+            accountViewSelect "$(jq -r '.name | sub("-[^-]*$"; "")' <<<"${user}")"
             echoContent skyBlue "\n ---> 账号:$(echo "${user}" | jq -r .name)"
             echo
             defaultBase64Code hysteria "${hysteria2DefaultPort}" "$(echo "${user}" | jq -r .name)" "$(echo "${user}" | jq -r .password)"
@@ -7594,6 +7614,7 @@ showAccounts() {
         jq .inbounds[1].settings.clients//.inbounds[0].users ${configPath}07_VLESS_vision_reality_inbounds.json | jq -c '.[]' | while read -r user; do
             local email=
             email=$(echo "${user}" | jq -r .email//.name)
+            accountViewSelect "${email%-*}"
 
             echoContent skyBlue "\n ---> 账号:${email}"
             echo
@@ -7610,6 +7631,7 @@ showAccounts() {
             path="${singBoxConfigPath}"
         fi
         jq -r -c '.inbounds[].users[]' "${path}09_tuic_inbounds.json" | while read -r user; do
+            accountViewSelect "$(jq -r '.name | sub("-[^-]*$"; "")' <<<"${user}")"
             echoContent skyBlue "\n ---> 账号:$(echo "${user}" | jq -r .name)"
             echo
             defaultBase64Code tuic "${singBoxTuicPort}" "$(echo "${user}" | jq -r .name)" "$(echo "${user}" | jq -r .uuid)_$(echo "${user}" | jq -r .password)"
@@ -7624,6 +7646,7 @@ showAccounts() {
             path="${singBoxConfigPath}"
         fi
         jq -r -c '.inbounds[]|.users[]' "${path}10_naive_inbounds.json" | while read -r user; do
+            accountViewSelect "$(jq -r '.username | sub("-[^-]*$"; "")' <<<"${user}")"
             echoContent skyBlue "\n ---> 账号:$(echo "${user}" | jq -r .username)"
             echo
             defaultBase64Code naive "${singBoxNaivePort}" "$(echo "${user}" | jq -r .username)" "$(echo "${user}" | jq -r .password)"
@@ -7642,6 +7665,7 @@ showAccounts() {
         jq .inbounds[0].settings.clients//.inbounds[0].users ${configPath}11_VMess_HTTPUpgrade_inbounds.json | jq -c '.[]' | while read -r user; do
             local email=
             email=$(echo "${user}" | jq -r .email//.name)
+            accountViewSelect "${email%-*}"
 
             local vmessHTTPUpgradePort=${currentDefaultPort}
             if [[ "${coreKind}" == "2" ]]; then
@@ -7666,6 +7690,7 @@ showAccounts() {
         jq .inbounds[0].settings.clients//.inbounds[0].users ${configPath}12_VLESS_XHTTP_inbounds.json | jq -c '.[]' | while read -r user; do
             local email=
             email=$(echo "${user}" | jq -r .email//.name)
+            accountViewSelect "${email%-*}"
             echo
             local path="${currentPath}xHTTP"
 
@@ -7687,6 +7712,7 @@ showAccounts() {
         jq -c '.inbounds[0].settings.clients[]' "${configPath}15_VLESS_XHTTP_TLS_inbounds.json" | while read -r user; do
             local email=
             email=$(echo "${user}" | jq -r .email)
+            accountViewSelect "${email%-*}"
 
             local count=
             while read -r line; do
@@ -7704,6 +7730,7 @@ showAccounts() {
         echoContent skyBlue "\n================================  AnyTLS ================================\n"
 
         jq -r -c '.inbounds[]|.users[]' "${configPath}13_anytls_inbounds.json" | while read -r user; do
+            accountViewSelect "$(jq -r '.name | sub("-[^-]*$"; "")' <<<"${user}")"
             echoContent skyBlue "\n ---> 账号:$(echo "${user}" | jq -r .name)"
             echo
             defaultBase64Code anytls "${singBoxAnyTLSPort}" "$(echo "${user}" | jq -r .name)" "$(echo "${user}" | jq -r .password)"
@@ -7724,6 +7751,7 @@ showAccounts() {
             port=$(jq -r '.inbounds[0].listen_port' "${path}14_ss2022_inbounds.json")
 
             jq -r -c '.inbounds[]|.users[]' "${path}14_ss2022_inbounds.json" | while read -r user; do
+                accountViewSelect "$(jq -r '.name | sub("-[^-]*$"; "")' <<<"${user}")"
                 echoContent skyBlue "\n ---> 账号:$(echo "${user}" | jq -r .name)"
                 echo
                 defaultBase64Code ss2022 "${port}" "$(echo "${user}" | jq -r .name)" "$(echo "${user}" | jq -r .password)" "${serverKey}" "${method}"
@@ -7736,6 +7764,7 @@ showAccounts() {
         local stFile="${configPath}16_shadowtls_inbounds.json" stName stPw stKey
         jq -r '(.inbounds[1].users | map({(.name): .password}) | add) as $inner | .inbounds[0].users[] | [.name, .password, $inner[.name]] | @tsv' "${stFile}" |
             while IFS=$'\t' read -r stName stPw stKey; do
+                accountViewSelect "${stName%-*}"
                 echoContent skyBlue "\n ---> 账号:${stName}"
                 echo
                 defaultBase64Code shadowtls "$(jq -r '.inbounds[0].listen_port' "${stFile}")" "${stName}" "${stPw}" "${stKey}" \
@@ -8315,7 +8344,7 @@ customUUID() {
             echoContent red " ---> UUID 格式非法，需 8-4-4-4-12 位十六进制（例：550e8400-e29b-41d4-a716-446655440000）"
             exit 1
         fi
-        # 仅 Reality 安装时 frontingType 为空，回退到 frontingTypeReality（同 removeUser）
+        # 仅 Reality 安装时 frontingType 为空，回退到 frontingTypeReality
         local dupCheckFile="${frontingType:-${frontingTypeReality}}"
         local checkUUID=
         if [[ "${coreKind}" == "1" ]]; then
@@ -8516,16 +8545,24 @@ applyAccountChangeAllProtocols() {
     jsonTxCommit
 }
 
-# 添加用户
+# addUser → 用户管理 → 添加用户。拼车开着时按成员加（额度、到期、协议）；关着时问个数，逐个问 UUID 与名字，
+# 加进所有协议，重建订阅后打印各人的订阅地址
 addUser() {
-    if carpoolGuardAccountMenu add; then return; fi
+    local userNum uuid email names=() name
+    if carpoolEnabled; then
+        echoContent yellow " ---> $(t CARPOOL_ACCOUNTS_MANAGED)"
+        carpoolMemberAdd
+        return
+    fi
+    echoContent yellow "# 添加单个用户时可自定义email和uuid"
+    echoContent yellow "# 如安装了Hysteria或者Tuic，账号会同时添加到相应的类型下面\n"
     read -r -p "请输入要添加的用户数量:" userNum
     echo
-    if [[ -z ${userNum} || ${userNum} -le 0 ]]; then
+    if [[ ! "${userNum}" =~ ^[1-9][0-9]{0,2}$ ]]; then
         echoContent red " ---> 输入有误，请重新输入"
-        exit 1
+        return 1
     fi
-    while [[ ${userNum} -gt 0 ]]; do
+    while ((userNum > 0)); do
         readConfigHostPathUUID
         ((userNum--)) || true
 
@@ -8535,85 +8572,35 @@ addUser() {
         uuid=${currentCustomUUID}
         email=${currentCustomEmail}
 
-        if ! applyAccountChangeAllProtocols add "${uuid}" "${email}"; then
-            manageAccount 1
-            return
-        fi
+        applyAccountChangeAllProtocols add "${uuid}" "${email}" || return 1
+        names+=("${email}")
     done
     reloadCore
     echoContent green " ---> 添加完成"
-    readNginxSubscribe
-    if [[ -n "${subscribePort}" ]]; then
-        subscribe false
-    fi
-    manageAccount 1
+    carpoolRefreshSubscribe
+    for name in "${names[@]}"; do
+        carpoolShowMemberLinks "${name}"
+    done
 }
-# 移除用户
-removeUser() {
-    if carpoolGuardAccountMenu remove; then return; fi
-    local userConfigType= delUserKey=
-    if [[ -n "${frontingType}" ]]; then
-        userConfigType="${frontingType}"
-    elif [[ -n "${frontingTypeReality}" ]]; then
-        userConfigType="${frontingTypeReality}"
-    fi
 
-    if [[ -n "${userConfigType}" ]]; then
-        # 列表字段按注册表取（fronting 可能是 TLS/Reality/naive/ss2022，路径与名字段各不同）
-        local frontingProtocolId listUsersPath listNameField
-        frontingProtocolId=$(parseProtocolIdFromFileName "${userConfigType}.json")
-        listUsersPath=$(getProtocolUsersPath "${coreKind}" "${frontingProtocolId}")
-        listNameField=$(getProtocolNameField "${coreKind}" "${frontingProtocolId}")
-        if [[ -z "${listUsersPath}" || -z "${listNameField}" ]]; then
-            echoContent red " ---> $(t ACCOUNT_TX_FILE_MISSING) [${userConfigType}]"
-            manageAccount 1
-            return
-        fi
-        jq -r "${listUsersPath}[].${listNameField}" "${configPath}${userConfigType}.json" | awk '{print NR""":"$0}'
-        read -r -p "请选择要删除的用户编号[仅支持单个删除]:" delUserIndex
-        # 必须是正整数；非法输入直接清空，跳过后续删除分支，避免注入进 jq 过滤器
-        if ! [[ "${delUserIndex}" =~ ^[1-9][0-9]*$ ]]; then
-            echoContent red " ---> 用户编号必须为正整数"
-            delUserIndex=
-        elif [[ $(jq -r "${listUsersPath}|length" "${configPath}${userConfigType}.json") -lt ${delUserIndex} ]]; then
-            echoContent red " ---> 选择错误"
-            delUserIndex=
-        else
-            # 编号只用来在前置协议文件里取名字；各协议文件的用户顺序不保证一致，真正删除按去掉协议后缀的名字
-            delUserKey=$(jq -r --argjson idx "$((delUserIndex - 1))" "${listUsersPath}[\$idx].${listNameField} // empty" "${configPath}${userConfigType}.json")
-            delUserKey=${delUserKey%-*}
-            if [[ -z "${delUserKey}" ]]; then
-                echoContent red " ---> $(t REMOVE_USER_NO_NAME)"
-            fi
-        fi
+# removeAccount NAME → 拼车关着时删一个用户：确认后从所有协议里删掉，连同按账号选的出口与他的订阅文件。拼车开着时走 carpoolMemberEdit remove
+removeAccount() {
+    local name=$1 confirmDelete
+    read -r -p "$(t REMOVE_USER_CONFIRM "${name}")" confirmDelete
+    if ! isYesInput "${confirmDelete}"; then
+        echoContent yellow " ---> $(t CANCELLED)"
+        return 0
     fi
-
-    if [[ -n "${delUserKey}" ]]; then
-        local confirmDelete
-        read -r -p "$(t REMOVE_USER_CONFIRM "${delUserKey}")" confirmDelete
-        if ! isYesInput "${confirmDelete}"; then
-            echoContent yellow " ---> $(t CANCELLED)"
-            manageAccount 1
-            return
-        fi
-        if ! applyAccountChangeAllProtocols delName "${delUserKey}"; then
-            manageAccount 1
-            return
-        fi
-        if ! chainAccountForget "${delUserKey}"; then
-            echoContent red " ---> $(t CHAIN_ACCOUNT_FORGET_FAILED "${delUserKey}")"
-        fi
-        reloadCore
-        readNginxSubscribe
-        if [[ -n "${subscribePort}" ]]; then
-            subscribe false
-        fi
-        # 订阅文件按名字第一段命名，剩下的账号还有同一段时那份文件是它的，不能删
-        if [[ ! -e "${SUBSCRIBE_LOCAL_DIR}/default/$(carpoolSubscribeKey "${delUserKey}")" ]]; then
-            removeSubscriptionFiles "${delUserKey}"
-        fi
+    applyAccountChangeAllProtocols delName "${name}" || return 1
+    if ! chainAccountForget "${name}"; then
+        echoContent red " ---> $(t CHAIN_ACCOUNT_FORGET_FAILED "${name}")"
     fi
-    manageAccount 1
+    reloadCore
+    carpoolRefreshSubscribe
+    # 订阅文件按名字第一段命名，剩下的账号还有同一段时那份文件是它的，不能删
+    if [[ ! -e "${SUBSCRIBE_LOCAL_DIR}/default/$(carpoolSubscribeKey "${name}")" ]]; then
+        removeSubscriptionFiles "${name}"
+    fi
 }
 
 # ======================= 拼车 =======================
@@ -9038,19 +9025,6 @@ carpoolRefuseIfEnabled() {
     exit 1
 }
 
-# carpoolGuardAccountMenu add|remove → 拼车开着时 addUser / removeUser 转到成员管理的加成员 / 移除成员；拦住了返回 0
-carpoolGuardAccountMenu() {
-    carpoolEnabled || return 1
-    echoContent yellow " ---> $(t CARPOOL_ACCOUNTS_MANAGED)"
-    if [[ "$1" == "remove" ]]; then
-        carpoolMemberEdit remove
-    else
-        carpoolMemberAdd
-    fi
-    manageAccount 1
-    return 0
-}
-
 # carpoolCheckPrerequisites → 开启前的五项检查，逐条打印不满足的原因，任一不满足返回 1
 carpoolCheckPrerequisites() {
     local ok=1 ver
@@ -9375,30 +9349,26 @@ carpoolApply() {
     echoContent green " ---> $(t CARPOOL_APPLIED)"
 }
 
-# carpoolResetUsage → 菜单：清零单人或全员，随后判定一次（因超额停用的随之恢复）
+# carpoolResetUsage [NAME] → 清零这个成员本周期的已用流量，不给名字就是全员；先确认，随后判定一次（因超额停用的随之恢复）
 carpoolResetUsage() {
-    local choice name="" state events
+    local name=${1:-} confirm state events
     if ! carpoolEnabled; then
         echoContent yellow " ---> $(t CARPOOL_NOT_ENABLED)"
         return 1
     fi
-    echoContent yellow "1.$(t CARPOOL_RESET_ALL)"
-    echoContent yellow "2.$(t CARPOOL_RESET_ONE)"
-    read -r -p "$(t CARPOOL_MENU_PROMPT)" choice
-    case "${choice}" in
-        1) ;;
-        2)
-            read -r -p "$(t CARPOOL_RESET_NAME_PROMPT)" name
-            if ! carpoolIsValidMemberName "${name}" || ! jq -e --arg n "${name}" '.members[$n]' <<<"$(carpoolReadState)" >/dev/null 2>&1; then
-                echoContent red " ---> $(t CARPOOL_RESET_NOT_MEMBER "${name}")"
-                return 1
-            fi
-            ;;
-        *)
-            echoContent red " ---> $(t CARPOOL_MENU_BAD_CHOICE)"
-            return 1
-            ;;
-    esac
+    if [[ -n "${name}" ]] && ! jq -e --arg n "${name}" '.members | has($n)' <<<"$(carpoolReadState)" >/dev/null 2>&1; then
+        echoContent red " ---> $(t CARPOOL_RESET_NOT_MEMBER "${name}")"
+        return 1
+    fi
+    if [[ -n "${name}" ]]; then
+        read -r -p "$(t CARPOOL_RESET_ONE_CONFIRM "${name}")" confirm
+    else
+        read -r -p "$(t CARPOOL_RESET_ALL_CONFIRM)" confirm
+    fi
+    if ! isYesInput "${confirm}"; then
+        echoContent yellow " ---> $(t CARPOOL_CANCELLED)"
+        return 0
+    fi
     carpoolLock || return 1
     state=$(carpoolResetUsageState "$(carpoolReadState)" "${name}")
     if ! events=$(carpoolJudgeAndWrite "${state}" "$(date +%F)" "$(date '+%F %H:%M')"); then
@@ -9411,24 +9381,12 @@ carpoolResetUsage() {
     echoContent green " ---> $(t CARPOOL_RESET_DONE)"
 }
 
-# carpoolShowUsage → 菜单：文本表（与页面同一份数据）
-carpoolShowUsage() {
-    local state n u q e st others
-    if ! state=$(carpoolReadState); then
-        echoContent yellow " ---> $(t CARPOOL_NOT_ENABLED)"
-        return 0
-    fi
-    echoContent skyBlue "\n$(jq -r '.notify.label' <<<"${state}") · $(if [[ "$(jq -r '.enabled' <<<"${state}")" == "true" ]]; then t CARPOOL_USAGE_STATE_ON; else t CARPOOL_USAGE_STATE_OFF; fi)"
-    echoContent yellow " ---> $(t CARPOOL_PAGE_PERIOD) $(jq -r '.period' <<<"${state}") · $(t CARPOOL_PAGE_NEXT_RESET) $(carpoolNextPeriodStart "$(date +%F)" "$(jq -r '.resetDay' <<<"${state}")") · $(t CARPOOL_USAGE_LAST_TICK) $(jq -r '.lastTick | if . == "" then "-" else . end' <<<"${state}")"
-    echoContent yellow " ---> $(carpoolMachineSummary "${state}") · $(t CARPOOL_USAGE_IFACES "$(jq -r '(.machine.ifaces // []) | if length == 0 then "-" else join(", ") end' <<<"${state}")")"
+# carpoolUsageHeader STATE → 用户列表上方的拼车概况：周期、下次清零、上次统计、整机用量与网卡、单位说明
+carpoolUsageHeader() {
+    echoContent skyBlue "\n$(jq -r '.notify.label' <<<"$1") · $(if [[ "$(jq -r '.enabled' <<<"$1")" == "true" ]]; then t CARPOOL_USAGE_STATE_ON; else t CARPOOL_USAGE_STATE_OFF; fi)"
+    echoContent yellow " ---> $(t CARPOOL_PAGE_PERIOD) $(jq -r '.period' <<<"$1") · $(t CARPOOL_PAGE_NEXT_RESET) $(carpoolNextPeriodStart "$(date +%F)" "$(jq -r '.resetDay' <<<"$1")") · $(t CARPOOL_USAGE_LAST_TICK) $(jq -r '.lastTick | if . == "" then "-" else . end' <<<"$1")"
+    echoContent yellow " ---> $(carpoolMachineSummary "$1") · $(t CARPOOL_USAGE_IFACES "$(jq -r '(.machine.ifaces // []) | if length == 0 then "-" else join(", ") end' <<<"$1")")"
     echoContent yellow " ---> $(t CARPOOL_UNIT_NOTE)\n"
-    printf '%-24s %-12s %-12s %-12s %s\n' "$(t CARPOOL_PAGE_NAME)" "$(t CARPOOL_PAGE_USED)" "$(t CARPOOL_PAGE_QUOTA)" "$(t CARPOOL_PAGE_EXPIRE)" "$(t CARPOOL_PAGE_STATUS)"
-    while IFS=$'\t' read -r n u q e st; do
-        [[ -n "${n}" ]] && printf '%-24s %-12s %-12s %-12s %s\n' "${n}" "${u}" "${q}" "${e}" "${st}"
-    done < <(carpoolUsageTable "${state}")
-    others=$(carpoolForeignAccounts "${state}" "$(carpoolCurrentClientsMap)" | jq -r 'keys | join(", ")')
-    [[ -n "${others}" ]] && echoContent yellow "\n ---> $(t CARPOOL_PAGE_OTHERS): ${others}"
-    echo
 }
 
 # carpoolWritePage FILE HTML → mktemp + mv 原子落盘，644（nginx 要读）
@@ -9710,40 +9668,46 @@ carpoolTelegramDisable() {
     echoContent green " ---> $(t CARPOOL_TG_DISABLED "${CARPOOL_TELEGRAM_FILE}")"
 }
 
-# carpoolPageMenu → 拼车管理 → 页面与通知
+# carpoolPageMenu → 用户管理 → 拼车 → 页面与通知。做完一项回到这里，0 或回车回拼车；输入读完就带着上一项的返回码退出
 carpoolPageMenu() {
-    local choice pageOn=
-    [[ "$(carpoolReadState 2>/dev/null | jq -r '.pageEnabled' 2>/dev/null)" == "true" ]] && pageOn=1
-    echoContent skyBlue "\n$(t CARPOOL_PAGE_TITLE)"
-    echoContent yellow " ---> $(if [[ -n "${pageOn}" ]]; then t CARPOOL_PAGE_STATUS_ON; else t CARPOOL_PAGE_STATUS_OFF; fi) · $(carpoolTelegramMask)"
-    echoContent skyBlue "=============================================================="
-    if [[ -n "${pageOn}" ]]; then
-        echoContent yellow "1.$(t CARPOOL_PAGE_OFF)"
-    else
-        echoContent yellow "1.$(t CARPOOL_PAGE_ON)"
-    fi
-    echoContent yellow "2.$(t CARPOOL_PAGE_LINKS)"
-    echoContent yellow "3.$(t CARPOOL_PAGE_REGEN)"
-    echoContent yellow "4.$(t CARPOOL_TG_CONFIGURE)"
-    echoContent yellow "5.$(t CARPOOL_TG_TEST)"
-    echoContent yellow "6.$(t CARPOOL_TG_DISABLE)"
-    echoContent skyBlue "=============================================================="
-    read -r -p "$(t CARPOOL_MENU_PROMPT)" choice
-    case "${choice}" in
-        1) if [[ -n "${pageOn}" ]]; then carpoolPageDisable; else carpoolPageEnable; fi ;;
-        2) carpoolShowPageLinks ;;
-        3)
-            if [[ -z "${pageOn}" ]]; then
-                echoContent yellow " ---> $(t CARPOOL_PAGE_STATUS_OFF)"
-            elif carpoolPageEnable; then
-                echoContent yellow " ---> $(t CARPOOL_PAGE_TOKEN_REGENERATED)"
-            fi
-            ;;
-        4) carpoolTelegramConfigure ;;
-        5) carpoolTelegramTest ;;
-        6) carpoolTelegramDisable ;;
-        *) echoContent red " ---> $(t CARPOOL_MENU_BAD_CHOICE)" ;;
-    esac
+    local choice pageOn rc=0
+    while true; do
+        pageOn=
+        [[ "$(carpoolReadState 2>/dev/null | jq -r '.pageEnabled' 2>/dev/null)" == "true" ]] && pageOn=1
+        echoContent skyBlue "\n$(t CARPOOL_PAGE_TITLE)"
+        echoContent yellow " ---> $(if [[ -n "${pageOn}" ]]; then t CARPOOL_PAGE_STATUS_ON; else t CARPOOL_PAGE_STATUS_OFF; fi) · $(carpoolTelegramMask)"
+        echoContent skyBlue "=============================================================="
+        if [[ -n "${pageOn}" ]]; then
+            echoContent yellow "1.$(t CARPOOL_PAGE_OFF)"
+        else
+            echoContent yellow "1.$(t CARPOOL_PAGE_ON)"
+        fi
+        echoContent yellow "2.$(t CARPOOL_PAGE_LINKS)"
+        echoContent yellow "3.$(t CARPOOL_PAGE_REGEN)"
+        echoContent yellow "4.$(t CARPOOL_TG_CONFIGURE)"
+        echoContent yellow "5.$(t CARPOOL_TG_TEST)"
+        echoContent yellow "6.$(t CARPOOL_TG_DISABLE)"
+        echoContent yellow "0.$(t BACK)"
+        echoContent skyBlue "=============================================================="
+        read -r -p "$(t CARPOOL_MENU_PROMPT)" choice || [[ -n "${choice}" ]] || return "${rc}"
+        case "${choice}" in
+            0 | "") return 0 ;;
+            1) if [[ -n "${pageOn}" ]]; then carpoolPageDisable; else carpoolPageEnable; fi ;;
+            2) carpoolShowPageLinks ;;
+            3)
+                if [[ -z "${pageOn}" ]]; then
+                    echoContent yellow " ---> $(t CARPOOL_PAGE_STATUS_OFF)"
+                elif carpoolPageEnable; then
+                    echoContent yellow " ---> $(t CARPOOL_PAGE_TOKEN_REGENERATED)"
+                fi
+                ;;
+            4) carpoolTelegramConfigure ;;
+            5) carpoolTelegramTest ;;
+            6) carpoolTelegramDisable ;;
+            *) echoContent red " ---> $(t CARPOOL_MENU_BAD_CHOICE)" ;;
+        esac
+        rc=$?
+    done
 }
 
 # carpoolMembersClean → 0=members.json 过得了校验、也没有没应用的改动。成员管理只在这时动文件：
@@ -9776,27 +9740,6 @@ carpoolMembersEditApply() {
         return 1
     fi
     rm -f "${backup}"
-}
-
-# carpoolPickMember → 列出 members.json 里的成员让车主选，名字放在 carpoolPicked；没有成员或输错返回 1
-carpoolPickMember() {
-    local names=() i pick
-    mapfile -t names < <(jq -r '.members | keys_unsorted[]' "${CARPOOL_MEMBERS_FILE}")
-    if ((${#names[@]} == 0)); then
-        echoContent yellow " ---> $(t CARPOOL_MEMBER_NONE)"
-        return 1
-    fi
-    for i in "${!names[@]}"; do
-        echoContent yellow "$((i + 1)).$(jq -r --arg n "${names[i]}" --arg u "$(t CARPOOL_UNLIMITED)" '.members[$n] as $m
-            | "\($n) · \(if ($m.quotaGiB // 0) > 0 then "\($m.quotaGiB) GiB" else $u end) · \(if ($m.expire // "") == "" then "-" else $m.expire end)"
-              + " · \($m.protocols // "all" | if type == "array" then map(tostring) | join(",") else tostring end)"' "${CARPOOL_MEMBERS_FILE}")"
-    done
-    read -r -p "$(t CARPOOL_MEMBER_PICK)" pick
-    if [[ ! "${pick}" =~ ^[0-9]{1,4}$ ]] || ((10#${pick} < 1 || 10#${pick} > ${#names[@]})); then
-        echoContent red " ---> $(t CARPOOL_MENU_BAD_CHOICE)"
-        return 1
-    fi
-    carpoolPicked=${names[10#${pick} - 1]}
 }
 
 # carpoolAsk quota|expire|protocols PROMPT [CURRENT_EXPIRE] → 读一项成员设置，输错就重问，结果放在 carpoolAnswer：
@@ -9844,16 +9787,24 @@ carpoolShowProtocolChoices() {
     done
 }
 
-# carpoolShowMemberLinks NAME → 打印这个成员的通用订阅地址，页面开着时再打印成员页；没装订阅就指到「查看账号」
+# carpoolShowMemberLinks NAME [full] → 打印这个账号的通用订阅地址，full 时再加二维码与另外三种格式的地址；拼车页面开着、
+# 他又是成员时再打印成员页。只打印不重建（加人、改人、删人时已经重建过）；没装订阅就指到「订阅设置」
 carpoolShowMemberLinks() {
-    local base md5 state key
+    local base md5 state key sub
     if ! base=$(carpoolPageUrlBase) || ! md5=$(carpoolSubscribeMd5 "$1"); then
         echoContent yellow " ---> $(t CARPOOL_MEMBER_NO_SUB "$1")"
         return 0
     fi
-    echoContent green " ---> $(t CARPOOL_MEMBER_SUB_LINK "$1" "${base%carpool/}${md5}")"
+    sub=${base%carpool/}
+    echoContent green " ---> $(t CARPOOL_MEMBER_SUB_LINK "$1" "${sub}${md5}")"
+    if [[ "${2:-}" == "full" ]]; then
+        shareQrCode "" "${sub}${md5}"
+        echoContent yellow " ---> $(t SUBSCRIBE_UNIVERSAL_HINT)"
+        printf '      %s\n' "${sub}default/${md5}" "${sub}clashMetaProfiles/${md5}" "${sub}sing-box/${md5}"
+    fi
     state=$(carpoolReadState) || return 0
-    if [[ "$(jq -r '.pageEnabled' <<<"${state}")" == "true" ]] && key=$(carpoolMemberPageKey "$(jq -r '.pageToken' <<<"${state}")" "$1"); then
+    if [[ "$(jq -r --arg n "$1" '.pageEnabled == true and (.members | has($n))' <<<"${state}")" == "true" ]] \
+        && key=$(carpoolMemberPageKey "$(jq -r '.pageToken' <<<"${state}")" "$1"); then
         echoContent green " ---> $(t CARPOOL_MEMBER_PAGE_LINK "$1" "${base}${key}")"
     fi
 }
@@ -9891,12 +9842,14 @@ carpoolMemberAdd() {
     carpoolShowMemberLinks "${name}"
 }
 
-# carpoolMemberEdit renew|quota|protocols|uuid|remove → 选一个成员改一项，删人与换 UUID 的逐项确认在 carpoolApply 里
+# carpoolMemberEdit renew|quota|protocols|uuid|remove NAME → 给这个成员改一项，删人与换 UUID 的逐项确认在 carpoolApply 里
 carpoolMemberEdit() {
-    local name current rc u
+    local name=$2 current rc u
     carpoolMembersClean || return 1
-    carpoolPickMember || return 1
-    name=${carpoolPicked}
+    if ! jq -e --arg n "${name}" '.members | has($n)' "${CARPOOL_MEMBERS_FILE}" >/dev/null 2>&1; then
+        echoContent red " ---> $(t CARPOOL_RESET_NOT_MEMBER "${name}")"
+        return 1
+    fi
     case "$1" in
         renew)
             current=$(jq -r --arg n "${name}" '.members[$n].expire // ""' "${CARPOOL_MEMBERS_FILE}")
@@ -9939,61 +9892,42 @@ carpoolMemberEdit() {
     esac
 }
 
-# carpoolMemberMenu → 拼车管理 → 成员管理；每项只改 members.json，再走与「应用配置文件」同一条路
-carpoolMemberMenu() {
-    local choice
-    echoContent skyBlue "\n$(t CARPOOL_MENU_MEMBERS)"
-    echoContent skyBlue "=============================================================="
-    echoContent yellow "1.$(t CARPOOL_MEMBER_ADD)"
-    echoContent yellow "2.$(t CARPOOL_MEMBER_RENEW)"
-    echoContent yellow "3.$(t CARPOOL_MEMBER_QUOTA)"
-    echoContent yellow "4.$(t CARPOOL_MEMBER_PROTOCOLS)"
-    echoContent yellow "5.$(t CARPOOL_MEMBER_UUID)"
-    echoContent yellow "6.$(t CARPOOL_MEMBER_REMOVE)"
-    echoContent skyBlue "=============================================================="
-    read -r -p "$(t CARPOOL_MENU_PROMPT)" choice
-    case "${choice}" in
-        1) carpoolMemberAdd ;;
-        2) carpoolMemberEdit renew ;;
-        3) carpoolMemberEdit quota ;;
-        4) carpoolMemberEdit protocols ;;
-        5) carpoolMemberEdit uuid ;;
-        6) carpoolMemberEdit remove ;;
-        *) echoContent red " ---> $(t CARPOOL_MENU_BAD_CHOICE)" ;;
-    esac
-}
-
-# carpoolMenu → 账号管理 → 拼车管理
+# carpoolMenu → 用户管理 → 拼车：全局的开关、应用配置文件、全员清零、页面与通知；按人的操作在用户列表里。
+# 做完一项回到这里，0 或回车回用户管理；输入读完（管道喂的）就带着上一项的返回码退出
 carpoolMenu() {
-    local choice on=
-    carpoolEnabled && on=1
-    echoContent skyBlue "\n$(t CARPOOL_MENU_TITLE)"
-    echoContent skyBlue "=============================================================="
-    echoContent yellow "1.$(t CARPOOL_MENU_USAGE)"
-    if [[ -n "${on}" ]]; then
-        echoContent yellow "2.$(t CARPOOL_MENU_APPLY)"
-        echoContent yellow "3.$(t CARPOOL_MENU_RESET)"
-        echoContent yellow "4.$(t CARPOOL_MENU_DISABLE)"
-        echoContent yellow "5.$(t CARPOOL_MENU_PAGE)"
-        echoContent yellow "6.$(t CARPOOL_MENU_MEMBERS)"
-    else
-        echoContent yellow "4.$(t CARPOOL_MENU_ENABLE)"
-    fi
-    echoContent skyBlue "=============================================================="
-    read -r -p "$(t CARPOOL_MENU_PROMPT)" choice
-    # 关着时只认 1 和 4：其余几项都要拼车开着才有意义，编号不变是因为文档与脚本按编号引用
-    if [[ -z "${on}" && "${choice}" =~ ^[2356]$ ]]; then
-        choice=
-    fi
-    case "${choice}" in
-        1) carpoolShowUsage ;;
-        2) carpoolApply ;;
-        3) carpoolResetUsage ;;
-        4) if [[ -n "${on}" ]]; then carpoolDisable; else carpoolEnable; fi ;;
-        5) carpoolPageMenu ;;
-        6) carpoolMemberMenu ;;
-        *) echoContent red " ---> $(t CARPOOL_MENU_BAD_CHOICE)" ;;
-    esac
+    local choice on rc=0
+    while true; do
+        on=
+        carpoolEnabled && on=1
+        echoContent skyBlue "\n$(t CARPOOL_MENU_TITLE)"
+        echoContent skyBlue "=============================================================="
+        if [[ -n "${on}" ]]; then
+            echoContent yellow "1.$(t CARPOOL_MENU_DISABLE)"
+            echoContent yellow "2.$(t CARPOOL_MENU_APPLY)"
+            echoContent yellow "3.$(t CARPOOL_RESET_ALL)"
+            echoContent yellow "4.$(t CARPOOL_MENU_PAGE)"
+        else
+            echoContent yellow "1.$(t CARPOOL_MENU_ENABLE)"
+        fi
+        echoContent yellow "0.$(t BACK)"
+        echoContent skyBlue "=============================================================="
+        read -r -p "$(t CARPOOL_MENU_PROMPT)" choice || [[ -n "${choice}" ]] || return "${rc}"
+        # 关着时只认 1：其余几项都要拼车开着才有意义，编号不变是因为文档与脚本按编号引用
+        if [[ -z "${on}" && "${choice}" =~ ^[234]$ ]]; then
+            echoContent red " ---> $(t CARPOOL_MENU_BAD_CHOICE)"
+            rc=1
+            continue
+        fi
+        case "${choice}" in
+            0 | "") return 0 ;;
+            1) if [[ -n "${on}" ]]; then carpoolDisable; else carpoolEnable; fi ;;
+            2) carpoolApply ;;
+            3) carpoolResetUsage ;;
+            4) carpoolPageMenu ;;
+            *) echoContent red " ---> $(t CARPOOL_MENU_BAD_CHOICE)" ;;
+        esac
+        rc=$?
+    done
 }
 
 # ======================= 脚本版本管理 =======================
@@ -12227,8 +12161,8 @@ chainAccountForget() {
     fi
 }
 
-# chainAccountAllNames → 本机全部账号名（去掉协议后缀，升序去重）：Xray 与 sing-box 两边按注册表找到的入站文件
-chainAccountAllNames() {
+# accountAllNames → 本机全部账号名（去掉协议后缀，升序去重）：Xray 与 sing-box 两边按注册表找到的入站文件
+accountAllNames() {
     local dir id file files=()
     for dir in "${XRAY_CONF_DIR}/" "${SINGBOX_FRAGMENT_DIR}/"; do
         [[ -d "${dir}" ]] || continue
@@ -12264,11 +12198,11 @@ chainAccountExitMenu() {
         echoContent red " ---> $(t CHAIN_ACCOUNT_XRAY_UNWIRED)"
         return 1
     fi
-    if ! names=$(chainAccountAllNames); then
+    if ! names=$(accountAllNames); then
         echoContent red " ---> $(t CHAIN_ACCOUNT_LIST_FAILED)"
         return 1
     fi
-    # 拼车停用中的成员不在入站里、chainAccountAllNames 看不到，恢复后照样按映射走，所以从拼车状态里补上
+    # 拼车停用中的成员不在入站里、accountAllNames 看不到，恢复后照样按映射走，所以从拼车状态里补上
     mapfile -t nameList < <({ printf '%s\n' "${names}"; jq -r '(.accounts // {}) | keys[]' <<<"${state}"
         carpoolReadState 2>/dev/null | jq -r 'select(.enabled == true) | .members | keys[]'; } | grep -v '^$' | sort -u)
     dflt=$(jq -r '.default_chain // "direct"' <<<"${state}")
@@ -16189,45 +16123,194 @@ cronFunction() {
         exit $?
     fi
 }
-# 账号管理
+# manageAccount → 主菜单 7「用户管理」：用户列表（按人看链接、续期、删除）、添加用户、拼车、订阅设置。
+# 做完一项回到这里，0 或回车回主菜单；输入读完（管道喂的）就带着上一项的返回码退出
 manageAccount() {
-    echoContent skyBlue "\n功能 1/${totalProgress} : 账号管理"
+    local choice rc=0
     if [[ -z "${configPath}" ]]; then
         echoContent red " ---> 未安装"
         exit 1
     fi
+    while true; do
+        echoContent skyBlue "\n$(t MENU_USER)"
+        echoContent red "=============================================================="
+        echoContent yellow "1.$(t ACCOUNT_MENU_LIST)"
+        echoContent yellow "2.$(t ACCOUNT_MENU_ADD)"
+        echoContent yellow "3.$(t CARPOOL_MENU_ENTRY)"
+        echoContent yellow "4.$(t ACCOUNT_MENU_SUBSCRIBE)"
+        echoContent yellow "0.$(t BACK)"
+        echoContent red "=============================================================="
+        read -r -p "$(t PROMPT_SELECT):" choice || [[ -n "${choice}" ]] || return "${rc}"
+        case "${choice}" in
+            0 | "")
+                menu
+                return
+                ;;
+            1) accountListMenu ;;
+            2) addUser ;;
+            3) carpoolMenu ;;
+            4) subscribeSettingsMenu ;;
+            *) echoContent red " ---> $(t INVALID_SELECTION)" ;;
+        esac
+        rc=$?
+    done
+}
 
-    echoContent red "\n=============================================================="
-    echoContent yellow "# 添加单个用户时可自定义email和uuid"
-    echoContent yellow "# 如安装了Hysteria或者Tuic，账号会同时添加到相应的类型下面\n"
-    echoContent yellow "1.查看账号"
-    echoContent yellow "2.查看订阅"
-    echoContent yellow "3.管理其他订阅"
-    echoContent yellow "4.添加用户"
-    echoContent yellow "5.删除用户"
-    echoContent yellow "6.$(t CARPOOL_MENU_ENTRY)"
-    if ! subscribeIsMerged && [[ -n "$(subscribeConfPort)" ]] && subscribeMergedHost any >/dev/null; then
-        echoContent yellow "7.$(t SUBSCRIBE_MERGE_MENU)"
+# accountListMenu → 用户管理 → 用户列表。拼车开着时上面是拼车概况，每行带已用、额度、到期、状态（与页面同一份数据），
+# 没纳入拼车的账号也列出来；按名字排。选一个人进 accountMenu，只有一个人时直接进。0 或回车回用户管理；输入读完就退出
+accountListMenu() {
+    local state rows choice i n u q e st rc=0
+    local -a names
+    while true; do
+        state=
+        if carpoolEnabled; then
+            state=$(carpoolReadState) || state=
+        fi
+        if [[ -n "${state}" ]]; then
+            rows=$({
+                carpoolUsageTable "${state}"
+                carpoolForeignAccounts "${state}" "$(carpoolCurrentClientsMap)" | jq -r --arg s "$(t ACCOUNT_FOREIGN)" 'keys[] | "\(.)\t-\t-\t-\t\($s)"'
+            } | sort -f -t $'\t' -k1,1)
+        else
+            rows=$(accountAllNames | sort -f)
+        fi
+        mapfile -t names < <(cut -f1 <<<"${rows}" | grep -v '^$')
+        if ((${#names[@]} == 0)); then
+            echoContent yellow " ---> $(t ACCOUNT_LIST_EMPTY)"
+            return 0
+        fi
+        if ((${#names[@]} == 1)); then
+            accountMenu "${names[0]}"
+            return
+        fi
+        echoContent skyBlue "\n$(t ACCOUNT_MENU_LIST)"
+        if [[ -n "${state}" ]]; then
+            carpoolUsageHeader "${state}"
+            printf '     %-24s %-12s %-12s %-12s %s\n' "$(t CARPOOL_PAGE_NAME)" "$(t CARPOOL_PAGE_USED)" "$(t CARPOOL_PAGE_QUOTA)" "$(t CARPOOL_PAGE_EXPIRE)" "$(t CARPOOL_PAGE_STATUS)"
+        fi
+        i=0
+        while IFS=$'\t' read -r n u q e st; do
+            [[ -n "${n}" ]] || continue
+            i=$((i + 1))
+            if [[ -n "${state}" ]]; then
+                printf '%3d. %-24s %-12s %-12s %-12s %s\n' "${i}" "${n}" "${u}" "${q}" "${e}" "${st}"
+            else
+                printf '%3d. %s\n' "${i}" "${n}"
+            fi
+        done <<<"${rows}"
+        printf '%3d. %s\n' 0 "$(t BACK)"
+        read -r -p "$(t ACCOUNT_LIST_PICK)" choice || [[ -n "${choice}" ]] || return "${rc}"
+        if [[ -z "${choice}" || "${choice}" == "0" ]]; then
+            return 0
+        fi
+        if [[ "${choice}" =~ ^[1-9][0-9]{0,3}$ ]] && ((choice <= ${#names[@]})); then
+            accountMenu "${names[choice - 1]}"
+            rc=$?
+        else
+            echoContent red " ---> $(t INVALID_SELECTION)"
+            rc=1
+        fi
+    done
+}
+
+# accountMenu NAME → 用户列表里选中的一个人：分享链接、订阅地址、删除；拼车开着且他是成员时还有续期、改额度、改协议、换 UUID、清零，
+# 删除走成员移除（没纳入拼车的不在这里删）。编号不随这些变。做完一项回到这里，人删掉了或 0、回车回列表；输入读完就退出
+accountMenu() {
+    local name=$1 choice state member row u q e st header rc=0
+    while true; do
+        state=
+        member=
+        if carpoolEnabled; then
+            state=$(carpoolReadState) || state=
+        fi
+        if [[ -n "${state}" ]] && jq -e --arg n "${name}" '.members | has($n)' <<<"${state}" >/dev/null 2>&1; then
+            member=1
+        elif ! accountAllNames | grep -Fx -- "${name}" >/dev/null; then
+            return 0
+        fi
+        header=${name}
+        if [[ -n "${member}" ]]; then
+            row=$(carpoolUsageTable "${state}" | awk -F'\t' -v n="${name}" '$1 == n')
+            IFS=$'\t' read -r _ u q e st <<<"${row}"
+            header="${name} · ${u} / ${q} · $(t CARPOOL_PAGE_EXPIRE) ${e} · ${st}"
+        elif [[ -n "${state}" ]]; then
+            header="${name} · $(t ACCOUNT_FOREIGN)"
+        fi
+        echoContent skyBlue "\n${header}"
+        echoContent skyBlue "=============================================================="
+        echoContent yellow "1.$(t ACCOUNT_LINKS)"
+        echoContent yellow "2.$(t ACCOUNT_SUBSCRIBE)"
+        if [[ -n "${member}" ]]; then
+            echoContent yellow "3.$(t CARPOOL_MEMBER_RENEW)"
+            echoContent yellow "4.$(t CARPOOL_MEMBER_QUOTA)"
+            echoContent yellow "5.$(t CARPOOL_MEMBER_PROTOCOLS)"
+            echoContent yellow "6.$(t CARPOOL_MEMBER_UUID)"
+            echoContent yellow "7.$(t ACCOUNT_RESET_USAGE)"
+        fi
+        if [[ -n "${member}" || -z "${state}" ]]; then
+            echoContent yellow "8.$(t ACCOUNT_DELETE)"
+        fi
+        echoContent yellow "0.$(t BACK)"
+        echoContent skyBlue "=============================================================="
+        read -r -p "$(t PROMPT_SELECT):" choice || [[ -n "${choice}" ]] || return "${rc}"
+        if [[ -z "${member}" && "${choice}" =~ ^[34567]$ ]] || [[ "${choice}" == "8" && -z "${member}" && -n "${state}" ]]; then
+            echoContent red " ---> $(t INVALID_SELECTION)"
+            rc=1
+            continue
+        fi
+        case "${choice}" in
+            0 | "") return 0 ;;
+            1) accountShowLinks "${name}" ;;
+            2) carpoolShowMemberLinks "${name}" full ;;
+            3) carpoolMemberEdit renew "${name}" ;;
+            4) carpoolMemberEdit quota "${name}" ;;
+            5) carpoolMemberEdit protocols "${name}" ;;
+            6) carpoolMemberEdit uuid "${name}" ;;
+            7) carpoolResetUsage "${name}" ;;
+            8) if [[ -n "${member}" ]]; then carpoolMemberEdit remove "${name}"; else removeAccount "${name}"; fi ;;
+            *) echoContent red " ---> $(t INVALID_SELECTION)" ;;
+        esac
+        rc=$?
+    done
+}
+
+# accountShowLinks NAME → 这个人在各协议上的分享链接与二维码；不在任何入站里（拼车停用中）就说明
+accountShowLinks() {
+    if ! accountAllNames | grep -Fx -- "$1" >/dev/null; then
+        echoContent yellow " ---> $(t ACCOUNT_NOT_IN_INBOUNDS "$1")"
+        return 0
     fi
-    echoContent red "=============================================================="
-    read -r -p "请输入:" manageAccountStatus
-    if [[ "${manageAccountStatus}" == "1" ]]; then
-        showAccounts 1
-    elif [[ "${manageAccountStatus}" == "2" ]]; then
-        subscribe
-    elif [[ "${manageAccountStatus}" == "3" ]]; then
-        addSubscribeMenu 1
-    elif [[ "${manageAccountStatus}" == "4" ]]; then
-        addUser
-    elif [[ "${manageAccountStatus}" == "5" ]]; then
-        removeUser
-    elif [[ "${manageAccountStatus}" == "6" ]]; then
-        carpoolMenu
-    elif [[ "${manageAccountStatus}" == "7" ]]; then
-        subscribeMergeExisting
-    else
-        echoContent red " ---> 选择错误"
-    fi
+    showAccounts 1 "$1"
+}
+
+# subscribeSettingsMenu → 用户管理 → 订阅设置：重建全部订阅（第一次在这里开通，换 salt 也在这里）、管理其他机器的订阅、
+# 把独立端口的订阅并到节点端口（能并时才列）。做完一项回到这里，0 或回车回用户管理；输入读完就退出
+subscribeSettingsMenu() {
+    local choice canMerge rc=0
+    while true; do
+        canMerge=
+        if ! subscribeIsMerged && [[ -n "$(subscribeConfPort)" ]] && subscribeMergedHost any >/dev/null; then
+            canMerge=1
+        fi
+        echoContent skyBlue "\n$(t ACCOUNT_MENU_SUBSCRIBE)"
+        echoContent red "=============================================================="
+        echoContent yellow "1.$(t SUBSCRIBE_MENU_REBUILD)"
+        echoContent yellow "2.$(t SUBSCRIBE_MENU_REMOTE)"
+        if [[ -n "${canMerge}" ]]; then
+            echoContent yellow "3.$(t SUBSCRIBE_MERGE_MENU)"
+        fi
+        echoContent yellow "0.$(t BACK)"
+        echoContent red "=============================================================="
+        read -r -p "$(t PROMPT_SELECT):" choice || [[ -n "${choice}" ]] || return "${rc}"
+        case "${choice}" in
+            0 | "") return 0 ;;
+            1) subscribe "" true ;;
+            2) addSubscribeMenu ;;
+            3) if [[ -n "${canMerge}" ]]; then subscribeMergeExisting; else echoContent red " ---> $(t INVALID_SELECTION)"; fi ;;
+            *) echoContent red " ---> $(t INVALID_SELECTION)" ;;
+        esac
+        rc=$?
+    done
 }
 
 # 安装订阅
@@ -16686,7 +16769,7 @@ unInstallSubscribe() {
     rm -f "${nginxConfigPath}subscribe_locations.inc"
 }
 
-# 添加订阅
+# addSubscribeMenu → 订阅设置 → 管理其他订阅：添加或移除并进本机订阅的其他机器，改完重建订阅（沿用 salt，一人一行）
 addSubscribeMenu() {
     echoContent skyBlue "\n===================== 添加其他机器订阅 ======================="
     echoContent yellow "1.添加"
@@ -16698,19 +16781,20 @@ addSubscribeMenu() {
     elif [[ "${addSubscribeStatus}" == "2" ]]; then
         if [[ ! -f "${SUBSCRIBE_REMOTE_DIR}/remoteSubscribeUrl" ]]; then
             echoContent green " ---> 未安装其他订阅"
-            exit 0
+            return 0
         fi
         grep -v '^$' "${SUBSCRIBE_REMOTE_DIR}/remoteSubscribeUrl" | awk '{print NR""":"$0}'
         read -r -p "请选择要删除的订阅编号[仅支持单个删除]:" delSubscribeIndex
-        if [[ -z "${delSubscribeIndex}" ]]; then
-            echoContent red " ---> 不可以为空"
-            exit 1
+        # 只认正整数：这个值要进 sed 的地址
+        if [[ ! "${delSubscribeIndex}" =~ ^[1-9][0-9]{0,3}$ ]]; then
+            echoContent red " ---> 输入有误"
+            return 1
         fi
 
-        sed -i "$((delSubscribeIndex))d" "${SUBSCRIBE_REMOTE_DIR}/remoteSubscribeUrl" >/dev/null 2>&1
+        sed -i "${delSubscribeIndex}d" "${SUBSCRIBE_REMOTE_DIR}/remoteSubscribeUrl" >/dev/null 2>&1
 
         echoContent green " ---> 其他机器订阅删除成功"
-        subscribe
+        subscribe false true
     fi
 }
 # 添加其他机器clashMeta订阅
@@ -16721,14 +16805,14 @@ addOtherSubscribe() {
     read -r -p "请输入域名 端口 机器别名:" remoteSubscribeUrl
     if [[ -z "${remoteSubscribeUrl}" ]]; then
         echoContent red " ---> 不可为空"
-        addOtherSubscribe
+        return 1
     elif ! echo "${remoteSubscribeUrl}" | grep -q ":"; then
         echoContent red " ---> 规则不合法"
     else
 
         if [[ -f "${SUBSCRIBE_REMOTE_DIR}/remoteSubscribeUrl" ]] && grep -q "${remoteSubscribeUrl}" ${SUBSCRIBE_REMOTE_DIR}/remoteSubscribeUrl; then
             echoContent red " ---> 此订阅已添加"
-            exit 1
+            return 1
         fi
         echo
         read -r -p "是否是HTTP订阅？[y/n]" httpSubscribeStatus
@@ -16736,7 +16820,7 @@ addOtherSubscribe() {
             remoteSubscribeUrl="${remoteSubscribeUrl}:http"
         fi
         echo "${remoteSubscribeUrl}" >>${SUBSCRIBE_REMOTE_DIR}/remoteSubscribeUrl
-        subscribe
+        subscribe false true
     fi
 }
 # clashMetaConfig URL MD5 → 写 Clash 配置；provider 名与缓存路径用订阅地址的 md5，不能用 salt：
@@ -17163,7 +17247,7 @@ subscribeLocalHasEmptyHost() {
         || grep -qsE '"server":[[:space:]]*""' "${SUBSCRIBE_LOCAL_DIR}"/sing-box/*
 }
 
-# 订阅
+# subscribe [NOPROMPT] [QUIET] → 重建全部账号的订阅文件。NOPROMPT 非空：沿用 salt、不问；QUIET 非空：每人只打一行
 subscribe() {
     readInstallProtocolType
     installSubscribe

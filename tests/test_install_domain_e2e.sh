@@ -278,8 +278,8 @@ assert_equals "301 https://${DOMAIN_A}/" "$(curl -s -o /dev/null -w '%{http_code
 assert_contains "$(crontab -l 2>/dev/null)" "install.sh RenewTLS" "crontab 里有证书维护任务"
 
 echo ""
-echo -e "${YELLOW}=== 菜单 7 → 2：订阅（有 0 就并在它的端口上，不问端口；salt 回车随机）===${NC}"
-s2Out=$(runMenu "7\n2\n\n")
+echo -e "${YELLOW}=== 菜单 7 → 4 → 1：开通订阅（有 0 就并在它的端口上，不问端口；salt 回车随机）===${NC}"
+s2Out=$(runMenu "7\n4\n1\n\n")
 s2Rc=$?
 assert_equals "0" "${s2Rc}" "装订阅退出码 0"
 noNoise "装订阅" "${s2Out}"
@@ -496,12 +496,12 @@ assert_contains "${extOut}" "sing-box is not installed" "sing-box 没了，菜�
 # ============================================================================
 
 echo ""
-echo -e "${YELLOW}=== 菜单 7 → 6：开拼车、开页面 ===${NC}"
-c1Out=$(runMenu "7\n6\n4\n")
+echo -e "${YELLOW}=== 菜单 7 → 3：开拼车、开页面 ===${NC}"
+c1Out=$(runMenu "7\n3\n1\n")
 assert_equals "0" "$?" "开启拼车退出码 0"
-c2Out=$(runMenu "7\n6\n5\n1\n")
+c2Out=$(runMenu "7\n3\n4\n1\n")
 assert_equals "0" "$?" "开启页面退出码 0"
-linksOut=$(runMenu "7\n6\n5\n2\n")
+linksOut=$(runMenu "7\n3\n4\n2\n")
 pageUrls=$(grep -oE 'https://[^ ]+/carpool/[0-9a-f]{32,64}' <<<"${linksOut}" | sort -u)
 assert_equals "2" "$(grep -c . <<<"${pageUrls}")" "页面链接两条：车主页与 ${E2E_USER} 的成员页"
 while read -r url; do
@@ -551,7 +551,7 @@ usedBefore=$(carpoolUsed)
 assert_equals "204" "$(probeXhttpLink "$(base64 -d "${WORK}/sub-check" 2>/dev/null | grep -m1 'security=tls&type=xhttp')")" "拼车开着时 XHTTP+TLS 照样能用"
 usedAfter=$(carpoolUsed)
 assert_equals "yes" "$([[ "${usedAfter:-0}" -gt "${usedBefore:-0}" ]] && echo yes || echo no)" "XHTTP+TLS 的流量记到成员头上（${usedBefore} → ${usedAfter}）"
-c5Out=$(runMenu "7\n6\n4\ny\ny\n")
+c5Out=$(runMenu "7\n3\n1\ny\n")
 assert_equals "0" "$?" "关闭拼车退出码 0"
 assert_equals "false" "$(jq -r '.enabled' "${INSTALL_ROOT}/carpool/state.json" 2>/dev/null)" "拼车已关闭"
 assert_equals "" "$(subHeaders "/s/$(subKey)" 'curl/8')" "关了拼车，订阅响应不再带用量头"
