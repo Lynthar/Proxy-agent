@@ -1342,12 +1342,35 @@ assert_equals "0" "$(topoRenderHtml "${_tpBare}" | grep -c '<table')" "按账号
 _tpHtml=$(topoRenderHtml "$(jq -c '.flows = [{exit: "direct", when: "全部"}] | .inboundExits = [{inbound: "chain", exit: "a", when: "来自入口"}] | .issues = []' <<<"${_tpModel}")")
 assert_equals "0" "$(grep -c '跟随默认的账号：' <<<"${_tpHtml}")" "按账号表: 经链路进来的流量不是账号的分流条件，不写进表上方那行"
 
+# tpExitColors → 按图上从上到下列出「出口名=颜色」；tpEdges → 去出口的每根线一行「起点 y 终点 y」；tpCrossings → 互相交叉的线有几对
+tpExitColors() { grep -oE 'class="f[0-9]"/><text x="[0-9.]+" y="[0-9.]+" class="n">[^<]*' | sed -E 's/^class="(f[0-9])".*class="n">(.*)$/\2=\1/'; }
+tpEdges() { grep -oE 'M[0-9.]+ [0-9.]+ C[0-9. ]+ 959 [0-9.]+" class="edge' | sed -E 's/^M[0-9.]+ ([0-9.]+) C.* 959 ([0-9.]+)".*/\1 \2/'; }
+tpCrossings() { tpEdges | awk '{ a[NR] = $1; b[NR] = $2 } END { n = 0; for (i = 1; i <= NR; i++) for (j = 1; j <= NR; j++) if (a[i] < a[j] && b[i] > b[j]) n++; print n }'; }
+
 # 出口配色：直连固定第一色，其余在后四色里循环，第 7 个出口不会和直连同色
 _tpSeven=$(jq -c '.exits = ([.exits[0]] + [range(1; 7) | {key: "c\(.)", name: "c\(.)", kind: "链式", host: "198.x.x.x", port: 1}])
     | .accounts = [range(1; 7) | {name: "u\(.)", status: "active", protocols: "all", exit: "c\(.)", sub: "", short: "", ratio: null}]
     | .flows = [{exit: "direct", when: "全部"}] | .issues = []' <<<"${_tpModel}")
-assert_equals "f0 f1 f2 f3 f4 f1 f2" "$(topoRenderHtml "${_tpSeven}" | grep -oE 'width="4" height="[0-9.]+" rx="2" class="f[0-9]"' | grep -oE 'f[0-9]' | paste -sd' ' -)" \
-    "配色: 直连固定 f0，其余在 f1–f4 里循环，第 7 个出口不和直连同色"
+assert_equals "c1=f1 c2=f2 c3=f3 c4=f4 c5=f1 c6=f2 直连=f0" "$(topoRenderHtml "${_tpSeven}" | tpExitColors | LC_ALL=C sort | paste -sd' ' -)" \
+    "配色: 直连固定 f0，其余按配置顺序在 f1–f4 里循环，第 7 个出口不和直连同色；没人走的直连挪到最下面，颜色不跟着变"
+
+# 出口按进来的线出自账号栏哪一段排、中心对着线的起点：账号指定的那束在最上，它的出口也在最上，和跟随默认那束不交叉
+_tpPinTop=$(jq -c '.flows = [{exit: "direct", when: "全部"}] | .exits = [.exits[0], .exits[1]] | .issues = []
+    | .accounts = ([{name: "pin", exit: "a"}] + [range(0; 9) | {name: "m\(.)", exit: null}] | map(. + {status: "active", protocols: "all", sub: "", short: "", ratio: null}))' <<<"${_tpModel}")
+_tpHtml=$(topoRenderHtml "${_tpPinTop}")
+assert_equals "节点 a|直连" "$(tpExitColors <<<"${_tpHtml}" | sed 's/=f[0-9]$//' | paste -sd'|' -)" "布局: 指定账号排在最上，它的出口也排在最上（原来直连在上，两根线交叉）"
+assert_equals "0" "$(tpCrossings <<<"${_tpHtml}")" "布局: 去出口的线不交叉"
+assert_equals "yes" "$(tpEdges <<<"${_tpHtml}" | awk '$1 > 100 { print ($1 == $2 ? "yes" : "no") }')" "布局: 跟随默认那束对着直连的中心，线是水平的"
+_tpMix=$(jq -c '.exits = [.exits[0]] + [("A", "B", "C", "D") | {key: ., name: "出口 \(.)", kind: "链式", host: "198.x.x.x", port: 1}]
+    | .flows = [{exit: "A", when: "geosite:netflix"}, {exit: "direct", when: "其余（默认）"}] | .issues = []
+    | .accounts = ([{name: "x", exit: "B", protocols: "all"}, {name: "y", exit: "direct", protocols: "all"}, {name: "f1", exit: null, protocols: "all"},
+                    {name: "f2", exit: null, protocols: "all"}, {name: "p1", exit: null, protocols: [0, 7]}, {name: "z", exit: "D", protocols: [7]},
+                    {name: "w", exit: "A", protocols: [0]}] | map(. + {status: "active", sub: "", short: "", ratio: null}))' <<<"${_tpModel}")
+_tpHtml=$(topoRenderHtml "${_tpMix}")
+assert_equals "出口 B|直连|出口 A|出口 D|出口 C" "$(tpExitColors <<<"${_tpHtml}" | sed 's/=f[0-9]$//' | paste -sd'|' -)" \
+    "布局: 只有上段指定的在上，上段指定加跟随默认的其次，跟随默认加下段指定的再次，只有下段指定的在下，没人走的最后"
+assert_equals "0" "$(tpCrossings <<<"${_tpHtml}")" "布局: 五个出口、上下两段指定加分流，线也不交叉"
+assert_equals "出口 A=f1 出口 B=f2 出口 C=f3 出口 D=f4" "$(tpExitColors <<<"${_tpHtml}" | grep -v 直连 | sort | paste -sd' ' -)" "布局: 出口换了位置，颜色仍按配置顺序"
 
 # 进同一个出口的线终点错开，终点的标签各在各的线头上
 _tpHtml=$(topoRenderHtml "$(jq -c '.issues = []' <<<"${_tpModel}")")

@@ -21,7 +21,7 @@ topoMaskHost() {
     jq -nr --arg h "$1" "${_TOPO_JQ_MASK}"'$h | topoMask'
 }
 
-# 出口配色：直连固定 e0，其余按出口顺序在 e1–e4 里循环，相邻两个出口在常见色觉缺陷下也分得开（浅色、深色两套各自校验过）。
+# 出口配色：直连固定 e0，其余按配置里的出口顺序在 e1–e4 里循环（不随图上的位置变），相邻两个在常见色觉缺陷下也分得开（浅色、深色两套各自校验过）。
 # 橙色只表示用量过 80%、红色只表示配置没生效，出口不用这两种色
 readonly _TOPO_PAGE_CSS=':root{--bg:#f5f6f8;--surface:#fff;--ink:#1b2230;--muted:#5a6575;--line:#d3d9e2;--edge:#8d99aa;--warn:#a86a00;--bad:#c0322a;--off:#8b95a3;--e0:#1baf7a;--e1:#2a78d6;--e2:#008300;--e3:#6250d6;--e4:#e87ba4}
 @media (prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#12161d;--surface:#1a202a;--ink:#e7ebf1;--muted:#95a1b2;--line:#2c3543;--edge:#6c7a8e;--warn:#e0b050;--bad:#f27d73;--off:#6e7886;--e0:#199e70;--e1:#3987e5;--e2:#008300;--e3:#9085e9;--e4:#d55181}}
@@ -86,10 +86,18 @@ topoRenderHtml() {
       | . as $m
       | 16 as $IX | 216 as $IW | 410 as $AX | 226 as $AW | 960 as $EX | 244 as $EW | 1220 as $W | 46 as $top
       | ($m.labels) as $L
-      | ($m.exits | to_entries | map({key: .value.key, value: .key}) | from_entries) as $exitIdx
       | ($m.accounts | map(select(.status != "disabled"))) as $active
       | ($active | map(select(.protocols == "all"))) as $groupA
       | ($active | map(select(.protocols != "all"))) as $groupB
+      # 出口从上到下按进来的线出自账号栏哪一段排：上段（全部协议、指定出口）记 0，中段（跟随默认、入站直接决定）记 1，下段（部分协议、
+      # 指定出口）记 2，取平均，一样的按配置顺序，没有线的放最后。指定出口的账号再按这个顺序排，两边同序，线就不交叉
+      | (([$groupA[] | select(.exit != null) | .exit] | unique | map({exit: ., s: 0}))
+         + (if ([$active[] | select(.exit == null)] | length) > 0 then [$m.flows[] | {exit, s: 1}] else [] end)
+         + [$m.inboundExits[]? | . as $e | select($m.inbounds | any(.id == $e.inbound)) | {exit, s: 1}]
+         + ([$groupB[] | select(.exit != null) | .exit] | unique | map({exit: ., s: 2}))) as $slots
+      | ($m.exits | to_entries | map(.value.key as $k | [$slots[] | select(.exit == $k) | .s] as $ss
+          | {key: $k, o: .key, s: (if ($ss | length) > 0 then ($ss | add / length) else 3 end)})
+        | sort_by(.s, .o) | to_entries | map({key: .value.key, value: .key}) | from_entries) as $exitIdx
       | ($groupA | map(select(.exit != null)) | sort_by($exitIdx[.exit])) as $pinA
       | ($groupA | map(select(.exit == null))) as $folA
       | ($groupB | map(select(.exit == null)) | sort_by(.protocols)) as $folB
@@ -126,13 +134,17 @@ topoRenderHtml() {
 
       # 每个出口按进来的线数定高，线的终点在出口左边缘上错开 21 像素，终点的标签就不会叠在一起
       | ($m.exits | reduce .[] as $x ({list: [], k: 0};
-          if $x.key == "direct" then .list += [$x + {idx: 0}] else .list += [$x + {idx: (1 + (.k % 4))}] | .k += 1 end) | .list) as $exits1
+          if $x.key == "direct" then .list += [$x + {idx: 0}] else .list += [$x + {idx: (1 + (.k % 4))}] | .k += 1 end) | .list
+        | sort_by($exitIdx[.key])) as $exits1
       | ($exits1 | map(. as $x | ([$edges0[] | select(.exit == $x.key)] | length) as $cnt
           | . + {nIn: $cnt, eh: ([(if (.host2 // "") != "" and (.note // "") != "" then 90 else 72 end), 21 * $cnt + 10] | max)})) as $exits2
-      | (($exits2 | map(.eh) | add // 0)) as $sumH
-      | (($exits2 | length) - 1) as $gaps
-      | (if $gaps > 0 and (($bottom - $top - $sumH) / $gaps) > 18 then ($bottom - $top - $sumH) / $gaps else 18 end) as $egap
-      | ($exits2 | reduce .[] as $x ({list: [], y: $top}; .list += [$x + {y: .y}] | .y += $x.eh + $egap) | .list) as $exits
+      # 出口中心尽量对着进来的线起点的平均高度，线接近水平；挤不下往下推，推出左边两栏底部的往上收，但不高过顶
+      | ([$bottom, ($itop + $ispan)] | max) as $colBottom
+      | ($exits2 | map(. as $x | [$edges0[] | select(.exit == $x.key) | .y1] as $ys
+          | . + {want: (if ($ys | length) > 0 then ($ys | add / length) - .eh / 2 else null end)})
+        | reduce .[] as $x ({list: [], y: $top}; ([$x.want // .y, .y] | max) as $y | .list += [$x + {y: $y}] | .y = $y + $x.eh + 18) | .list
+        | reverse | reduce .[] as $x ({list: [], lim: $colBottom}; ([$x.y, .lim - $x.eh] | min) as $y | .list = [$x + {y: $y}] + .list | .lim = $y - 18) | .list
+        | reduce .[] as $x ({list: [], y: $top}; ([$x.y, .y] | max) as $y | .list += [$x + {y: $y}] | .y = $y + $x.eh + 18) | .list) as $exits
       | ($exits | map(select(.bad != true))) as $goodExits
       | ([$exits[] | . as $x | [$edges0[] | select(.exit == $x.key)] | sort_by(.y1) | to_entries[]
           | .value + {y2: ($x.y + ($x.eh - 21 * $x.nIn) / 2 + 10.5 + 21 * .key), idx: $x.idx}]) as $edges
