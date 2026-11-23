@@ -72,10 +72,11 @@ Description: Multi-Protocol Proxy Script
 21.切换语言 / Switch Language
 22.Script Version Management
 23.System Doctor (read-only)
+24.Routing Overview (read-only)
 ==============================================================
 ```
 
-For historical reasons, 10, 13, 14 and 15 are gaps left by removed or hidden
+For historical reasons, 10, 11, 13, 14 and 15 are gaps left by removed or hidden
 entries.
 
 Four subcommands run and exit without entering the menu:
@@ -89,7 +90,7 @@ V2RAY_LANG=en pasly
 
 ## Protocols
 
-12 installable protocols:
+14 installable protocols:
 
 | Family | Protocols |
 |---|---|
