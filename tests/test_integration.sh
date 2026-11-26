@@ -1490,7 +1490,7 @@ assert_equals "未检测到已安装核心" "$(doctor_cert_rows "")" "doctor 证
 rm -rf "${DOCTOR_TLS}"
 
 # --- doctor：在用证书与配置安全。真 openssl 造证书，函数原文执行 ---
-DS_FNS=$(sed -n '/^_doctorConfigFiles() {/,/^}/p;/^_doctorJqFiles() {/,/^}/p;/^_doctorCertsInUse() {/,/^}/p;/^_doctorCheckOneCert() {/,/^}/p;/^_doctorCheckCert() {/,/^}/p;/^auditUuidWeak() {/,/^}/p;/^_doctorCheckSecurity() {/,/^}/p;/^_doctorCheckConfig() {/,/^}/p;/^verifyCertExpiry() {/,/^}/p;/^verifyCertKeyMatch() {/,/^}/p' install.sh)
+DS_FNS=$(sed -n '/^_doctorConfigFiles() {/,/^}/p;/^_doctorJqFiles() {/,/^}/p;/^_doctorCertsInUse() {/,/^}/p;/^_doctorCheckOneCert() {/,/^}/p;/^_doctorCheckCert() {/,/^}/p;/^auditUuidWeak() {/,/^}/p;/^_doctorCheckSecurity() {/,/^}/p;/^_doctorCheckConfig() {/,/^}/p;/^_doctorCheckRealityLocalDest() {/,/^}/p;/^verifyCertExpiry() {/,/^}/p;/^verifyCertKeyMatch() {/,/^}/p' install.sh)
 DC_ROOT="${MOCK_ROOT}/doctor-sec.root"
 DS_CA="${MOCK_ROOT}/doctor-sec.ca"
 rm -rf "${DS_CA}" && mkdir -p "${DS_CA}"
@@ -1512,11 +1512,12 @@ dc_use() {
 }
 # run_dc FUNC → 打印 状态|行名|详情
 run_dc() {
-    env PROXY_AGENT_DIR="${DC_ROOT}" V2RAY_LANG=en DS_FNS="${DS_FNS}" DS_CORE="${DS_CORE:-1}" DS_HOST="${DS_HOST:-}" bash -c '
+    env PROXY_AGENT_DIR="${DC_ROOT}" V2RAY_LANG=en DS_FNS="${DS_FNS}" DS_CORE="${DS_CORE:-1}" DS_HOST="${DS_HOST:-}" DS_LISTEN="${DS_LISTEN:-}" bash -c '
         source lib/i18n.sh; source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh
         eval "${DS_FNS}"
         _doctorSection() { :; }; _doctorRow() { printf "%s|%s|%s\n" "$2" "$1" "$3"; }
         echoContent() { :; }
+        listeningPorts() { printf "%s\n" ${DS_LISTEN}; }
         coreKind=${DS_CORE} currentHost=${DS_HOST} currentInstallProtocolType=",0,"
         "$1"' _ "$1" 2>&1
 }
@@ -1596,6 +1597,20 @@ dc_reset
 printf '%s\n' '{}' >"${DC_ROOT}/xray/conf/ok.json"
 : >"${DC_ROOT}/xray/conf/empty.json"
 assert_contains "$(run_dc _doctorCheckConfig)" "fail|Config file validation|1/2 invalid: empty.json" "doctor 配置：空文件算坏（jq -e . 对空输入返回 0，放过去了）"
+# doctor 配置：Reality 的目标在回环上（本机域名当目标）时看那个端口有没有人听。Xray 的 7 / 12 写 target，sing-box 的 7 写 handshake
+dc_reset
+printf '%s\n' '{"inbounds":[{"port":443},{"streamSettings":{"realitySettings":{"target":"127.0.0.1:31305"}}}]}' >"${DC_ROOT}/xray/conf/07_VLESS_vision_reality_inbounds.json"
+printf '%s\n' '{"inbounds":[{"streamSettings":{"realitySettings":{"target":"127.0.0.1:31305"}}}]}' >"${DC_ROOT}/xray/conf/12_VLESS_XHTTP_inbounds.json"
+assert_contains "$(DS_LISTEN="22 443 31300" run_dc _doctorCheckConfig)" "fail|Reality local target|nothing listens on 127.0.0.1:31305," \
+    "doctor 配置：本机目标的端口没人听红（nginx 没读到 reality_dest.conf，7 与 12 每次握手都断）"
+assert_equals "pass|Reality local target|127.0.0.1:31305" "$(DS_LISTEN="22 443 31305" run_dc _doctorCheckConfig | grep 'Reality local target')" \
+    "doctor 配置：本机目标有人听，7 与 12 同一个端口只报一行"
+printf '%s\n' '{"inbounds":[{"port":443},{"streamSettings":{"realitySettings":{"target":"dl.google.com:443"}}}]}' >"${DC_ROOT}/xray/conf/07_VLESS_vision_reality_inbounds.json"
+rm -f "${DC_ROOT}/xray/conf/12_VLESS_XHTTP_inbounds.json"
+assert_equals "" "$(run_dc _doctorCheckConfig | grep 'Reality local target')" "doctor 配置：目标是外站时没有这一行"
+printf '%s\n' '{"inbounds":[{"tls":{"reality":{"handshake":{"server":"127.0.0.1","server_port":31305}}}}]}' >"${DC_ROOT}/sing-box/conf/config/07_VLESS_vision_reality_inbounds.json"
+assert_contains "$(DS_CORE=2 DS_LISTEN="443" run_dc _doctorCheckConfig)" "fail|Reality local target|nothing listens on 127.0.0.1:31305," \
+    "doctor 配置：sing-box 的 7 以本机域名为目标时也查"
 rm -rf "${DC_ROOT}" "${DS_CA}"
 
 OVERRIDE_LAYOUT=$(env PROXY_AGENT_DIR=/tmp/pa-override bash -c \

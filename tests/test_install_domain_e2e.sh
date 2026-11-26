@@ -757,5 +757,6 @@ assert_equals "200" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --re
     "回环上的目标有 nginx 应答：它读到了安装时才写的 reality_dest.conf"
 assert_equals "204" "$(probeXhttpLink "$(grep -m1 -oE 'vless://[^ ]*security=reality[^ ]*type=xhttp[^ ]*' <<<"${p1Out}")")" \
     "个性化装 0,12 后 12 真握手、经它访问外网"
+assert_contains "$(doctorClean "个性化装 0,12")" "[PASS] Reality local target — 127.0.0.1:31305" "doctor：回环上的 Reality 目标有人听"
 
 e2eSummary "带域名的真装机端到端测试" "${E2E_LOG}"

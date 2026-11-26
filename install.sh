@@ -18241,6 +18241,27 @@ _doctorCheckConfig() {
         fi
     fi
     _doctorRow "$(t DOCTOR_CHECK_PROTOCOLS)" pass "${count}"
+    _doctorCheckRealityLocalDest
+}
+
+# _doctorCheckRealityLocalDest → 目标是本机域名（在 127.0.0.1 上）的 Reality 入站，那个端口得有人听：
+# 没人听时每次握手都断，安装、内核日志、客户端都看不出原因。没有这类入站不出这一行
+_doctorCheckRealityLocalDest() {
+    local files=() ports port listening down=
+    mapfile -t files < <(_doctorConfigFiles)
+    ports=$(_doctorJqFiles '.inbounds[]?
+        | (.streamSettings.realitySettings.target // empty | strings | select(startswith("127.0.0.1:")) | ltrimstr("127.0.0.1:")),
+          (.tls.reality.handshake // empty | select(.server == "127.0.0.1") | .server_port | tostring)' "${files[@]}" | sort -u)
+    [[ -n "${ports}" ]] || return 0
+    listening=$(listeningPorts tcp)
+    while IFS= read -r port; do
+        portListed "${port}" "${listening}" || down+="${down:+, }127.0.0.1:${port}"
+    done <<<"${ports}"
+    if [[ -n "${down}" ]]; then
+        _doctorRow "$(t DOCTOR_CHECK_REALITY_DEST)" fail "$(t DOCTOR_DETAIL_REALITY_DEST_DOWN "${down}")"
+    else
+        _doctorRow "$(t DOCTOR_CHECK_REALITY_DEST)" pass "127.0.0.1:${ports//$'\n'/, 127.0.0.1:}"
+    fi
 }
 
 _doctorCheckNetwork() {
