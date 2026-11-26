@@ -15848,7 +15848,6 @@ customXrayInstall() {
         fi
         if anyProtocolRequiresTLS "${selectCustomInstallType}"; then
             updateRedirectNginxConf
-            handleNginx start
         fi
 
         # 安装Xray
@@ -15864,6 +15863,10 @@ customXrayInstall() {
 
         # 端口自检停过旁挂的 sing-box（链式、6 / 9），重启要连它一起按片段拉回来，只起 Xray 会让它一直停着
         reloadCore
+        # 在 initXrayConfig 之后起：Reality 目标选本机域名时它才写 reality_dest.conf，早起的 nginx 不听回环目标，7 和 12 握手全断
+        if anyProtocolRequiresTLS "${selectCustomInstallType}"; then
+            handleNginx start
+        fi
         # 生成账号
         refreshSubscribeAfterInstall
         checkGFWStatue 11

@@ -5854,6 +5854,26 @@ assert_equals "handleNginx stop" "$(run_csb 14)" "sing-box 只选 SS2022：没�
 assert_equals "handleNginx stop" "$(run_csb 7,14)" "sing-box 选 7、14：同样不要证书，不去起 nginx"
 assert_equals "handleNginx stop|handleNginx stop|handleNginx start" "$(run_csb 0,14)" "sing-box 选了要证书的协议：照常起 nginx"
 
+# run_cxi SELECTION → 自定义安装 Xray 到收尾；initXrayConfig 的桩写 reality_dest.conf（目标选了本机域名），
+# 打印 handleNginx 的调用，起 nginx 时那份文件已在就带 dest
+CX_DIR="${MOCK_ROOT}/customxray"
+run_cxi() {
+    rm -rf "${CX_DIR}" && mkdir -p "${CX_DIR}"
+    env CX_FN="$(sed -n '/^customXrayInstall() {/,/^}/p' install.sh)" CX_DIR="${CX_DIR}" REG_FILE="$(pwd)/lib/protocol-registry.sh" bash -c '
+        eval "${CX_FN}"
+        source "${REG_FILE}"
+        for f in echoContent t validateCustomInstallTokens chainRefuseCoreSwitch readLastInstallationConfig installAbortArm installAbortDisarm installTools \
+            initTLSNginxConfig handleXray installTLS randomPathFunction nginxBlog updateRedirectNginxConf installXray installXrayService cleanUp \
+            syncSidecarTlsDomain installCronTLS reloadCore refreshSubscribeAfterInstall checkGFWStatue showAccounts; do eval "$f() { :; }"; done
+        initXrayConfig() { : >"${CX_DIR}/reality_dest.conf"; }
+        handleNginx() { if [[ -f "${CX_DIR}/reality_dest.conf" ]]; then echo "handleNginx $1 dest"; else echo "handleNginx $1"; fi; }
+        customXrayInstall' <<<"$1" 2>&1 | paste -sd'|' -
+    rm -rf "${CX_DIR}"
+}
+assert_equals "handleNginx stop|handleNginx start dest" "$(run_cxi 0,7,12)" \
+    "Xray 个性化装 0,7,12、目标选本机域名：nginx 在 reality_dest.conf 写完后才起（先起就不听回环目标，7 和 12 握手全断）"
+assert_equals "handleNginx stop" "$(run_cxi 7,12)" "Xray 个性化装只选 7,12：不要证书，不去起 nginx"
+
 # --- 链式与账号菜单的几处：抽真函数，注册表和 JSON 工具都用真的，只桩内核、探测与合并 ---
 # 这些函数里的 heredoc 有顶格的 }，按下一个函数名截
 ah_src() {

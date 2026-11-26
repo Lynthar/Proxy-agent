@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test_install_domain_e2e.sh - 带域名的真装机端到端：以 root 在一次性 Debian 容器里走菜单 1 的 Xray 全部安装，
-# 装订阅、旁挂 Hysteria2、装到一半退出、换域名重装、拼车的页面与补装协议、只留 Reality、换成 sing-box 全部安装，最后卸载并核对残留。
-# 每个节点都拿订阅里发出去的配置真握手。证书由测试 CA 签、预先放进 tls/（脚本的自定义证书路径），ACME 签发不在这条腿里。跑法见 tests/e2e/run.sh
+# 装订阅、旁挂 Hysteria2、装到一半退出、换域名重装、拼车的页面与补装协议、只留 Reality、换成 sing-box 全部安装，卸载核对残留后不开订阅个性化装 0,12。
+# 每个节点都拿发出去的配置真握手。证书由测试 CA 签、预先放进 tls/（脚本的自定义证书路径），ACME 签发不在这条腿里。跑法见 tests/e2e/run.sh
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/e2e/assert.sh"
 
@@ -734,5 +734,28 @@ newPkgs=$(comm -13 "${WORK}/pkgs-before" <(dpkg-query -W -f '${Package}\n' | sor
 echo "装机时新装的软件包：${newPkgs}"
 assert_equals "" "$(tr ' ' '\n' <<<"${newPkgs}" | grep -E '^(exim4|bsd-mailx|inetutils-ping)' || true)" "装机没带进 exim4、bsd-mailx（cron 的推荐包）与 inetutils-ping"
 assert_contains "${u1Out}" "The nginx package" "卸载结尾说明 nginx 软件包还留着"
+
+# ============================================================================
+# 卸载后个性化装 0,12、Reality 目标用本机域名、不开订阅：没有订阅那步重启 nginx，回环上的目标全靠安装流程让 nginx 读到
+# ============================================================================
+
+echo ""
+echo -e "${YELLOW}=== 菜单 2 → 1：卸载后个性化装 0,12，目标用本机域名，不开订阅 ===${NC}"
+placeCert "${DOMAIN_A}"
+# 第一次安装收尾时 aliasInstall 删了 $HOME 下的脚本（lib 与 lang 留着），重新放一份
+cp "${PROJECT_ROOT}/install.sh" "${PROJECT_ROOT}/VERSION" "${HOME}/"
+# 域名、0 的端口（回车 443）、path（回车随机）、UUID、用户名；12：端口回车、本机域名当目标 y、私钥回车生成
+p1Out=$(runMenu "2\n1\n0,12\n${DOMAIN_A}\n\n\n${E2E_UUID}\n${E2E_USER}\n\ny\n\n" "${HOME}/install.sh")
+p1Rc=$?
+[[ ${p1Rc} -ne 0 ]] && tail -n 30 <<<"${p1Out}"
+assert_equals "0" "${p1Rc}" "个性化装 0,12 退出码 0"
+noNoise "个性化装 0,12" "${p1Out}"
+assert_equals "none" "$(subMode)" "没开订阅：收尾不替安装流程重启 nginx"
+assert_equals "127.0.0.1:31305" "$(jq -r '[.inbounds[] | .streamSettings.realitySettings.target // empty][0]' "${XRAY_CONF_DIR}/12_VLESS_XHTTP_inbounds.json" 2>/dev/null)" \
+    "12 以本机域名为目标"
+assert_equals "200" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --resolve "${DOMAIN_A}:31305:127.0.0.1" "https://${DOMAIN_A}:31305/")" \
+    "回环上的目标有 nginx 应答：它读到了安装时才写的 reality_dest.conf"
+assert_equals "204" "$(probeXhttpLink "$(grep -m1 -oE 'vless://[^ ]*security=reality[^ ]*type=xhttp[^ ]*' <<<"${p1Out}")")" \
+    "个性化装 0,12 后 12 真握手、经它访问外网"
 
 e2eSummary "带域名的真装机端到端测试" "${E2E_LOG}"
