@@ -154,8 +154,8 @@ sing-box 的 shadowsocks 出站，还开了 sing-box 特有的 h2mux 多路复�
 
 **它会替你装几样第三方组件**：acme.sh 走官方安装方式，BBR 走第三方脚本，Xray 和
 sing-box 的二进制从各自 GitHub release 拉。sing-box 拉最新稳定版；Xray-core 默认钉在
-v26.3.27——更新的版本拒绝官方 sing-box 客户端的 Reality 握手，脚本自己发的 sing-box 订阅
-会连不上，内核菜单里可以显式装最新版。其余都没有钉版本。伪装站素材是从 GitHub
+v26.11.9，新版先验过再换，内核菜单里可以显式装最新版。这一版的 Reality 要求客户端带
+X25519MLKEM768，sing-box 系客户端要 1.14.5 或更新。其余都没有钉版本。伪装站素材是从 GitHub
 archive 取的 zip，没有校验——它是纯静态文件、不进执行链。
 
 **SELinux enforcing 下菜单会直接退出**并指向 `docs/selinux.md`，这是有意的；`doctor`、`topo` 和定时任务（证书续期等）不受影响。

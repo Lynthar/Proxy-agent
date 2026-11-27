@@ -180,9 +180,9 @@ previous script from `backup/`, or simply leaves the target alone.
 **It installs a few third-party components for you**: acme.sh through its official
 installer, BBR through a third-party script, and the Xray and sing-box binaries
 from their own GitHub releases. sing-box is the latest stable release; Xray-core is
-pinned to v26.3.27 by default, because newer releases reject the Reality handshake
-of official sing-box clients and the sing-box subscriptions this script emits would
-stop connecting (the core menu can install the latest release explicitly). Nothing
+pinned to v26.11.9 by default and only moves after a newer release has been tested
+(the core menu can install the latest release explicitly). Its Reality requires an
+X25519MLKEM768 key share, so sing-box based clients need 1.14.5 or newer. Nothing
 else is version-pinned. The masquerade site assets are a GitHub archive zip with no
 checksum — static files that never enter an execution path.
 

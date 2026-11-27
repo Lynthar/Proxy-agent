@@ -840,9 +840,9 @@ tar -czvf proxy-backup.tar.gz /etc/Proxy-agent/
 
 这个包不含 crontab、服务单元和 `/root/.acme.sh`。
 
-**内核版本：菜单 16。** 先选内核。sing-box 的 **1. 升级** 装最新稳定版。Xray-core 默认钉在 v26.3.27：**16 → 1 → 1**「升级 Xray-core」装的是这个版本，不是 GitHub 最新版。
+**内核版本：菜单 16。** 先选内核。sing-box 的 **1. 升级** 装最新稳定版。Xray-core 默认钉在 v26.11.9：**16 → 1 → 1**「升级 Xray-core」装的是这个版本，不是 GitHub 最新版，更新的版本脚本先验过再换。更新脚本不会替你换内核：已经装好的机器一直用原来的版本，重装或走 16 → 1 → 1 才换。
 
-Xray-core 26.9.9 起（首个稳定版 26.10.21）的 Reality 入站要求客户端带 X25519MLKEM768 密钥份额，官方 sing-box 客户端（含 1.14.x）不带，连接会报 `reality verification failed`，脚本自己发的 sing-box 订阅就连不上 Reality 节点。只用 v2rayN 这类 Xray 内核的客户端、想要最新版的，选 **16 → 1 → 10**「安装最新稳定版」，脚本会打一行警告后照装。Clash 订阅里的 Reality 节点带 `support-x25519mlkem768: true`，mihomo 1.19.9 及以上能连新版（XHTTP 节点要 1.19.22）；旧版脚本生成的订阅没有这一行，走 **7 → 4 → 1** 重建一次。
+这个版本的 Reality 入站要求客户端带 X25519MLKEM768 密钥份额（Xray-core 26.9.9 起都这样），旧客户端不带，连接会报 `reality verification failed`。基于 sing-box 的客户端（sing-box 官方客户端、Hiddify、Karing 这类）要 1.14.5 或更新。Clash 订阅里的 Reality 节点带 `support-x25519mlkem768: true`，mihomo 1.19.9 及以上能连（XHTTP 节点要 1.19.22）；旧版脚本生成的订阅没有这一行，走 **7 → 4 → 1** 重建一次。Xray 内核的客户端（v2rayN、v2rayNG）要内核 25.5.16 或更新，实测 25.4.30 连不上。想装 GitHub 上更新的版本，选 **16 → 1 → 10**「安装最新稳定版」，脚本会打一行警告后照装。
 
 ### 从旧版本升级
 
@@ -945,19 +945,19 @@ Xray-core 26.9.9 起（首个稳定版 26.10.21）的 Reality 入站要求客户
 
 **要不要处理**：不用。手改过 `subscribe.conf` 的，改动会被覆盖（重装时同样会覆盖）。
 
-#### Xray-core「升级」会装回 v26.3.27
+#### Xray-core 换到 v26.11.9 之后，有人连不上 Reality
 
-**适用对象**：用 Xray 内核、且装有 Reality（VLESS+Reality+Vision 或 XHTTP）的用户。
+**适用对象**：用 Xray 内核、装有 Reality（VLESS+Reality+Vision 或 XHTTP），重装过或走 16 → 1 → 1 把内核换成 v26.11.9 的用户。
 
-**现象**：更新脚本后走 16 → 1 → 1「升级 Xray-core」，提示「将把 Xray-core 从 v26.10.x 换成 v26.3.27」。
+**现象**：一部分人连 Reality 节点失败，客户端报 `reality verification failed` 或握手超时，同一台机器上的别的协议正常。
 
-**原因**：见[更新、回退与备份](#更新回退与备份)的内核版本一段。v26.3.27 是最后一个两边都能连的稳定版。
+**原因**：v26.11.9 的 Reality 要求客户端带 X25519MLKEM768，旧客户端不带，见[更新、回退与备份](#更新回退与备份)的内核版本一段。最常见的是 1.14.5 之前的 sing-box 系客户端。
 
 **要不要处理**：
 
-- 有人用 sing-box 系客户端（sing-box、SFI / SFA、Karing 这类）连你的 Reality 节点：按提示换成 v26.3.27。
-- 只有 Xray 系客户端：可以留在新版，或用 16 → 1 → 10 显式装最新版。
-- sing-box 上游修复发布后脚本会解钉，届时「升级」重新指向最新版。
+- 让这些人把客户端升到上面说的版本。
+- 一时升不了的，可以先走 16 → 1 → 3 回退到 v26.3.27，等他们升完再走 16 → 1 → 1 换回来。
+- VMess（WS）节点从这一版起写明加密方式：Clash 节点写 `cipher: auto`，sing-box 节点和分享链接写 `aes-128-gcm`。Xray-core 26.7.11 起服务端不再接受 none / zero，而旧版脚本发的 Clash 节点写的是 `none`，sing-box 节点和分享链接没写，sing-box 系客户端在 TLS 上会自己换成 zero。换内核前走 **7 → 4 → 1** 重建一次订阅，不然 Clash 系、sing-box 系客户端连 VMess 都会断；手动导过链接的要重新导。
 
 #### Cloudflare WARP：`apt update` 可能有 legacy keyring 警告
 
@@ -1400,9 +1400,9 @@ apt-key del <fingerprint>
 - <details>
   <summary><b>1. Xray-core</b></summary>
 
-  - **1. 升级 Xray-core**：装钉住的版本（v26.3.27）
+  - **1. 升级 Xray-core**：装钉住的版本（v26.11.9）
   - **2. 升级 Xray-core 预览版**：打一行警告后安装
-  - **3. 回退 Xray-core**：只列不高于钉住版本 v26.3.27 的最近五个正式版，更新的版本走 2
+  - **3. 回退 Xray-core**：只列不高于钉住版本 v26.11.9 的最近五个正式版，更新的版本走 2
   - **4. 关闭 Xray-core**
   - **5. 打开 Xray-core**
   - **6. 重启 Xray-core**

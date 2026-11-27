@@ -65,9 +65,9 @@ readonly CARPOOL_PAGE_DIR="${SUBSCRIBE_DIR}/carpool"
 # domain_resolver 与新格式 DNS server（{type,tag}），故必须 1.12+
 readonly SINGBOX_MIN_VERSION="1.12.0"
 
-# Reality 入站显式写的最低客户端版本。Xray-core 26.7 起未写时默认 26.3.27，会拒掉脚本自己
-# 发的 sing-box/clash 订阅（sing-box 系客户端报 1.8.1、mihomo 报 1.8.2）；只用 Xray 客户端、
-# 想跟随 Xray 收紧策略的用户可手动改成 26.3.27
+# Reality 入站显式写的最低客户端版本。Xray-core 26.7.11、26.7.28 两个预发布未写时默认 26.3.27，会拒掉脚本自己
+# 发的 sing-box/clash 订阅（sing-box 1.14.4 及更早报 1.8.1、mihomo 与 1.14.5 起的 sing-box 报 1.8.2）；26.9.9 起没有默认值。
+# 只用 Xray 客户端、想收紧的用户可手动改成 26.3.27
 readonly REALITY_MIN_CLIENT_VER="1.8.0"
 # Reality 目标选本机域名时转交连接的落点：nginx 只在回环上听、用这个域名的证书。不指订阅端口（订阅一改一删 Reality 就断），
 # 也不经公网 IP 回连自己（云上的 1:1 NAT 常常不回环）。避开端口池、链式桥与拼车 API 段、nginx 的 31300 / 31302 回落
@@ -75,10 +75,12 @@ readonly REALITY_LOCAL_DEST_PORT=31305
 # 15（VLESS+XHTTP+TLS）的入站只在回环上听，nginx 的 h2 块按路径 grpc_pass 到这里。与上面同样避开那些段，也避开 sing-box 11 的 31306
 readonly XHTTP_TLS_LOCAL_PORT=31307
 
-# Xray-core 默认钉在官方 sing-box 客户端还能完成 REALITY 握手的最后一个稳定版：26.9.9 起（首个稳定版 26.10.21）服务端要求
-# ClientHello 带 X25519MLKEM768 份额，sing-box 会剥掉它（SagerNet/sing-box#4520），脚本发的 sing-box 订阅在 7/12 上报
-# reality verification failed。升级菜单可显式装最新版；sing-box 修好前别动
-readonly XRAY_PINNED_VERSION="v26.3.27"
+# Xray-core 的默认版本。26.9.9 起 REALITY 服务端要求 ClientHello 带 X25519MLKEM768 份额，官方 sing-box 1.14.5 才不再剥掉它
+# （SagerNet/sing-box#4520）：更早的 sing-box 系客户端连 7 / 12 报 reality verification failed。升级菜单装这个版本
+readonly XRAY_PINNED_VERSION="v26.11.9"
+# Xray 直连出站的 finalRules：26.10.31 起 freedom 把 NAT64 前缀算进私有段，经 vless / vmess / trojan 进来的连接拨到它就进黑洞，
+# 纯 IPv6、靠 DNS64 出 IPv4 的机器上几乎全断。用户规则排在默认规则前面；更早的 Xray 不认这个字段，照常加载
+readonly XRAY_DIRECT_FINAL_RULES='[{"action":"allow","ip":["64:ff9b::/96","64:ff9b:1::/48"]}]'
 
 # nginx.org 官网（linux_packages.html）公布的软件包签名钥指纹：Debian / Ubuntu 配 nginx.org 源前，下到的钥文件里必须有这一把
 readonly NGINX_SIGNING_KEY_FPR="573BFD6B3D8FBC641079A6ABABF5BD827BD9BF62"

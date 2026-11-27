@@ -2678,7 +2678,7 @@ location /${1}xhttp/ {
 		client_body_timeout 5m;
 		grpc_read_timeout 315s;
 		grpc_send_timeout 5m;
-		grpc_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+		grpc_set_header X-Forwarded-For \$remote_addr;
 		grpc_pass grpc://127.0.0.1:${XHTTP_TLS_LOCAL_PORT};
 	}
 EOF
@@ -4581,6 +4581,14 @@ ensureXrayDirectStrategy() {
     fi
 }
 
+# ensureXrayDirectFinalRules → 老安装的 z_direct_outbound 补上 XRAY_DIRECT_FINAL_RULES；已经有 finalRules 的（手改过的）不动
+ensureXrayDirectFinalRules() {
+    local file="${XRAY_CONF_DIR}/z_direct_outbound.json"
+    [[ -f "${file}" ]] || return 0
+    jq -e 'any(.outbounds[]?; .tag == "z_direct_outbound" and (.settings.finalRules == null))' "${file}" >/dev/null 2>&1 || return 0
+    jsonModifyFile "${file}" "(.outbounds[] | select(.tag == \"z_direct_outbound\")).settings.finalRules = ${XRAY_DIRECT_FINAL_RULES}" false
+}
+
 # localBlockApiPort → 拼车统计 API 的端口（12_stats_api.json 的 api.listen），没开拼车时为空
 localBlockApiPort() {
     local file="${XRAY_CONF_DIR}/12_stats_api.json"
@@ -4809,6 +4817,7 @@ handleXray() {
         ensureXrayLogPaths
         ensureRealityMinClientVer
         ensureXrayDirectStrategy
+        ensureXrayDirectFinalRules
         ensureCorePortTargets || echoContent yellow " ---> $(t CORE_PORT_TARGET_FAILED)"
         ensureCarpoolXray
         # 旧入口状态先转成现在的形状、旧分流工具的文件删掉，改了就把 sing-box 一起重启：下面写的 Xray 路由要和它的路由成对生效
@@ -5776,7 +5785,8 @@ migrateChainRouteResolve() {
 addXrayOutbound() {
     local tag=$1 body
     case "${tag}" in
-        *direct*) body=$(jq -n --arg t "${tag}" '{outbounds: [{protocol: "freedom", settings: {domainStrategy: "UseIP"}, tag: $t}]}') ;;
+        *direct*) body=$(jq -n --arg t "${tag}" --argjson r "${XRAY_DIRECT_FINAL_RULES}" \
+            '{outbounds: [{protocol: "freedom", settings: {domainStrategy: "UseIP", finalRules: $r}, tag: $t}]}') ;;
         *blackhole*) body=$(jq -n --arg t "${tag}" '{outbounds: [{protocol: "blackhole", tag: $t}]}') ;;
         *) return 1 ;;
     esac
@@ -6194,6 +6204,9 @@ EOF
 		"wsSettings": {
 		  "acceptProxyProtocol": true,
 		  "path": "/${customPath}ws"
+		},
+		"sockopt": {
+		  "trustedXForwardedFor": ["X-Forwarded-For"]
 		}
 	  }
 	}
@@ -6280,6 +6293,9 @@ EOF
 		"xhttpSettings": {
 		  "path": "/${customPath}xhttp",
 		  "mode": "auto"
+		},
+		"sockopt": {
+		  "trustedXForwardedFor": ["X-Forwarded-For"]
 		}
 	  }
 	}
@@ -6308,6 +6324,9 @@ EOF
             "wsSettings": {
               "acceptProxyProtocol": true,
               "path": "/${customPath}vws"
+            },
+            "sockopt": {
+              "trustedXForwardedFor": ["X-Forwarded-For"]
             }
           }
         }
@@ -7016,11 +7035,11 @@ EOF
         shareQrCode " ---> 二维码 VLESS(VLESS+TCP+TLS_Vision)" "$(tail -n 1 "${SUBSCRIBE_LOCAL_DIR}/default/${user}")"
 
     elif [[ "${type}" == "vmessws" ]]; then
-        qrCodeBase64Default=$(echo -n "{\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"ws\",\"add\":\"${add}\",\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}" | base64 | tr -d '\n')
+        qrCodeBase64Default=$(echo -n "{\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"ws\",\"add\":\"${add}\",\"scy\":\"aes-128-gcm\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}" | base64 | tr -d '\n')
         qrCodeBase64Default="${qrCodeBase64Default// /}"
 
         echoContent yellow " ---> 通用json(VMess+WS+TLS)"
-        echoContent green "    {\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"ws\",\"add\":\"${add}\",\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}\n"
+        echoContent green "    {\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"ws\",\"add\":\"${add}\",\"scy\":\"aes-128-gcm\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}\n"
         echoContent yellow " ---> 通用vmess(VMess+WS+TLS)链接"
         echoContent green "    vmess://${qrCodeBase64Default}\n"
 
@@ -7034,7 +7053,7 @@ EOF
     port: ${port}
     uuid: ${id}
     alterId: 0
-    cipher: none
+    cipher: auto
     udp: true
     tls: true
     client-fingerprint: chrome
@@ -7045,8 +7064,9 @@ EOF
       headers:
         Host: ${currentHost}
 EOF
-        # xudp 两种服务端都认；packetaddr 只有 sing-box 认，Xray 上 UDP 全丢
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vmess\",\"server\":\"${add}\",\"server_port\":${port},\"uuid\":\"${id}\",\"alter_id\":0,\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"packet_encoding\":\"xudp\",\"transport\":{\"type\":\"ws\",\"path\":\"${path}\",\"max_early_data\":2048,\"early_data_header_name\":\"Sec-WebSocket-Protocol\"}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
+        # xudp 两种服务端都认；packetaddr 只有 sing-box 认，Xray 上 UDP 全丢。security 不能留给 auto：
+        # sing-box 在 TLS 上把它换成 zero，Xray 26.7.11 起的服务端拒收（unknown security type）
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vmess\",\"server\":\"${add}\",\"server_port\":${port},\"uuid\":\"${id}\",\"alter_id\":0,\"security\":\"aes-128-gcm\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"packet_encoding\":\"xudp\",\"transport\":{\"type\":\"ws\",\"path\":\"${path}\",\"max_early_data\":2048,\"early_data_header_name\":\"Sec-WebSocket-Protocol\"}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
 
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
@@ -7091,12 +7111,12 @@ EOF
         pqvParamQr=$(realityPqvParam "${currentRealityMldsa65Verify}" qr)
 
         echoContent yellow " ---> 通用格式(VLESS+reality+XHTTP)"
-        echoContent green "    vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality${pqvParam}&type=xhttp&sni=${xrayVLESSRealityXHTTPServerName}&host=${xrayVLESSRealityXHTTPServerName}&fp=chrome&path=${path}&pbk=${currentRealityXHTTPPublicKey}&sid=${currentRealityXHTTPShortId}#${email}\n"
+        echoContent green "    vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality${pqvParam}&type=xhttp&sni=${xrayVLESSRealityXHTTPServerName}&host=${xrayVLESSRealityXHTTPServerName}&fp=chrome&path=${path}&pbk=${currentRealityXHTTPPublicKey}&sid=${currentRealityXHTTPShortId}&support-x25519mlkem768=true#${email}\n"
 
         echoContent yellow " ---> 格式化明文(VLESS+reality+XHTTP)"
         echoContent green "协议类型:VLESS reality，地址:$(getPublicIP)，publicKey:${currentRealityXHTTPPublicKey}，shortId: ${currentRealityXHTTPShortId}${currentRealityMldsa65Verify:+，pqv=${currentRealityMldsa65Verify}}，serverNames：${xrayVLESSRealityXHTTPServerName}，端口:${port}，路径：${path}，SNI:${xrayVLESSRealityXHTTPServerName}，伪装域名:${xrayVLESSRealityXHTTPServerName}，用户ID:${id}，传输方式:xhttp，账户名:${email}\n"
         cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/default/${user}"
-vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality${pqvParam}&type=xhttp&sni=${xrayVLESSRealityXHTTPServerName}&fp=chrome&path=${path}&pbk=${currentRealityXHTTPPublicKey}&sid=${currentRealityXHTTPShortId}#${email}
+vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality${pqvParam}&type=xhttp&sni=${xrayVLESSRealityXHTTPServerName}&fp=chrome&path=${path}&pbk=${currentRealityXHTTPPublicKey}&sid=${currentRealityXHTTPShortId}&support-x25519mlkem768=true#${email}
 EOF
 
         # clashMeta（mihomo）订阅：reality-opts 必须含 publicKey + shortId，否则 clashMeta 客户端连不上 Reality；
@@ -7276,12 +7296,12 @@ EOF
             publicKey=${singBoxVLESSRealityPublicKey}
         fi
         echoContent yellow " ---> 通用格式(VLESS+reality+uTLS+Vision)"
-        echoContent green "    vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality${pqvParam}&type=tcp&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=${currentRealityShortId}&flow=xtls-rprx-vision#${email}\n"
+        echoContent green "    vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality${pqvParam}&type=tcp&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=${currentRealityShortId}&flow=xtls-rprx-vision&support-x25519mlkem768=true#${email}\n"
 
         echoContent yellow " ---> 格式化明文(VLESS+reality+uTLS+Vision)"
         echoContent green "协议类型:VLESS reality，地址:$(getPublicIP)，publicKey:${publicKey}，shortId: ${currentRealityShortId}${currentRealityMldsa65Verify:+，pqv=${currentRealityMldsa65Verify}}，serverNames：${realityServerName}，端口:${port}，用户ID:${id}，传输方式:tcp，账户名:${email}\n"
         cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/default/${user}"
-vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality${pqvParam}&type=tcp&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=${currentRealityShortId}&flow=xtls-rprx-vision#${email}
+vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality${pqvParam}&type=tcp&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=${currentRealityShortId}&flow=xtls-rprx-vision&support-x25519mlkem768=true#${email}
 EOF
         # support-x25519mlkem768 不写时 mihomo 会剥掉 ML-KEM 份额，Xray ≥ 26.9.9 的 Reality 按认证失败处理
         cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/clashMeta/${user}"
@@ -7359,11 +7379,11 @@ EOF
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
         shareQrCode " ---> 二维码 Naive(TLS)" "$(tail -n 1 "${SUBSCRIBE_LOCAL_DIR}/default/${user}")"
     elif [[ "${type}" == "vmessHTTPUpgrade" ]]; then
-        qrCodeBase64Default=$(echo -n "{\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"httpupgrade\",\"add\":\"${add}\",\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}" | base64 | tr -d '\n')
+        qrCodeBase64Default=$(echo -n "{\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"httpupgrade\",\"add\":\"${add}\",\"scy\":\"auto\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}" | base64 | tr -d '\n')
         qrCodeBase64Default="${qrCodeBase64Default// /}"
 
         echoContent yellow " ---> 通用json(VMess+HTTPUpgrade+TLS)"
-        echoContent green "    {\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"httpupgrade\",\"add\":\"${add}\",\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}\n"
+        echoContent green "    {\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"httpupgrade\",\"add\":\"${add}\",\"scy\":\"auto\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}\n"
         echoContent yellow " ---> 通用vmess(VMess+HTTPUpgrade+TLS)链接"
         echoContent green "    vmess://${qrCodeBase64Default}\n"
 
@@ -12137,9 +12157,10 @@ writeXrayChainConfig() {
     state=$(chainAccountReadState) || return 1
     bridges=$(chainAccountBridges "${state}") || return 1
     # 直连走链式自己的 chain_direct，不跟 z_direct_outbound 的解析策略。它不能排第一，Xray 把第一个出站当默认
-    outbounds=$(jq -n --argjson port "${port}" --argjson bridges "${bridges}" '
+    outbounds=$(jq -n --argjson port "${port}" --argjson bridges "${bridges}" --argjson r "${XRAY_DIRECT_FINAL_RULES}" '
         def socksOut($tag; $p): {tag: $tag, protocol: "socks", settings: {servers: [{address: "127.0.0.1", port: $p}]}};
-        {outbounds: ([socksOut("chain_proxy"; $port)] + [$bridges[] | socksOut("chain_proxy_" + .name; .port)] + [{tag: "chain_direct", protocol: "freedom"}])}') || return 1
+        {outbounds: ([socksOut("chain_proxy"; $port)] + [$bridges[] | socksOut("chain_proxy_" + .name; .port)]
+            + [{tag: "chain_direct", protocol: "freedom", settings: {finalRules: $r}}])}') || return 1
     if [[ "$(jq -cS . "${XRAY_CONF_DIR}/chain_outbound.json" 2>/dev/null)" != "$(jq -cS . <<<"${outbounds}")" ]]; then
         jsonWriteFile "${XRAY_CONF_DIR}/chain_outbound.json" "${outbounds}" false || return 1
     fi
@@ -15183,6 +15204,10 @@ parseVmessLink() {
     [[ "${value}" == "1" || "${value}" == "true" ]] && insecure=true
     value=$(_vmessField "${json}" sni)
     tls=$(_linkTlsJson "$(_vmessField "${json}" tls)" "${value:-${hostHeader:-${host}}}" "$(_vmessField "${json}" fp)" "$(_vmessField "${json}" alpn)" "${insecure}" "" "") || return 1
+    # sing-box 在 TLS 上把 auto（或不写）换成 zero，Xray 26.7.11 起的服务端拒收：换成 Xray 客户端的 auto 会选的那种
+    if [[ "${tls}" != "null" && ( -z "${security}" || "${security}" == "auto" ) ]]; then
+        security=aes-128-gcm
+    fi
     transport=$(_linkTransportJson "$(_vmessField "${json}" net)" "$(_vmessField "${json}" path)" "${hostHeader}" "$(_vmessField "${json}" path)") || return 1
 
     jq -n --arg name "${name:-VMess-${host}}" --arg server "${host}" --argjson port "${port}" --arg uuid "${uuid}" --argjson alterId "$((10#${alterId:-0}))" \

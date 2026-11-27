@@ -173,7 +173,7 @@ assert_equals "yes" "$([[ -x "${CORE_BIN}" ]] && echo yes || echo no)" "${CORE_L
 assert_equals "0" "$("${CORE_BIN}" version >/dev/null 2>&1; echo $?)" "${CORE_LABEL} 二进制能在本机运行（架构与 libc 都对）"
 if [[ "${E2E_CORE}" == "xray" ]]; then
     assert_equals "yes" "$([[ -s "${INSTALL_ROOT}/xray/geosite.dat" && -s "${INSTALL_ROOT}/xray/geoip.dat" ]] && echo yes || echo no)" "geosite.dat / geoip.dat 已下载"
-    # 默认装的是钉住的版本，不是 GitHub 最新：更新的 Xray-core 会让下面的 sing-box 交叉握手失败
+    # 默认装的是钉住的版本，不跟 GitHub 最新走：新版可能让下面的 sing-box 交叉握手失败，要先验过再升
     pinnedXray=$(sed -n 's/^readonly XRAY_PINNED_VERSION="\(.*\)"$/\1/p' "${PROJECT_ROOT}/lib/constants.sh")
     assert_not_empty "${pinnedXray}" "lib/constants.sh 里有 XRAY_PINNED_VERSION"
     assert_equals "${pinnedXray#v}" "$("${XRAY_BIN}" version 2>/dev/null | head -1 | awk '{print $2}')" "装的是钉住的 Xray-core ${pinnedXray}"
@@ -424,15 +424,14 @@ for localTarget in 127.0.0.1 '[::ffff:127.0.0.1]' 0.0.0.0; do
     assert_equals "000" "$(viaProxyCode --connect-to "${E2E_SNI}:443:${localTarget}:${linkPort}" "https://${E2E_SNI}/")" \
         "经代理连服务端本机 ${localTarget}:${linkPort} 被拦下"
 done
-# 解析到回环的域名：sing-box 在路由里先解析再按 IP 拒；Xray 侧要等解钉后的 freedom 才拦，先不测
-if [[ "${E2E_CORE}" == "singbox" ]]; then
-    assert_equals "127.0.0.1" "$(getent hosts 127-0-0-1.sslip.io | awk '{print $1; exit}')" "对照：127-0-0-1.sslip.io 解析到回环"
-    assert_equals "000" "$(viaProxyCode --connect-to "${E2E_SNI}:443:127-0-0-1.sslip.io:${linkPort}" "https://${E2E_SNI}/")" \
-        "经代理连解析到回环的域名被拦下"
-fi
+# 解析到回环的域名：sing-box 在路由里先解析再按 IP 拒；Xray 由 freedom 的默认规则拦（经 vless 进来的连接，目标解析到私有段就进黑洞）
+assert_equals "127.0.0.1" "$(getent hosts 127-0-0-1.sslip.io | awk '{print $1; exit}')" "对照：127-0-0-1.sslip.io 解析到回环"
+assert_equals "000" "$(viaProxyCode --connect-to "${E2E_SNI}:443:127-0-0-1.sslip.io:${linkPort}" "https://${E2E_SNI}/")" \
+    "经代理连解析到回环的域名被拦下"
 # 本机网卡上的公网地址：经代理连它走 lo、绕过 INPUT 防火墙。挂地址要 NET_ADMIN，只有 Debian 腿有。
-# 规则在核心启动时才读网卡，所以先有一条经代理连得到的对照，重启之后才是被拦下，两种结果分得开
-selfAddr=198.51.100.7
+# 规则在核心启动时才读网卡，所以先有一条经代理连得到的对照，重启之后才是被拦下，两种结果分得开。
+# 地址不能落在 Xray freedom 默认就封的保留段里（198.51.100.0/24 这类文档地址也算），不然对照本身就连不上
+selfAddr=203.0.114.7
 if ip addr add "${selfAddr}/32" dev lo 2>/dev/null; then
     printf 'HTTP/1.0 200 OK\r\n\r\n' >/tmp/proxy-agent-e2e-self.http
     socat "TCP-LISTEN:18081,bind=${selfAddr},fork,reuseaddr" EXEC:"cat /tmp/proxy-agent-e2e-self.http" &

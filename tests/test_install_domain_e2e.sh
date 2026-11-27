@@ -217,7 +217,7 @@ probeSub() {
 }
 
 # probeXhttpLink LINK → 按 XHTTP 分享链接（Reality 或 TLS）起 Xray 客户端（sing-box 没有 XHTTP），经它访问外网，打印 HTTP 状态码；
-# 不是 204 时同 probeOutbound 打出报错
+# 不是 204 时同 probeOutbound 打出报错。TLS 要 useSystemCA：测试 CA 只进了系统信任库，Xray 26.10.21 起客户端默认只认内置根
 probeXhttpLink() {
     local link=$1 query pid code pair key value
     local -A p=()
@@ -239,7 +239,7 @@ probeXhttpLink() {
             streamSettings: ({network: "xhttp", security: $security, xhttpSettings: {path: $path, host: $host}}
                 + if $security == "reality"
                   then {realitySettings: {serverName: $sni, fingerprint: $fp, publicKey: $pbk, shortId: $sid}}
-                  else {tlsSettings: {serverName: $sni, fingerprint: $fp, alpn: [$alpn]}} end)}]}' >"${WORK}/xhttp.json"
+                  else {tlsSettings: {serverName: $sni, fingerprint: $fp, alpn: [$alpn], useSystemCA: true}} end)}]}' >"${WORK}/xhttp.json"
     "${XRAY_BIN}" run -c "${WORK}/xhttp.json" >"${WORK}/xhttp.log" 2>&1 &
     pid=$!
     sleep 2
@@ -573,6 +573,8 @@ assert_equals "200" "$(fetchSub "${DOMAIN_B}" 'v2rayN/7.0' "${WORK}/sub-default.
 xhttpTlsLink=$(base64 -d "${WORK}/sub-default.txt" 2>/dev/null | grep -m1 'security=tls&type=xhttp')
 assert_contains "${xhttpTlsLink}" "path=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' "${XRAY_CONF_DIR}/15_VLESS_XHTTP_TLS_inbounds.json")#" "分享链接的路径就是入站的路径"
 assert_equals "204" "$(probeXhttpLink "${xhttpTlsLink}")" "只有 0 + 15 时 XHTTP+TLS 照样能用"
+assert_equals "" "$(grep -F 'X-Forwarded-For' "${INSTALL_ROOT}/xray/error.log" 2>/dev/null || true)" \
+    "15 经 nginx 进来带着 XFF，Xray 采信它、不记告警（26.6.22 起没配 trustedXForwardedFor 就每个请求记一条）"
 # 单选 15 把 Reality 删了，装回 7 要再答：端口回车、本机域名当目标 y、私钥回车生成
 x2Out=$(runMenu "2\n1\n0,7\ny\n\ny\n\n")
 assert_equals "0" "$?" "去掉 15 退出码 0"

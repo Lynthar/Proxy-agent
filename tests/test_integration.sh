@@ -598,6 +598,29 @@ run_ds yes no UseIP >/dev/null
 assert_equals "" "$(ls "${DS_ROOT}/xray/conf" | grep -v '^z_direct_outbound.json$')" "直连策略：改写后 xray/conf 里不留备份与临时文件"
 assert_equals "freedom|z_direct_outbound" "$(jq -r '.outbounds[0] | "\(.protocol)|\(.tag)"' "${DS_ROOT}/xray/conf/z_direct_outbound.json")" "直连策略：出站的其余字段不动"
 assert_contains "$(sed -n '/^handleXray() {/,/^}/p' install.sh)" "ensureXrayDirectStrategy" "handleXray start 前挂了直连策略修正（存量机器靠它补上）"
+
+# 直连出站放行 NAT64 前缀：老安装启动前补上，新写的直连出站就带着，手改过 finalRules 的不动（原文执行）
+DF_FN=$(sed -n '/^ensureXrayDirectFinalRules() {/,/^}/p;/^addXrayOutbound() {/,/^}/p' install.sh)
+assert_equals "2" "$(grep -cE '^(ensureXrayDirectFinalRules|addXrayOutbound)\(\) \{$' <<<"${DF_FN}")" "抽到直连出站 finalRules 相关的两个函数"
+# run_df JSON|none CALL → 先写 z_direct_outbound.json（none 不建），跑 CALL，打印文件里直连出站的 finalRules
+run_df() {
+    rm -rf "${DS_ROOT}" && mkdir -p "${DS_ROOT}/xray/conf"
+    [[ "$1" == none ]] || printf '%s\n' "$1" >"${DS_ROOT}/xray/conf/z_direct_outbound.json"
+    env PROXY_AGENT_DIR="${DS_ROOT}" DF_FN="${DF_FN}" bash -c '
+        source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh
+        eval "${DF_FN}"
+        '"$2"' || echo "rc=$?"
+        jq -c ".outbounds[] | select(.tag == \"z_direct_outbound\") | .settings.finalRules" "${XRAY_CONF_DIR}/z_direct_outbound.json" 2>/dev/null'
+}
+_dfAllow='[{"action":"allow","ip":["64:ff9b::/96","64:ff9b:1::/48"]}]'
+assert_equals "${_dfAllow}" "$(run_df '{"outbounds":[{"protocol":"freedom","settings":{"domainStrategy":"UseIP"},"tag":"z_direct_outbound"}]}' ensureXrayDirectFinalRules)" \
+    "直连出站：老安装补上放行 NAT64 前缀的 finalRules（26.10.31 起 freedom 把它算私有段，纯 IPv6 + DNS64 的机器经代理几乎全断）"
+assert_equals '[{"action":"block","port":"25"}]' \
+    "$(run_df '{"outbounds":[{"protocol":"freedom","settings":{"finalRules":[{"action":"block","port":"25"}]},"tag":"z_direct_outbound"}]}' ensureXrayDirectFinalRules)" \
+    "直连出站：手改过的 finalRules 不动"
+assert_equals "" "$(run_df none ensureXrayDirectFinalRules)" "直连出站：文件不在时不新建（WARP / IPv6 全局删掉过它）"
+assert_equals "${_dfAllow}" "$(run_df none 'addXrayOutbound z_direct_outbound')" "直连出站：新写的就带着"
+assert_contains "$(sed -n '/^handleXray() {/,/^}/p' install.sh)" "ensureXrayDirectFinalRules" "handleXray start 前挂了 finalRules 补齐（存量机器靠它补上）"
 rm -rf "${DS_ROOT}"
 
 # 内核由哪一版脚本起：起成功才记版本，入口与 doctor 据此提示自更新后还没用上的启动前修正（原文执行，进程、服务与重启桩掉）
@@ -619,7 +642,7 @@ run_cs() {
         xrayDaemonRunning() { [[ -f "${PROXY_AGENT_DIR}/xray.up" ]]; }
         singBoxDaemonRunning() { [[ -f "${PROXY_AGENT_DIR}/sb.up" ]]; }
         reloadCore() { echo RELOAD; }
-        for f in ownCoreBinary labelCoreBinary removeLegacyAllowInsecure ensureXrayLogPaths ensureRealityMinClientVer ensureXrayDirectStrategy ensureCorePortTargets \
+        for f in ownCoreBinary labelCoreBinary removeLegacyAllowInsecure ensureXrayLogPaths ensureRealityMinClientVer ensureXrayDirectStrategy ensureXrayDirectFinalRules ensureCorePortTargets \
             migrateChainEntryState legacyRoutingClear ensureCarpoolXray writeXrayRouting carpoolCollectBeforeStop sleep; do eval "$f() { :; }"; done
         find() { echo found; }
         systemctl() { [[ "$1" == start ]] && touch "${PROXY_AGENT_DIR}/xray.up"; return 0; }
@@ -1222,6 +1245,8 @@ ext_vmess() { run_vps "parseVmessLink 'vmess://$(printf '%s' "$1" | base64 | tr 
 assert_equals '{"name":"a b","type":"vless","server":"203.0.113.9","server_port":443,"uuid":"'"${EXT_UUID}"'","flow":"xtls-rprx-vision","tls":{"enabled":true,"server_name":"www.python.org","utls":{"enabled":true,"fingerprint":"chrome"},"reality":{"enabled":true,"public_key":"PBK","short_id":"ab12"}}}' \
     "$(ext_vless "${EXT_UUID}@203.0.113.9:443?encryption=none&security=reality&type=tcp&sni=www.python.org&fp=chrome&pbk=PBK&sid=ab12&flow=xtls-rprx-vision#a%20b" | jq -c .)" \
     "VLESS 链接：脚本发的 Reality 链接解析成 sing-box 出站，名字解码"
+assert_equals "PBK|ab12" "$(ext_vless "${EXT_UUID}@203.0.113.9:443?encryption=none&security=reality&type=tcp&sni=www.python.org&fp=chrome&pbk=PBK&sid=ab12&flow=xtls-rprx-vision&support-x25519mlkem768=true#a" | jq -r '"\(.tls.reality.public_key)|\(.tls.reality.short_id)"')" \
+    "VLESS 链接：带 support-x25519mlkem768 的 Reality 链接照常解析（sing-box 自己带 ML-KEM，这个参数不用管）"
 assert_equals '{"name":"VLESS-a.example","type":"vless","server":"a.example","server_port":8443,"uuid":"'"${EXT_UUID}"'","tls":{"enabled":true,"server_name":"h.example","utls":{"enabled":true,"fingerprint":"chrome"}},"transport":{"type":"ws","path":"/p/ws","headers":{"Host":"h.example"}}}' \
     "$(ext_vless "${EXT_UUID}@a.example:8443?encryption=none&security=tls&type=ws&host=h.example&fp=chrome&path=%2Fp%2Fws" | jq -c .)" \
     "VLESS 链接：WS 路径解码，没写 sni 时用 host，没写名字时用地址"
@@ -1248,9 +1273,13 @@ for _extCase in \
     assert_contains "${_extOut}" "${_extWant}" "VLESS 链接：拒绝${_extWhy}，并说明是哪一项"
     assert_equals "" "$(grep -F '"type"' <<<"${_extOut}")" "VLESS 链接：拒绝${_extWhy}时不输出节点"
 done
-assert_equals '{"name":"vm","type":"vmess","server":"a.example","server_port":443,"uuid":"'"${EXT_UUID}"'","packet_encoding":"xudp","security":"auto","tls":{"enabled":true,"server_name":"h.example"},"transport":{"type":"ws","path":"/vws","headers":{"Host":"h.example"}}}' \
+assert_equals '{"name":"vm","type":"vmess","server":"a.example","server_port":443,"uuid":"'"${EXT_UUID}"'","packet_encoding":"xudp","security":"aes-128-gcm","tls":{"enabled":true,"server_name":"h.example"},"transport":{"type":"ws","path":"/vws","headers":{"Host":"h.example"}}}' \
     "$(ext_vmess '{"port":443,"ps":"vm","tls":"tls","id":"'"${EXT_UUID}"'","aid":0,"v":2,"host":"h.example","type":"none","path":"/vws","net":"ws","add":"a.example","scy":"auto"}' | jq -c .)" \
-    "VMess 链接：端口是数字也行，sni 缺省用 host，UDP 用 xudp"
+    "VMess 链接：端口是数字也行，sni 缺省用 host，UDP 用 xudp；带 TLS 的 auto 换成 aes-128-gcm（sing-box 会把它换成 Xray 拒收的 zero）"
+assert_equals 'aes-128-gcm|none|chacha20-poly1305|auto' \
+    "$({ for _scy in '' none chacha20-poly1305; do ext_vmess '{"port":443,"id":"'"${EXT_UUID}"'","net":"tcp","tls":"tls","add":"a.example","scy":"'"${_scy}"'"}' | jq -r '.security // "-"'; done; \
+      ext_vmess '{"port":443,"id":"'"${EXT_UUID}"'","net":"tcp","tls":"","add":"a.example","scy":"auto"}' | jq -r '.security // "-"'; } | paste -sd'|' -)" \
+    "VMess 链接：带 TLS 且没写加密也换成 aes-128-gcm；写明的照用；不加密时 auto 照旧（sing-box 只在 TLS 上换）"
 assert_equals '["httpupgrade","/u",7,8443,null]' \
     "$(ext_vmess '{"port":"8443","id":"'"${EXT_UUID}"'","aid":"7","path":"/u","net":"httpupgrade","add":"a.example","tls":""}' | jq -c '[.transport.type, .transport.path, .alter_id, .server_port, .tls]')" \
     "VMess 链接：端口与 aid 是字符串也行，空 tls 不加密"
@@ -3414,6 +3443,8 @@ ca_single '{"accounts": {"alice": "direct", "a.b+c": "chain_1"}}'
 run_ca 'writeXrayChainConfig 31111' >/dev/null 2>&1
 assert_equals "0" "$?" "Xray 侧（一条出口）：写入返回 0"
 assert_equals '["chain_proxy:31111","chain_proxy_chain_1:31112","chain_direct:freedom"]' "$(ca_outs)" "Xray 侧（一条出口）：默认桥的 chain_proxy 打头（第一个出站是默认），链式自己的直连排在最后"
+assert_equals '[{"action":"allow","ip":["64:ff9b::/96","64:ff9b:1::/48"]}]' "$(jq -c '.outbounds[] | select(.tag == "chain_direct") | .settings.finalRules' "${CA_X}/chain_outbound.json")" \
+    "Xray 侧：chain_direct 也放行 NAT64 前缀（经账号指定直连的流量同样走 freedom 的默认封锁）"
 assert_equals '["chain_direct","chain_proxy_chain_1","chain_proxy"]' "$(ca_chain_rules '[.routing.rules[].outboundTag]')" \
     "Xray 侧（一条出口）：按账号 → 兜底进默认桥；直连指向 chain_direct，不靠旧分流工具的全局模式删过的 z_direct_outbound"
 assert_equals '["local-block-port","local-block-ip"]' "$(jq -c '[.routing.rules[0:2][].ruleTag]' "${CA_X}/09_routing.json")" \
@@ -5622,6 +5653,8 @@ run_db 1 vlessReality 443 rea-x uuid1 >/dev/null 2>&1
 run_db 1 vlessXHTTP 8443 rea-y uuid2 example.org /path >/dev/null 2>&1
 assert_equals "2" "$(grep -A3 'reality-opts:' "${DB_SUB}/clashMeta/rea" | grep -c '^      support-x25519mlkem768: true$')" \
     "Clash 订阅：Xray 的 Reality Vision 与 XHTTP 都开 support-x25519mlkem768"
+assert_equals "2" "$(grep -c '^vless://.*security=reality.*&support-x25519mlkem768=true#' "${DB_SUB}/default/rea")" \
+    "分享链接：Reality Vision 与 XHTTP 都带 support-x25519mlkem768（mihomo 吃通用订阅、手动导链接时靠它，不带就连不上新版 Xray）"
 db_reset
 run_db 2 vlessReality 443 rea-x uuid1 >/dev/null 2>&1
 assert_equals "1" "$(grep -A3 'reality-opts:' "${DB_SUB}/clashMeta/rea" | grep -c '^      support-x25519mlkem768: true$')" \
@@ -5659,6 +5692,10 @@ assert_equals "no" "$([[ -s "${DB_SUB}/clashMeta/nv" ]] && echo yes || echo no)"
 db_reset
 run_db 1 vmessws 443 vm-x 0f3c8a4e-1b2d-4c5e-8f90-123456789abc example.net /vws >/dev/null 2>&1
 assert_equals "xudp" "$(jq -r '.[0].packet_encoding' "${DB_SUB}/sing-box/vm")" "VMess WS：sing-box 片段的 UDP 用 xudp（packetaddr 只有 sing-box 服务端认，Xray 上 UDP 全丢）"
+assert_equals "aes-128-gcm" "$(jq -r '.[0].security' "${DB_SUB}/sing-box/vm")" "VMess WS：sing-box 节点写明 aes-128-gcm（不写时 sing-box 在 TLS 上发 zero，Xray 26.7.11 起拒收）"
+assert_contains "$(cat "${DB_SUB}/clashMeta/vm")" "cipher: auto" "VMess WS：Clash 节点的 cipher 是 auto（Xray 26.7.11 起服务端拒收 none）"
+assert_equals "aes-128-gcm|null" "$(sed -n 's#^vmess://##p' "${DB_SUB}/default/vm" | base64 -d | jq -r '"\(.scy)|\(.method)"')" \
+    "VMess WS：分享链接用标准的 scy 字段写明 aes-128-gcm（写 auto 的话，sing-box 系客户端导入后在 TLS 上发 zero），不再写客户端不认的 method"
 # hy2_client OBFSTYPE OBFSPW UP DOWN → 打印出的官方客户端 JSON（从「v2rayN(hysteria+TLS)」那行之后截到下一个提示或输出结束）
 hy2_client() {
     db_reset
@@ -6950,6 +6987,9 @@ _urWant="location /abcdxhttp/ {|grpc_pass grpc://127.0.0.1:${XHTTP_TLS_LOCAL_POR
 assert_equals "${_urWant}" "$(run_ur "" all)" "15 的 location：全部安装写进 h2 块，路径与端口对得上入站"
 assert_equals "${_urWant}" "$(run_ur ",0,15," "")" "15 的 location：个性化选了 15 也写"
 assert_equals "h1=0" "$(run_ur ",0,1," "")" "15 的 location：没选 15 不写，猜中路径也只看到伪装站"
+run_ur "" all >/dev/null
+assert_equals 'grpc_set_header X-Forwarded-For $remote_addr;' "$(grep -o 'grpc_set_header X-Forwarded-For [^;]*;' "${UR_DIR}/alone.conf")" \
+    "15 的 location：XFF 只填对端地址，客户端自己带的 XFF 不往后传（Xray 采信这个头）"
 
 # --- 16 的配置：内层只听回环、只开 TCP；重装沿用目标与密钥；验证连不出去时不能卡死安装 ---
 SC_FN=$(sed -n '/^ssUserKey() {/,/^}/p;/^shadowTlsWithInnerUsers() {/,/^}/p;/^shadowTlsInbound() {/,/^}/p;/^initShadowTlsConfig() {/,/^}/p;/^ensureSingBoxLocalDns() {/,/^}/p' install.sh)
