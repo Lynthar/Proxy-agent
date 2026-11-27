@@ -57,6 +57,7 @@ Description: Multi-Protocol Proxy Script
 4.Hysteria2 Management
 5.REALITY Management
 6.Tuic Management
+10.XHTTP+TLS Management (15)
 -------------------------Tool Management-----------------------------
 7.User Management
 8.Disguise Site Management
@@ -76,7 +77,7 @@ Description: Multi-Protocol Proxy Script
 ==============================================================
 ```
 
-For historical reasons, 10, 11, 13, 14 and 15 are gaps left by removed or hidden
+For historical reasons, 11, 13, 14 and 15 are gaps left by removed or hidden
 entries.
 
 Four subcommands run and exit without entering the menu:
