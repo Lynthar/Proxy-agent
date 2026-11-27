@@ -6281,6 +6281,9 @@ EOF
     fi
     # VLESS_XHTTP_TLS：只听回环，0 把 h2 回落给 nginx，nginx 按路径转进来；host 不写，校验交给 nginx 的 server_name
     if echo "${selectCustomInstallType}" | grep -q ",15," || [[ "$1" == "all" ]]; then
+        # 重装沿用加密开关与密钥：换掉的话已发出去的 15 订阅全部连不上
+        local xhttpTlsKept
+        xhttpTlsKept=$(xhttpTlsKeptSettings)
         cat <<EOF >${XRAY_CONF_DIR}/15_VLESS_XHTTP_TLS_inbounds.json
 {
 "inbounds":[
@@ -6308,6 +6311,9 @@ EOF
 ]
 }
 EOF
+        if [[ -n "${xhttpTlsKept}" ]] && ! xhttpTlsWriteSettings "${xhttpTlsKept}"; then
+            echoContent red " ---> $(t XHTTP_TLS_KEEP_FAILED)"
+        fi
     elif [[ -z "${3:-}" ]]; then
         rm ${XRAY_CONF_DIR}/15_VLESS_XHTTP_TLS_inbounds.json >/dev/null 2>&1
     fi
@@ -7152,7 +7158,13 @@ EOF
         shareQrCode " ---> 二维码 VLESS(VLESS+reality+XHTTP)" "$(tail -n 1 "${SUBSCRIBE_LOCAL_DIR}/default/${user}")"
 
     elif [[ "${type}" == "vlessXHTTPTLS" ]]; then
-        local xhttpTlsLink="vless://${id}@${add}:${port}?encryption=none&security=tls&type=xhttp&mode=auto&host=${currentHost}&sni=${currentHost}&fp=chrome&alpn=h2&path=${path}#${email}"
+        # $7 是 xhttpTlsClientEncryption 的结果：开了加密就连同 Vision 一起写进链接与 Clash 条目
+        local xhttpTlsEnc=${7:-none} xhttpTlsFlow= xhttpTlsClashEnc=
+        if [[ "${xhttpTlsEnc}" != "none" ]]; then
+            xhttpTlsFlow="&flow=xtls-rprx-vision"
+            xhttpTlsClashEnc=$'\n'"    encryption: ${xhttpTlsEnc}"$'\n'"    flow: xtls-rprx-vision"
+        fi
+        local xhttpTlsLink="vless://${id}@${add}:${port}?encryption=${xhttpTlsEnc}${xhttpTlsFlow}&security=tls&type=xhttp&mode=auto&host=${currentHost}&sni=${currentHost}&fp=chrome&alpn=h2&path=${path}#${email}"
         echoContent yellow " ---> $(t ACCOUNT_LINK_XHTTP_TLS)"
         echoContent green "    ${xhttpTlsLink}\n"
 
@@ -7165,7 +7177,7 @@ EOF
     type: vless
     server: ${add}
     port: ${port}
-    uuid: ${id}
+    uuid: ${id}${xhttpTlsClashEnc}
     udp: true
     tls: true
     network: xhttp
@@ -7782,7 +7794,10 @@ showAccounts() {
         done
     fi
     # VLESS XHTTP TLS
-    if echo ${currentInstallProtocolType} | grep -q ",15,"; then
+    local xhttpTlsEnc=
+    if echo ${currentInstallProtocolType} | grep -q ",15," && ! xhttpTlsEnc=$(xhttpTlsClientEncryption); then
+        echoContent red " ---> $(t XHTTP_TLS_ENC_UNREADABLE)"
+    elif echo ${currentInstallProtocolType} | grep -q ",15,"; then
         echoContent skyBlue "\n================================ $(t ACCOUNT_TITLE_XHTTP_TLS) ================================\n"
         jq -c '.inbounds[0].settings.clients[]' "${configPath}15_VLESS_XHTTP_TLS_inbounds.json" | while read -r user; do
             local email=
@@ -7793,7 +7808,7 @@ showAccounts() {
             while read -r line; do
                 echoContent skyBlue "\n ---> 账号:${email}${count}"
                 if [[ -n "${line}" ]]; then
-                    defaultBase64Code vlessXHTTPTLS "${currentDefaultPort}" "${email}${count}" "$(echo "${user}" | jq -r .id)" "${line}" "/${currentPath}xhttp"
+                    defaultBase64Code vlessXHTTPTLS "${currentDefaultPort}" "${email}${count}" "$(echo "${user}" | jq -r .id)" "${line}" "/${currentPath}xhttp" "${xhttpTlsEnc}"
                     count=$((count + 1))
                     echo
                 fi
@@ -17955,6 +17970,105 @@ manageTuic() {
         unInstallSingBox tuic
     fi
 }
+# xhttpTlsKeptSettings → 15 的入站开着加密时打出它的 {decryption, flow}，供重写入站后原样写回；没开或没装输出空
+xhttpTlsKeptSettings() {
+    jq -c '.inbounds[0].settings | select((.decryption // "none") != "none") | {decryption, flow}' \
+        "${XRAY_CONF_DIR}/15_VLESS_XHTTP_TLS_inbounds.json" 2>/dev/null
+}
+
+# xhttpTlsWriteSettings SETTINGS → 把 {decryption, flow} 并进 15 入站的 settings，flow 为 null 就删掉
+xhttpTlsWriteSettings() {
+    local file="${XRAY_CONF_DIR}/15_VLESS_XHTTP_TLS_inbounds.json" content
+    content=$(jq --argjson s "$1" '.inbounds[0].settings |= (. + $s | if .flow == null then del(.flow) else . end)' "${file}" 2>/dev/null) || return 1
+    jsonWriteFile "${file}" "${content}" false
+}
+
+# xhttpTlsClientEncryption → 15 客户端的 encryption 串：没开是 none，开了由入站里的私钥现推；
+# decryption 不是脚本写的格式、或推不出 Password 时返回 1，调用方不能拿 none 顶上（客户端会连不上）
+xhttpTlsClientEncryption() {
+    local decryption key password
+    decryption=$(jq -r '.inbounds[0].settings.decryption // "none"' "${XRAY_CONF_DIR}/15_VLESS_XHTTP_TLS_inbounds.json" 2>/dev/null)
+    if [[ -z "${decryption}" || "${decryption}" == "none" ]]; then
+        echo none
+        return 0
+    fi
+    key=${decryption#"${XHTTP_TLS_DECRYPTION_PREFIX}"}
+    [[ "${key}" != "${decryption}" && "${key}" =~ ^[A-Za-z0-9_-]{43}$ ]] || return 1
+    password=$(${XRAY_BIN} x25519 -i "${key}" 2>/dev/null | grep 'Password' | awk '{print $NF}')
+    [[ "${password}" =~ ^[A-Za-z0-9_-]{43}$ ]] || return 1
+    printf '%s\n' "${XHTTP_TLS_ENCRYPTION_PREFIX}${password}"
+}
+
+# xhttpTlsSetEncryption on|off → 改 15 的入站（on 时新生成 X25519 密钥，连同入站级 Vision），过内核校验才重载，
+# 之后静默重建订阅；写入或校验不过就整份还原
+xhttpTlsSetEncryption() {
+    local file="${XRAY_CONF_DIR}/15_VLESS_XHTTP_TLS_inbounds.json" settings key
+    if [[ "$1" == "on" ]]; then
+        key=$(${XRAY_BIN} x25519 2>/dev/null | grep 'Private' | awk '{print $NF}')
+        if [[ ! "${key}" =~ ^[A-Za-z0-9_-]{43}$ ]]; then
+            echoContent red " ---> $(t XHTTP_TLS_KEYGEN_FAILED)"
+            return 1
+        fi
+        settings=$(jq -nc --arg d "${XHTTP_TLS_DECRYPTION_PREFIX}${key}" '{decryption: $d, flow: "xtls-rprx-vision"}')
+    else
+        settings='{"decryption": "none", "flow": null}'
+    fi
+    jsonTxBegin || return 1
+    if ! jsonTxTrack "${file}" || ! xhttpTlsWriteSettings "${settings}" || ! xrayConfigTest; then
+        jsonTxRollback
+        echoContent red " ---> $(t XHTTP_TLS_APPLY_FAILED)"
+        return 1
+    fi
+    jsonTxCommit
+    reloadCore
+    carpoolRefreshSubscribe
+    if [[ "$1" == "on" ]]; then
+        echoContent green " ---> $(t XHTTP_TLS_ENC_ON_DONE)"
+    else
+        echoContent green " ---> $(t XHTTP_TLS_ENC_OFF_DONE)"
+    fi
+    echoContent yellow " ---> $(t XHTTP_TLS_REFRESH_HINT)"
+}
+
+# manageXhttpTls → 主菜单 10：15 的 VLESS Encryption（连同 Vision）开关。decryption 是入站级的，
+# 开、关的那一刻没更新订阅的 15 客户端都连不上，所以确认前先把这点和客户端门槛说清
+manageXhttpTls() {
+    local on= choice confirm
+    echoContent skyBlue "\n$(t XHTTP_TLS_MENU_TITLE)"
+    echoContent red "=============================================================="
+    if [[ "${coreKind}" != "1" || ! -f "${XRAY_CONF_DIR}/15_VLESS_XHTTP_TLS_inbounds.json" ]]; then
+        echoContent yellow " ---> $(t XHTTP_TLS_NOT_INSTALLED)"
+        return 0
+    fi
+    [[ -n "$(xhttpTlsKeptSettings)" ]] && on=1
+    if [[ -n "${on}" ]]; then
+        echoContent green "$(t XHTTP_TLS_ENC_STATE_ON)\n"
+    else
+        echoContent yellow "$(t XHTTP_TLS_ENC_STATE_OFF)\n"
+    fi
+    echoContent yellow "$(t XHTTP_TLS_ENC_ABOUT)"
+    echoContent yellow "$(t XHTTP_TLS_ENC_CLIENTS)"
+    echoContent yellow "$(t XHTTP_TLS_ENC_SWITCH_WARN)\n"
+    if [[ -n "${on}" ]]; then
+        echoContent yellow "1.$(t XHTTP_TLS_ENC_TURN_OFF)"
+    else
+        echoContent yellow "1.$(t XHTTP_TLS_ENC_TURN_ON)"
+    fi
+    echoContent yellow "0.$(t BACK)"
+    echoContent red "=============================================================="
+    read -r -p "$(t PROMPT_SELECT):" choice
+    [[ "${choice}" == "1" ]] || return 0
+    read -r -p "$(t XHTTP_TLS_ENC_CONFIRM)" confirm
+    if ! isYesInput "${confirm}"; then
+        echoContent yellow " ---> $(t XHTTP_TLS_ENC_UNCHANGED)"
+        return 0
+    fi
+    if [[ -n "${on}" ]]; then
+        xhttpTlsSetEncryption off
+    else
+        xhttpTlsSetEncryption on
+    fi
+}
 # sing-box log日志
 singBoxLog() {
     cat <<EOF >${SINGBOX_FRAGMENT_DIR}/log.json
@@ -18819,6 +18933,7 @@ menu() {
     echoContent yellow "4.$(t MENU_HYSTERIA2)"
     echoContent yellow "5.$(t MENU_REALITY)"
     echoContent yellow "6.$(t MENU_TUIC)"
+    echoContent yellow "10.$(t MENU_XHTTP_TLS)"
 
     echoContent skyBlue "-------------------------$(t MENU_TOOL_MGMT)-----------------------------"
     echoContent yellow "7.$(t MENU_USER)"
@@ -18862,6 +18977,9 @@ menu() {
         ;;
     6)
         manageTuic
+        ;;
+    10)
+        manageXhttpTls
         ;;
     7)
         manageAccount 1

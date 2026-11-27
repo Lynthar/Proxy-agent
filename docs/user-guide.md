@@ -84,7 +84,7 @@
 | 12 | VLESS+Reality+XHTTP | ✓ | | 选 `7,12` 不要；单选 12 会自动带上 0，就要了 | |
 | 13 | AnyTLS | | ✓ | 要 | |
 | 14 | Shadowsocks 2022 | | ✓ | 不要 | |
-| 15 | VLESS+XHTTP+TLS | ✓ | | 要 | 和 0 共用 443；XTLS 推荐的过 CDN 路线，走 CDN 没有实测过；sing-box 没有 XHTTP，不进 sing-box 订阅 |
+| 15 | VLESS+XHTTP+TLS | ✓ | | 要 | 和 0 共用 443；XTLS 推荐的过 CDN 路线，走 CDN 没有实测过；sing-box 没有 XHTTP，不进 sing-box 订阅；可在菜单 10 开 VLESS Encryption |
 | 16 | ShadowTLS v3 + Shadowsocks 2022 | | ✓ | 不要 | 探测者看到的是握手目标站的真证书；只进 sing-box 和 Clash 格式，不进默认（分享链接）格式，见下 |
 
 Hysteria2 和 TUIC 只接受 ACME 签发的证书，脚本不生成自签证书。Reality 不能挂在 CDN 后面；要走 CDN 选 XHTTP+TLS、WS 或 HTTPUpgrade，端口也要选 CDN 会转发的（Cloudflare 的 HTTPS 代理端口是 443、2053、2083、2087、2096、8443）。
@@ -1153,7 +1153,7 @@ apt-key del <fingerprint>
 
 ### 各级菜单
 
-点开查看下一级。编号和屏幕上一致；标了条件的项只在满足条件时出现或可用。主菜单没有 10、11、13、15，它们是移除的菜单留下的空号。14 不显示但还能输入，它在 h2 和 http/1.1 之间切换服务端 alpn 的首位，一般用不上；切到 http/1.1 首位后协议 15 连不上。
+点开查看下一级。编号和屏幕上一致；标了条件的项只在满足条件时出现或可用。主菜单没有 11、13、15，它们是移除的菜单留下的空号。14 不显示但还能输入，它在 h2 和 http/1.1 之间切换服务端 alpn 的首位，一般用不上；切到 http/1.1 首位后协议 15 连不上。
 
 #### 安装与协议
 
@@ -1298,6 +1298,15 @@ apt-key del <fingerprint>
 
 - **1. 安装 / 重新安装**：没装时只有这一项。拼车开着时不能装
 - **2. 卸载**：装了才有
+
+</details>
+
+<details>
+<summary><b>10. XHTTP+TLS 管理（15）</b>：Xray 内核、装了 15 才有内容</summary>
+
+- **1. 开启 / 关闭 VLESS Encryption**：默认关。开启后 15 在 TLS 里面再加一层加密并带上 Vision，过 CDN 时 CDN 看不到 UUID 和要访问的网站；只有 15 受影响。开、关的那一刻，所有 15 的客户端都要更新一次订阅（或重新导入链接），不然连不上；每次开启都会换新密钥。重装 15 时沿用原来的开关和密钥
+- 客户端要 Xray-core 内核 25.8.29 及以上（v2rayN、v2rayNG 这类看它带的内核版本）或 mihomo 1.19.22 及以上；sing-box 系本来就用不了 15
+- 服务端重启（改账号、续证书、重启内核）之后，每个在线客户端的下一条新连接会失败一次，随后自动重连
 
 </details>
 

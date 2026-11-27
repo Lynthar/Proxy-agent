@@ -232,10 +232,12 @@ probeXhttpLink() {
     hostPort=${hostPort%%\?*}
     jq -n --arg id "$(sed 's#^vless://##; s#@.*##' <<<"${link}")" --arg addr "${hostPort%:*}" --arg port "${hostPort##*:}" \
         --arg sni "${p[sni]:-}" --arg fp "${p[fp]:-}" --arg pbk "${p[pbk]:-}" --arg sid "${p[sid]:-}" --arg path "${p[path]:-}" \
-        --arg host "${p[host]:-}" --arg security "${p[security]:-}" --arg alpn "${p[alpn]:-}" '{log: {loglevel: "warning"},
+        --arg host "${p[host]:-}" --arg security "${p[security]:-}" --arg alpn "${p[alpn]:-}" \
+        --arg enc "${p[encryption]:-}" --arg flow "${p[flow]:-}" '{log: {loglevel: "warning"},
         inbounds: [{listen: "127.0.0.1", port: 10809, protocol: "socks"}],
         outbounds: [{protocol: "vless",
-            settings: {vnext: [{address: $addr, port: ($port | tonumber), users: [{id: $id, encryption: "none"}]}]},
+            settings: {vnext: [{address: $addr, port: ($port | tonumber),
+                users: [{id: $id, encryption: (if $enc == "" then "none" else $enc end)} + (if $flow == "" then {} else {flow: $flow} end)]}]},
             streamSettings: ({network: "xhttp", security: $security, xhttpSettings: {path: $path, host: $host}}
                 + if $security == "reality"
                   then {realitySettings: {serverName: $sni, fingerprint: $fp, publicKey: $pbk, shortId: $sid}}
@@ -333,6 +335,26 @@ assert_equals "127.0.0.1" "$(jq -r '.inbounds[0].listen' "${XRAY_CONF_DIR}/15_VL
 xhttpTlsPath=$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path' "${XRAY_CONF_DIR}/15_VLESS_XHTTP_TLS_inbounds.json")
 assert_equals "404" "$(curl -s -o /dev/null -w '%{http_code}' --http1.1 --max-time 10 "https://${DOMAIN_A}${xhttpTlsPath}/")" "XHTTP+TLS：路径对、但走 http/1.1 只看到伪装站"
 assert_equals "404" "$(curl -s -o /dev/null -w '%{http_code}' --http2 --max-time 10 "https://${DOMAIN_A}/not${xhttpTlsPath#/}/")" "XHTTP+TLS：路径不对的 h2 请求只看到伪装站"
+
+echo ""
+echo -e "${YELLOW}=== 菜单 10：15 开 VLESS Encryption（连同 Vision），按订阅里的链接真握手；再关掉 ===${NC}"
+encOut=$(runMenu "10\n1\ny\n")
+assert_equals "0" "$?" "菜单 10 开启：退出码 0"
+noNoise "菜单 10 开启" "${encOut}"
+assert_contains "${encOut}" "Turned on; subscriptions rebuilt" "菜单 10 开启：订阅跟着重建"
+assert_equals "mlkem768x25519plus.native.600s.|xtls-rprx-vision" \
+    "$(jq -r '.inbounds[0].settings | "\(.decryption[0:31])|\(.flow)"' "${XRAY_CONF_DIR}/15_VLESS_XHTTP_TLS_inbounds.json")" "15 的入站：600 秒票据的 decryption，入站级 Vision"
+assert_equals "200" "$(fetchSub "${DOMAIN_A}" 'v2rayN/7.0' "${WORK}/sub-default.txt")" "开加密后取通用订阅 200"
+xhttpTlsEncLink=$(base64 -d "${WORK}/sub-default.txt" 2>/dev/null | grep -m1 'security=tls&type=xhttp')
+assert_contains "${xhttpTlsEncLink}" "encryption=mlkem768x25519plus.native.0rtt." "开加密后：订阅里 15 的链接带 0rtt 的 encryption"
+assert_contains "${xhttpTlsEncLink}" "&flow=xtls-rprx-vision&" "开加密后：订阅里 15 的链接带 Vision"
+assert_contains "$(curl -sS --max-time 15 "https://${DOMAIN_A}:$(subPort)/s/clashMeta/$(subKey)" 2>/dev/null)" "encryption: mlkem768x25519plus.native.0rtt." "开加密后：Clash 节点也带 encryption"
+assert_equals "204" "$(probeXhttpLink "${xhttpTlsEncLink}")" "开加密：按新链接配的 Xray 客户端（encryption + Vision）经 15 访问外网"
+assert_equals "000" "$(probeXhttpLink "${xhttpTlsLink}" 2>/dev/null)" "开加密：没更新订阅的旧链接连不上（菜单里提醒的就是这个）"
+encOut=$(runMenu "10\n1\ny\n")
+assert_contains "${encOut}" "Turned off; subscriptions rebuilt" "菜单 10 关闭：订阅跟着重建"
+assert_equals "none|null" "$(jq -r '.inbounds[0].settings | "\(.decryption)|\(.flow)"' "${XRAY_CONF_DIR}/15_VLESS_XHTTP_TLS_inbounds.json")" "关闭后：decryption 回到 none、flow 删掉"
+assert_equals "204" "$(probeXhttpLink "${xhttpTlsLink}")" "关闭后：原来不加密的链接又能用"
 
 # ============================================================================
 # 菜单 4 → 1：Xray 机上旁挂 Hysteria2，同一个账号

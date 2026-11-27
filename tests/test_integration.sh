@@ -5724,6 +5724,103 @@ assert_equals "$(printf '%s\n' '  - name: "xt-x"' '    type: vless' '    server:
     '    network: xhttp' '    client-fingerprint: chrome' '    alpn:' '      - h2' '    servername: example.org' '    xhttp-opts:' '      path: /abcdxhttp' '      host: example.org')" \
     "$(cat "${DB_SUB}/clashMeta/xt")" "XHTTP+TLS：Clash 节点没有 reality-opts，SNI 和 Host 是本机域名"
 assert_equals "[]" "$(jq -c . "${DB_SUB}/sing-box/xt")" "XHTTP+TLS：不进 sing-box 订阅"
+# 15 开了加密：链接与 Clash 节点带 encryption 与 Vision 的 flow；没开时照旧是 none、不写 flow
+db_reset
+run_db 1 vlessXHTTPTLS 443 xt-x uuid3 cdn.example.net /abcdxhttp "mlkem768x25519plus.native.0rtt.PW" >/dev/null 2>&1
+assert_equals "vless://uuid3@cdn.example.net:443?encryption=mlkem768x25519plus.native.0rtt.PW&flow=xtls-rprx-vision&security=tls&type=xhttp&mode=auto&host=example.org&sni=example.org&fp=chrome&alpn=h2&path=/abcdxhttp#xt-x" \
+    "$(cat "${DB_SUB}/default/xt")" "XHTTP+TLS 开加密：分享链接带 encryption 与 flow"
+assert_equals "$(printf '%s\n' '    uuid: uuid3' '    encryption: mlkem768x25519plus.native.0rtt.PW' '    flow: xtls-rprx-vision' '    udp: true')" \
+    "$(grep -A3 '^    uuid: ' "${DB_SUB}/clashMeta/xt")" "XHTTP+TLS 开加密：Clash 节点在 uuid 后面带 encryption 与 flow"
+db_reset
+run_db 1 vlessXHTTPTLS 443 xt-x uuid3 cdn.example.net /abcdxhttp none >/dev/null 2>&1
+assert_equals "0|0" "$(grep -c 'flow' "${DB_SUB}/default/xt")|$(grep -c 'encryption\|flow' "${DB_SUB}/clashMeta/xt")" "XHTTP+TLS 没开加密：链接不带 flow，Clash 节点不写 encryption 与 flow"
+
+# --- 15 的 VLESS Encryption 开关（主菜单 10）：入站怎么改、客户端串怎么推、内核校验不过就整份还原 ---
+XE_FN=$(sed -n '/^xhttpTlsKeptSettings() {/,/^}/p;/^xhttpTlsWriteSettings() {/,/^}/p;/^xhttpTlsClientEncryption() {/,/^}/p;/^xhttpTlsSetEncryption() {/,/^}/p;/^manageXhttpTls() {/,/^}/p' install.sh)
+assert_equals "5" "$(grep -c '^[a-zA-Z]*() {$' <<<"${XE_FN}")" "15 的加密开关：五个函数都抽到了"
+XE_ROOT="${MOCK_ROOT}/xhttpenc.root"
+XE_FILE="${XE_ROOT}/xray/conf/15_VLESS_XHTTP_TLS_inbounds.json"
+XE_PRIV="$(printf 'k%.0s' {1..42})1"
+XE_PW="$(printf 'p%.0s' {1..41})_2"
+# xe_reset → 一份只有 15 的安装根：入站没开加密；xray 桩照 26.11.9 的格式打 x25519，-i 只认 XE_PRIV；XE_NOKEY 非空时 x25519 什么都不打
+xe_reset() {
+    rm -rf "${XE_ROOT}" && mkdir -p "${XE_ROOT}/xray/conf"
+    jq -n '{inbounds: [{port: 31307, listen: "127.0.0.1", protocol: "vless", tag: "VLESSXHTTPTLS",
+        settings: {clients: [{id: "a1", email: "alice-VLESS_XHTTP_TLS"}], decryption: "none"}}]}' >"${XE_FILE}"
+    cat >"${XE_ROOT}/xray/xray" <<'EOF'
+#!/usr/bin/env bash
+[[ "$1" == "x25519" && -z "${XE_NOKEY}" ]] || exit 0
+if [[ "${2:-}" == "-i" ]]; then
+    [[ "$3" == "${XE_PRIV}" ]] && printf 'PrivateKey: %s\nPassword (PublicKey): %s\nHash32: h\n' "$3" "${XE_PW}"
+else
+    printf 'PrivateKey: %s\nPassword (PublicKey): %s\nHash32: h\n' "${XE_PRIV}" "${XE_PW}"
+fi
+EOF
+    chmod +x "${XE_ROOT}/xray/xray"
+}
+# run_xe CMD → 以 XE_ROOT 为安装根跑 CMD；内核校验（XE_TEST_RC）、重载、重建订阅是桩，调用记进 calls
+run_xe() (
+    env PROXY_AGENT_DIR="${XE_ROOT}" XE_FN="${XE_FN}" XE_PRIV="${XE_PRIV}" XE_PW="${XE_PW}" XE_NOKEY="${XE_NOKEY:-}" \
+        XE_TEST_RC="${XE_TEST_RC:-0}" XE_CORE="${XE_CORE:-1}" V2RAY_LANG=zh_CN bash -c '
+        source lib/i18n.sh; source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh
+        eval "${XE_FN}"
+        xrayConfigTest() { echo xrayConfigTest >>"${PROXY_AGENT_DIR}/calls"; return "${XE_TEST_RC}"; }
+        reloadCore() { echo reloadCore >>"${PROXY_AGENT_DIR}/calls"; }
+        carpoolRefreshSubscribe() { echo refreshSubscribe >>"${PROXY_AGENT_DIR}/calls"; }
+        coreKind="${XE_CORE}"
+        eval "$1"' _ "$1" 2>&1
+)
+xe_calls() { paste -sd'|' "${XE_ROOT}/calls" 2>/dev/null; }
+xe_settings() { jq -c '.inbounds[0].settings | [.decryption, (.flow // "-"), [.clients[].email]]' "${XE_FILE}"; }
+xe_reset
+assert_equals "none" "$(run_xe xhttpTlsClientEncryption)" "15 没开加密：客户端串是 none"
+_out=$(run_xe 'xhttpTlsSetEncryption on')
+assert_equals "[\"mlkem768x25519plus.native.600s.${XE_PRIV}\",\"xtls-rprx-vision\",[\"alice-VLESS_XHTTP_TLS\"]]" "$(xe_settings)" \
+    "开启：decryption 用新生成的 X25519 私钥、600 秒票据，入站级 flow 是 Vision，用户不动"
+assert_equals "xrayConfigTest|reloadCore|refreshSubscribe" "$(xe_calls)" "开启：先过内核校验，再重载、重建订阅"
+assert_contains "${_out}" "现在要更新一次订阅" "开启：提醒 15 的客户端要更新订阅"
+assert_equals "mlkem768x25519plus.native.0rtt.${XE_PW}" "$(run_xe xhttpTlsClientEncryption)" "开启后：客户端串由私钥经 xray x25519 -i 推出，0rtt"
+_kept=$(run_xe xhttpTlsKeptSettings)
+jq '.inbounds[0].settings.decryption = "none"' "${XE_FILE}" >"${XE_FILE}.t" && cat "${XE_FILE}.t" >"${XE_FILE}" && rm -f "${XE_FILE}.t"
+run_xe "xhttpTlsWriteSettings '${_kept}'" >/dev/null
+assert_equals "[\"mlkem768x25519plus.native.600s.${XE_PRIV}\",\"xtls-rprx-vision\",[\"alice-VLESS_XHTTP_TLS\"]]" "$(xe_settings)" \
+    "重装沿用：重写入站前取出的 decryption 与 flow 原样写回"
+rm -f "${XE_ROOT}/calls"
+run_xe 'xhttpTlsSetEncryption off' >/dev/null
+assert_equals '["none","-",["alice-VLESS_XHTTP_TLS"]]|xrayConfigTest|reloadCore|refreshSubscribe' "$(xe_settings)|$(xe_calls)" "关闭：decryption 回到 none、flow 删掉，照样校验、重载、重建"
+assert_equals "" "$(run_xe xhttpTlsKeptSettings)" "关闭后：没有要沿用的加密设置"
+xe_reset
+cp "${XE_FILE}" "${XE_ROOT}/before.json"
+_out=$(XE_TEST_RC=1 run_xe 'xhttpTlsSetEncryption on; echo rc=$?')
+assert_equals "rc=1|xrayConfigTest|same" "$(grep -o 'rc=[0-9]*' <<<"${_out}")|$(xe_calls)|$(cmp -s "${XE_FILE}" "${XE_ROOT}/before.json" && echo same || echo changed)" \
+    "内核校验不过：返回 1、不重载不重建，15 的入站整份还原"
+assert_contains "${_out}" "已还原" "内核校验不过：说明配置已还原"
+rm -f "${XE_ROOT}/calls"
+_out=$(XE_NOKEY=1 run_xe 'xhttpTlsSetEncryption on; echo rc=$?')
+assert_equals "rc=1||same" "$(grep -o 'rc=[0-9]*' <<<"${_out}")|$(xe_calls)|$(cmp -s "${XE_FILE}" "${XE_ROOT}/before.json" && echo same || echo changed)" \
+    "生成不出私钥：返回 1，什么都不碰"
+jq --arg d "mlkem768x25519plus.native.600s.$(printf 'm%.0s' {1..86})" '.inbounds[0].settings.decryption = $d' "${XE_ROOT}/before.json" >"${XE_FILE}"
+assert_equals "rc=1|" "$(run_xe 'out=$(xhttpTlsClientEncryption); echo "rc=$?|${out}"')" "decryption 不是脚本写的格式（ML-KEM 认证）：返回 1，不拿 none 顶上"
+jq --arg d "mlkem768x25519plus.native.600s.$(printf 'z%.0s' {1..43})" '.inbounds[0].settings.decryption = $d' "${XE_ROOT}/before.json" >"${XE_FILE}"
+assert_equals "rc=1|" "$(run_xe 'out=$(xhttpTlsClientEncryption); echo "rc=$?|${out}"')" "私钥推不出 Password（xray x25519 -i 不认）：返回 1，不拿 none 顶上"
+xe_reset
+_out=$(printf '1\nn\n' | run_xe manageXhttpTls)
+assert_equals '["none","-",["alice-VLESS_XHTTP_TLS"]]|' "$(xe_settings)|$(xe_calls)" "菜单 10：确认时答 n 什么都不改"
+assert_contains "${_out}" "VLESS Encryption：未开启" "菜单 10：显示当前状态"
+assert_contains "${_out}" "mihomo ≥ 1.19.22" "菜单 10：确认前说明客户端门槛"
+printf '1\ny\n' | run_xe manageXhttpTls >/dev/null
+assert_equals "xtls-rprx-vision|xrayConfigTest|reloadCore|refreshSubscribe" "$(jq -r '.inbounds[0].settings.flow' "${XE_FILE}")|$(xe_calls)" "菜单 10：没开时 1 是开启，答 y 才开"
+assert_contains "$(printf '0\n' | run_xe manageXhttpTls)" "1.关闭" "菜单 10：开着时 1 是关闭"
+rm -f "${XE_FILE}"
+assert_contains "$(run_xe manageXhttpTls </dev/null)" "没装 15" "菜单 10：没装 15 只说明、不问"
+xe_reset
+assert_contains "$(XE_CORE=2 run_xe manageXhttpTls </dev/null)" "没装 15" "菜单 10：sing-box 内核的机器没有 15"
+_xtBlock=$(sed -n '/# VLESS_XHTTP_TLS：只听回环/,/rm ${XRAY_CONF_DIR}\/15_VLESS_XHTTP_TLS_inbounds.json/p' install.sh)
+assert_equals "xhttpTlsKeptSettings|cat <<EOF|xhttpTlsWriteSettings" "$(grep -oE 'xhttpTlsKeptSettings|cat <<EOF|xhttpTlsWriteSettings' <<<"${_xtBlock}" | paste -sd'|' -)" \
+    "initXrayConfig：重写 15 的入站前取出加密设置，写完再写回"
+assert_equals "1" "$(grep -c '"/${currentPath}xhttp" "${xhttpTlsEnc}"$' install.sh)" "showAccounts：15 的客户端串算一次、交给每个人的链接"
+_menuFn=$(sed -n '/^menu() {/,/^}/p' install.sh)
+assert_equals "1|1" "$(grep -c '"10.$(t MENU_XHTTP_TLS)"' <<<"${_menuFn}")|$(grep -A1 '^    10)$' <<<"${_menuFn}" | grep -c 'manageXhttpTls')" "主菜单：10 是 XHTTP+TLS 管理"
 # 16：通用订阅一行都不写（v2rayN、mihomo 的链接解析器会丢掉 plugin，退化成裸 SS2022），两种带它的订阅都要有 UDP 通路
 db_reset
 getPublicIP() { echo 203.0.113.9; }; export -f getPublicIP

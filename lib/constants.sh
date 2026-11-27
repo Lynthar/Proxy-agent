@@ -42,6 +42,9 @@ readonly TLS_DIR="${PROXY_AGENT_DIR}/tls"
 readonly SUBSCRIBE_DIR="${PROXY_AGENT_DIR}/subscribe"
 readonly SUBSCRIBE_LOCAL_DIR="${PROXY_AGENT_DIR}/subscribe_local"
 readonly SUBSCRIBE_REMOTE_DIR="${PROXY_AGENT_DIR}/subscribe_remote"
+# 15 的 VLESS Encryption：服务端 600 秒票据，客户端 0rtt，认证用 X25519（末段分别是私钥与 xray x25519 -i 推出的 Password）
+readonly XHTTP_TLS_DECRYPTION_PREFIX="mlkem768x25519plus.native.600s."
+readonly XHTTP_TLS_ENCRYPTION_PREFIX="mlkem768x25519plus.native.0rtt."
 # 订阅文件上次完整重建时的脚本版本：与 SCRIPT_VERSION 不同，菜单入口就沿用 salt 静默重建一次，新版的节点写法不用等机主查看订阅
 readonly SUBSCRIBE_BUILT_VERSION_FILE="${SUBSCRIBE_LOCAL_DIR}/built_version"
 # subscribe.conf 第一行记的模板修订号：renderSubscribeConf 的输出一改就加一，旧号的机器进菜单时按原端口与域名重写
