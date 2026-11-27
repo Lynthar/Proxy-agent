@@ -3176,6 +3176,62 @@ assert_equals "rc=1|good-old|good-old-clash" "$(grep -o 'rc=[0-9]*' <<<"${_out}"
     "subscribe：节点地址为空时不发布，已发布的原样留着"
 assert_contains "${_out}" "取不到本机公网 IP" "subscribe：节点地址为空时说明原因"
 
+# 订阅的版本标记：三种格式都重建了才记本版版本号；sing-box 模板拉不到、节点地址为空都不记，下次进菜单再建
+CP_BUILT="${CP_ROOT}/subscribe_local/built_version"
+cp_built() { if [[ -e "${CP_BUILT}" ]]; then cat "${CP_BUILT}"; else echo none; fi; }
+cp_reset_tree
+mkdir -p "${CP_ROOT}/subscribe/clashMetaProfiles"
+run_cp "${SUBSCRIBE_FN}; ${CP_SUB_STUBS}; ${CP_WGET_OK}; SCRIPT_VERSION=v9.9.9; subscribe false true" >/dev/null 2>&1
+assert_equals "v9.9.9" "$(cp_built)" "版本标记：完整重建后记下本版版本号"
+rm -f "${CP_BUILT}"
+run_cp "${SUBSCRIBE_FN}; ${CP_SUB_STUBS}; wget() { return 4; }; SCRIPT_VERSION=v9.9.9; subscribe false true" >/dev/null 2>&1
+assert_equals "none" "$(cp_built)" "版本标记：sing-box 模板拉不到不记（旧的 sing-box 文件还在发）"
+rm -f "${CP_BUILT}"
+run_cp "${SUBSCRIBE_FN}; ${CP_SUB_STUBS}; ${CP_SUB_EMPTY}; ${CP_WGET_OK}; SCRIPT_VERSION=v9.9.9; subscribe false true" >/dev/null 2>&1
+assert_equals "none" "$(cp_built)" "版本标记：节点地址为空、这次没发布不记"
+
+# subscribeRebuildAfterUpgrade：标记不是本版才静默重建一次；没 salt、订阅没装、nginx 没跑、dry-run 跳过；没建完不记、下次再试
+UPG_REBUILD_FN=$(sed -n '/^subscribeRebuildAfterUpgrade() {/,/^}/p' install.sh)
+CP_RB_OK='subscribe() { echo "subscribe $*" >>"${CP_CALLS}"; echo "${SCRIPT_VERSION}" >"${SUBSCRIBE_BUILT_VERSION_FILE}"; }'
+# cp_rb CMD → 订阅端口 12345、本版 v9.9.9，先跑 CMD 再调钩子；打印钩子的输出，subscribe 的调用记进 CP_CALLS
+cp_rb() {
+    : >"${CP_CALLS}"
+    CP_SUBPORT=${CP_RB_PORT-12345} run_cp "${UPG_REBUILD_FN}; SCRIPT_VERSION=v9.9.9; $1; subscribeRebuildAfterUpgrade" 2>&1
+}
+cp_reset_tree
+echo v1.0.0 >"${CP_BUILT}"
+_out=$(cp_rb "${CP_RB_OK}")
+assert_equals "subscribe false true|v9.9.9" "$(paste -sd'|' "${CP_CALLS}")|$(cp_built)" "升级重建：标记是旧版时沿用 salt 静默重建一次，记下本版"
+assert_contains "${_out}" "订阅已按新版重建" "升级重建：告诉机主建好了"
+_out=$(cp_rb "${CP_RB_OK}")
+assert_equals "|" "$(paste -sd'|' "${CP_CALLS}")|${_out}" "升级重建：标记已是本版就什么都不做、不打印"
+rm -f "${CP_BUILT}"
+cp_rb "${CP_RB_OK}" >/dev/null
+assert_equals "subscribe false true" "$(paste -sd'|' "${CP_CALLS}")" "升级重建：没有标记（这一版之前装的）也重建"
+for _case in "salt|rm -f \"\${SUBSCRIBE_LOCAL_DIR}/subscribeSalt\"" "nginx|pgrep() { return 1; }" "dryrun|DRY_RUN=1"; do
+    rm -f "${CP_BUILT}"
+    cp_reset_tree
+    _out=$(cp_rb "${CP_RB_OK}; ${_case#*|}")
+    assert_equals "|none|" "$(paste -sd'|' "${CP_CALLS}")|$(cp_built)|${_out}" "升级重建：${_case%%|*} 那种情况跳过，不重建、不打印"
+done
+cp_reset_tree
+_out=$(CP_RB_PORT= cp_rb "${CP_RB_OK}")
+assert_equals "|none|" "$(paste -sd'|' "${CP_CALLS}")|$(cp_built)|${_out}" "升级重建：订阅没装或域名对不上（端口读不出）跳过"
+cp_reset_tree
+echo v1.0.0 >"${CP_BUILT}"
+_out=$(cp_rb 'subscribe() { echo "subscribe $*" >>"${CP_CALLS}"; }')
+assert_equals "subscribe false true|v1.0.0" "$(paste -sd'|' "${CP_CALLS}")|$(cp_built)" "升级重建：没建完不改标记"
+assert_contains "${_out}" "下次进菜单会再试" "升级重建：没建完说明下次再试"
+cp_rb "${CP_RB_OK}" >/dev/null
+assert_equals "subscribe false true|v9.9.9" "$(paste -sd'|' "${CP_CALLS}")|$(cp_built)" "升级重建：上次没建完，下次进来再建"
+_menuFn=$(sed -n '/^menu() {/,/^}/p' install.sh)
+assert_equals "mkdirTools aliasInstall subscribeRebuildAfterUpgrade" \
+    "$(sed -n '/if ! isDryRun; then/,/fi/p' <<<"${_menuFn}" | grep -oE 'mkdirTools|aliasInstall|subscribeRebuildAfterUpgrade' | paste -sd' ' -)" \
+    "菜单入口：建好目录之后、dry-run 以外跑升级重建"
+assert_equals "handleXray start|subscribeRebuildAfterUpgrade" \
+    "$(sed -n '/^updateXray() {/,/^}/p' install.sh | grep -oE 'handleXray start|subscribeRebuildAfterUpgrade' | paste -sd'|' -)" \
+    "updateXray：新内核起来后再补一次升级重建"
+
 # --- 用量头：成员的用量写进 subscribe.conf include 的 map；用量变化每小时至多重载一次，成员、配额、到期变了立刻生效 ---
 cp_reset_tree
 printf '%s\n' '# proxy-agent subscribe.conf r3' 'map $uri $paSubUserinfo {' '}' 'server {' '    listen 12345 ssl;' '}' >"${CP_ROOT}/nginx/subscribe.conf"

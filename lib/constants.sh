@@ -42,6 +42,8 @@ readonly TLS_DIR="${PROXY_AGENT_DIR}/tls"
 readonly SUBSCRIBE_DIR="${PROXY_AGENT_DIR}/subscribe"
 readonly SUBSCRIBE_LOCAL_DIR="${PROXY_AGENT_DIR}/subscribe_local"
 readonly SUBSCRIBE_REMOTE_DIR="${PROXY_AGENT_DIR}/subscribe_remote"
+# 订阅文件上次完整重建时的脚本版本：与 SCRIPT_VERSION 不同，菜单入口就沿用 salt 静默重建一次，新版的节点写法不用等机主查看订阅
+readonly SUBSCRIBE_BUILT_VERSION_FILE="${SUBSCRIBE_LOCAL_DIR}/built_version"
 # subscribe.conf 第一行记的模板修订号：renderSubscribeConf 的输出一改就加一，旧号的机器进菜单时按原端口与域名重写
 readonly SUBSCRIBE_CONF_REVISION=3
 # 订阅响应的 subscription-userinfo 从这个 nginx map 来；文件名要与 renderSubscribeConf 里 include 的通配对得上

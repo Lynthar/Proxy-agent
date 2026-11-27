@@ -4272,6 +4272,8 @@ updateXray() {
         chmod 755 ${XRAY_BIN}
         handleXray stop
         handleXray start
+        # 换内核之后老写法的节点可能被拒，进菜单时没建成的订阅这里再补一次
+        subscribeRebuildAfterUpgrade
     else
         local currentVersion
         currentVersion="v$(${XRAY_BIN} --version | awk '{print $2}' | head -1)"
@@ -16777,6 +16779,22 @@ ensureSubscribeConfCurrent() {
     fi
 }
 
+# subscribeRebuildAfterUpgrade → 订阅文件不是本版脚本建的，就沿用 salt 静默重建一次（其他机器的订阅照拉），没建完下次再试。
+# 没有 salt、订阅没装或域名对不上时 subscribe 会提问，nginx 没跑它会替机主起，所以这几种和 dry-run 一样跳过
+subscribeRebuildAfterUpgrade() {
+    [[ "$(cat "${SUBSCRIBE_BUILT_VERSION_FILE}" 2>/dev/null)" != "${SCRIPT_VERSION}" ]] || return 0
+    [[ -s "${SUBSCRIBE_LOCAL_DIR}/subscribeSalt" && -n $(nginxPids) ]] && ! isDryRun || return 0
+    readNginxSubscribe
+    [[ -n "${subscribePort}" ]] || return 0
+    echoContent skyBlue " ---> $(t SUBSCRIBE_UPGRADE_REBUILDING)"
+    subscribe false true >/dev/null 2>&1
+    if [[ "$(cat "${SUBSCRIBE_BUILT_VERSION_FILE}" 2>/dev/null)" == "${SCRIPT_VERSION}" ]]; then
+        echoContent green " ---> $(t SUBSCRIBE_UPGRADE_REBUILT)"
+    else
+        echoContent yellow " ---> $(t SUBSCRIBE_UPGRADE_REBUILD_FAILED)"
+    fi
+}
+
 # renderRealityLocalDest DOMAIN → reality_dest.conf：Reality 目标选本机域名时转交来的连接由它应答（该域名证书 + 伪装站），
 # 只听回环、要能 TLS 1.3 与 h2。没有这个域名的证书就不写，返回 1
 renderRealityLocalDest() {
@@ -17332,6 +17350,7 @@ subscribe() {
     readNginxSubscribe
     local renewSalt=$1
     local showStatus=$2
+    local singBoxSkipped=
     if [[ "${coreKind}" == "1" || "${coreKind}" == "2" ]]; then
 
         echoContent skyBlue "-------------------------备注---------------------------------"
@@ -17398,6 +17417,9 @@ subscribe() {
                     rm -f "${_singboxTpl}"
                     _singboxTpl=
                 fi
+            fi
+            if [[ -z "${_singboxTpl}" && -n $(ls "${SUBSCRIBE_LOCAL_DIR}/sing-box/" 2>/dev/null) ]]; then
+                singBoxSkipped=1
             fi
             find ${SUBSCRIBE_LOCAL_DIR}/default/* | while read -r email; do
                 email=$(echo "${email}" | awk -F "[d][e][f][a][u][l][t][/]" '{print $2}')
@@ -17477,6 +17499,10 @@ subscribe() {
         # 停用的拼车成员不在 inbound 里、上面没给他们生成文件，补上占位（关闭后保持停用的也算）
         if [[ -f "${CARPOOL_STATE_FILE}" ]]; then
             carpoolWritePlaceholders "$(carpoolReadState)"
+        fi
+        # sing-box 那份没重建就不记版本：留着的旧文件可能是新内核不认的写法，下次进菜单还要再建
+        if [[ -z "${singBoxSkipped}" ]]; then
+            echo "${SCRIPT_VERSION}" >"${SUBSCRIBE_BUILT_VERSION_FILE}"
         fi
     else
         echoContent red " ---> 未安装伪装站点，无法使用订阅服务"
@@ -18811,6 +18837,7 @@ menu() {
     if ! isDryRun; then
         mkdirTools
         aliasInstall
+        subscribeRebuildAfterUpgrade
     fi
     read -r -p "$(t PROMPT_SELECT):" selectInstallType
     case ${selectInstallType} in

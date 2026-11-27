@@ -299,6 +299,25 @@ assert_equals "200" "$(fetchSub "${DOMAIN_A}" 'v2rayN/7.0' "${WORK}/sub-default.
 assert_contains "$(base64 -d "${WORK}/sub-default.txt" 2>/dev/null)" "vless://${E2E_UUID}@" "其他 UA 拿到 base64 的分享链接"
 
 echo ""
+echo -e "${YELLOW}=== 升级后进菜单：旧版脚本建的订阅静默重建一次，地址不变 ===${NC}"
+builtFile="${INSTALL_ROOT}/subscribe_local/built_version"
+assert_equals "v$(tr -d '[:space:]' <"${PROJECT_ROOT}/VERSION")" "$(cat "${builtFile}" 2>/dev/null)" "开通订阅后记下本版版本号"
+# 旧版的 sing-box 订阅里 VMess 不写加密，新版 Xray 会拒
+staleSb="${INSTALL_ROOT}/subscribe/sing-box/${subKeyA}"
+jq '(.outbounds[] | select(.type == "vmess")) |= del(.security)' "${staleSb}" >"${WORK}/stale-sb.json" && cat "${WORK}/stale-sb.json" >"${staleSb}"
+echo v0.0.1 >"${builtFile}"
+upOut=$(runMenu "\n")
+assert_equals "0" "$?" "进菜单再退出，退出码 0"
+noNoise "升级重建" "${upOut}"
+assert_contains "${upOut}" "Subscriptions rebuilt for this version" "进菜单时说明订阅已按新版重建"
+assert_equals "${subKeyA}" "$(subKey)" "重建后订阅地址不变"
+assert_equals "200" "$(fetchSub "${DOMAIN_A}" 'sing-box 1.14.4' "${WORK}/sub-sb.json")" "重建后 sing-box 的 UA 取订阅 200"
+assert_equals "aes-128-gcm" "$(jq -r '[.outbounds[] | select(.type == "vmess") | .security] | unique | join(",")' "${WORK}/sub-sb.json")" \
+    "重建后 sing-box 订阅里的 VMess 写回 aes-128-gcm"
+upOut=$(runMenu "\n")
+assert_equals "" "$(grep -F 'Subscriptions were built by' <<<"${upOut}")" "再进菜单不再重建"
+
+echo ""
 echo -e "${YELLOW}=== 订阅里的每个节点真握手 ===${NC}"
 fetchSingBoxClient
 assert_equals "yes" "$([[ -x "${SB_CLIENT}" ]] && echo yes || echo no)" "官方 sing-box 客户端已就位（$("${SB_CLIENT}" version 2>/dev/null | awk 'NR == 1 {print $3}')）"
