@@ -1030,7 +1030,7 @@ initVar() {
 
     singBoxVLESSVisionPort=
     singBoxVLESSRealityVisionPort=
-    singBoxHysteria2Port=
+    hysteria2InboundPort=
     singBoxTrojanPort=
     singBoxTuicPort=
     singBoxNaivePort=
@@ -1315,7 +1315,7 @@ readInstallProtocolType() {
     currentRealityMldsa65Verify=
 
     singBoxVLESSVisionPort=
-    singBoxHysteria2Port=
+    hysteria2InboundPort=
     singBoxTrojanPort=
 
     frontingTypeReality=
@@ -1389,8 +1389,12 @@ readInstallProtocolType() {
             currentInstallProtocolType="${currentInstallProtocolType}6,"
             if [[ "${coreKind}" == "2" ]]; then
                 frontingType=06_hysteria2_inbounds
-                singBoxHysteria2Port=$(jq .inbounds[0].listen_port "${row}.json")
+                hysteria2InboundPort=$(jq .inbounds[0].listen_port "${row}.json")
             fi
+        fi
+        if echo "${row##*/}" | grep -q hysteria_inbounds; then
+            currentInstallProtocolType="${currentInstallProtocolType}17,"
+            hysteria2InboundPort=$(jq .inbounds[0].port "${row}.json")
         fi
         if echo "${row##*/}" | grep -q VLESS_vision_reality_inbounds; then
             currentInstallProtocolType="${currentInstallProtocolType}7,"
@@ -1498,7 +1502,7 @@ readInstallProtocolType() {
     if [[ "${coreKind}" == "1" && -n "${singBoxConfigPath}" ]]; then
         if [[ -f "${singBoxConfigPath}06_hysteria2_inbounds.json" ]]; then
             currentInstallProtocolType="${currentInstallProtocolType}6,"
-            singBoxHysteria2Port=$(jq .inbounds[0].listen_port "${singBoxConfigPath}06_hysteria2_inbounds.json")
+            hysteria2InboundPort=$(jq .inbounds[0].listen_port "${singBoxConfigPath}06_hysteria2_inbounds.json")
         fi
         if [[ -f "${singBoxConfigPath}09_tuic_inbounds.json" ]]; then
             currentInstallProtocolType="${currentInstallProtocolType}9,"
@@ -1898,6 +1902,16 @@ readSingBoxConfig() {
             hysteria2ObfsPassword=$(jq -r '.inbounds[0].obfs.password // empty' "${singBoxConfigPath}06_hysteria2_inbounds.json")
         fi
     fi
+    # 17 是 Xray 的入站，读进 6 的这几个变量：一台机器上只有其中一个，订阅照同一套写。
+    # brutalUp 是服务端上行即客户端下行；带 packetSize 的 salamander 就是 gecko
+    local hy17="${XRAY_CONF_DIR}/17_hysteria_inbounds.json" mask='.inbounds[0].streamSettings.finalmask'
+    if [[ "${coreKind}" == "1" && -f "${hy17}" ]]; then
+        hysteriaPort=$(jq -r '.inbounds[0].port' "${hy17}")
+        hysteria2ClientDownloadSpeed=$(jq -r "${mask}.quicParams | select(.congestion? == \"brutal\") | .brutalUp // empty | sub(\" *mbps\$\"; \"\")" "${hy17}")
+        hysteria2ClientUploadSpeed=$(jq -r "${mask}.quicParams | select(.congestion? == \"brutal\") | .brutalDown // empty | sub(\" *mbps\$\"; \"\")" "${hy17}")
+        hysteria2ObfsType=$(jq -r "${mask}.udp[0] | select(.type? == \"salamander\") | if .settings.packetSize then \"gecko\" else \"salamander\" end" "${hy17}")
+        hysteria2ObfsPassword=$(jq -r "${mask}.udp[0].settings.password // empty" "${hy17}")
+    fi
 }
 
 # 读取上次安装的配置
@@ -1930,9 +1944,18 @@ unInstallSingBox() {
         rm -f ${SINGBOX_MERGED_CONFIG}
     fi
 
-    readInstallType
+    singBoxKeepOrRemove
+    refreshSubscribeAfterInstall
+    # 卸掉的是本机最后一个协议：nginx、证书、续签任务与订阅文件都还在，整机清理只有菜单 20
+    if [[ -z "${coreKind}" && ! -e "${SINGBOX_BIN}" ]]; then
+        echoContent yellow " ---> $(t NO_PROTOCOL_LEFT_HINT)"
+    fi
+}
 
-    # 片段里还有入站（链式的桥、出口）也得留：singBoxConfigPath 只看 6 / 9，按它删会把链式的片段、状态文件连同二进制一起删掉
+# singBoxKeepOrRemove → 删过协议片段之后：片段里还有入站（6 / 9、链式的桥与出口）就重启 sing-box，一个都不剩就连服务与二进制一起删。
+# 只看 singBoxConfigPath（6 / 9）会把链式的片段、状态文件连同二进制一起删掉
+singBoxKeepOrRemove() {
+    readInstallType
     if [[ -n "${singBoxConfigPath}" ]] || singBoxFragmentsHaveInbounds; then
         echoContent yellow " ---> 检测到有其他配置，保留sing-box核心"
         handleSingBox stop
@@ -1953,11 +1976,6 @@ unInstallSingBox() {
             rm -rf ${SINGBOX_DIR}/*
         fi
         echoContent green " ---> sing-box 卸载完成"
-    fi
-    refreshSubscribeAfterInstall
-    # 卸掉的是本机最后一个协议：nginx、证书、续签任务与订阅文件都还在，整机清理只有菜单 20
-    if [[ -z "${coreKind}" && ! -e "${SINGBOX_BIN}" ]]; then
-        echoContent yellow " ---> $(t NO_PROTOCOL_LEFT_HINT)"
     fi
 }
 
@@ -2122,10 +2140,14 @@ chainRefuseCoreSwitch() {
 }
 
 # 清理旧残留。singBoxProtocolsDel PREV_CORE：Xray 安装只在从 sing-box 内核（PREV_CORE=2）切过来时删它的协议入站，
-# 已是 Xray 内核时旁挂的 6 / 9 与链式出口 / 中继原样留着；删完片段里还有入站（出口、中继）就让 sing-box 接着跑
+# 已是 Xray 内核时旁挂的 9 与链式出口 / 中继原样留着，旁挂的 6 在装了 17 时换掉；删完片段里还有入站就让 sing-box 接着跑
 cleanUp() {
     if [[ "$1" == "xrayDel" ]]; then
         handleXray stop
+        # 17 的跳跃规则随它走：Xray 删了，留着的规则把区间转进没人听的端口
+        if [[ -f "${XRAY_CONF_DIR}/17_hysteria_inbounds.json" ]]; then
+            removeProtocolPortHopping hysteria2 "${XRAY_CONF_DIR}/17_hysteria_inbounds.json"
+        fi
         # 服务单元连同自启一起撤：留着的话每次开机都去拉一个已删掉的二进制
         if [[ "${release}" == "alpine" ]]; then
             rc-update del xray default >/dev/null 2>&1
@@ -2140,6 +2162,12 @@ cleanUp() {
     elif [[ "$1" == "singBoxProtocolsDel" ]]; then
         local file
         if [[ "$2" != "2" ]]; then
+            # 两个 Hysteria2 抢同一个端口、拼车也只计得到 17：在 Xray 启动前停掉 sing-box 里的那个。跳跃规则由装 17 的那一步接过去
+            if [[ -f "${XRAY_CONF_DIR}/17_hysteria_inbounds.json" && -f "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" ]]; then
+                rm -f "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" "${SINGBOX_MERGED_CONFIG}"
+                echoContent green " ---> $(t HY2_SIDECAR_REPLACED)"
+                singBoxKeepOrRemove
+            fi
             if [[ -f "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" || -f "${SINGBOX_FRAGMENT_DIR}/09_tuic_inbounds.json" ]]; then
                 echoContent yellow " ---> $(t CLEANUP_SIDECAR_KEPT)"
             fi
@@ -4976,6 +5004,13 @@ initXrayClients() {
                 --arg email "${email}-vless_reality_vision" \
                 '. += [{id: $id, email: $email, flow: "xtls-rprx-vision"}]')
         fi
+        # Hysteria2 (id 17)：Xray 的 hysteria 入站，凭据字段是 auth
+        if [[ "${type}" == *",17,"* ]]; then
+            users=$(echo "${users}" | jq \
+                --arg auth "${uuid}" \
+                --arg email "${email}-xray_hysteria2" \
+                '. += [{auth: $auth, email: $email}]')
+        fi
         # TUIC (id 9) -- Xray 路径与 sing-box 共用 currentClients，保留原 schema
         if [[ "${type}" == *",9,"* ]]; then
             users=$(echo "${users}" | jq \
@@ -5125,8 +5160,8 @@ initSingBoxClients() {
     echo "${users}"
 }
 
-# initHysteria2Network → 问拥塞控制与混淆。BBR 时 hysteria2ClientDownloadSpeed / UploadSpeed 为空，
-# 不混淆时 hysteria2ObfsType / hysteria2ObfsPassword 为空；gecko 要 sing-box ≥ 1.14，低于它不给选
+# initHysteria2Network [xray] → 问拥塞控制与混淆。BBR 时 hysteria2ClientDownloadSpeed / UploadSpeed 为空，
+# 不混淆时 hysteria2ObfsType / hysteria2ObfsPassword 为空；gecko 要 sing-box ≥ 1.14，低于它不给选，xray（17）的最低内核都带
 initHysteria2Network() {
     local choice= gecko=
     hysteria2ClientDownloadSpeed=
@@ -5144,7 +5179,7 @@ initHysteria2Network() {
         echoContent green " ---> BBR"
     fi
 
-    if versionGreaterOrEqual "$(singBoxInstalledVersion)" 1.14.0; then
+    if [[ "${1:-}" == "xray" ]] || versionGreaterOrEqual "$(singBoxInstalledVersion)" 1.14.0; then
         gecko=true
     fi
     echoContent yellow "$(t HY2_OBFS_MENU)"
@@ -5203,6 +5238,27 @@ hysteria2InboundJson() {
         + (if $site == "" then {} else {masquerade: {type: "file", directory: $site}} end)
         + {tls: {enabled: true, server_name: $sni, alpn: ["h3"], certificate_path: $cert, key_path: $keyFile}}
         | {inbounds: [.]}'
+}
+
+# hysteriaXrayInboundJson PORT CLIENTS_JSON SNI UP DOWN OBFS_TYPE OBFS_PASSWORD SITE_DIR → 17 的完整 JSON，参数同 hysteria2InboundJson。
+# Brutal 两个方向都要写，只写一个时 Xray 不认客户端报的带宽；gecko 是 salamander 加 packetSize，与 sing-box、mihomo 的 gecko 互通
+hysteriaXrayInboundJson() {
+    jq -n --argjson port "$1" --argjson clients "$2" --arg up "$4" --arg down "$5" \
+        --arg obfsType "$6" --arg obfsPassword "$7" --arg site "$8" \
+        --arg cert "${TLS_DIR}/$3.crt" --arg keyFile "${TLS_DIR}/$3.key" '
+        (if $up == "" then {congestion: "bbr"}
+         else {congestion: "brutal", brutalUp: "\($up) mbps", brutalDown: "\($down) mbps"} end) as $quic
+        | (if $obfsType == "" then {}
+           else {udp: [{type: "salamander", settings: ({password: $obfsPassword}
+               + (if $obfsType == "gecko" then {packetSize: "512-1200"} else {} end))}]} end) as $obfs
+        | {inbounds: [{tag: "hysteria-in", listen: "0.0.0.0", port: $port, protocol: "hysteria",
+            settings: {version: 2, clients: $clients},
+            streamSettings: {network: "hysteria", security: "tls",
+                tlsSettings: {alpn: ["h3"], certificates: [{certificateFile: $cert, keyFile: $keyFile}]},
+                hysteriaSettings: ({version: 2, udpIdleTimeout: 60}
+                    + (if $site == "" then {} else {masquerade: {type: "file", dir: $site}} end)),
+                finalmask: ($obfs + {quicParams: $quic})},
+            sniffing: {enabled: true, destOverride: ["http", "tls", "quic"]}}]}'
 }
 
 # 初始化 Shadowsocks 2022 配置
@@ -5443,22 +5499,38 @@ portHoppingRule() {
     echo "PREROUTING -p udp --dport $2:$3 -m addrtype --dst-type LOCAL -m comment --comment Proxy-agent_$1_portHopping -j REDIRECT --to-ports $4"
 }
 
-# portHoppingBootHook TYPE on START END TARGET | TYPE off → sing-box 每次启动前补回 iptables 的跳跃规则（-C 查到就不加），
-# systemd 写 drop-in，OpenRC 写 conf.d 的 start_pre。没有 netfilter-persistent 的机器（装了 ufw 的都是）规则只活到重启，
-# 订阅里的跳跃区间也从活规则读，丢了一起丢。on 时两种服务都没有返回 1
+# portHoppingBootHook TYPE on START END TARGET | TYPE off → 跳跃目标所在的内核每次启动前补回 iptables 的跳跃规则（-C 查到就不加），
+# 17 在 Xray 上、别的在 sing-box 上，另一个内核上同类型的钩子撤掉。没有 netfilter-persistent 的机器（装了 ufw 的都是）规则只活到重启，
+# 订阅里的跳跃区间也从活规则读，丢了一起丢。on 时承载它的服务两种都没有返回 1
 portHoppingBootHook() {
-    local type=$1 dropIn="/etc/systemd/system/sing-box.service.d/port-hopping-$1.conf" confD=/etc/conf.d/sing-box
+    local type=$1 host=sing-box service rc=0
+    [[ "${type}" == "hysteria2" && -f "${XRAY_CONF_DIR}/17_hysteria_inbounds.json" ]] && host=xray
+    for service in sing-box xray; do
+        if [[ "$2" == "on" && "${service}" == "${host}" ]]; then
+            portHoppingServiceHook "${service}" "${type}" on "$3" "$4" "$5" || rc=1
+        else
+            portHoppingServiceHook "${service}" "${type}" off
+        fi
+    done
+    return "${rc}"
+}
+
+# portHoppingServiceHook SERVICE TYPE on START END TARGET | SERVICE TYPE off → 在 SERVICE 上挂或撤那条启动前钩子：
+# systemd 写 drop-in，OpenRC 写 conf.d 的 start_pre。on 时这个服务两种都没有返回 1；
+# off 时服务单元已经先删了（整机卸载）也照样撤，不然留下一个孤立的 drop-in
+portHoppingServiceHook() {
+    local service=$1 type=$2 dropIn="/etc/systemd/system/$1.service.d/port-hopping-$2.conf" confD="/etc/conf.d/$1"
     local rule cmd= tool kept want
-    if [[ "$2" == "on" ]]; then
-        rule=$(portHoppingRule "${type}" "$3" "$4" "$5")
+    if [[ "$3" == "on" ]]; then
+        rule=$(portHoppingRule "${type}" "$4" "$5" "$6")
         for tool in iptables ip6tables; do
             cmd+="${tool} -t nat -C ${rule} 2>/dev/null || ${tool} -t nat -A ${rule} 2>/dev/null; "
         done
         cmd+="true"
     fi
-    if [[ -f /etc/systemd/system/sing-box.service ]]; then
+    if [[ -f "/etc/systemd/system/${service}.service" || ("$3" != "on" && -e "${dropIn}") ]]; then
         want=$'[Service]\nExecStartPre=+/bin/sh -c '"'${cmd}'"
-        if [[ "$2" == "on" ]]; then
+        if [[ "$3" == "on" ]]; then
             [[ "$(cat "${dropIn}" 2>/dev/null)" == "${want}" ]] && return 0
             mkdir -p "${dropIn%/*}" && printf '%s\n' "${want}" >"${dropIn}" || return 1
         elif [[ -e "${dropIn}" ]]; then
@@ -5468,11 +5540,11 @@ portHoppingBootHook() {
             return 0
         fi
         systemctl daemon-reload
-    elif [[ -f /etc/init.d/sing-box ]]; then
+    elif [[ -f "/etc/init.d/${service}" || ("$3" != "on" && -f "${confD}") ]]; then
         # 只认、只动自己的那一行（带类型标记）；init 脚本不定义 start_pre，openrc-run 先读 conf.d，这里定义的就是启动前钩子
         kept=$(grep -vF "Proxy-agent_${type}_portHopping" "${confD}" 2>/dev/null)
         want=${kept}
-        [[ "$2" == "on" ]] && want=${kept:+${kept}$'\n'}"start_pre() { ${cmd}; }"
+        [[ "$3" == "on" ]] && want=${kept:+${kept}$'\n'}"start_pre() { ${cmd}; }"
         [[ "${want}" == "$(cat "${confD}" 2>/dev/null)" ]] && return 0
         if [[ -z "${want}" ]]; then
             rm -f "${confD}"
@@ -5480,7 +5552,7 @@ portHoppingBootHook() {
             printf '%s\n' "${want}" >"${confD}" || return 1
         fi
     else
-        [[ "$2" != "on" ]]
+        [[ "$3" != "on" ]]
     fi
 }
 
@@ -5548,11 +5620,11 @@ deletePortHoppingRules() {
     fi
 }
 
-# removeProtocolPortHopping TYPE FRAGMENT → 协议卸载时带走它的跳跃规则：留着的话重装换了端口，规则还指向旧端口。
+# removeProtocolPortHopping TYPE INBOUND_FILE → 协议卸载时带走它的跳跃规则：留着的话重装换了端口，规则还指向旧端口。
 # iptables 的规则带协议标记；firewalld 的只能按目标端口认，读不到端口就不动，否则 toport= 会匹配到用户自己的转发
 removeProtocolPortHopping() {
     local type=$1 targetPort= start= end=
-    targetPort=$(jq -r '.inbounds[0].listen_port // empty' "$2" 2>/dev/null)
+    targetPort=$(jq -r '.inbounds[0] | .listen_port // .port // empty' "$2" 2>/dev/null)
     if [[ "${release}" == "centos" ]]; then
         [[ -n "${targetPort}" ]] && systemctl is-active --quiet firewalld || return 0
     else
@@ -5570,6 +5642,21 @@ removeProtocolPortHopping() {
     fi
 }
 
+# hysteria2HoppingFollow OLD_PORT NEW_PORT → 重装 Hysteria2 或从 6 换成 17 之后跳跃规则跟着走：端口没变，开机补规则的钩子挂到现在跑它的内核上；
+# 换了端口就删掉并提示（规则只认目标端口，留着就把区间转进没人听的端口）
+hysteria2HoppingFollow() {
+    [[ -n "$1" ]] || return 0
+    [[ "${release}" == "centos" ]] || command -v iptables-save >/dev/null 2>&1 || return 0
+    readPortHopping hysteria2 "$1"
+    [[ -n "${hysteria2PortHoppingStart}" && -n "${hysteria2PortHoppingEnd}" ]] || return 0
+    if [[ "$1" != "$2" ]]; then
+        deletePortHoppingRules hysteria2 "${hysteria2PortHoppingStart}" "${hysteria2PortHoppingEnd}" "$1"
+        echoContent yellow " ---> $(t HY2_HOPPING_DROPPED "$1")"
+    elif [[ "${release}" != "centos" ]] && ! portHoppingBootHook hysteria2 on "${hysteria2PortHoppingStart}" "${hysteria2PortHoppingEnd}" "$2"; then
+        echoContent yellow " ---> $(t PORT_HOPPING_NOT_PERSISTENT)"
+    fi
+}
+
 # 端口跳跃菜单
 portHoppingMenu() {
     local type=$1
@@ -5580,7 +5667,7 @@ portHoppingMenu() {
         exit 1
     fi
 
-    local targetPort=${singBoxHysteria2Port}
+    local targetPort=${hysteria2InboundPort}
     local portHoppingStart=
     local portHoppingEnd=
 
@@ -5682,6 +5769,16 @@ ensureSingBoxLocalDns() {
 # 读运行中 sing-box 内核版本（形如 1.14.0）；二进制缺失或输出异常时为空
 singBoxInstalledVersion() {
     ${SINGBOX_BIN} version 2>/dev/null | awk '/^sing-box version/ {print $3; exit}'
+}
+
+# 读装着的 Xray-core 版本（形如 26.11.9）；二进制缺失或输出异常时为空
+xrayInstalledVersion() {
+    ${XRAY_BIN} version 2>/dev/null | awk 'NR == 1 {print $2}'
+}
+
+# xrayHysteriaSupported → 0 = 装着的 Xray-core 不低于 17 要的 HYSTERIA_XRAY_MIN_VERSION
+xrayHysteriaSupported() {
+    versionGreaterOrEqual "$(xrayInstalledVersion)" "${HYSTERIA_XRAY_MIN_VERSION}"
 }
 
 # 顶层 http_clients 片段：remote rule_set 的下载通道，不带 detour 即直连拨号。别加 detour 指向 direct 出站：
@@ -5996,12 +6093,12 @@ singBoxMergeConfig() {
     return 0
 }
 
-# initSingBoxPort OLD_PORT [ID KEEP] → 端口打到最后一行。带 ID 按协议取默认端口并查重（KEEP 同 configuredPorts），
+# initSingBoxPort OLD_PORT [ID KEEP [TAKEN...]] → 端口打到最后一行。带 ID 按协议取默认端口并查重（KEEP 同 configuredPorts，TAKEN 另算占用），
 # 防火墙只放该协议实际监听的网络；不带 ID 的是订阅端口（nginx，只放 TCP），回车随机
 initSingBoxPort() {
     local port=$1 network
     if [[ -n "${2:-}" ]]; then
-        port=$(pickInboundPort "$2" "${port}" "${SINGBOX_FRAGMENT_DIR}" "${3:-}" "")
+        port=$(pickInboundPort "$2" "${port}" "${SINGBOX_FRAGMENT_DIR}" "${3:-}" "" "${@:4}")
         network=$(getProtocolListenNetwork "$2") || network=both
         [[ "${network}" == "udp" ]] || allowPort "${port}"
         [[ "${network}" == "tcp" ]] || allowPort "${port}" "udp"
@@ -6494,6 +6591,35 @@ EOF
         rm ${XRAY_CONF_DIR}/07_VLESS_vision_reality_inbounds.json >/dev/null 2>&1
         rm ${XRAY_CONF_DIR}/08_VLESS_vision_gRPC_inbounds.json >/dev/null 2>&1
     fi
+
+    # Hysteria2（Xray 原生）：证书用 0 的域名，masquerade 用伪装站（宝塔 / 1Panel 的目录是用户自己的站点，不配）
+    local hy17File="${XRAY_CONF_DIR}/17_hysteria_inbounds.json"
+    if echo "${selectCustomInstallType}" | grep -q ",17," || [[ "$1" == "all" ]]; then
+        if ! xrayHysteriaSupported; then
+            echoContent yellow " ---> $(t HY2_XRAY_TOO_OLD "$(xrayInstalledVersion)" "${HYSTERIA_XRAY_MIN_VERSION}")"
+        else
+            echoContent skyBlue "\n================== $(t CONFIG_PROTOCOL_TITLE "$(getProtocolDisplayName 17)") ==================\n"
+            local hy17OldPort=${hysteria2InboundPort} hy17Site= hy17Json=
+            initXrayHysteriaPort "${portKeep}" "${portSkip}"
+            initHysteria2Network xray
+            if [[ -z "${btDomain}" ]]; then
+                hy17Site=${nginxStaticPath%/}
+            else
+                echoContent yellow " ---> $(t HY2_MASQUERADE_NONE)"
+            fi
+            if ! hy17Json=$(hysteriaXrayInboundJson "${hysteria17Port}" "$(initXrayClients 17)" "${domain}" \
+                "${hysteria2ClientDownloadSpeed}" "${hysteria2ClientUploadSpeed}" \
+                "${hysteria2ObfsType}" "${hysteria2ObfsPassword}" "${hy17Site}") ||
+                ! jsonWriteFile "${hy17File}" "${hy17Json}" false; then
+                echoContent red " ---> $(t HY2_WRITE_FAILED)"
+                exit 1
+            fi
+            hysteria2HoppingFollow "${hy17OldPort}" "${hysteria17Port}"
+        fi
+    elif [[ -z "${3:-}" && -f "${hy17File}" ]]; then
+        removeProtocolPortHopping hysteria2 "${hy17File}"
+        rm -f "${hy17File}"
+    fi
     installSniffing
     if [[ -z "${3:-}" ]]; then
         removeXrayOutbound wireguard_out_IPv4_route
@@ -6731,7 +6857,7 @@ EOF
         echoContent yellow "\n================== 配置 Hysteria2 ==================\n"
         echoContent skyBlue "\n开始配置Hysteria2协议端口"
         echo
-        mapfile -t result < <(initSingBoxPort "${singBoxHysteria2Port}" 6 "${portKeep}")
+        mapfile -t result < <(initSingBoxPort "${hysteria2InboundPort}" 6 "${portKeep}")
         echoContent green "\n ---> Hysteria2端口：${result[-1]}"
         initHysteria2Network
 
@@ -6793,7 +6919,10 @@ EOF
         echoContent yellow "\n==================== 配置 Tuic =====================\n"
         echoContent skyBlue "\n开始配置Tuic协议端口"
         echo
-        mapfile -t result < <(initSingBoxPort "${singBoxTuicPort}" 9 "${portKeep}")
+        # 旁挂到 Xray 机上时 Xray 接着跑，17 的 UDP 端口它绑不了
+        local xrayUdpPorts=()
+        [[ "${coreKind}" == "1" && -n "${3:-}" ]] && mapfile -t xrayUdpPorts < <(configuredPorts "${XRAY_CONF_DIR}" udp)
+        mapfile -t result < <(initSingBoxPort "${singBoxTuicPort}" 9 "${portKeep}" "${xrayUdpPorts[@]}")
         echoContent green "\n ---> Tuic端口：${result[-1]}"
         initTuicProtocol
         cat <<EOF >${SINGBOX_FRAGMENT_DIR}/09_tuic_inbounds.json
@@ -7271,9 +7400,9 @@ EOF
             singBoxBandwidth=",\"up_mbps\":${hysteria2ClientUploadSpeed},\"down_mbps\":${hysteria2ClientDownloadSpeed}"
         fi
 
-        echoContent green "    hysteria2://${id}@${currentHost}:${singBoxHysteria2Port}?${multiPort}${obfsUrlParam}peer=${currentHost}&insecure=0&sni=${currentHost}&alpn=h3#${email}\n"
+        echoContent green "    hysteria2://${id}@${currentHost}:${hysteria2InboundPort}?${multiPort}${obfsUrlParam}peer=${currentHost}&insecure=0&sni=${currentHost}&alpn=h3#${email}\n"
         cat <<EOF >>"${SUBSCRIBE_LOCAL_DIR}/default/${user}"
-hysteria2://${id}@${currentHost}:${singBoxHysteria2Port}?${multiPort}${obfsUrlParam}peer=${currentHost}&insecure=0&sni=${currentHost}&alpn=h3#${email}
+hysteria2://${id}@${currentHost}:${hysteria2InboundPort}?${multiPort}${obfsUrlParam}peer=${currentHost}&insecure=0&sni=${currentHost}&alpn=h3#${email}
 EOF
         echoContent yellow " ---> v2rayN(hysteria+TLS)"
         # 官方客户端格式：混淆按类型再嵌一层；少了它，开着混淆的服务端一个包都不认
@@ -7297,7 +7426,7 @@ ${clashMetaBandwidth}
 ${clashMetaObfs}
 EOF
 
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"hysteria2\",\"server\":\"${currentHost}\",\"server_port\":${singBoxHysteria2Port}${singBoxPorts}${singBoxBandwidth},\"password\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"alpn\":[\"h3\"]}${singBoxObfs}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"hysteria2\",\"server\":\"${currentHost}\",\"server_port\":${hysteria2InboundPort}${singBoxPorts}${singBoxBandwidth},\"password\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"alpn\":[\"h3\"]}${singBoxObfs}}]" "${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}")
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${SUBSCRIBE_LOCAL_DIR}/sing-box/${user}"
 
         shareQrCode " ---> 二维码 Hysteria2(TLS)" "$(tail -n 1 "${SUBSCRIBE_LOCAL_DIR}/default/${user}")"
@@ -7671,9 +7800,9 @@ showAccounts() {
     fi
     # VLESS grpc - 已移除
 
-    # hysteria2
-    if echo ${currentInstallProtocolType} | grep -q ",6," || [[ -n "${hysteriaPort}" ]]; then
-        readPortHopping "hysteria2" "${singBoxHysteria2Port}"
+    # hysteria2：6（sing-box）与 17（Xray）发的节点一样，一台机器上只有其中一个
+    if echo ${currentInstallProtocolType} | grep -qE ",(6|17)," || [[ -n "${hysteriaPort}" ]]; then
+        readPortHopping "hysteria2" "${hysteria2InboundPort}"
         echoContent skyBlue "\n================================  Hysteria2 TLS [推荐] ================================\n"
         local path="${configPath}"
         if [[ "${coreKind}" == "1" ]]; then
@@ -7683,10 +7812,17 @@ showAccounts() {
         if [[ -n "${hysteria2PortHoppingStart}" && -n "${hysteria2PortHoppingEnd}" ]]; then
             hysteria2DefaultPort="${hysteria2PortHopping}"
         else
-            hysteria2DefaultPort=${singBoxHysteria2Port}
+            hysteria2DefaultPort=${hysteria2InboundPort}
+        fi
+        local hysteria2Users='.inbounds[]|.users[]'
+        if echo ${currentInstallProtocolType} | grep -q ",17,"; then
+            path="${configPath}17_hysteria_inbounds.json"
+            hysteria2Users='.inbounds[0].settings.clients[] | {name: .email, password: .auth}'
+        else
+            path="${path}06_hysteria2_inbounds.json"
         fi
 
-        jq -r -c '.inbounds[]|.users[]' "${path}06_hysteria2_inbounds.json" | while read -r user; do
+        jq -r -c "${hysteria2Users}" "${path}" | while read -r user; do
             accountViewSelect "$(jq -r '.name | sub("-[^-]*$"; "")' <<<"${user}")"
             echoContent skyBlue "\n ---> 账号:$(echo "${user}" | jq -r .name)"
             echo
@@ -8077,7 +8213,8 @@ corePortTarget() {
 ensureCorePortTargets() {
     local file target hy want out
     target=$(corePortTarget) || return 0
-    hy=$(jq -er '.inbounds[0].listen_port | numbers' "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" 2>/dev/null)
+    hy=$(jq -er '.inbounds[0].port | numbers' "${XRAY_CONF_DIR}/17_hysteria_inbounds.json" 2>/dev/null) ||
+        hy=$(jq -er '.inbounds[0].listen_port | numbers' "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" 2>/dev/null)
     for file in "${XRAY_CONF_DIR}"/02_dokodemodoor_inbounds_*.json; do
         [[ -f "${file}" ]] || continue
         want=${target}
@@ -8387,6 +8524,7 @@ unInstall() {
     removeOwnCronEntries
     # 跳跃规则要趁片段还在时收：firewalld 的只能按片段里的目标端口认
     removeProtocolPortHopping hysteria2 "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json"
+    removeProtocolPortHopping hysteria2 "${XRAY_CONF_DIR}/17_hysteria_inbounds.json"
     removeProtocolPortHopping tuic "${SINGBOX_FRAGMENT_DIR}/09_tuic_inbounds.json"
     removeOwnFirewallRules
     rm -rf ${PROXY_AGENT_DIR}
@@ -9119,12 +9257,13 @@ carpoolCheckPrerequisites() {
         echoContent red " ---> $(t CARPOOL_REQ_XRAY)"
         ok=
     else
-        ver=$(${XRAY_BIN} version 2>/dev/null | head -1 | awk '{print $2}')
+        ver=$(xrayInstalledVersion)
         if [[ -z "${ver}" ]] || ! versionGreaterOrEqual "${ver}" "${CARPOOL_XRAY_MIN_VERSION}"; then
             echoContent red " ---> $(t CARPOOL_REQ_XRAY_VERSION "${ver:-?}" "${CARPOOL_XRAY_MIN_VERSION}")"
             ok=
         fi
     fi
+    # 17 不算：它是 Xray 的入站，与别的协议一起计量
     if [[ "${currentInstallProtocolType}" == *",6,"* || "${currentInstallProtocolType}" == *",9,"* ]]; then
         echoContent red " ---> $(t CARPOOL_REQ_NO_SIDECAR)"
         ok=
@@ -15855,7 +15994,7 @@ customSingBoxInstall() {
 # Xray-core个性化安装
 customXrayInstall() {
     echoContent skyBlue "\n========================个性化安装============================"
-    echoContent yellow "VLESS前置：选了 1 / 3 / 4 / 15 会自动带上 0；无域名只装 Reality 选 7 或 7,12"
+    echoContent yellow "VLESS前置：选了 1 / 3 / 4 / 15 / 17 会自动带上 0；无域名只装 Reality 选 7 或 7,12"
     echoContent yellow "0.VLESS+TLS_Vision+TCP[推荐]"
     echoContent yellow "1.VLESS+TLS+WS[仅CDN推荐]"
     echoContent yellow "$(t INSTALL_ITEM_VMESS_WS)"
@@ -15863,6 +16002,7 @@ customXrayInstall() {
     echoContent yellow "7.VLESS+Reality+uTLS+Vision[推荐]"
     echoContent yellow "12.VLESS+Reality+XHTTP"
     echoContent yellow "$(t INSTALL_ITEM_XHTTP_TLS)"
+    echoContent yellow "$(t INSTALL_ITEM_HYSTERIA2_XRAY)"
     read -r -p "请选择[多选]，[例如:1,2,3]:" selectCustomInstallType
     echoContent skyBlue "--------------------------------------------------------------"
     if echo "${selectCustomInstallType}" | grep -q "，"; then
@@ -15875,9 +16015,9 @@ customXrayInstall() {
     fi
 
     selectCustomInstallType=",${selectCustomInstallType},"
-    # 1 / 3 / 4 / 15 是 0 的 TLS 回落，没选 0 就补上；12 也要 0 或 7 当前置（readInstallType 与账号管理只认它们）。
+    # 1 / 3 / 4 / 15 是 0 的 TLS 回落、17 的证书与订阅地址取自 0，没选 0 就补上；12 也要 0 或 7 当前置（readInstallType 与账号管理只认它们）。
     # 7、7,12 不补：补了 0 就要域名和证书，无域名的机器装不上
-    if [[ ("${selectCustomInstallType}" =~ ,(1|3|4|15), || ("${selectCustomInstallType}" == *",12,"* && "${selectCustomInstallType}" != *",7,"*)) \
+    if [[ ("${selectCustomInstallType}" =~ ,(1|3|4|15|17), || ("${selectCustomInstallType}" == *",12,"* && "${selectCustomInstallType}" != *",7,"*)) \
         && "${selectCustomInstallType}" != *",0,"* ]]; then
         selectCustomInstallType=",0${selectCustomInstallType}"
     fi
@@ -17847,6 +17987,16 @@ initXrayXHTTPort() {
     echoContent yellow "\n ---> $(getProtocolDisplayName 12) 端口: ${xHTTPort}"
 }
 
+# initXrayHysteriaPort KEEP SKIP → 17 的 UDP 端口写进 hysteria17Port 并放行，回车默认沿用 17 或旁挂 6 的端口。
+# Xray 机上旁挂 sing-box 留着的 UDP 入站（9）也算占用，两个内核绑不了同一个端口；6 不算，装 17 就是换掉它
+initXrayHysteriaPort() {
+    local sidecar=()
+    [[ "${coreKind}" == "1" ]] && mapfile -t sidecar < <(configuredPorts "${SINGBOX_FRAGMENT_DIR}" udp "" ",6,")
+    hysteria17Port=$(pickInboundPort 17 "${hysteria2InboundPort}" "${XRAY_CONF_DIR}" "$1" "$2" "${sidecar[@]}")
+    allowPort "${hysteria17Port}" udp
+    echoContent yellow "\n ---> $(getProtocolDisplayName 17) 端口: ${hysteria17Port}"
+}
+
 # reality管理
 manageReality() {
     readInstallProtocolType
@@ -17906,31 +18056,79 @@ manageReality() {
     fi
 }
 
-# hysteria管理
+# hysteria管理：Xray 机上装、重装都给 17（Xray 原生），旁挂的 6 照旧能卸、能管跳跃，重装就换成 17；sing-box 机照旧是 6
 manageHysteria() {
     echoContent skyBlue "\n进度  1/1 : Hysteria2 管理"
     echoContent red "\n=============================================================="
-    local hysteria2Status=
-    if [[ -n "${singBoxConfigPath}" ]] && [[ -f "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" ]]; then
-        echoContent yellow "依赖sing-box内核\n"
+    local installed=
+    if [[ "${coreKind}" == "1" && -f "${XRAY_CONF_DIR}/17_hysteria_inbounds.json" ]]; then
+        echoContent yellow "$(t HY2_XRAY_NATIVE)\n"
         echoContent yellow "1.重新安装"
-        echoContent yellow "2.卸载"
-        echoContent yellow "3.端口跳跃管理"
-        hysteria2Status=true
+        installed=17
+    elif [[ -n "${singBoxConfigPath}" ]] && [[ -f "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" ]]; then
+        echoContent yellow "依赖sing-box内核\n"
+        if [[ "${coreKind}" == "1" ]]; then
+            echoContent yellow "1.$(t HY2_REINSTALL_AS_XRAY)"
+        else
+            echoContent yellow "1.重新安装"
+        fi
+        installed=6
+    elif [[ "${coreKind}" == "1" ]]; then
+        echoContent yellow "$(t HY2_XRAY_NATIVE)\n"
+        echoContent yellow "1.安装"
     else
         echoContent yellow "依赖sing-box内核\n"
         echoContent yellow "1.安装"
     fi
+    if [[ -n "${installed}" ]]; then
+        echoContent yellow "2.卸载"
+        echoContent yellow "3.端口跳跃管理"
+    fi
 
     echoContent red "=============================================================="
     read -r -p "请选择:" installHysteria2Status
-    if [[ "${installHysteria2Status}" == "1" ]]; then
+    if [[ "${installHysteria2Status}" == "1" && "${coreKind}" == "1" ]]; then
+        xrayHysteriaInstall
+    elif [[ "${installHysteria2Status}" == "1" ]]; then
         singBoxHysteria2Install
-    elif [[ "${installHysteria2Status}" == "2" && "${hysteria2Status}" == "true" ]]; then
+    elif [[ "${installHysteria2Status}" == "2" && "${installed}" == "17" ]]; then
+        unInstallXrayHysteria
+    elif [[ "${installHysteria2Status}" == "2" && "${installed}" == "6" ]]; then
         unInstallSingBox hysteria2
-    elif [[ "${installHysteria2Status}" == "3" && "${hysteria2Status}" == "true" ]]; then
+    elif [[ "${installHysteria2Status}" == "3" && -n "${installed}" ]]; then
         portHoppingMenu hysteria2
     fi
+}
+
+# xrayHysteriaInstall → Xray 机上装或重装 17：证书与订阅地址取自 0，账号从 0 / 7 映射，旁挂的 6 随之换掉。拼车开着也能装，成员由对账放进去
+xrayHysteriaInstall() {
+    if [[ "${currentInstallProtocolType}" != *",0,"* ]]; then
+        echoContent red "\n ---> 由于需要依赖证书，如安装Hysteria2，请先安装带有TLS标识协议"
+        exit 1
+    fi
+    if ! xrayHysteriaSupported; then
+        echoContent red " ---> $(t HY2_XRAY_TOO_OLD "$(xrayInstalledVersion)" "${HYSTERIA_XRAY_MIN_VERSION}")"
+        exit 1
+    fi
+    totalProgress=2
+    domain=${currentHost}
+    selectCustomInstallType=",17,"
+    initXrayConfig custom 1 true
+    cleanUp singBoxProtocolsDel 1
+    reloadCore
+    # 订阅装过就按原 salt 重建：不然新装的协议进不了用户手里的订阅
+    refreshSubscribeAfterInstall
+    showAccounts 2
+}
+
+# unInstallXrayHysteria → 卸掉 17，连同它的跳跃规则；0 还在，本机不会因此没有协议
+unInstallXrayHysteria() {
+    local file="${XRAY_CONF_DIR}/17_hysteria_inbounds.json"
+    removeProtocolPortHopping hysteria2 "${file}"
+    rm -f "${file}"
+    echoContent green " ---> $(t HY2_REMOVED)"
+    reloadCore
+    refreshSubscribeAfterInstall
 }
 
 # tuic管理
@@ -18668,7 +18866,7 @@ _doctorCheckSecurity() {
     while IFS=$'\t' read -r u name; do
         ((total++)) || true
         auditUuidWeak "${u}" && weak+="${name%-*}"$'\n'
-    done < <(_doctorJqFiles '.inbounds[]? | .. | objects | (.id? // .uuid? // .password?) as $u
+    done < <(_doctorJqFiles '.inbounds[]? | .. | objects | (.id? // .uuid? // .password? // .auth?) as $u
         | select(($u | type) == "string" and ($u | test("^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")))
         | "\($u)\t\(.email // .name // "-")"' "${files[@]}")
     if [[ -n "${weak}" ]]; then

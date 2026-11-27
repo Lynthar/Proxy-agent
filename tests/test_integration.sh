@@ -1029,6 +1029,48 @@ printf '%s\n' '{"inbounds":[{"type":"hysteria2","listen_port":443,"up_mbps":200,
 assert_equals "200|20|salamander|pw" "$(hy2_read)" "readSingBoxConfig：旧版写死 Brutal 的片段照旧读出带宽与混淆"
 rm -rf "${HY2_READ_DIR}"
 
+# 17（Xray 原生）：同一组提问写成 Xray 的 hysteria 入站，读回到 6 的那几个变量，订阅照同一套写
+HY17_FN=$(sed -n '/^hysteriaXrayInboundJson() {/,/^}/p' install.sh)
+assert_not_empty "${HY17_FN}" "hysteriaXrayInboundJson：抽到函数原文"
+hy17_json() ( eval "${HY17_FN}"; hysteriaXrayInboundJson "$@" )
+_hy17Bbr=$(hy17_json 443 '[{"auth":"p","email":"a-xray_hysteria2"}]' example.com '' '' '' '' /usr/share/nginx/html)
+assert_equals "hysteria|hysteria|tls|443|0.0.0.0|$(getProtocolInboundTag 17)" \
+    "$(jq -r '.inbounds[0] | "\(.protocol)|\(.streamSettings.network)|\(.streamSettings.security)|\(.port)|\(.listen)|\(.tag)"' <<<"${_hy17Bbr}")" \
+    "17：Xray 的 hysteria 入站，端口是数字，tag 与 registry 一致"
+assert_equals '[{"auth":"p","email":"a-xray_hysteria2"}]' "$(jq -c "$(getProtocolUsersPath 1 17)" <<<"${_hy17Bbr}")" "17：用户数组原样落在 registry 声明的路径上"
+assert_equals '{"quicParams":{"congestion":"bbr"}}' "$(jq -c '.inbounds[0].streamSettings.finalmask' <<<"${_hy17Bbr}")" "17：不填带宽即 BBR，不写混淆"
+assert_equals '{"version":2,"udpIdleTimeout":60,"masquerade":{"type":"file","dir":"/usr/share/nginx/html"}}' \
+    "$(jq -c '.inbounds[0].streamSettings.hysteriaSettings' <<<"${_hy17Bbr}")" "17：masquerade 拿伪装站目录当文件服务器"
+assert_equals "h3|${TLS_DIR}/example.com.crt|${TLS_DIR}/example.com.key" \
+    "$(jq -r '.inbounds[0].streamSettings.tlsSettings | "\(.alpn | join(","))|\(.certificates[0].certificateFile)|\(.certificates[0].keyFile)"' <<<"${_hy17Bbr}")" \
+    "17：ALPN 只有 h3，证书按域名取 tls/ 下那一对"
+_hy17Brutal=$(hy17_json 8443 '[]' example.com 100 50 gecko 'a"b\c' '')
+assert_equals '{"udp":[{"type":"salamander","settings":{"password":"a\"b\\c","packetSize":"512-1200"}}],"quicParams":{"congestion":"brutal","brutalUp":"100 mbps","brutalDown":"50 mbps"}}' \
+    "$(jq -c '.inbounds[0].streamSettings.finalmask' <<<"${_hy17Brutal}")" \
+    "17：Brutal 两个方向都写（服务端上行 = 客户端下行），gecko 是带 packetSize 的 salamander，密码只当数据进 jq"
+assert_equals "false" "$(jq '.inbounds[0].streamSettings.hysteriaSettings | has("masquerade")' <<<"${_hy17Brutal}")" "17：没有伪装站目录就不写 masquerade"
+_hy17Sal=$(hy17_json 443 '[]' example.com '' '' salamander pw '')
+assert_equals '[{"type":"salamander","settings":{"password":"pw"}}]' "$(jq -c '.inbounds[0].streamSettings.finalmask.udp' <<<"${_hy17Sal}")" "17：salamander 不带 packetSize"
+HY17_READ_ROOT="${MOCK_ROOT}/hy17read"
+HY17_READ_DIR="${HY17_READ_ROOT}/xray/conf"
+mkdir -p "${HY17_READ_DIR}"
+# 打印「端口|客户端下行|客户端上行|混淆类型|混淆密码」
+hy17_read() {
+    env PROXY_AGENT_DIR="${HY17_READ_ROOT}" READ_SB_FN="${READ_SB_FN}" bash -c '
+        source lib/constants.sh
+        coreKind=1 singBoxConfigPath=
+        eval "${READ_SB_FN}"
+        readSingBoxConfig
+        printf "%s|%s|%s|%s|%s\n" "${hysteriaPort}" "${hysteria2ClientDownloadSpeed}" "${hysteria2ClientUploadSpeed}" "${hysteria2ObfsType}" "${hysteria2ObfsPassword}"'
+}
+printf '%s\n' "${_hy17Bbr}" >"${HY17_READ_DIR}/17_hysteria_inbounds.json"
+assert_equals "443||||" "$(hy17_read)" "readSingBoxConfig：17 的 BBR 读回空带宽、空混淆"
+printf '%s\n' "${_hy17Brutal}" >"${HY17_READ_DIR}/17_hysteria_inbounds.json"
+assert_equals '8443|100|50|gecko|a"b\c' "$(hy17_read)" "readSingBoxConfig：17 的 brutalUp 读作客户端下行、brutalDown 读作上行，带 packetSize 读作 gecko"
+printf '%s\n' "${_hy17Sal}" >"${HY17_READ_DIR}/17_hysteria_inbounds.json"
+assert_equals "443|||salamander|pw" "$(hy17_read)" "readSingBoxConfig：17 的 salamander 读回类型与密码"
+rm -rf "${HY17_READ_ROOT}"
+
 echo ""
 
 # ============================================================================
@@ -1210,6 +1252,15 @@ vps_reset
 printf '%s\n' '{"inbounds":[{"tag":"x"}]}' >"${VPS_F}/07_VLESS_vision_reality_inbounds.json"
 run_vps 'cleanUp singBoxProtocolsDel 2' >/dev/null 2>&1
 assert_equals "singbox stop" "$(tr '\n' ' ' <"${VPS_CALLS}" | sed 's/ $//')" "换内核：一个入站都不剩就停着"
+# Xray 上装了 17 就换掉旁挂的 6（两个 Hysteria2 抢同一个 UDP 端口，拼车也计不到 6）；9 照留
+vps_reset
+mkdir -p "${VPS_ROOT}/xray/conf" && printf '%s\n' '{"inbounds":[{"port":443}]}' >"${VPS_ROOT}/xray/conf/17_hysteria_inbounds.json"
+for _f in 06_hysteria2_inbounds 09_tuic_inbounds; do printf '%s\n' '{"inbounds":[{"tag":"x"}]}' >"${VPS_F}/${_f}.json"; done
+_vpsOut=$(run_vps 'singBoxKeepOrRemove() { echo "keepOrRemove" >>"${VPS_CALLS}"; }; cleanUp singBoxProtocolsDel 1' 2>&1)
+assert_equals "09_tuic_inbounds.json" "$(cd "${VPS_F}" && ls | paste -sd' ' -)" "装了 17：旁挂的 6 删掉，9 留着"
+assert_equals "keepOrRemove" "$(paste -sd' ' - <"${VPS_CALLS}")" "装了 17：删了 6 就按剩下的片段决定 sing-box 留不留，赶在 Xray 起来之前让出端口"
+assert_contains "${_vpsOut}" "换成 Xray 原生" "装了 17：说明旁挂的 Hysteria2 换掉了"
+rm -f "${VPS_ROOT}/xray/conf/17_hysteria_inbounds.json"
 
 vps_reset
 : >"${VPS_ROOT}/sing-box/conf/chain_multi_info.json"
@@ -1362,9 +1413,9 @@ render_install_status() (
 assert_equals "$(printf '%s\n' '\nCORE_CURRENT_STOPPED' 'PROTOCOLS_INSTALLED:' \
     'VLESS+TCP[TLS_Vision]' 'VLESS+WS[TLS]' 'Trojan+gRPC[TLS]' 'VMess+WS[TLS]' 'Trojan+TCP[TLS]' \
     'VLESS+gRPC[TLS]' 'Hysteria2' 'VLESS+Reality+Vision' 'VLESS+Reality+gRPC' 'Tuic' 'Naive' \
-    'VMess+TLS+HTTPUpgrade' 'VLESS+Reality+XHTTP' 'AnyTLS' 'SS2022' 'VLESS+XHTTP[TLS]' 'ShadowTLS+SS2022' '')" \
-    "$(render_install_status 2 ",0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,")" \
-    "showInstallStatus：全部 17 个协议按 ID 升序、用菜单文案显示"
+    'VMess+TLS+HTTPUpgrade' 'VLESS+Reality+XHTTP' 'AnyTLS' 'SS2022' 'VLESS+XHTTP[TLS]' 'ShadowTLS+SS2022' 'Hysteria2' '')" \
+    "$(render_install_status 2 ",0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,")" \
+    "showInstallStatus：全部 18 个协议按 ID 升序、用菜单文案显示"
 assert_equals "$(printf '%s\n' '\nCORE_CURRENT_STOPPED' 'PROTOCOLS_INSTALLED:' 'VLESS+Reality+Vision' 'Tuic' 'Naive' '')" \
     "$(render_install_status 1 ",10,9,7,")" \
     "showInstallStatus：显示顺序按 ID 数值、与状态串顺序无关"
@@ -1599,6 +1650,8 @@ assert_contains "${_out}" "pass|Account UUIDs|1" "doctor 配置安全：普通�
 dc_reset
 assert_contains "$(dc_sec '{"inbounds":[{"users":[{"password":"ffffffff-ffff-ffff-ffff-ffffffffffff","name":"t-trojan"}]}]}' a.json)" "fail|Account UUIDs" "doctor 配置安全：Trojan、Hysteria2 这类把 UUID 当密码的也查"
 dc_reset
+assert_contains "$(dc_sec '{"inbounds":[{"settings":{"clients":[{"auth":"00000000-0000-0000-0000-000000000000","email":"hy-xray_hysteria2"}]}}]}' a.json)" "replace them: hy" "doctor 配置安全：Xray 原生 Hysteria2 的凭据在 auth 里，也查"
+dc_reset
 _out=$(dc_sec '{"outbounds":[{"tag":"keep","tls":{"insecure":false}},{"tag":"node1","tls":{"insecure":true}},{"tag":"old","streamSettings":{"tlsSettings":{"allowInsecure":true}}}]}' a.json)
 assert_contains "${_out}" "warn|Outbound certificate checks|these outbounds do not verify the peer certificate: node1,old" "doctor 配置安全：不校验证书的出站黄，insecure:false 不算"
 assert_equals "" "$(grep '^fail|' <<<"${_out}")" "doctor 配置安全：不校验证书是用户选的，不红"
@@ -1780,6 +1833,24 @@ rm -f "${DOTTED_ROOT}/xray/conf/15_VLESS_XHTTP_TLS_inbounds.json"
 printf '%s\n' '{"inbounds":[{"port":443,"settings":{"clients":[{"id":"a1","email":"alice"},{"id":"b2","email":"bob"}]}}]}' \
     >"${DOTTED_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
 
+# 17 也走同一个事务：凭据字段是 auth；文件名不能被 6 的 hysteria2 探测吞掉，它的端口就是订阅与跳跃用的那个
+printf '%s\n' '{"inbounds":[{"port":8443,"settings":{"version":2,"clients":[{"auth":"a1","email":"alice-xray_hysteria2"}]}}]}' \
+    >"${DOTTED_ROOT}/xray/conf/17_hysteria_inbounds.json"
+assert_equals ",0,17,|8443" "$(env PROXY_AGENT_DIR="${DOTTED_ROOT}" DOTTED_FNS="${DOTTED_FNS}" bash -c '
+    source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh
+    eval "${DOTTED_FNS}"
+    readInstallType; readInstallProtocolType
+    echo "${currentInstallProtocolType}|${hysteria2InboundPort}"' 2>/dev/null)" "readInstallProtocolType：认出 17、不当成 6，读出它的端口"
+run_dotted_15 add c3 carol >/dev/null
+assert_equals '[{"auth":"a1","email":"alice-xray_hysteria2"},{"auth":"c3","email":"carol-xray_hysteria2"}]' \
+    "$(jq -c '.inbounds[0].settings.clients' "${DOTTED_ROOT}/xray/conf/17_hysteria_inbounds.json")" "账户事务：加人写进 17，凭据在 auth、后缀是 xray_hysteria2"
+run_dotted_15 delName carol >/dev/null
+assert_equals '["alice-xray_hysteria2"]' "$(jq -c '[.inbounds[0].settings.clients[].email]' "${DOTTED_ROOT}/xray/conf/17_hysteria_inbounds.json")" \
+    "账户事务：按名删人，17 里也没了"
+rm -f "${DOTTED_ROOT}/xray/conf/17_hysteria_inbounds.json"
+printf '%s\n' '{"inbounds":[{"port":443,"settings":{"clients":[{"id":"a1","email":"alice"},{"id":"b2","email":"bob"}]}}]}' \
+    >"${DOTTED_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
+
 # 16 有两层用户：事务只写外层，内层跟着重写，uPSK 由外层密码派生；只删一层的话被删的人还能走另一层的密钥
 ST_ROOT="${MOCK_ROOT}/shadowtls.root"
 rm -rf "${ST_ROOT}" && mkdir -p "${ST_ROOT}/sing-box/conf/config" && : >"${ST_ROOT}/sing-box/sing-box" && : >"${ST_ROOT}/sing-box/conf/config.json"
@@ -1900,6 +1971,27 @@ _out=$(run_av "")
 assert_equals "LINK vlessReality alice|LINK vlessReality bob|LINK vlessReality carol|LINK vlessXHTTP bob|LINK vlessXHTTP alice" "$(av_links "${_out}")" "查看账号不挑人：照旧全打印"
 assert_equals "" "$(av_links "$(run_av nobody)")" "查看账号挑了不存在的名字：一个链接都不打印"
 rm -rf "${AV_ROOT:?}"
+# Xray 机上的 17：账号页照 6 那一块打印，用户名取 email、凭据取 auth，端口有跳跃时是区间
+HV_ROOT="${MOCK_ROOT}/hy17view"
+mkdir -p "${HV_ROOT}/xray/conf" "${HV_ROOT}/nginx" "${HV_ROOT}/subscribe_local/default" && : >"${HV_ROOT}/xray/xray"
+printf '%s\n' '{"inbounds":[{"port":443,"settings":{"clients":[{"id":"u1","email":"alice-VLESS_TCP/TLS_Vision"}]},"streamSettings":{"tlsSettings":{"certificates":[{"certificateFile":"/x/tls/ex.org.crt"}]}}}]}' \
+    >"${HV_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
+printf '%s\n' '{"inbounds":[{"port":8443,"settings":{"version":2,"clients":[{"auth":"u1","email":"alice-xray_hysteria2"},{"auth":"u2","email":"bob-xray_hysteria2"}]}}]}' \
+    >"${HV_ROOT}/xray/conf/17_hysteria_inbounds.json"
+run_hv() {
+    env PROXY_AGENT_DIR="${HV_ROOT}" AV_FN="${AV_FN}" HV_HOP="${1:-}" bash -c '
+        source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh
+        eval "${AV_FN}"
+        echoContent() { :; }; t() { :; }; getPublicIP() { :; }
+        readSingBoxConfig() { hysteriaPort=8443; }
+        readPortHopping() { [[ -z "${HV_HOP}" ]] || { hysteria2PortHoppingStart=${HV_HOP%-*} hysteria2PortHoppingEnd=${HV_HOP#*-} hysteria2PortHopping=${HV_HOP}; }; }
+        defaultBase64Code() { [[ "$1" == hysteria ]] && echo "$1 $2 $3 $4"; return 0; }
+        nginxConfigPath="${PROXY_AGENT_DIR}/nginx/"
+        showAccounts 1' 2>/dev/null | grep '^hysteria ' | paste -sd'|' -
+}
+assert_equals "hysteria 8443 alice-xray_hysteria2 u1|hysteria 8443 bob-xray_hysteria2 u2" "$(run_hv)" "17 的账号页：每人一条 Hysteria2 节点，凭据是 auth"
+assert_equals "hysteria 30000-30010 alice-xray_hysteria2 u1|hysteria 30000-30010 bob-xray_hysteria2 u2" "$(run_hv 30000-30010)" "17 的账号页：有端口跳跃时发区间，和 6 一样"
+rm -rf "${HV_ROOT:?}"
 
 rm -rf "${ST_ROOT}"
 
@@ -1941,7 +2033,7 @@ render_clients() (
 )
 
 # 每个内核上该产出用户的协议独立写死（加协议时同步）：删掉一个活分支，产出集合就对不上
-CLIENTS_LIVE_1="0 1 3 4 6 7 9 12 15"
+CLIENTS_LIVE_1="0 1 3 4 6 7 9 12 15 17"
 CLIENTS_LIVE_2="0 1 3 4 6 7 9 10 11 13 14 16 20"
 REGISTRY_IDS=$(for _pid in $(seq 0 30); do getProtocolConfigFileName "${_pid}" >/dev/null && echo "${_pid}"; done)
 for _core in 1 2; do
@@ -2044,7 +2136,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试拼车钩子与 tick ===${NC}"
 
-CP_FN_NAMES="subscribeIsMerged subscribeLocationsFile subscribeAuthority applyAccountChangeAllProtocols carpoolUserinfoUsageDropped carpoolSyncUserinfo nginxPids xrayConfigTest readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled xrayDaemonRunning carpoolCurrentClientsMap crontabHas crontabReplace ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolMachineStep carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolCheckPrerequisites carpoolPickApiPort carpoolApiReady carpoolAllAccounts carpoolFillUuids carpoolRemoveCron removeSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable stdinIsTty carpoolApply carpoolResetUsage carpoolUsageHeader carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolInsertPageBlock carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMembersClean carpoolMembersEditApply carpoolAsk carpoolShowProtocolChoices carpoolShowMemberLinks carpoolMemberAdd carpoolMemberEdit carpoolMenu addUser removeAccount cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget accountAllNames accountListMenu accountMenu accountShowLinks subscribeSettingsMenu shareQrCode"
+CP_FN_NAMES="subscribeIsMerged subscribeLocationsFile subscribeAuthority applyAccountChangeAllProtocols carpoolUserinfoUsageDropped carpoolSyncUserinfo nginxPids xrayConfigTest readInstallType readInstallProtocolType carpoolLock carpoolUnlock carpoolEnabled xrayDaemonRunning carpoolCurrentClientsMap crontabHas crontabReplace ensureCarpoolCron ensureCarpoolXray carpoolReconcile carpoolCollect carpoolMachineStep carpoolCollectBeforeStop carpoolSubscribeMd5 carpoolMemberPageKey carpoolWritePlaceholders carpoolRefreshSubscribe carpoolJudgeAndWrite carpoolSetNotified carpoolSettle carpoolTick carpoolRefuseIfEnabled carpoolCheckPrerequisites xrayInstalledVersion carpoolPickApiPort carpoolApiReady carpoolAllAccounts carpoolFillUuids carpoolRemoveCron removeSubscriptionFiles carpoolConfirmReenable carpoolEnable carpoolDisable stdinIsTty carpoolApply carpoolResetUsage carpoolUsageHeader carpoolWritePage carpoolRemovePages carpoolReloadNginx carpoolInsertPageBlock carpoolEnsureNginxLocation carpoolPendingText carpoolRenderPages carpoolPageUrlBase carpoolShowPageLinks carpoolPageSetToken carpoolPageEnable carpoolPageDisable carpoolTelegramSend carpoolNotifyEvents carpoolTickExitTrap carpoolTelegramMask carpoolTelegramConfigure carpoolTelegramTest carpoolTelegramDisable carpoolPageMenu carpoolMembersClean carpoolMembersEditApply carpoolAsk carpoolShowProtocolChoices carpoolShowMemberLinks carpoolMemberAdd carpoolMemberEdit carpoolMenu addUser removeAccount cronFunction backupConfigSnapshot restoreConfigSnapshot installCronTLS removeOwnCronEntries chainAccountReadState chainAccountBridges writeXrayChainConfig chainAccountForget accountAllNames accountListMenu accountMenu accountShowLinks subscribeSettingsMenu shareQrCode"
 CP_FNS=$(sed -n "$(for _f in ${CP_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_not_empty "${CP_FNS}" "拼车：抽到 install.sh 原文"
 assert_equals "$(wc -w <<<"${CP_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CP_FNS}")" "拼车：每个函数都抽到了（抽不到说明函数体里出现了顶格的 }）"
@@ -2488,7 +2580,7 @@ assert_equals "no" "$([[ -f "${CP_ROOT}/carpool/state.json" ]] && echo yes || ec
 _out=$(CP_XRAY_VERSION=1.8.11 run_cp 'carpoolEnable; echo "rc=$?"' 2>&1)
 assert_contains "${_out}" "Xray 1.8.11 太旧，拼车需要 1.8.12 以上" "开启（Xray 太旧）：说明版本与下限"
 _out=$(CP_PROTOS=",0,6,7," run_cp 'carpoolEnable; echo "rc=$?"' 2>&1)
-assert_contains "${_out}" "装了 Hysteria2 或 TUIC" "开启（装了 6/9）：拒绝"
+assert_contains "${_out}" "跑在 sing-box 里的 Hysteria2 或 TUIC" "开启（装了 6/9）：拒绝，说明它们跑在 sing-box 里"
 _out=$(CP_CROND_RC=1 run_cp 'carpoolEnable; echo "rc=$?"' 2>&1)
 assert_contains "${_out}" "cron 守护进程没在跑" "开启（crond 起不来）：拒绝"
 _out=$(run_cp 'flock() { :; }; command() { if [[ "$2" == "flock" ]]; then return 1; fi; builtin command "$@"; }; carpoolEnable; echo "rc=$?"' 2>&1)
@@ -2795,7 +2887,7 @@ assert_equals "1.开启拼车|0.返回" "$(printf '0\n' | run_cp 'carpoolMenu' 2
 
 cp_reset_tree
 _out=$(run_cp 'carpoolRefuseIfEnabled; echo "rc=$?"' 2>&1)
-assert_contains "${_out}" "拼车开着时不能切换内核或安装 Hysteria2 / TUIC" "拦截：开着时拒绝"
+assert_contains "${_out}" "拼车开着时不能切换到 sing-box 或往 sing-box 里装协议" "拦截：开着时拒绝"
 assert_equals "no" "$([[ "${_out}" == *"rc="* ]] && echo yes || echo no)" "拦截：开着时 exit 1，不往下走"
 jq '.enabled = false' "${CP_ROOT}/carpool/state.json" >"${CP_ROOT}/carpool/s.tmp" && mv "${CP_ROOT}/carpool/s.tmp" "${CP_ROOT}/carpool/state.json"
 assert_equals "rc=0" "$(run_cp 'carpoolRefuseIfEnabled; echo "rc=$?"' 2>&1)" "拦截：关着时放行"
@@ -4680,8 +4772,9 @@ assert_equals "1" "$(grep -c '^    ensureCronService$' <<<"${INSTALL_BASE_TOOLS_
 UNINSTALL_FN=$(sed -n '/^unInstall() {/,/^}/p' install.sh)
 assert_equals "yes" "$(grep -n -E 'removeOwnCronEntries|rm -rf \$\{PROXY_AGENT_DIR\}$' <<<"${UNINSTALL_FN}" | head -1 | grep -q removeOwnCronEntries && echo yes || echo no)" \
     "unInstall：先清 cron 行再 rm -rf 安装根"
-assert_equals "removeProtocolPortHopping removeProtocolPortHopping removeOwnFirewallRules rm" "$(grep -oE 'removeProtocolPortHopping|removeOwnFirewallRules|rm -rf \$\{PROXY_AGENT_DIR\}$' <<<"${UNINSTALL_FN}" | cut -d' ' -f1 | paste -sd' ' -)" \
+assert_equals "removeProtocolPortHopping removeProtocolPortHopping removeProtocolPortHopping removeOwnFirewallRules rm" "$(grep -oE 'removeProtocolPortHopping|removeOwnFirewallRules|rm -rf \$\{PROXY_AGENT_DIR\}$' <<<"${UNINSTALL_FN}" | cut -d' ' -f1 | paste -sd' ' -)" \
     "unInstall：跳跃规则与放行都在 rm -rf 安装根之前收（firewalld 要读片段里的目标端口）"
+assert_contains "${UNINSTALL_FN}" 'removeProtocolPortHopping hysteria2 "${XRAY_CONF_DIR}/17_hysteria_inbounds.json"' "unInstall：17 的跳跃规则按它在 Xray 下的入站收"
 rm -rf "${CRON_FAKE_ROOT}" "${MOCK_ROOT}/cron.calls"
 
 echo ""
@@ -5871,13 +5964,13 @@ hy2_client() {
     db_reset
     run_db 2 hysteria 443 hy-x pw123 2>&1 <<<"" | sed -n '/v2rayN(hysteria+TLS)/,/--->/p' | sed '1d;/--->/d' | sed 's/\x1b\[[0-9;]*m//g'
 }
-_hyJson=$(hysteria2ObfsType='' hysteria2ObfsPassword='' hysteria2ClientUploadSpeed='' hysteria2ClientDownloadSpeed='' singBoxHysteria2Port=443 hy2_client)
+_hyJson=$(hysteria2ObfsType='' hysteria2ObfsPassword='' hysteria2ClientUploadSpeed='' hysteria2ClientDownloadSpeed='' hysteria2InboundPort=443 hy2_client)
 assert_equals 'null|null|example.org:443|pw123' "$(jq -r '[.obfs, .bandwidth, .server, .auth] | map(tostring) | join("|")' <<<"${_hyJson}")" \
     "Hysteria2 官方客户端 JSON：没开混淆、BBR 时不带 obfs 与 bandwidth"
-_hyJson=$(hysteria2ObfsType=salamander hysteria2ObfsPassword='a&b=c' singBoxHysteria2Port=443 hy2_client)
+_hyJson=$(hysteria2ObfsType=salamander hysteria2ObfsPassword='a&b=c' hysteria2InboundPort=443 hy2_client)
 assert_equals '{"type":"salamander","salamander":{"password":"a&b=c"}}' "$(jq -c .obfs <<<"${_hyJson}")" \
     "Hysteria2 官方客户端 JSON：带上 salamander 混淆（按类型嵌一层，缺了连不上开着混淆的服务端）"
-_hyJson=$(hysteria2ObfsType=gecko hysteria2ObfsPassword=pw hysteria2ClientUploadSpeed=20 hysteria2ClientDownloadSpeed=200 singBoxHysteria2Port=443 hy2_client)
+_hyJson=$(hysteria2ObfsType=gecko hysteria2ObfsPassword=pw hysteria2ClientUploadSpeed=20 hysteria2ClientDownloadSpeed=200 hysteria2InboundPort=443 hy2_client)
 assert_equals '{"type":"gecko","gecko":{"password":"pw"}}|{"up":"20 mbps","down":"200 mbps"}' "$(jq -c .obfs <<<"${_hyJson}")|$(jq -c .bandwidth <<<"${_hyJson}")" \
     "Hysteria2 官方客户端 JSON：gecko 混淆与 Brutal 的带宽"
 rm -rf "${MOCK_ROOT}/sharecode.root"
@@ -6095,6 +6188,50 @@ run_cxi() {
 assert_equals "handleNginx stop|handleNginx start dest" "$(run_cxi 0,7,12)" \
     "Xray 个性化装 0,7,12、目标选本机域名：nginx 在 reality_dest.conf 写完后才起（先起就不听回环目标，7 和 12 握手全断）"
 assert_equals "handleNginx stop" "$(run_cxi 7,12)" "Xray 个性化装只选 7,12：不要证书，不去起 nginx"
+# run_cxs SELECTION → Xray 个性化安装交给 initXrayConfig 的协议清单
+run_cxs() {
+    env CX_FN="$(sed -n '/^customXrayInstall() {/,/^}/p' install.sh)" REG_FILE="$(pwd)/lib/protocol-registry.sh" bash -c '
+        eval "${CX_FN}"
+        source "${REG_FILE}"
+        for f in echoContent t validateCustomInstallTokens chainRefuseCoreSwitch readLastInstallationConfig installAbortArm installAbortDisarm installTools \
+            initTLSNginxConfig handleXray installTLS randomPathFunction nginxBlog updateRedirectNginxConf installXray installXrayService cleanUp \
+            syncSidecarTlsDomain installCronTLS reloadCore handleNginx refreshSubscribeAfterInstall checkGFWStatue showAccounts; do eval "$f() { :; }"; done
+        initXrayConfig() { echo "${selectCustomInstallType}"; }
+        customXrayInstall' <<<"$1" 2>&1
+}
+assert_equals ",0,17," "$(run_cxs 17)" "Xray 个性化装单选 17：两位数不当成漏了逗号，自动带上 0（证书与订阅地址取自它）"
+assert_equals ",0,7,17," "$(run_cxs 7,17)" "Xray 个性化装 7,17：7 没有证书，照样带上 0"
+
+# --- 17 的端口：回车沿用 17 或旁挂 6 的；Xray 机上旁挂 sing-box 留着的 UDP 入站（9）算占用，要换掉的 6 不算 ---
+XH_FN=$(sed -n '/^initXrayHysteriaPort() {/,/^}/p;/^configuredPorts() {/,/^}/p' install.sh)
+XH_ROOT="${MOCK_ROOT}/hy17port"
+rm -rf "${XH_ROOT}" && mkdir -p "${XH_ROOT}/sing-box/conf/config" "${XH_ROOT}/xray/conf"
+echo '{"inbounds":[{"listen_port":443}]}' >"${XH_ROOT}/sing-box/conf/config/06_hysteria2_inbounds.json"
+echo '{"inbounds":[{"listen_port":8443}]}' >"${XH_ROOT}/sing-box/conf/config/09_tuic_inbounds.json"
+# run_xh COREKIND → 打印 pickInboundPort 拿到的参数、放行与选定的端口
+run_xh() {
+    env PROXY_AGENT_DIR="${XH_ROOT}" XH_FN="${XH_FN}" XH_CORE="$1" bash -c '
+        source lib/constants.sh; source lib/protocol-registry.sh
+        eval "${XH_FN}"
+        coreKind=${XH_CORE} hysteria2InboundPort=443
+        echoContent() { :; }
+        pickInboundPort() { echo "pick $*" >&2; echo 443; }
+        allowPort() { echo "allow $*" >&2; }
+        initXrayHysteriaPort ",17," ",0,"; echo "port=${hysteria17Port}" >&2' 2>&1 | paste -sd'|' -
+}
+assert_equals "pick 17 443 ${XH_ROOT}/xray/conf ,17, ,0, 8443|allow 443 udp|port=443" "$(run_xh 1)" \
+    "17 的端口：沿用上次的 443；旁挂 9 的 8443/udp 算占用，6 的不算，放行 UDP"
+assert_equals "pick 17 443 ${XH_ROOT}/xray/conf ,17, ,0,|allow 443 udp|port=443" "$(run_xh 2)" \
+    "17 的端口：从 sing-box 内核换过来时它的协议入站随后就删，那边的端口都不算占用"
+rm -rf "${XH_ROOT:?}"
+ISP_FN=$(sed -n '/^initSingBoxPort() {/,/^}/p' install.sh)
+assert_equals "pick 9 2053 DIR ,9,  443|allow 2053 udp|2053" "$(env ISP_FN="${ISP_FN}" bash -c '
+    eval "${ISP_FN}"
+    SINGBOX_FRAGMENT_DIR=DIR
+    getProtocolListenNetwork() { echo udp; }
+    pickInboundPort() { echo "pick $*" >&2; echo 2053; }
+    allowPort() { echo "allow $*" >&2; }
+    initSingBoxPort 2053 9 ",9," 443' 2>&1 | paste -sd'|' -)" "initSingBoxPort：另外给的占用端口（旁挂时 Xray 的 17）交给选端口，UDP 协议只放行 UDP"
 
 # --- 链式与账号菜单的几处：抽真函数，注册表和 JSON 工具都用真的，只桩内核、探测与合并 ---
 # 这些函数里的 heredoc 有顶格的 }，按下一个函数名截
@@ -6507,6 +6644,27 @@ run_mt() {
 }
 assert_equals "" "$(run_mt manageTuic)" "TUIC 菜单：没有端口跳跃入口（三种订阅都带不了区间，服务端 DNAT 白开）"
 assert_equals "hop hysteria2" "$(run_mt manageHysteria)" "Hysteria2 菜单：端口跳跃入口还在"
+# run_mh COREKIND HAS17 HAS6 CHOICE → 菜单 4 选 CHOICE 走到哪个函数
+run_mh() {
+    rm -rf "${MT_DIR}/x" "${MT_DIR}/s" && mkdir -p "${MT_DIR}/x" "${MT_DIR}/s"
+    [[ -n "$2" ]] && : >"${MT_DIR}/x/17_hysteria_inbounds.json"
+    [[ -n "$3" ]] && : >"${MT_DIR}/s/06_hysteria2_inbounds.json"
+    env MT_FN="${MT_FN}" MT_DIR="${MT_DIR}" MH_CORE="$1" MH_6="$3" MH_CHOICE="$4" bash -c '
+        eval "${MT_FN}"
+        coreKind=${MH_CORE} XRAY_CONF_DIR="${MT_DIR}/x" SINGBOX_FRAGMENT_DIR="${MT_DIR}/s" singBoxConfigPath=
+        [[ -n "${MH_6}" ]] && singBoxConfigPath="${MT_DIR}/s/"
+        echoContent() { :; }; t() { :; }
+        for f in xrayHysteriaInstall singBoxHysteria2Install unInstallXrayHysteria unInstallSingBox portHoppingMenu; do eval "$f() { echo $f \$*; }"; done
+        echo "${MH_CHOICE}" | manageHysteria' 2>&1 | paste -sd'|' -
+}
+assert_equals "xrayHysteriaInstall" "$(run_mh 1 "" "" 1)" "菜单 4（Xray 机，没装）：装的是 Xray 原生的 17"
+assert_equals "" "$(run_mh 1 "" "" 2)" "菜单 4（Xray 机，没装）：只有安装一项"
+assert_equals "unInstallXrayHysteria|portHoppingMenu hysteria2|xrayHysteriaInstall" \
+    "$({ run_mh 1 y "" 2; run_mh 1 y "" 3; run_mh 1 y "" 1; } | paste -sd'|' -)" "菜单 4（Xray 机，装着 17）：卸、跳跃、重装都对着 17"
+assert_equals "unInstallSingBox hysteria2|portHoppingMenu hysteria2|xrayHysteriaInstall" \
+    "$({ run_mh 1 "" y 2; run_mh 1 "" y 3; run_mh 1 "" y 1; } | paste -sd'|' -)" "菜单 4（Xray 机，旧版的旁挂 6）：照旧能卸、管跳跃，重装就换成 17"
+assert_equals "singBoxHysteria2Install|unInstallSingBox hysteria2" "$({ run_mh 2 "" y 1; run_mh 2 "" y 2; } | paste -sd'|' -)" "菜单 4（sing-box 机）：照旧是 6"
+rm -rf "${MT_DIR}/x" "${MT_DIR}/s"
 
 HOP_ADD_FN=$(sed -n '/^addPortHopping() {/,/^}/p;/^portHoppingRule() {/,/^}/p' install.sh)
 # run_hop_add [NO_V6] → 桩掉 iptables / ip6tables，打印加规则的调用；NO_V6 非空时 ip6tables 的 nat 表不可用
@@ -7013,7 +7171,7 @@ assert_equals "my.example:8443|0" "$(run_rd_prev my.example 8443 '' '' 1)" "重�
 assert_equals "no" "$(run_rd_prev my.example 8443 '' '' | grep -qE '^(my\.example)?:' && echo yes || echo no)" "重装：问沿用时 stdin 关了算答否，随机挑一个不空转"
 
 # --- Xray 机上卸 Hysteria2：片段里还有链式的入站就留着 sing-box，不能把链式的片段、状态文件连二进制一起删 ---
-US_FN=$(sed -n '/^unInstallSingBox() {/,/^}/p;/^singBoxFragmentsHaveInbounds() {/,/^}/p' install.sh)
+US_FN=$(sed -n '/^unInstallSingBox() {/,/^}/p;/^singBoxKeepOrRemove() {/,/^}/p;/^singBoxFragmentsHaveInbounds() {/,/^}/p' install.sh)
 US_DIR="${MOCK_ROOT}/uninstallsb"
 # run_us WITH_CHAIN [NODES] → 造一台 Xray 机：旁挂 6，WITH_CHAIN 非空时再有链式入口的桥片段与状态文件，NODES 是外部节点清单；
 # 卸掉 6 后打印 sing-box 目录里还剩什么，打印过的话记进 said。US_CORE 是卸完后读到的 coreKind，默认 1，设空就是 sing-box 机
@@ -7696,7 +7854,7 @@ assert_equals "" "$(run_nu 1.31.8-1~trixie 1.31.9-1~trixie)" "doctor nginx 更�
 
 # --- 端口跳跃的启动前钩子：/etc 挪到 MOCK_ROOT 下；systemctl 桩掉 ---
 HB_ROOT="${MOCK_ROOT}/hophook"
-HB_FN=$(sed -n '/^portHoppingRule() {/,/^}/p;/^portHoppingBootHook() {/,/^}/p' install.sh | sed "s|/etc/|${HB_ROOT}/etc/|g")
+HB_FN=$(sed -n '/^portHoppingRule() {/,/^}/p;/^portHoppingBootHook() {/,/^}/p;/^portHoppingServiceHook() {/,/^}/p' install.sh | sed "s|/etc/|${HB_ROOT}/etc/|g")
 # run_hb CODE → 打印 daemon-reload 与 CODE 的输出
 run_hb() {
     env HB_FN="${HB_FN}" bash -c '
@@ -7735,7 +7893,46 @@ rm -rf "${HB_ROOT:?}/etc"
 assert_equals "1|0" "$(run_hb 'portHoppingBootHook hysteria2 on 30000 30010 443; echo $?; portHoppingBootHook hysteria2 off; echo $?')" "跳跃钩子：两种服务都没有时，挂返回 1（调用方黄字提示重启会丢），撤返回 0"
 assert_equals "1 1" "$(sed -n '/^deletePortHoppingRules() {/,/^}/p' install.sh | grep -c 'portHoppingBootHook "${type}" off') $(sed -n '/^removeProtocolPortHopping() {/,/^}/p' install.sh | grep -c 'portHoppingBootHook "${type}" off')" \
     "删跳跃、卸协议都撤钩子（卸协议时规则不在也撤，不然下次启动按旧端口补回来）"
+# 17 的跳跃目标是 Xray：钩子挂在 xray.service 上，sing-box 上留着的旧钩子（从 6 换过来的）撤掉；TUIC 照旧在 sing-box 上
+rm -rf "${HB_ROOT:?}/etc" "${HB_ROOT}/xconf" && mkdir -p "${HB_ROOT}/etc/systemd/system" "${HB_ROOT}/xconf"
+: >"${HB_ROOT}/etc/systemd/system/sing-box.service"
+: >"${HB_ROOT}/etc/systemd/system/xray.service"
+run_hb 'portHoppingBootHook hysteria2 on 30000 30010 443' >/dev/null
+: >"${HB_ROOT}/xconf/17_hysteria_inbounds.json"
+run_hb 'XRAY_CONF_DIR='"${HB_ROOT}"'/xconf; portHoppingBootHook hysteria2 on 30000 30010 443; echo "rc=$?"' >/dev/null
+assert_equals "no yes" "$([[ -e "${hb_dropin}" ]] && echo yes || echo no) $([[ -e "${HB_ROOT}/etc/systemd/system/xray.service.d/port-hopping-hysteria2.conf" ]] && echo yes || echo no)" \
+    "跳跃钩子：装着 17 时挂到 xray.service，sing-box 上的旧钩子撤掉"
+assert_equals "[Service]" "$(head -1 "${HB_ROOT}/etc/systemd/system/xray.service.d/port-hopping-hysteria2.conf")" "跳跃钩子：Xray 的 drop-in 与 sing-box 的同一个写法"
+run_hb 'XRAY_CONF_DIR='"${HB_ROOT}"'/xconf; portHoppingBootHook tuic on 30000 30010 4443' >/dev/null
+assert_equals "yes" "$([[ -e "${HB_ROOT}/etc/systemd/system/sing-box.service.d/port-hopping-tuic.conf" ]] && echo yes || echo no)" "跳跃钩子：TUIC 装着 17 时也挂在 sing-box 上"
+run_hb 'XRAY_CONF_DIR='"${HB_ROOT}"'/xconf; portHoppingBootHook hysteria2 off' >/dev/null
+assert_equals "no" "$([[ -e "${HB_ROOT}/etc/systemd/system/xray.service.d" ]] && echo yes || echo no)" "跳跃钩子：撤掉时 Xray 上那份连空目录一起删"
+run_hb 'XRAY_CONF_DIR='"${HB_ROOT}"'/xconf; portHoppingBootHook hysteria2 on 30000 30010 443' >/dev/null
+rm -f "${HB_ROOT}/etc/systemd/system/xray.service"
+run_hb 'XRAY_CONF_DIR='"${HB_ROOT}"'/xconf; portHoppingBootHook hysteria2 off' >/dev/null
+assert_equals "no" "$([[ -e "${HB_ROOT}/etc/systemd/system/xray.service.d" ]] && echo yes || echo no)" "跳跃钩子：整机卸载先删了服务单元，撤的时候 drop-in 照样删，不留孤儿"
+rm -rf "${HB_ROOT:?}/etc" && mkdir -p "${HB_ROOT}/etc/systemd/system"
+assert_equals "1" "$(run_hb 'XRAY_CONF_DIR='"${HB_ROOT}"'/xconf; portHoppingBootHook hysteria2 on 30000 30010 443; echo $?')" "跳跃钩子：装着 17 而 Xray 没有服务单元时返回 1"
 rm -rf "${HB_ROOT:?}"
+
+# --- 重装 Hysteria2 或从 6 换成 17 之后：端口没变钩子跟着挂到现在的内核上；换了端口就删掉跳跃并提示 ---
+HF_FN=$(sed -n '/^hysteria2HoppingFollow() {/,/^}/p' install.sh)
+# run_hf OLD NEW [RANGE] → 跳跃规则的区间是 RANGE（空就是没有），打印删除、挂钩子与提示
+run_hf() {
+    env HF_FN="${HF_FN}" HF_RANGE="${3:-}" bash -c '
+        eval "${HF_FN}"
+        release=debian
+        iptables-save() { :; }
+        readPortHopping() { [[ -n "${HF_RANGE}" ]] && hysteria2PortHoppingStart=${HF_RANGE%-*} hysteria2PortHoppingEnd=${HF_RANGE#*-}; return 0; }
+        deletePortHoppingRules() { echo "delete $*"; }
+        portHoppingBootHook() { echo "hook $*"; }
+        echoContent() { echo "$2"; }; t() { echo "$1 $2"; }
+        hysteria2HoppingFollow "$@"' _ "$1" "$2" 2>&1 | paste -sd'|' -
+}
+assert_equals "hook hysteria2 on 30000 30010 443" "$(run_hf 443 443 30000-30010)" "跳跃跟随：端口没变，钩子挂到现在跑它的内核上"
+assert_equals "delete hysteria2 30000 30010 443| ---> HY2_HOPPING_DROPPED 443" "$(run_hf 443 8443 30000-30010)" "跳跃跟随：换了端口就删掉指向旧端口的跳跃并提示"
+assert_equals "" "$(run_hf 443 8443)" "跳跃跟随：没有跳跃什么都不做"
+assert_equals "" "$(run_hf "" 8443 30000-30010)" "跳跃跟随：之前没装过 Hysteria2 什么都不做"
 
 echo "=============================================="
 echo -e "${YELLOW}测试结果汇总${NC}"

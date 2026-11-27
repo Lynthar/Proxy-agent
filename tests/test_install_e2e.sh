@@ -239,6 +239,31 @@ if [[ "${E2E_CORE}" == "singbox" ]]; then
     assert_equals "0" "$?" "Hysteria2 片段过 sing-box ${singBoxVersion} 的 check：Brutal + salamander"
     rm -rf "${hy2Dir}"
 fi
+# Xray 原生 Hysteria2（17）的入站要过装上的 Xray 的 run -test、不出告警：finalmask、masquerade 的写法桩测不出来
+if [[ "${E2E_CORE}" == "xray" ]]; then
+    HY17_FN=$(sed -n '/^hysteriaXrayInboundJson() {/,/^}/p' "${PROJECT_ROOT}/install.sh")
+    hy17Dir=$(mktemp -d)
+    mkdir -p "${hy17Dir}/site"
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 -subj /CN=e2e.example \
+        -keyout "${hy17Dir}/e2e.example.key" -out "${hy17Dir}/e2e.example.crt" >/dev/null 2>&1
+    xrayVersion=$("${XRAY_BIN}" version 2>/dev/null | awk 'NR == 1 {print $2}')
+    # hy17Check UP DOWN OBFS SITE → 生成入站、配一个 freedom 出站跑 run -test；不过或有告警时打出输出并返回 1
+    hy17Check() {
+        (TLS_DIR="${hy17Dir}"; eval "${HY17_FN}"
+            hysteriaXrayInboundJson 18443 '[{"auth":"pw","email":"e2e-xray_hysteria2"}]' e2e.example "$1" "$2" "$3" pw0 "$4") |
+            jq '. + {outbounds: [{protocol: "freedom", tag: "direct"}]}' >"${hy17Dir}/hy17.json" &&
+            "${XRAY_BIN}" run -test -c "${hy17Dir}/hy17.json" >"${hy17Dir}/test.log" 2>&1 &&
+            ! grep -iE 'warn|deprecat' "${hy17Dir}/test.log" >/dev/null || {
+            tail -n 5 "${hy17Dir}/test.log"
+            return 1
+        }
+    }
+    hy17Check '' '' gecko "${hy17Dir}/site"
+    assert_equals "0" "$?" "Hysteria2（17）入站过 Xray ${xrayVersion} 的 run -test、零告警：BBR + gecko + masquerade"
+    hy17Check 100 50 salamander ''
+    assert_equals "0" "$?" "Hysteria2（17）入站过 Xray ${xrayVersion} 的 run -test、零告警：Brutal + salamander"
+    rm -rf "${hy17Dir}"
+fi
 
 if [[ -f "${realityConf}" && "${E2E_CORE}" == "xray" ]]; then
     assert_contains "${coreTestOut}" "Configuration OK" "xray run -test 报 Configuration OK"

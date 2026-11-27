@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # test_install_domain_e2e.sh - 带域名的真装机端到端：以 root 在一次性 Debian 容器里走菜单 1 的 Xray 全部安装，
-# 装订阅、旁挂 Hysteria2、装到一半退出、换域名重装、拼车的页面与补装协议、只留 Reality、换成 sing-box 全部安装，卸载核对残留后不开订阅个性化装 0,12。
+# 装订阅、旁挂 TUIC、装到一半退出、换域名重装、Xray 原生 Hysteria2 的跳跃与旧版旁挂换过来、拼车的页面与补装协议、只留 Reality、
+# 换成 sing-box 全部安装，卸载核对残留后不开订阅个性化装 0,12。
 # 每个节点都拿发出去的配置真握手。证书由测试 CA 签、预先放进 tls/（脚本的自定义证书路径），ACME 签发不在这条腿里。跑法见 tests/e2e/run.sh
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/e2e/assert.sh"
@@ -258,8 +259,9 @@ probeXhttpLink() {
 
 echo ""
 echo -e "${YELLOW}=== 菜单 1 → 1：Xray 全部安装（${DOMAIN_A}）===${NC}"
-# 域名、0 的端口（回车 443）、path（回车随机）、UUID、用户名；12：端口回车、本机域名当目标 y、私钥回车生成；7：端口回车、本机域名 y
-s1Out=$(runMenu "1\n1\n${DOMAIN_A}\n\n\n${E2E_UUID}\n${E2E_USER}\n\ny\n\n\ny\n" "${HOME}/install.sh")
+# 域名、0 的端口（回车 443）、path（回车随机）、UUID、用户名；12：端口回车、本机域名当目标 y、私钥回车生成；7：端口回车、本机域名 y；
+# 17：端口回车（443/udp）、BBR、不混淆
+s1Out=$(runMenu "1\n1\n${DOMAIN_A}\n\n\n${E2E_UUID}\n${E2E_USER}\n\ny\n\n\ny\n\n\n\n" "${HOME}/install.sh")
 s1Rc=$?
 [[ ${s1Rc} -ne 0 ]] && tail -n 30 <<<"${s1Out}"
 assert_equals "0" "${s1Rc}" "Xray 带域名全部安装退出码 0"
@@ -267,7 +269,7 @@ noNoise "Xray 全部安装" "${s1Out}"
 assert_equals "active - active" "$(activeState | sed 's/inactive/-/; s/unknown/-/')" "Xray 与 nginx 在跑，sing-box 没装"
 assert_equals "enabled enabled" "$(systemctl is-enabled xray nginx 2>/dev/null | tr '\n' ' ' | sed 's/ $//')" "Xray 与 nginx 开机自启"
 assert_contains "$("${XRAY_BIN}" run -test -confdir "${XRAY_CONF_DIR}" 2>&1)" "Configuration OK" "xray run -test 通过"
-for f in 02_VLESS_TCP_inbounds 03_VLESS_WS_inbounds 04_trojan_TCP_inbounds 05_VMess_WS_inbounds 07_VLESS_vision_reality_inbounds 12_VLESS_XHTTP_inbounds 15_VLESS_XHTTP_TLS_inbounds; do
+for f in 02_VLESS_TCP_inbounds 03_VLESS_WS_inbounds 04_trojan_TCP_inbounds 05_VMess_WS_inbounds 07_VLESS_vision_reality_inbounds 12_VLESS_XHTTP_inbounds 15_VLESS_XHTTP_TLS_inbounds 17_hysteria_inbounds; do
     assert_equals "yes" "$([[ -f "${XRAY_CONF_DIR}/${f}.json" ]] && echo yes || echo no)" "${f}.json 已生成"
 done
 assert_equals "127.0.0.1:31305" "$(jq -r '.inbounds[1].streamSettings.realitySettings.target' "${XRAY_CONF_DIR}/07_VLESS_vision_reality_inbounds.json" 2>/dev/null)" \
@@ -278,6 +280,9 @@ assert_equals "200" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "htt
 assert_equals "301 https://${DOMAIN_A}/" "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 10 "http://${DOMAIN_A}/")" \
     "80 端口把本域名 301 到 https"
 assert_contains "$(crontab -l 2>/dev/null)" "install.sh RenewTLS" "crontab 里有证书维护任务"
+assert_equals "443 ${E2E_USER}-xray_hysteria2" "$(jq -r '.inbounds[0] | "\(.port) \(.settings.clients[0].email)"' "${XRAY_CONF_DIR}/17_hysteria_inbounds.json" 2>/dev/null)" \
+    "Hysteria2 是 Xray 原生的（17）：同一个账号，回车取 443/udp，和 0 的 443/tcp 不冲突"
+assert_contains "$(ss -Hulnp 2>/dev/null | awk '$4 ~ /:443$/')" '"xray"' "443/udp 由 Xray 在听，没有装 sing-box"
 
 echo ""
 echo -e "${YELLOW}=== 菜单 7 → 4 → 1：开通订阅（有 0 就并在它的端口上，不问端口；salt 回车随机）===${NC}"
@@ -324,7 +329,9 @@ echo -e "${YELLOW}=== 订阅里的每个节点真握手 ===${NC}"
 fetchSingBoxClient
 assert_equals "yes" "$([[ -x "${SB_CLIENT}" ]] && echo yes || echo no)" "官方 sing-box 客户端已就位（$("${SB_CLIENT}" version 2>/dev/null | awk 'NR == 1 {print $3}')）"
 probeSub "Xray 全装" "${WORK}/sub-sb.json"
-assert_equals "trojan vless vless vless vmess" "${probedTypes}" "sing-box 订阅里是 VLESS TLS / WS / Reality、VMess、Trojan 五个节点"
+assert_equals "hysteria2 trojan vless vless vless vmess" "${probedTypes}" "sing-box 订阅里是 VLESS TLS / WS / Reality、VMess、Trojan、Hysteria2 六个节点，Hysteria2 由 Xray 接"
+assert_contains "$(base64 -d "${WORK}/sub-default.txt" 2>/dev/null)" "hysteria2://${E2E_UUID}@${DOMAIN_A}:443?" "通用订阅里的 Hysteria2 链接与 sing-box 版同一个写法"
+assert_contains "$(curl -sS --max-time 15 "https://${DOMAIN_A}/s/clashMeta/$(subKey)" 2>/dev/null)" "type: hysteria2" "Clash 的节点文件里有 Hysteria2"
 xhttpLink=$(base64 -d "${WORK}/sub-default.txt" 2>/dev/null | grep -m1 'security=reality.*type=xhttp')
 assert_not_empty "${xhttpLink}" "通用订阅里有 Reality XHTTP 的链接"
 assert_equals "204" "$(probeXhttpLink "${xhttpLink}")" "按 XHTTP 链接配的 Xray 客户端经服务端访问外网"
@@ -357,22 +364,24 @@ assert_equals "none|null" "$(jq -r '.inbounds[0].settings | "\(.decryption)|\(.f
 assert_equals "204" "$(probeXhttpLink "${xhttpTlsLink}")" "关闭后：原来不加密的链接又能用"
 
 # ============================================================================
-# 菜单 4 → 1：Xray 机上旁挂 Hysteria2，同一个账号
+# 菜单 6 → 1：Xray 机上旁挂 TUIC，同一个账号；后面的外部节点要靠这个 sing-box 真握手
 # ============================================================================
 
 echo ""
-echo -e "${YELLOW}=== 菜单 4 → 1：旁挂 Hysteria2（沿用账号、端口回车、默认带宽与不混淆）===${NC}"
-s3Out=$(runMenu "4\n1\ny\n\n\n\n")
+echo -e "${YELLOW}=== 菜单 6 → 1：旁挂 TUIC（沿用账号、端口回车、默认算法）===${NC}"
+s3Out=$(runMenu "6\n1\ny\n\n\n")
 s3Rc=$?
 [[ ${s3Rc} -ne 0 ]] && tail -n 20 <<<"${s3Out}"
-assert_equals "0" "${s3Rc}" "装 Hysteria2 退出码 0"
-noNoise "装 Hysteria2" "${s3Out}"
+assert_equals "0" "${s3Rc}" "装 TUIC 退出码 0"
+noNoise "装 TUIC" "${s3Out}"
 assert_equals "active active active" "$(activeState)" "Xray、sing-box、nginx 都在跑"
-assert_equals "${E2E_USER}-singbox_hysteria2" "$(jq -r '.inbounds[0].users[0].name' "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" 2>/dev/null)" \
-    "Hysteria2 用的是同一个账号"
+assert_equals "${E2E_USER}-singbox_tuic" "$(jq -r '.inbounds[0].users[0].name' "${SINGBOX_FRAGMENT_DIR}/09_tuic_inbounds.json" 2>/dev/null)" \
+    "TUIC 用的是同一个账号"
+assert_equals "8443" "$(jq -r '.inbounds[0].listen_port' "${SINGBOX_FRAGMENT_DIR}/09_tuic_inbounds.json" 2>/dev/null)" \
+    "TUIC 回车默认跳过 Xray 的 Hysteria2 占着的 443/udp（两个内核绑不了同一个端口）"
 assert_equals "200" "$(fetchSub "${DOMAIN_A}" 'sing-box 1.14.4' "${WORK}/sub-sb.json")" "装完再取 sing-box 订阅 200"
-probeSub "加了 Hysteria2" "${WORK}/sub-sb.json"
-assert_equals "hysteria2 trojan vless vless vless vmess" "${probedTypes}" "订阅里多了 Hysteria2 节点（装协议后订阅跟着重建）"
+probeSub "加了 TUIC" "${WORK}/sub-sb.json"
+assert_equals "hysteria2 trojan tuic vless vless vless vmess" "${probedTypes}" "订阅里多了 TUIC 节点（装协议后订阅跟着重建）"
 
 # ============================================================================
 # 菜单 5：换 Reality 目标，7 与 12 一起换、端口密钥 path 沿用；再用菜单 5 换回本机域名（换回前删掉 reality_dest.conf，当它没用过自偷）
@@ -436,8 +445,10 @@ assert_equals "yes" "$([[ ${s4Rc} -ne 0 ]] && echo yes || echo no)" "端口自�
 assert_contains "${s4Out}" "未检测到443端口开放" "退出的原因确实是端口自检（三个服务在那里都停过）"
 sleep 2
 assert_equals "active active active" "$(activeState)" "退出后 Xray、sing-box、nginx 都按旧配置拉回来了"
-assert_equals "204" "$(probeOutbound "${WORK}/sub-sb.json" "$(jq -r '.outbounds[] | select(.type == "hysteria2") | .tag' "${WORK}/sub-sb.json")")" \
-    "退出后旁挂的 Hysteria2 照常可用"
+for _udp in hysteria2 tuic; do
+    assert_equals "204" "$(probeOutbound "${WORK}/sub-sb.json" "$(jq -r --arg t "${_udp}" '.outbounds[] | select(.type == $t) | .tag' "${WORK}/sub-sb.json")")" \
+        "退出后 ${_udp} 照常可用（Hysteria2 在 Xray 上，TUIC 在旁挂的 sing-box 上）"
+done
 
 echo ""
 echo -e "${YELLOW}=== 菜单 1 → 1 重装：新域名的证书与私钥对不上，退出 ===${NC}"
@@ -454,15 +465,15 @@ sleep 2
 assert_equals "active active active" "$(activeState)" "退出后 Xray、sing-box、nginx 都按旧配置拉回来了"
 
 # ============================================================================
-# 换域名重装：A → B，旁挂的 sing-box 要跟着起来，订阅、伪装站、Reality 目标、旁挂的证书都换成 B
+# 换域名重装：A → B，旁挂的 sing-box 要跟着起来，订阅、伪装站、Reality 目标、Hysteria2 与旁挂的证书都换成 B
 # ============================================================================
 
 echo ""
 echo -e "${YELLOW}=== 菜单 1 → 1 重装：换成域名 ${DOMAIN_B} ===${NC}"
 placeCert "${DOMAIN_B}"
 # 不沿用配置、不沿用域名、输 B、不沿用端口（回车 443）、不沿用 path 且输个过短的（重问）、这回沿用 path、不重下 Xray、沿用账号；
-# 12：沿用端口 y、本机域名当目标 y、沿用密钥 y；7：同上；伪装站不重装
-s5Out=$(runMenu "1\n1\nn\nn\n${DOMAIN_B}\nn\n\nn\nab\ny\nn\ny\ny\ny\ny\ny\ny\ny\nn\n")
+# 12：沿用端口 y、本机域名当目标 y、沿用密钥 y；7：同上；17：沿用端口 y、BBR、不混淆；伪装站不重装
+s5Out=$(runMenu "1\n1\nn\nn\n${DOMAIN_B}\nn\n\nn\nab\ny\nn\ny\ny\ny\ny\ny\ny\ny\ny\n\n\nn\n")
 s5Rc=$?
 [[ ${s5Rc} -ne 0 ]] && tail -n 30 <<<"${s5Out}"
 assert_equals "0" "${s5Rc}" "换域名重装退出码 0"
@@ -476,23 +487,25 @@ assert_contains "$(cat /etc/nginx/conf.d/reality_dest.conf 2>/dev/null)" "server
 assert_equals "${DOMAIN_B}" "$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0]' "${XRAY_CONF_DIR}/07_VLESS_vision_reality_inbounds.json" 2>/dev/null)" \
     "Reality 的 serverNames 换成 ${DOMAIN_B}"
 assert_equals "200" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://${DOMAIN_B}/")" "https://${DOMAIN_B}/ 伪装站可用"
-assert_equals "${TLS_DIR}/${DOMAIN_B}.crt" "$(jq -r '.inbounds[0].tls.certificate_path' "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" 2>/dev/null)" \
-    "旁挂的 Hysteria2 也换成 ${DOMAIN_B} 的证书"
+assert_equals "${TLS_DIR}/${DOMAIN_B}.crt 443" "$(jq -r '.inbounds[0] | "\(.streamSettings.tlsSettings.certificates[0].certificateFile) \(.port)"' "${XRAY_CONF_DIR}/17_hysteria_inbounds.json" 2>/dev/null)" \
+    "Hysteria2（17）随 Xray 重写成 ${DOMAIN_B} 的证书，端口沿用"
+assert_equals "${TLS_DIR}/${DOMAIN_B}.crt" "$(jq -r '.inbounds[0].tls.certificate_path' "${SINGBOX_FRAGMENT_DIR}/09_tuic_inbounds.json" 2>/dev/null)" \
+    "旁挂的 TUIC 也换成 ${DOMAIN_B} 的证书"
 assert_equals "200" "$(fetchSub "${DOMAIN_B}" 'sing-box 1.14.4' "${WORK}/sub-sb.json")" "用 ${DOMAIN_B} 取 sing-box 订阅 200"
 assert_equals "" "$(jq -r --arg a "${DOMAIN_A}" '.outbounds[] | select((.server // "") == $a or (.tls.server_name // "") == $a) | .tag' "${WORK}/sub-sb.json")" \
     "订阅里没有节点还指着旧域名 ${DOMAIN_A}"
 probeSub "换域名后" "${WORK}/sub-sb.json"
-assert_equals "hysteria2 trojan vless vless vless vmess" "${probedTypes}" "换域名后订阅里的节点都能用"
+assert_equals "hysteria2 trojan tuic vless vless vless vmess" "${probedTypes}" "换域名后订阅里的节点都能用"
 # tls/ 里还留着旧域名的证书和上面那张配不上私钥的坏证书，doctor 查的是在用的 B
 doctorOut=$(doctorClean "换域名后")
 assert_contains "${doctorOut}" "[PASS] Certificate covers domain" "doctor：证书覆盖新域名"
 assert_contains "${doctorOut}" "${DOMAIN_B}.crt" "doctor：查的是在用的 ${DOMAIN_B} 这张"
 assert_equals "" "$(grep -E "\[[A-Z]+\] Certificate.*${DOMAIN_BAD}" <<<"${doctorOut}" || true)" "doctor：tls/ 里那张坏证书不在查的范围内"
 assert_contains "${doctorOut}" "[WARN] Certificate chain" "doctor：测试 CA 签的单张证书提示证书链，不算 FAIL"
-assert_contains "${doctorOut}" "[PASS] Account UUIDs" "doctor：全协议的账号 UUID 没有弱值（Xray + 旁挂 Hysteria2）"
+assert_contains "${doctorOut}" "[PASS] Account UUIDs" "doctor：全协议的账号 UUID 没有弱值（Xray 含 Hysteria2 的 auth + 旁挂 TUIC）"
 
 # ============================================================================
-# 菜单 3 → 6：脚本自己发的 vless / vmess 链接当外部节点。走真菜单，由旁挂的 sing-box 真握手，所以要在卸 Hysteria2 之前：入站删光后 sing-box 连二进制一起删
+# 菜单 3 → 6：脚本自己发的 vless / vmess 链接当外部节点。走真菜单，由旁挂的 sing-box 真握手，所以要在卸 TUIC 之前：入站删光后 sing-box 连二进制一起删
 # ============================================================================
 
 echo ""
@@ -510,19 +523,71 @@ done <<<"${extLinks}"
 extOut=$(runMenu "3\n6\n1\n$(base64 -d "${WORK}/sub-default.txt" 2>/dev/null | grep -m1 'security=reality.*type=xhttp')\n0\n")
 assert_contains "${extOut}" "type = xhttp" "外部节点：XHTTP 链接当场拒绝并说明原因（sing-box 没有 XHTTP）"
 assert_equals "0" "$(jq '.nodes | length' "${INSTALL_ROOT}/sing-box/conf/external_node_info.json" 2>/dev/null)" "外部节点：被拒的链接没有写进节点文件"
-# 留一条走到最后：卸 Hysteria2、重装 sing-box 都要带着它，完整卸载才清掉。443 上的 VLESS TLS 换内核后端口账号不变，所以还能真握手
+# 留一条走到最后：卸 TUIC、重装 sing-box 都要带着它，完整卸载才清掉。443 上的 VLESS TLS 换内核后端口账号不变，所以还能真握手
 keptLink=$(grep -E 'security=tls' <<<"${extLinks}" | grep -E '^vless://[^?]+:443\?' | grep -v 'type=ws' | head -n 1)
 runMenu "3\n6\n1\n${keptLink}\ny\n0\n" >/dev/null
 assert_equals "1" "$(jq '.nodes | length' "${INSTALL_ROOT}/sing-box/conf/external_node_info.json" 2>/dev/null)" "外部节点：留一条，看卸 sing-box 时带不带走"
 
 echo ""
-echo -e "${YELLOW}=== 菜单 4 → 3：端口跳跃，再 4 → 2 卸掉 Hysteria2（拼车不计量 sing-box 里的协议，开拼车前要拿掉）===${NC}"
+echo -e "${YELLOW}=== 菜单 4 → 3：Hysteria2（17）的端口跳跃，钩子挂在 Xray 上；再 4 → 2 卸掉 ===${NC}"
+hopCount() { iptables -t nat -S PREROUTING | grep -c 'Proxy-agent_hysteria2_portHopping'; }
+xrayHop=/etc/systemd/system/xray.service.d/port-hopping-hysteria2.conf
+sbHop=/etc/systemd/system/sing-box.service.d/port-hopping-hysteria2.conf
 runMenu "4\n3\n1\n30000-30010\n" >/dev/null
-assert_equals "1" "$(iptables -t nat -S PREROUTING | grep -c 'Proxy-agent_hysteria2_portHopping')" "加了端口跳跃：IPv4 有一条 NAT 规则"
+assert_equals "1" "$(hopCount)" "加了端口跳跃：IPv4 有一条 NAT 规则"
 assert_equals "" "$(iptables -S INPUT | grep -F '30000:30010' || true)" "加端口跳跃不放行区间（INPUT 看到的是 NAT 之后的目标端口）"
-s6Out=$(runMenu "4\n2\n")
-assert_equals "0" "$?" "卸 Hysteria2 退出码 0"
-assert_equals "0" "$(iptables -t nat -S PREROUTING | grep -c 'Proxy-agent_hysteria2_portHopping')" "卸 Hysteria2 带走它的跳跃规则"
+assert_equals "yes no" "$([[ -f "${xrayHop}" ]] && echo yes || echo no) $([[ -e "${sbHop}" ]] && echo yes || echo no)" "17 的跳跃钩子挂在 xray.service 上，不在 sing-box 上"
+iptables -t nat -D PREROUTING $(iptables -t nat -S PREROUTING | grep 'Proxy-agent_hysteria2_portHopping' | sed 's/^-A PREROUTING //')
+systemctl restart xray
+assert_equals "1 active" "$(hopCount) $(systemctl is-active xray)" "规则丢了（重启后没人存盘的情形），Xray 起来前由钩子补回"
+h2Out=$(runMenu "4\n2\n")
+assert_equals "0" "$?" "卸 Hysteria2（17）退出码 0"
+noNoise "卸 17" "${h2Out}"
+assert_equals "0 no no" "$(hopCount) $([[ -e "${xrayHop}" ]] && echo yes || echo no) $([[ -e "${XRAY_CONF_DIR}/17_hysteria_inbounds.json" ]] && echo yes || echo no)" \
+    "卸 17 带走它的入站、跳跃规则与 Xray 上的钩子"
+assert_equals "active active active" "$(activeState)" "卸 17 后 Xray、旁挂的 sing-box（TUIC）、nginx 照常"
+assert_equals "" "$(iptables -S INPUT | grep -F '443/udp(Proxy-agent)' || true)" "17 的 443/udp 放行跟着收回（没人在听了）"
+
+echo ""
+echo -e "${YELLOW}=== 旧版留下的旁挂 Hysteria2（6）照常能用，菜单 4 → 1 换成 17：端口、跳跃跟着过去 ===${NC}"
+# 现在的菜单在 Xray 机上只装 17：用旧版同一套函数把 6 装进旁挂的 sing-box（沿用账号、端口回车、BBR、不混淆）
+legacyOut=$(printf 'y\n\n\n\n' | PROXY_AGENT_DIR="${INSTALL_ROOT}" V2RAY_LANG=en bash -c 'source "${PROXY_AGENT_DIR}/install.sh"
+    initVar; checkSystem; nginxConfigPath=/etc/nginx/conf.d/
+    readInstallType; readInstallProtocolType; readConfigHostPathUUID; readCustomPort; readSingBoxConfig
+    totalProgress=1; selectCustomInstallType=",6,"
+    initSingBoxConfig custom 1 true; reloadCore; refreshSubscribeAfterInstall' 2>&1)
+[[ -f "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" ]] || tail -n 20 <<<"${legacyOut}"
+assert_equals "443 ${E2E_USER}-singbox_hysteria2" "$(jq -r '.inbounds[0] | "\(.listen_port) \(.users[0].name)"' "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" 2>/dev/null)" \
+    "旧版的旁挂 6 装上了：443/udp、同一个账号"
+assert_equals "200" "$(fetchSub "${DOMAIN_B}" 'sing-box 1.14.4' "${WORK}/sub-sb.json")" "旧版旁挂下取 sing-box 订阅 200"
+probeSub "旧版旁挂 6" "${WORK}/sub-sb.json"
+assert_equals "hysteria2 trojan tuic vless vless vless vmess" "${probedTypes}" "旧版的旁挂 6 照常能用"
+assert_contains "$(runMenu "4\n\n")" "as a native Xray inbound" "菜单 4：旧版旁挂的重装项写明会换成 Xray 原生"
+runMenu "4\n3\n1\n30000-30010\n" >/dev/null
+assert_equals "1 yes" "$(hopCount) $([[ -f "${sbHop}" ]] && echo yes || echo no)" "旁挂 6 的跳跃钩子挂在 sing-box 上"
+# 沿用账号 y、沿用 6 的端口 y、BBR、不混淆
+m4Out=$(runMenu "4\n1\ny\ny\n\n\n")
+m4Rc=$?
+[[ ${m4Rc} -ne 0 ]] && tail -n 20 <<<"${m4Out}"
+assert_equals "0" "${m4Rc}" "4 → 1 换成 17 退出码 0"
+noNoise "换成 17" "${m4Out}"
+assert_contains "${m4Out}" "replaced by the native Xray inbound" "换的时候说明旁挂里的 Hysteria2 换掉了"
+assert_equals "no 443" "$([[ -e "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" ]] && echo yes || echo no) $(jq -r '.inbounds[0].port' "${XRAY_CONF_DIR}/17_hysteria_inbounds.json" 2>/dev/null)" \
+    "旁挂的 6 删掉，17 沿用它的 443"
+assert_equals "1 yes no" "$(hopCount) $([[ -f "${xrayHop}" ]] && echo yes || echo no) $([[ -e "${sbHop}" ]] && echo yes || echo no)" \
+    "端口没变，跳跃规则留着，钩子挪到 Xray 上"
+assert_equals "active active active" "$(activeState)" "换完 Xray、旁挂的 sing-box（TUIC）、nginx 都在跑"
+# 本机发出的包不过 PREROUTING，带区间的节点在这里连不上，探测前先删掉跳跃
+runMenu "4\n3\n2\n" >/dev/null
+assert_equals "0 no" "$(hopCount) $([[ -e "${xrayHop}" ]] && echo yes || echo no)" "删跳跃：规则与 Xray 上的钩子都删了"
+assert_equals "200" "$(fetchSub "${DOMAIN_B}" 'sing-box 1.14.4' "${WORK}/sub-sb.json")" "换成 17 后取 sing-box 订阅 200"
+probeSub "旁挂 6 换成 17" "${WORK}/sub-sb.json"
+assert_equals "hysteria2 trojan tuic vless vless vless vmess" "${probedTypes}" "换成 17 后节点都能用"
+
+echo ""
+echo -e "${YELLOW}=== 菜单 6 → 2：卸掉 TUIC（拼车不计量 sing-box 里的协议，开拼车前要拿掉）===${NC}"
+s6Out=$(runMenu "6\n2\n")
+assert_equals "0" "$?" "卸 TUIC 退出码 0"
 sleep 1
 assert_equals "active inactive active" "$(activeState)" "没有入站了，旁挂的 sing-box 停掉"
 assert_equals "no no" "$([[ -e "${SINGBOX_BIN}" ]] && echo yes || echo no) $([[ -e "${SINGBOX_FRAGMENT_DIR}" ]] && echo yes || echo no)" "sing-box 的二进制和片段都删了"
@@ -571,10 +636,14 @@ echo -e "${YELLOW}=== 菜单 2 → 1：拼车开着时先去掉 Trojan、再装�
 c3Out=$(runMenu "2\n1\n0,1,3,7,12\ny\n")
 assert_equals "0" "$?" "个性化安装去掉 4 退出码 0"
 assert_equals "no" "$([[ -f "${XRAY_CONF_DIR}/04_trojan_TCP_inbounds.json" ]] && echo yes || echo no)" "Trojan 入站已去掉"
-c4Out=$(runMenu "2\n1\n0,1,3,4,7,12,15\ny\n")
+assert_equals "no" "$([[ -f "${XRAY_CONF_DIR}/17_hysteria_inbounds.json" ]] && echo yes || echo no)" "没选 17：Hysteria2 也去掉了"
+# 沿用上次配置 y；17 这回是新装：端口回车、BBR、不混淆
+c4Out=$(runMenu "2\n1\n0,1,3,4,7,12,15,17\ny\n\n\n\n")
 c4Rc=$?
 [[ ${c4Rc} -ne 0 ]] && tail -n 20 <<<"${c4Out}"
-assert_equals "0" "${c4Rc}" "个性化安装装回 4 退出码 0"
+assert_equals "0" "${c4Rc}" "个性化安装装回 4 与 17 退出码 0"
+assert_equals "${E2E_USER}-xray_hysteria2" "$(jq -r '.inbounds[0].settings.clients[].email' "${XRAY_CONF_DIR}/17_hysteria_inbounds.json" 2>/dev/null | head -n 1)" \
+    "拼车开着也能装 Hysteria2（17），协议设为 all 的成员自动进它的入站"
 assert_equals "${E2E_USER}-trojan_tcp" "$(jq -r '.inbounds[0].settings.clients[].email' "${XRAY_CONF_DIR}/04_trojan_TCP_inbounds.json" 2>/dev/null | head -n 1)" \
     "协议设为 all 的成员自动进了新装的 Trojan 入站"
 for ua in 'sing-box 1.14.4' 'clash-verge/v2.4.0' 'v2rayN/7.0'; do
@@ -592,6 +661,11 @@ usedBefore=$(carpoolUsed)
 assert_equals "204" "$(probeXhttpLink "$(base64 -d "${WORK}/sub-check" 2>/dev/null | grep -m1 'security=tls&type=xhttp')")" "拼车开着时 XHTTP+TLS 照样能用"
 usedAfter=$(carpoolUsed)
 assert_equals "yes" "$([[ "${usedAfter:-0}" -gt "${usedBefore:-0}" ]] && echo yes || echo no)" "XHTTP+TLS 的流量记到成员头上（${usedBefore} → ${usedAfter}）"
+fetchSub "${DOMAIN_B}" 'sing-box 1.14.4' "${WORK}/sub-sb.json" >/dev/null
+usedBefore=$(carpoolUsed)
+assert_equals "204" "$(probeOutbound "${WORK}/sub-sb.json" "$(jq -r '.outbounds[] | select(.type == "hysteria2") | .tag' "${WORK}/sub-sb.json")")" "拼车开着时 Hysteria2（17）照样能用"
+usedAfter=$(carpoolUsed)
+assert_equals "yes" "$([[ "${usedAfter:-0}" -gt "${usedBefore:-0}" ]] && echo yes || echo no)" "Hysteria2（17）的流量记到成员头上（${usedBefore} → ${usedAfter}）"
 c5Out=$(runMenu "7\n3\n1\ny\n")
 assert_equals "0" "$?" "关闭拼车退出码 0"
 assert_equals "false" "$(jq -r '.enabled' "${INSTALL_ROOT}/carpool/state.json" 2>/dev/null)" "拼车已关闭"

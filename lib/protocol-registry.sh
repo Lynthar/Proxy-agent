@@ -35,6 +35,7 @@ getProtocolConfigFileName() {
         14) echo "14_ss2022_inbounds.json" ;;
         15) echo "15_VLESS_XHTTP_TLS_inbounds.json" ;;
         16) echo "16_shadowtls_inbounds.json" ;;
+        17) echo "17_hysteria_inbounds.json" ;;
         20) echo "20_socks5_inbounds.json" ;;
         *)  return 1 ;;
     esac
@@ -65,6 +66,7 @@ parseProtocolIdFromFileName() {
         *ss2022_inbounds.json)              echo "14" ;;
         *VLESS_XHTTP_TLS_inbounds.json)     echo "15" ;;
         *shadowtls_inbounds.json)           echo "16" ;;
+        *hysteria_inbounds.json)            echo "17" ;;
         *socks5_inbounds.json)              echo "20" ;;
         *)  return 1 ;;
     esac
@@ -97,6 +99,7 @@ getProtocolDisplayName() {
         14) echo "SS2022" ;;
         15) echo "VLESS+XHTTP[TLS]" ;;
         16) echo "ShadowTLS+SS2022" ;;
+        17) echo "Hysteria2" ;;
         20) echo "SOCKS5" ;;
         *)  echo "Unknown" ;;
     esac
@@ -123,6 +126,7 @@ getProtocolInboundTag() {
         14) echo "ss2022-in" ;;
         15) echo "VLESSXHTTPTLS" ;;
         16) echo "shadowtls-in" ;;
+        17) echo "hysteria-in" ;;
         *)  return 1 ;;
     esac
 }
@@ -137,7 +141,7 @@ protocolRequiresTLS() {
     local protocolId="$1"
 
     case "${protocolId}" in
-        0|1|2|3|4|5|6|9|10|11|13|15) return 0 ;;
+        0|1|2|3|4|5|6|9|10|11|13|15|17) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -155,7 +159,7 @@ anyProtocolRequiresTLS() {
 # sing-box 的 naive 与 shadowsocks 不写 network 就两种都监听，判端口冲突要按 both 算，否则会和 6 / 9 撞 UDP
 getProtocolListenNetwork() {
     case "$1" in
-        6|9) echo "udp" ;;
+        6|9|17) echo "udp" ;;
         10|14) echo "both" ;;
         0|1|2|3|4|5|7|8|11|12|13|15|16|20) echo "tcp" ;;
         *) return 1 ;;
@@ -166,7 +170,7 @@ getProtocolListenNetwork() {
 # 1 / 3 不进池：池只有六个位，sing-box 全装时要留给 0 4 7 10 11 13；15 经 0 的 443 回落，没有对外端口
 protocolUsesPortPool() {
     case "$1" in
-        0|4|6|7|9|10|11|12|13|16) return 0 ;;
+        0|4|6|7|9|10|11|12|13|16|17) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -175,7 +179,7 @@ protocolUsesPortPool() {
 # Xray 这份同时是拼车计量的名单（只有 Xray 承载的入站计得到），两份的并集是账户事务处理的协议
 installableProtocols() {
     case "$1" in
-        1) echo "0 1 3 4 7 12 15" ;;
+        1) echo "0 1 3 4 7 12 15 17" ;;
         2) echo "0 1 3 4 6 7 9 10 11 13 14 16" ;;
         *) return 1 ;;
     esac
@@ -200,7 +204,7 @@ getProtocolUsersPath() {
         case "${protocolId}" in
             7)                       echo ".inbounds[1].settings.clients" ;;
             6 | 9)                   echo ".inbounds[0].users" ;;
-            0 | 1 | 2 | 3 | 4 | 5 | 8 | 11 | 12 | 15) echo ".inbounds[0].settings.clients" ;;
+            0 | 1 | 2 | 3 | 4 | 5 | 8 | 11 | 12 | 15 | 17) echo ".inbounds[0].settings.clients" ;;
             *) return 1 ;;
         esac
     elif [[ "${core}" == "2" ]]; then
@@ -223,6 +227,7 @@ getProtocolIdField() {
             0 | 1 | 3 | 5 | 7 | 8 | 12 | 15) echo "id" ;;
             2 | 4 | 6)                  echo "password" ;;
             9)                          echo "uuid" ;;
+            17)                         echo "auth" ;;
             *) return 1 ;;
         esac
     elif [[ "${core}" == "2" ]]; then
@@ -245,7 +250,7 @@ getProtocolNameField() {
     if [[ "${core}" == "1" ]]; then
         case "${protocolId}" in
             6 | 9)                                   echo "name" ;;
-            0 | 1 | 2 | 3 | 4 | 5 | 7 | 8 | 11 | 12 | 15) echo "email" ;;
+            0 | 1 | 2 | 3 | 4 | 5 | 7 | 8 | 11 | 12 | 15 | 17) echo "email" ;;
             *) return 1 ;;
         esac
     elif [[ "${core}" == "2" ]]; then
@@ -275,6 +280,7 @@ getProtocolEmailSuffix() {
             9)  echo "singbox_tuic" ;;
             12) echo "VLESS_Reality_XHTTP" ;;
             15) echo "VLESS_XHTTP_TLS" ;;
+            17) echo "xray_hysteria2" ;;
             *) return 1 ;;
         esac
     elif [[ "${core}" == "2" ]]; then

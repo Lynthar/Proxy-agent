@@ -219,13 +219,14 @@ assert_true "protocolRequiresTLS 9" "TUIC requires TLS (ACME cert under tls/)"
 assert_true "! protocolRequiresTLS 14" "SS2022 does not require TLS"
 assert_true "protocolRequiresTLS 15" "VLESS+XHTTP+TLS requires TLS (falls back from 0)"
 assert_true "! protocolRequiresTLS 16" "ShadowTLS needs no certificate of its own (borrows the handshake target)"
+assert_true "protocolRequiresTLS 17" "Xray-native Hysteria2 requires TLS (uses the domain certificate of 0)"
 
 # 测试 getProtocolListenNetwork / protocolUsesPortPool：逐格钉住，错一格就会和别的协议撞端口或拿错默认端口
-for _cell in 0:tcp 1:tcp 3:tcp 4:tcp 6:udp 7:tcp 9:udp 10:both 11:tcp 12:tcp 13:tcp 14:both 15:tcp 16:tcp; do
+for _cell in 0:tcp 1:tcp 3:tcp 4:tcp 6:udp 7:tcp 9:udp 10:both 11:tcp 12:tcp 13:tcp 14:both 15:tcp 16:tcp 17:udp; do
     assert_equals "${_cell#*:}" "$(getProtocolListenNetwork "${_cell%%:*}")" "getProtocolListenNetwork(${_cell%%:*}) = ${_cell#*:}"
 done
 assert_true '! getProtocolListenNetwork 99 >/dev/null' "getProtocolListenNetwork: 未知 ID 返回 1"
-for _id in 0 4 6 7 9 10 11 12 13 16; do
+for _id in 0 4 6 7 9 10 11 12 13 16 17; do
     assert_true "protocolUsesPortPool ${_id}" "protocolUsesPortPool(${_id}): 回车默认从 443 端口池取"
 done
 for _id in 1 3 14 15 20; do
@@ -234,11 +235,12 @@ done
 assert_equals "443 8443 2053 2083 2087 2096" "${TLS_PORT_POOL}" "TLS_PORT_POOL: 443 打头，其后是 Cloudflare 也转发的 HTTPS 端口"
 
 # 测试 installableProtocols / protocolInstallableOn：两个安装菜单、拼车计量与账户事务都从这张表派生，逐格钉住
-assert_equals "0 1 3 4 7 12 15" "$(installableProtocols 1)" "installableProtocols(1): Xray 个性化安装能装的"
+assert_equals "0 1 3 4 7 12 15 17" "$(installableProtocols 1)" "installableProtocols(1): Xray 个性化安装能装的"
 assert_equals "0 1 3 4 6 7 9 10 11 13 14 16" "$(installableProtocols 2)" "installableProtocols(2): sing-box 个性化安装能装的"
 assert_true '! installableProtocols 3 >/dev/null' "installableProtocols: 未知内核返回 1"
 assert_true "protocolInstallableOn 1 15" "protocolInstallableOn(1,15): 两位数的也认"
 assert_true "! protocolInstallableOn 1 6" "protocolInstallableOn(1,6): Xray 菜单不装 sing-box 的 Hysteria2"
+assert_true "protocolInstallableOn 1 17 && ! protocolInstallableOn 2 17" "protocolInstallableOn(*,17): Xray 原生的 Hysteria2 只在 Xray 上装"
 assert_true "! protocolInstallableOn 2 12" "protocolInstallableOn(2,12): sing-box 没有 XHTTP"
 for _id in 2 5 8 20; do
     assert_true "! protocolInstallableOn 1 ${_id} && ! protocolInstallableOn 2 ${_id}" "protocolInstallableOn(*,${_id}): 已废弃与内部的协议哪边都不给装"
@@ -312,6 +314,7 @@ done <<'CELLS'
 1:9:uuid
 1:12:id
 1:15:id
+1:17:auth
 2:0:uuid
 2:4:password
 2:9:uuid
@@ -326,6 +329,7 @@ done <<'CELLS'
 1:6:name
 1:12:email
 1:15:email
+1:17:email
 2:0:name
 2:10:username
 2:14:name
@@ -349,6 +353,14 @@ assert_equals "16" "$(parseProtocolIdFromFileName 16_shadowtls_inbounds.json)" "
 assert_equals "16_shadowtls_inbounds.json" "$(getProtocolConfigFileName 16)" "getProtocolConfigFileName(16)"
 assert_equals "ShadowTLS+SS2022" "$(getProtocolDisplayName 16)" "getProtocolDisplayName(16)"
 assert_equals "shadowtls-in" "$(getProtocolInboundTag 16)" "getProtocolInboundTag(16)"
+assert_equals ".inbounds[0].settings.clients" "$(getProtocolUsersPath 1 17)" "usersPath(core=1,id=17)"
+assert_true "! getProtocolUsersPath 2 17" "usersPath rejects Xray-native Hysteria2 on sing-box core"
+assert_true "! getProtocolIdField 2 17" "idField rejects Xray-native Hysteria2 on sing-box core"
+assert_equals "17_hysteria_inbounds.json" "$(getProtocolConfigFileName 17)" "getProtocolConfigFileName(17)"
+assert_equals "17" "$(parseProtocolIdFromFileName 17_hysteria_inbounds.json)" "文件名解析：17 不被 6 的 hysteria2 模式吞掉"
+assert_equals "6" "$(parseProtocolIdFromFileName 06_hysteria2_inbounds.json)" "文件名解析：6 不被 17 的 hysteria 模式吞掉"
+assert_equals "Hysteria2" "$(getProtocolDisplayName 17)" "getProtocolDisplayName(17): 与 6 同名，节点也一样"
+assert_equals "hysteria-in" "$(getProtocolInboundTag 17)" "getProtocolInboundTag(17)"
 assert_true "! getProtocolNameField 2 20" "nameField rejects socks internal inbound (no name)"
 assert_true "! getProtocolIdField 3 0" "idField rejects unknown core"
 
@@ -494,6 +506,8 @@ assert_equals "VLESS_Reality_Vision" "$(getProtocolEmailSuffix 2 7)" "getProtoco
 assert_equals "singbox_naive" "$(getProtocolEmailSuffix 2 10)" "getProtocolEmailSuffix(2,10)"
 assert_true '! getProtocolEmailSuffix 2 20 >/dev/null' "getProtocolEmailSuffix(2,20): socks 无显示名，返回 1"
 assert_true '! getProtocolEmailSuffix 1 10 >/dev/null' "getProtocolEmailSuffix(1,10): naive 不在 Xray 下"
+assert_equals "xray_hysteria2" "$(getProtocolEmailSuffix 1 17)" "getProtocolEmailSuffix(1,17)"
+assert_true '! getProtocolEmailSuffix 2 17 >/dev/null' "getProtocolEmailSuffix(2,17): 17 不在 sing-box 下"
 _sfxWithDash=$(for _c in 1 2; do for _p in $(seq 0 20); do getProtocolEmailSuffix "${_c}" "${_p}" 2>/dev/null; done; done | grep -- '-')
 assert_equals "" "${_sfxWithDash}" "getProtocolEmailSuffix: 后缀都不含连字符（\${name%-*} 才能无歧义剥回账户名）"
 
@@ -810,6 +824,7 @@ assert_equals 'max|{"sizeGB":3000,"warnPercent":90,"interface":""}|{"rx":1,"tx":
 
 _cpMap='{"0":[{"id":"zz","email":"zed-VLESS_TCP/TLS_Vision"},{"id":"'"${_cpU1}"'","email":"alice-VLESS_TCP/TLS_Vision"}],"4":[{"password":"pp","email":"pat-trojan_tcp"}]}'
 assert_equals '{"zed":"zz","pat":"pp"}' "$(carpoolForeignAccounts "${_cpMerged}" "${_cpMap}")" "carpoolForeignAccounts: 不在册的账号 → {名: 凭据}，id 或 password 都认"
+assert_equals '{"hy":"hh"}' "$(carpoolForeignAccounts "${_cpMerged}" '{"17":[{"auth":"hh","email":"hy-xray_hysteria2"}]}')" "carpoolForeignAccounts: 17 的凭据在 auth 里也认（撞车校验靠它）"
 assert_equals '{}' "$(carpoolForeignAccounts "${_cpMerged}" '{}')" "carpoolForeignAccounts: 空映射得空对象"
 assert_equals '{"pat":"pp"}' "$(carpoolForeignAccounts "$(jq -c '.removing = ["zed"]' <<<"${_cpMerged}")" "${_cpMap}")" "carpoolForeignAccounts: 待删的不算外部账号"
 _cpRm=$(carpoolMarkRemoved "$(jq -c '.removing = ["zed"]' <<<"${_cpMerged}")" '["pat","zed"]')
@@ -1028,6 +1043,7 @@ assert_equals '{"id":"'"${_cpU1}"'","email":"alice-VLESS_WS"}' "$(carpoolExpecte
 assert_equals '{"id":"'"${_cpU1}"'","email":"alice-VLESS_Reality_XHTTP"}' "$(carpoolExpectedClients 12 "${_cpS}" '[]' | jq -c '.[0]')" "期望 clients: 12 的形状 {id,email}"
 assert_equals '{"id":"'"${_cpU1}"'","email":"alice-VMess_WS","alterId":0}' "$(carpoolExpectedClients 3 "$(jq -c '.members.alice.protocols = [0,3,7]' <<<"${_cpS}")" '[]' | jq -c '.[0]')" "期望 clients: 3 的形状 {id,email,alterId}"
 assert_equals '{"password":"'"${_cpU1}"'","email":"alice-trojan_tcp"}' "$(carpoolExpectedClients 4 "$(jq -c '.members.alice.protocols = [0,4,7]' <<<"${_cpS}")" '[]' | jq -c '.[0]')" "期望 clients: 4 的形状 {password,email}"
+assert_equals '{"auth":"'"${_cpU1}"'","email":"alice-xray_hysteria2"}' "$(carpoolExpectedClients 17 "$(jq -c '.members.alice.protocols = [0,7,17]' <<<"${_cpS}")" '[]' | jq -c '.[0]')" "期望 clients: 17 的形状 {auth,email}"
 assert_equals '["alice-VLESS_Reality_XHTTP"]' "$(carpoolExpectedClients 12 "${_cpS}" '[]' | jq -c '[.[].email]')" "期望 clients: 协议子集——carol 没有 12 就不进 12 的文件"
 assert_equals "[]" "$(carpoolExpectedClients 4 "${_cpS}" '[]')" "期望 clients: 没人有该协议时为空数组"
 assert_equals '["zed-VLESS_WS","alice-VLESS_WS"]' "$(carpoolExpectedClients 1 "$(jq -c '.members.alice.protocols = "all"' <<<"${_cpS}")" '[{"id":"zz","email":"zed-VLESS_WS"}]' | jq -c '[.[].email]')" \

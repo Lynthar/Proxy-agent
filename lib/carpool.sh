@@ -472,7 +472,7 @@ carpoolPruneRemoved() {
 # CURRENT_MAP 形如 {"<ID>": [clients…]}
 carpoolForeignAccounts() {
     jq -c --argjson state "$1" '
-      [.[] | .[]?] | map({key: ((.email // "") | sub("-[^-]*$"; "")), value: (.id // .password // "")})
+      [.[] | .[]?] | map({key: ((.email // "") | sub("-[^-]*$"; "")), value: (.id // .password // .auth // "")})
       | map(select(.key != "" and (.key as $k | ($state.members | has($k) | not) and (($state.removing // []) | index($k)) == null)))
       | from_entries' <<<"$2"
 }
@@ -643,16 +643,16 @@ carpoolDiffText() {
 # [不归拼车管的账号，原序] + [active、协议是 "all" 或含 ID、uuid 已定的成员，members 顺序]；对象形状与 initXrayClients 一致。
 # .removing 里的名字两边都不进，即从 inbound 删掉
 carpoolExpectedClients() {
-    local id=$1 suffix
+    local id=$1 suffix idField
     carpoolMetered "${id}" || return 1
     suffix=$(getProtocolEmailSuffix 1 "${id}") || return 1
-    jq -c --argjson id "${id}" --arg suffix "${suffix}" --argjson state "$2" '
+    idField=$(getProtocolIdField 1 "${id}") || return 1
+    jq -c --argjson id "${id}" --arg suffix "${suffix}" --arg idField "${idField}" --argjson state "$2" '
       def shape($n; $u):
         if $id == 0 then {id: $u, flow: "xtls-rprx-vision", email: ($n + "-" + $suffix)}
         elif $id == 7 then {id: $u, email: ($n + "-" + $suffix), flow: "xtls-rprx-vision"}
         elif $id == 3 then {id: $u, email: ($n + "-" + $suffix), alterId: 0}
-        elif $id == 4 then {password: $u, email: ($n + "-" + $suffix)}
-        else {id: $u, email: ($n + "-" + $suffix)} end;
+        else {($idField): $u, email: ($n + "-" + $suffix)} end;
       [ .[]? | select(((.email // "") | sub("-[^-]*$"; "")) as $k
           | ($state.members | has($k) | not) and (($state.removing // []) | index($k)) == null) ]
       + [ $state.members | to_entries[]

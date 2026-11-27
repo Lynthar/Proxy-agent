@@ -92,6 +92,8 @@ readonly NGINX_SIGNING_KEY_FPR="573BFD6B3D8FBC641079A6ABABF5BD827BD9BF62"
 
 # 拼车要的 api.listen 自 Xray 1.8.12 起才有；只拦手动回钉旧核的机器
 readonly CARPOOL_XRAY_MIN_VERSION="1.8.12"
+# Xray 原生 Hysteria2（17）要的最低内核，也是三种客户端都实测过的版本：更早的丢大包 UDP（隧道里的 HTTP/3 建不起来）或 Salamander 的盐可预测
+readonly HYSTERIA_XRAY_MIN_VERSION="26.11.9"
 
 # ============================================================================
 # 端口
