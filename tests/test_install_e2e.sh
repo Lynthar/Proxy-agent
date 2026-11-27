@@ -95,12 +95,46 @@ cp -r "${PROJECT_ROOT}/shell/lang" "${HOME}/shell/lang"
 # 答案按提示顺序喂 stdin。Xray：UUID、用户名、端口（回车取默认，空机器上应是 443）、目标域名、私钥（回车生成）；
 # sing-box 先问目标域名再问端口，密钥由 sing-box 自己生成、不问
 echo -e "${YELLOW}=== 菜单 19 → ${MENU_CORE_CHOICE}：一键 Reality（${CORE_LABEL}）===${NC}"
-if [[ "${E2E_CORE}" == "xray" ]]; then
-    printf '19\n1\n%s\n%s\n\n%s:443\n\n' "${E2E_UUID}" "${E2E_USER}" "${E2E_SNI}"
+# Debian 上 Xray 对 Xray、不接链式的那条腿在终端里装，工具那步答应装 ufw（只在终端里问）；别的腿照旧管道直喂，装 iptables-persistent
+E2E_UFW=
+if [[ "${E2E_CORE}" == "xray" && "${E2E_CLIENT}" == "xray" && -z "${E2E_CHAIN_CODE:-}" ]] && command -v script >/dev/null 2>&1 \
+    && [[ "$(. /etc/os-release && echo "${ID}")" == "debian" ]]; then
+    E2E_UFW=1
+fi
+# waitForLog PATTERN → 等安装输出里出现 PATTERN，最多 5 分钟
+waitForLog() {
+    local i
+    for i in $(seq 1 600); do
+        grep -q "$1" "${E2E_LOG}" 2>/dev/null && return 0
+        sleep 0.5
+    done
+    return 1
+}
+if [[ -n "${E2E_UFW}" ]]; then
+    # 终端上 apt 装包会把预先喂进去的输入清掉，所以看到提问再答
+    ttyFifo=$(mktemp -u)
+    mkfifo "${ttyFifo}"
+    timeout 900 script -qec "V2RAY_LANG=en bash ${HOME}/install.sh" /dev/null <"${ttyFifo}" >"${E2E_LOG}" 2>&1 &
+    ttyPid=$!
+    exec 3>"${ttyFifo}"
+    printf '19\n1\n' >&3
+    if waitForLog 'Install and enable ufw' && printf 'y\n' >&3 && waitForLog '随机UUID'; then
+        printf '%s\n%s\n\n%s:443\n\n' "${E2E_UUID}" "${E2E_USER}" "${E2E_SNI}" >&3
+    else
+        kill "${ttyPid}" 2>/dev/null
+    fi
+    wait "${ttyPid}"
+    installRc=$?
+    exec 3>&-
+    rm -f "${ttyFifo}"
 else
-    printf '19\n2\n%s\n%s\n%s:443\n\n' "${E2E_UUID}" "${E2E_USER}" "${E2E_SNI}"
-fi | V2RAY_LANG=en bash "${HOME}/install.sh" >"${E2E_LOG}" 2>&1
-installRc=$?
+    if [[ "${E2E_CORE}" == "xray" ]]; then
+        printf '19\n1\n%s\n%s\n\n%s:443\n\n' "${E2E_UUID}" "${E2E_USER}" "${E2E_SNI}"
+    else
+        printf '19\n2\n%s\n%s\n%s:443\n\n' "${E2E_UUID}" "${E2E_USER}" "${E2E_SNI}"
+    fi | V2RAY_LANG=en bash "${HOME}/install.sh" >"${E2E_LOG}" 2>&1
+    installRc=$?
+fi
 if [[ ${installRc} -ne 0 ]]; then
     echo -e "${RED}安装退出码 ${installRc}，输出末尾：${NC}"
     tail -n 40 "${E2E_LOG}"
@@ -113,6 +147,20 @@ if [[ -n "${noisyLines}" ]]; then
     echo "${noisyLines}"
 fi
 assert_equals "" "${noisyLines}" "安装输出里没有 command not found / No such file"
+
+if [[ -n "${E2E_UFW}" ]]; then
+    echo ""
+    echo -e "${YELLOW}=== 装机时答应装 ufw ===${NC}"
+    ufwVerbose=$(ufw status verbose 2>/dev/null)
+    assert_contains "${ufwVerbose}" "Status: active" "ufw 已启用"
+    assert_contains "${ufwVerbose}" "Default: deny (incoming)" "ufw 入站默认拒绝"
+    ufwAllows=$(ufw status 2>/dev/null | awk '$2 == "ALLOW" {print $1}' | sort -u | paste -sd' ' -)
+    assert_contains " ${ufwAllows} " " 22/tcp " "容器里没有 sshd，认不出 SSH 端口时放行了 22"
+    realityPort=$(jq -r '.inbounds[0].port' "${XRAY_CONF_DIR}/07_VLESS_vision_reality_inbounds.json" 2>/dev/null)
+    assert_contains " ${ufwAllows} " " ${realityPort}/tcp " "Reality 的端口 ${realityPort} 放行进了 ufw"
+    assert_equals "no" "$(dpkg-query -W -f '${Status}' iptables-persistent 2>/dev/null | grep -q 'ok installed' && echo yes || echo no)" \
+        "装了 ufw 就没装与它互斥的 iptables-persistent"
+fi
 
 # ============================================================================
 # 落盘的东西是不是真的：二进制、配置、软链、随行文件、以及 Reality-only 不该装的证书工具

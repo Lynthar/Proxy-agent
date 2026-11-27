@@ -237,6 +237,8 @@ nginx 装自 nginx.org 源时，配置安全段最后一行比对已装版本与
 
 **云厂商的安全组要自己放行。** 脚本只管本机防火墙（ufw、firewalld、nftables、iptables）。用 nftables 的机器上，脚本加的放行写在开机加载的配置（Debian 是 `/etc/nftables.conf`）末尾 `# Proxy-agent begin` 到 `# Proxy-agent end` 那一段，其余内容不动。云厂商面板里的安全组或防火墙要自己开：80（HTTP 验证申请证书）、各协议的端口、订阅端口；Hysteria2 和 TUIC 开 UDP。
 
+**机器上还没有防火墙时，装机会问要不要启用 ufw。** 只在 Debian / Ubuntu 上、在终端里装、机器上没有 ufw、firewalld、nftables 或 iptables-persistent 在管的时候问，默认不启用：回车就跳过，和以前一样装 iptables-persistent，入站照旧放行。答 y 就装上 ufw，入站默认拒绝，先放行 SSH 在用的端口（认不出就放行 22）再启用，之后脚本装的协议端口照常一个个放行。问之前会列出别的程序在听的对外端口，启用后外面连不进来，要用得自己 `ufw allow`。ufw 会把转发默认改成拒绝，本机给 WireGuard 这类做转发的先别启用。卸载脚本不会关掉 ufw。
+
 **不再用的端口，放行会收回。** 删协议、重装时换了端口、订阅并到节点端口之后，旧端口要是配置里不再用、也没有程序在听，脚本就收回它的放行：带 `(Proxy-agent)` 注释的 iptables / nft 规则，以及 ufw、firewalld 上不限来源的那一条。你自己手动加过一模一样的 ufw 规则（比如也 `ufw allow 8443/tcp` 过），会被一起删掉；还有程序在听的端口不动。整机卸载照旧只收带注释的，见[卸载](#卸载)。
 
 **默认端口怎么来的。** 看起来像 HTTPS 的协议，端口提示处直接回车取 443：VLESS Vision、Trojan、Reality、Reality XHTTP、Naive、HTTPUpgrade、AnyTLS、ShadowTLS。443 已被占，就依次取 8443、2053、2083、2087、2096 里第一个空着的，这几个也是 Cloudflare 会转发的 HTTPS 端口；六个全被占才回落随机端口。Hysteria2 与 TUIC 走 UDP，同样从 443/udp 起取，和 TCP 的 443 互不冲突，两个一起装时 Hysteria2 先拿。sing-box 内核上的 VLESS WS、VMess WS 与 Shadowsocks 2022 默认随机端口；Xray 内核上的 1、3、4 和 0 共用一个端口，不单独问。

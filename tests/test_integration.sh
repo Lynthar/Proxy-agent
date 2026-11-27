@@ -6165,9 +6165,10 @@ BT_FN=$(sed -n '/^installBaseTools() {/,/^}/p;/^debPackageInstalled() {/,/^}/p' 
 # run_bt UFW_STATE → 桩掉包管理器（记下要装的包）与 dpkg-query（ufw 的安装状态），打印 installBaseTools 要装的包里跟防火墙有关的
 run_bt() {
     rm -rf "${AP_DIR}" && mkdir -p "${AP_DIR}"
-    env BT_FN="${BT_FN}" AP_DIR="${AP_DIR}" UFW_STATE="$1" bash -c '
+    env BT_FN="${BT_FN}" AP_DIR="${AP_DIR}" UFW_STATE="$1" OFFER_UFW="${2:-}" bash -c '
         eval "${BT_FN}"
         for f in echoContent t ensureCronService ensureAlpineProcps sleep debconf-set-selections; do eval "$f() { :; }"; done
+        offerUfw() { [[ -n "${OFFER_UFW}" ]]; }
         pgrep() { return 1; }
         dpkg-query() { [[ -n "${UFW_STATE}" ]] && printf "%s" "${UFW_STATE}"; [[ -n "${UFW_STATE}" ]]; }
         instRec() { shift 2; echo "$*" >>"${AP_DIR}/installed"; }
@@ -6180,7 +6181,57 @@ if command -v netfilter-persistent >/dev/null 2>&1; then
 else
     assert_equals "" "$(run_bt "install ok installed")" "装了 ufw：installBaseTools 不装 iptables-persistent"
     assert_equals "iptables-persistent" "$(run_bt "")" "没装 ufw：照常装 iptables-persistent（端口跳跃靠它活过重启）"
+    assert_equals "" "$(run_bt "" y)" "装机时答应装 ufw：不再装与它互斥的 iptables-persistent"
 fi
+
+# --- 没有防火墙的 Debian / Ubuntu 装机时只在终端里问 ufw，默认不要；要的话先放行 SSH 再启用，启用前列出别的对外监听 ---
+OU_FN=$(sed -n '/^offerUfw() {/,/^}/p;/^externalListeners() {/,/^}/p;/^debPackageInstalled() {/,/^}/p' install.sh)
+assert_equals "3" "$(grep -cE '^(offerUfw|externalListeners|debPackageInstalled)\(\) \{$' <<<"${OU_FN}")" "offerUfw：抽到三个函数原文"
+# run_ou ANSWER [TTY] [SSH_PORTS] [ACTIVE_UNIT] → ANSWER 从 stdin 喂给提问；打印提示、ufw 收到的命令，最后一行是返回码
+run_ou() {
+    env OU_FN="${OU_FN}" OU_TTY="${2-1}" OU_SSH="${3:-}" OU_ACTIVE="${4:-}" V2RAY_LANG=en bash -c '
+        source lib/i18n.sh; source lib/utils.sh
+        eval "${OU_FN}"
+        echoContent() { printf "%s\n" "$2"; }
+        stdinIsTty() { [[ -n "${OU_TTY}" ]]; }
+        systemctl() { [[ "$3" == "${OU_ACTIVE}" ]]; }
+        sshListenPorts() { [[ -z "${OU_SSH}" ]] || printf "%s\n" ${OU_SSH}; }
+        proxyPortsInUse() { echo 443/tcp; }
+        ss() {
+            printf "%s\n" "tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:((\"sshd\",pid=1,fd=3))" \
+                "tcp LISTEN 0 128 [::]:8080 [::]:* users:((\"python3\",pid=2,fd=3))" \
+                "tcp LISTEN 0 128 127.0.0.1:631 0.0.0.0:* users:((\"cupsd\",pid=3,fd=3))" \
+                "tcp LISTEN 0 128 *:443 *:* users:((\"xray\",pid=4,fd=3))" \
+                "udp UNCONN 0 0 0.0.0.0:68 0.0.0.0:* users:((\"dhclient\",pid=5,fd=3))" \
+                "udp UNCONN 0 0 0.0.0.0:51820 0.0.0.0:*"
+        }
+        ouLog=$(mktemp)
+        pkg() { echo installed >>"${ouLog}"; }
+        dpkg-query() { grep -qx installed "${ouLog}" && printf "install ok installed"; }
+        ufw() { echo "ufw $*" >>"${ouLog}"; [[ "$1" == status ]] && echo "Status: active"; return 0; }
+        installType="pkg -y install"
+        offerUfw; rc=$?
+        grep "^ufw " "${ouLog}"; rm -f "${ouLog}"
+        echo "rc=${rc}"' <<<"$1" 2>&1
+}
+assert_equals "rc=1" "$(run_ou y "")" "ufw：不是终端不问、不装（管道喂进来的答案不能被它吃掉）"
+assert_equals "rc=1" "$(run_ou y 1 "" firewalld)" "ufw：firewalld 开着就不问"
+assert_equals "rc=1" "$(run_ou y 1 "" nftables)" "ufw：nftables 服务开着就不问"
+_out=$(run_ou "")
+assert_equals "rc=1" "$(tail -n 1 <<<"${_out}")" "ufw：回车就是不要"
+assert_equals "" "$(grep '^ufw ' <<<"${_out}")" "ufw：答不要时一条 ufw 命令都不发"
+assert_contains "${_out}" "8080/tcp python3" "ufw：启用前列出别的程序在听的对外端口"
+assert_contains "${_out}" "51820/udp -" "ufw：UDP 的也列（WireGuard 这类）"
+assert_equals "" "$(grep -E '631|68/udp|443/tcp|22/tcp' <<<"${_out}")" "ufw：只听回环的、DHCP 客户端、本脚本的端口、SSH 都不列"
+_out=$(run_ou y)
+assert_equals "ufw default deny incoming|ufw default allow outgoing|ufw allow 22/tcp|ufw --force enable|ufw status" "$(grep '^ufw ' <<<"${_out}" | paste -sd'|' -)" \
+    "ufw：认不出 sshd 的端口就放行 22，放行在启用之前（反过来当前的 SSH 会被锁在外面）"
+assert_equals "rc=0" "$(tail -n 1 <<<"${_out}")" "ufw：装上并启用返回 0，调用方不再装 iptables-persistent"
+assert_contains "${_out}" "SSH (22) allowed" "ufw：启用后说明放行了哪个 SSH 端口"
+_out=$(run_ou y 1 "2222 2222")
+assert_contains "${_out}" "ufw allow 2222/tcp" "ufw：放行 sshd 实际用的端口"
+assert_equals "" "$(grep 'ufw allow 22/tcp' <<<"${_out}")" "ufw：sshd 不在 22 时不多放 22"
+assert_contains "${_out}" "22/tcp sshd" "ufw：sshd 改了端口时，22 上别的监听照样列出来"
 
 # --- 端口跳跃菜单认 iptables：find | grep -q 在 pipefail 下会因 SIGPIPE 误判没有 ---
 PH_FN=$(sed -n '/^portHoppingMenu() {/,/^}/p' install.sh)
@@ -6199,6 +6250,7 @@ mkdir -p "${AP_DIR}"
 btPkgs=$(env BT_FN="${BT_FN}" AP_DIR="${AP_DIR}" bash -c '
     eval "${BT_FN}"
     for f in echoContent t ensureCronService ensureAlpineProcps sleep debconf-set-selections; do eval "$f() { :; }"; done
+    offerUfw() { return 1; }
     pgrep() { return 1; }
     crontab() { return 1; }
     ping6() { return 2; }
@@ -6220,6 +6272,7 @@ run_bt_qr() {
     env BT_FN="${BT_FN}" AP_DIR="${AP_DIR}" RELEASE="$1" bash -c '
         eval "${BT_FN}"
         for f in echoContent t ensureCronService ensureAlpineProcps sleep debconf-set-selections; do eval "$f() { :; }"; done
+        offerUfw() { return 1; }
         pgrep() { return 1; }
         dpkg-query() { return 1; }
         qrencode() { return 127; }

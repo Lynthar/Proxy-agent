@@ -1806,6 +1806,55 @@ firewallDefaultDenies() {
         return 1
     fi
 }
+# externalListeners → 本机此刻对外在听的端口，一行一个「PORT/PROTO 进程名」。只听回环的不算，
+# DHCP 客户端的 68、546/udp 也不算：ufw 自带的规则放行它们的回包
+externalListeners() {
+    ss -H -ltnup 2>/dev/null | awk '{
+        n = split($5, a, ":"); port = a[n]; addr = substr($5, 1, length($5) - length(port) - 1)
+        if (addr ~ /^(127\.|\[::1\]|\[::ffff:127\.)/ || ($1 == "udp" && (port == 68 || port == 546))) next
+        proc = "-"; if (match($0, /"[^"]+"/)) proc = substr($0, RSTART + 1, RLENGTH - 2)
+        print port "/" $1, proc
+    }' | sort -u
+}
+
+# offerUfw → Debian / Ubuntu 装机时还没有防火墙在管（firewalld、nftables 服务都没开；调用方已排除 ufw 与 netfilter-persistent），
+# 就在终端里问要不要装 ufw 并启用，默认不要。0 = ufw 装上了，调用方不能再装与它互斥的 iptables-persistent；
+# 不是终端、答 N、装不上都返回 1。启用前先放行 sshd 的端口（一个都认不出就放行 22），不然当前的 SSH 会被锁在外面
+offerUfw() {
+    local sshPorts others answer port
+    stdinIsTty || return 1
+    if systemctl is-active --quiet firewalld 2>/dev/null || systemctl is-active --quiet nftables 2>/dev/null; then
+        return 1
+    fi
+    sshPorts=$(sshListenPorts | grep -E '^[0-9]+$' | sort -un)
+    [[ -n "${sshPorts}" ]] || sshPorts=22
+    others=$(externalListeners | awk -v skip=" $(tr '\n' ' ' <<<"${sshPorts}") " -v ours=" $(proxyPortsInUse | tr '\n' ' ') " '{
+        split($1, p, "/"); if (index(skip, " " p[1] " ") || index(ours, " " $1 " ")) next; print
+    }')
+    echoContent yellow "\n$(t UFW_OFFER "${sshPorts//$'\n'/, }")"
+    if [[ -n "${others}" ]]; then
+        echoContent yellow "$(t UFW_OFFER_OTHERS)"
+        sed 's/^/    /' <<<"${others}"
+    fi
+    read -r -p "$(t UFW_OFFER_PROMPT)" answer
+    isYesInput "${answer}" || return 1
+    if ! ${installType} ufw >/dev/null 2>&1 || ! debPackageInstalled ufw; then
+        echoContent yellow " ---> $(t UFW_INSTALL_FAILED)"
+        return 1
+    fi
+    ufw default deny incoming >/dev/null
+    ufw default allow outgoing >/dev/null
+    while IFS= read -r port; do
+        ufw allow "${port}/tcp" >/dev/null
+    done <<<"${sshPorts}"
+    if ufw --force enable >/dev/null 2>&1 && ufw status | grep "Status: active" >/dev/null; then
+        echoContent green " ---> $(t UFW_ENABLED "${sshPorts//$'\n'/, }")"
+    else
+        echoContent yellow " ---> $(t UFW_ENABLE_FAILED)"
+    fi
+    return 0
+}
+
 # getPublicIP 由 lib/system-detect.sh 提供（同样的接口：默认 IPv4，
 # 第一参数可指定 4/6；保留 currentHost==Reality serverName 时短路返回 currentHost）。
 
@@ -2262,7 +2311,7 @@ installBaseTools() {
 
     # 装了 ufw 就不装 iptables-persistent：两包互斥，apt -y 会直接卸掉 ufw，用户的默认拒绝随之失效、整机全开
     if ! command -v netfilter-persistent >/dev/null 2>&1 && ! debPackageInstalled ufw; then
-        if [[ "${release}" == "debian" || "${release}" == "ubuntu" ]]; then
+        if [[ "${release}" == "debian" || "${release}" == "ubuntu" ]] && ! offerUfw; then
             echoContent green " ---> $(t INSTALL_TOOL "iptables")"
             echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | debconf-set-selections
             echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | debconf-set-selections
