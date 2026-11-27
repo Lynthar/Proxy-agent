@@ -233,6 +233,19 @@ for _id in 1 3 14 15 20; do
 done
 assert_equals "443 8443 2053 2083 2087 2096" "${TLS_PORT_POOL}" "TLS_PORT_POOL: 443 打头，其后是 Cloudflare 也转发的 HTTPS 端口"
 
+# 测试 installableProtocols / protocolInstallableOn：两个安装菜单、拼车计量与账户事务都从这张表派生，逐格钉住
+assert_equals "0 1 3 4 7 12 15" "$(installableProtocols 1)" "installableProtocols(1): Xray 个性化安装能装的"
+assert_equals "0 1 3 4 6 7 9 10 11 13 14 16" "$(installableProtocols 2)" "installableProtocols(2): sing-box 个性化安装能装的"
+assert_true '! installableProtocols 3 >/dev/null' "installableProtocols: 未知内核返回 1"
+assert_true "protocolInstallableOn 1 15" "protocolInstallableOn(1,15): 两位数的也认"
+assert_true "! protocolInstallableOn 1 6" "protocolInstallableOn(1,6): Xray 菜单不装 sing-box 的 Hysteria2"
+assert_true "! protocolInstallableOn 2 12" "protocolInstallableOn(2,12): sing-box 没有 XHTTP"
+for _id in 2 5 8 20; do
+    assert_true "! protocolInstallableOn 1 ${_id} && ! protocolInstallableOn 2 ${_id}" "protocolInstallableOn(*,${_id}): 已废弃与内部的协议哪边都不给装"
+done
+assert_true '! protocolInstallableOn 1 "3 4"' "protocolInstallableOn: 不是单个数字（带空格）不认"
+assert_true '! protocolInstallableOn 1 ""' "protocolInstallableOn: 空串不认"
+
 # 测试 anyProtocolRequiresTLS（三处装机白名单的派生源）
 assert_true 'anyProtocolRequiresTLS ",0,7,"' "anyProtocolRequiresTLS: VLESS_TCP + Reality needs a cert"
 assert_true 'anyProtocolRequiresTLS ",7,6,"' "anyProtocolRequiresTLS: Reality + Hysteria2 needs a cert"
@@ -551,7 +564,9 @@ assert_true 'carpoolIsValidUUID "550e8400-e29b-41d4-a716-446655440000"' "carpool
 assert_true '! carpoolIsValidUUID "550e8400-e29b-41d4-a716"' "carpoolIsValidUUID: 短了拒绝"
 assert_equals "[0,1,7,12]" "$(carpoolInstalledProtocolsJson ",0,1,6,7,9,12,")" "carpoolInstalledProtocolsJson: 6/9 不入拼车，升序"
 assert_equals "[]" "$(carpoolInstalledProtocolsJson ",6,9,")" "carpoolInstalledProtocolsJson: 只装 6/9 时为空"
-assert_equals "" "$(carpoolUnmanagedProtocols ",0,1,3,4,7,12,15,")" "carpoolUnmanagedProtocols: 现在 Xray 能装的协议都在名单里"
+assert_equals "" "$(carpoolUnmanagedProtocols ",$(installableProtocols 1 | tr ' ' ','),")" "carpoolUnmanagedProtocols: 现在 Xray 能装的协议都计量"
+_metered=$(for _id in $(seq 0 30); do carpoolMetered "${_id}" && echo "${_id}"; done | tr '\n' ' ')
+assert_equals "$(installableProtocols 1) " "${_metered}" "carpoolMetered: 计量的正好是 Xray 的可装清单"
 assert_equals "2 8" "$(carpoolUnmanagedProtocols ",2,7,8," | tr '\n' ' ' | sed 's/ $//')" "carpoolUnmanagedProtocols: v1.0.x 留下的 gRPC 2 / 8 带用户却不归拼车管，挑出来"
 assert_equals "" "$(carpoolUnmanagedProtocols ",0,7,20,")" "carpoolUnmanagedProtocols: 没有用户的入站（20 SOCKS5）不算"
 

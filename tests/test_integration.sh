@@ -1973,20 +1973,37 @@ done
 
 echo ""
 
-# 拼车名单、Xray 可装协议、账户事务白名单是三份手写清单：Xray 能装却不在拼车名单里，那个入站里停用与删人都无效；
-# 在拼车名单里却不在事务白名单里，对账的 set 会静默跳过它
-echo -e "${BLUE}[carpool] 拼车协议名单 ↔ Xray 可装协议 ↔ 账户事务白名单${NC}"
-CP_IDS=$(grep -oE '^readonly CARPOOL_PROTOCOLS=",[0-9,]+,"' lib/carpool.sh | grep -oE '[0-9]+' | sort -n | tr '\n' ' ')
-XRAY_IDS=$(sed -n '/^customXrayInstall() {/,/^}/p' install.sh | grep -oE 'validateCustomInstallTokens "\$\{selectCustomInstallType\}"( [0-9]+)+' | grep -oE ' [0-9]+' | tr -d ' ' | sort -n | tr '\n' ' ')
-TX_IDS=$(sed -n '/^applyAccountChangeAllProtocols() {/,/^}/p' install.sh | grep -E '^ +0 \|' | grep -oE '[0-9]+' | sort -n | tr '\n' ' ')
-assert_not_empty "${XRAY_IDS}" "抽到 customXrayInstall 的可装协议清单"
-assert_not_empty "${TX_IDS}" "抽到 applyAccountChangeAllProtocols 的协议白名单"
-for _pid in ${XRAY_IDS}; do
-    assert_contains " ${CP_IDS}" " ${_pid} " "Xray 可装的 ${_pid} 在拼车名单里"
+# 可装清单是 registry 的一张表，两个安装菜单的校验、拼车计量、账户事务白名单都从它派生：
+# Xray 能装却不计量，那个入站里停用与删人都无效；计量的协议不进事务，对账的 set 会静默跳过它
+echo -e "${BLUE}[registry] 可装清单 ↔ 安装菜单校验 ↔ 拼车计量 ↔ 账户事务${NC}"
+VCT_FN=$(sed -n '/^validateCustomInstallTokens() {/,/^}/p' install.sh)
+assert_not_empty "${VCT_FN}" "抽到 validateCustomInstallTokens 原文"
+for _core in 1 2; do
+    _accepted=$(for _pid in $(seq 0 30); do
+        (eval "${VCT_FN}"; echoContent() { :; }; t() { :; }; validateCustomInstallTokens ",${_pid}," "${_core}") && echo "${_pid}"
+    done | tr '\n' ' ')
+    assert_equals "$(installableProtocols "${_core}") " "${_accepted}" "core ${_core}：个性化安装逐个只放行可装清单里的协议"
 done
+assert_equals "1" "$( (eval "${VCT_FN}"; echoContent() { :; }; t() { :; }; validateCustomInstallTokens ",0,7,2," 1); echo $?)" "个性化安装：清单里混一个已废弃的 2 整体拒绝"
+
+CP_IDS=$(installableProtocols 1)
+TXS_ROOT="${MOCK_ROOT}/txset.root"
+rm -rf "${TXS_ROOT}" && mkdir -p "${TXS_ROOT}/xray/conf" && : >"${TXS_ROOT}/xray/xray"
 for _pid in ${CP_IDS}; do
-    assert_contains " ${TX_IDS}" " ${_pid} " "拼车名单里的 ${_pid} 在账户事务白名单里"
+    jq -n "$(getProtocolUsersPath 1 "${_pid}") = [{id: \"a1\", email: \"alice-x\"}]" >"$(getProtocolConfigPath "${_pid}" "${TXS_ROOT}/xray/conf/")"
 done
+jq -n --arg ids "${CP_IDS}" '[$ids | split(" ")[] | {key: ., value: [{id: "z9", email: "zed-x"}]}] | from_entries' >"${TXS_ROOT}/set.json"
+env PROXY_AGENT_DIR="${TXS_ROOT}" DOTTED_FNS="${DOTTED_FNS}" bash -c '
+    source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh; source lib/protocol-registry.sh
+    eval "${DOTTED_FNS}"
+    readInstallType; readInstallProtocolType
+    applyAccountChangeAllProtocols set "${PROXY_AGENT_DIR}/set.json"' >/dev/null 2>&1
+assert_equals "0" "$?" "账户事务 set：拼车计量的协议全装着时返回 0"
+for _pid in ${CP_IDS}; do
+    assert_equals '["z9"]' "$(jq -c "[$(getProtocolUsersPath 1 "${_pid}")[].id]" "$(getProtocolConfigPath "${_pid}" "${TXS_ROOT}/xray/conf/")" 2>/dev/null)" \
+        "拼车计量的 ${_pid}：对账的 set 真写进它的入站，没被事务白名单跳过"
+done
+rm -rf "${TXS_ROOT}"
 
 # 客户端对象写了两份（initXrayClients 与对账期望）：字段一漂移，对账次次判有变化，每个 tick 都重载、断所有人的连接
 CP_SHAPE_STATE='{"members":{"alice":{"status":"active","protocols":"all","uuid":"11111111-2222-3333-4444-555555555555"}}}'

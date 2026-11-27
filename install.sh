@@ -8534,11 +8534,8 @@ applyAccountChangeAllProtocols() {
     local protocolId targetDir targetFile usersPath nameField delFilter clients newContent
     local touchedXray= touchedSingBox=
     for protocolId in ${currentInstallProtocolType//,/ }; do
-        # 覆盖面与旧的手写分支一致：2/5/8 已废弃冻结，20 是内部 inbound，12 仅 Xray
-        case "${protocolId}" in
-        0 | 1 | 3 | 4 | 6 | 7 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16) ;;
-        *) continue ;;
-        esac
+        # 两个内核可装清单的并集：2/5/8 已废弃冻结，20 是内部 inbound；12 仅 Xray
+        protocolInstallableOn 1 "${protocolId}" || protocolInstallableOn 2 "${protocolId}" || continue
         if [[ "${protocolId}" == "12" && "${coreKind}" != "1" ]]; then
             continue
         fi
@@ -15723,28 +15720,17 @@ reloadCore() {
 
 
 
-# validateCustomInstallTokens SELECTION ALLOWED... → 0=合法；非法时打印红字并返回 1
+# validateCustomInstallTokens SELECTION CORE → 0=每一项都在该内核的可装清单里；非法时打印红字并返回 1
 # 旧的字符级正则（^[0-9]+$ / ^[0-7]+$）会放过 999、70 之类未知项，下游 grep 静默忽略——
 # 用户以为装了 A 实际装了 B，甚至带着空协议集把安装流程跑完、破坏现有配置
 validateCustomInstallTokens() {
-    local selection="$1"
-    shift
+    local selection="$1" core="$2" token bad=
     if ! [[ "${selection}" =~ ^[0-9,]+$ && -n "${selection//,/}" ]]; then
         echoContent red " ---> 输入不合法"
         return 1
     fi
-    local token allowed bad=
     for token in ${selection//,/ }; do
-        local ok=
-        for allowed in "$@"; do
-            if [[ "${token}" == "${allowed}" ]]; then
-                ok=1
-                break
-            fi
-        done
-        if [[ -z "${ok}" ]]; then
-            bad="${bad} ${token}"
-        fi
+        protocolInstallableOn "${core}" "${token}" || bad="${bad} ${token}"
     done
     if [[ -n "${bad}" ]]; then
         echoContent red " ---> $(t CUSTOM_INSTALL_INVALID_TOKENS "${bad}")"
@@ -15814,7 +15800,7 @@ customSingBoxInstall() {
         echoContent red " ---> 请使用英文逗号分隔"
         exit 1
     fi
-    if [[ "${selectCustomInstallType}" != "10" ]] && [[ "${selectCustomInstallType}" != "11" ]] && [[ "${selectCustomInstallType}" != "13" ]] && [[ "${selectCustomInstallType}" != "14" ]] && [[ "${selectCustomInstallType}" != "16" ]] && ((${#selectCustomInstallType} >= 2)) && ! echo "${selectCustomInstallType}" | grep -q ","; then
+    if ! protocolInstallableOn 2 "${selectCustomInstallType}" && ((${#selectCustomInstallType} >= 2)) && ! echo "${selectCustomInstallType}" | grep -q ","; then
         echoContent red " ---> 多选请使用英文逗号分隔"
         exit 1
     fi
@@ -15825,7 +15811,7 @@ customSingBoxInstall() {
         selectCustomInstallType=",${selectCustomInstallType},"
     fi
 
-    if validateCustomInstallTokens "${selectCustomInstallType}" 0 1 3 4 6 7 9 10 11 13 14 16; then
+    if validateCustomInstallTokens "${selectCustomInstallType}" 2; then
         # 走 CDN 的协议提示：sing-box 下每个协议单独监听，随机端口 CDN 不转发
         if echo "${selectCustomInstallType}" | grep -q -E ",1,|,3,|,11,"; then
             echoContent yellow "\n ---> 提示: WS / HTTPUpgrade 只在走 CDN 时才值得用；不走 CDN 选 7（Reality）抗检测更好，但 Reality 不能挂在 CDN 后面"
@@ -15883,7 +15869,7 @@ customXrayInstall() {
         echoContent red " ---> 请使用英文逗号分隔"
         exit 1
     fi
-    if [[ ! "${selectCustomInstallType}" =~ ^(12|15)$ ]] && ((${#selectCustomInstallType} >= 2)) && ! echo "${selectCustomInstallType}" | grep -q ","; then
+    if ! protocolInstallableOn 1 "${selectCustomInstallType}" && ((${#selectCustomInstallType} >= 2)) && ! echo "${selectCustomInstallType}" | grep -q ","; then
         echoContent red " ---> 多选请使用英文逗号分隔"
         exit 1
     fi
@@ -15899,7 +15885,7 @@ customXrayInstall() {
     if [[ "${selectCustomInstallType:0:1}" != "," ]]; then
         selectCustomInstallType=",${selectCustomInstallType},"
     fi
-    if validateCustomInstallTokens "${selectCustomInstallType}" 0 1 3 4 7 12 15; then
+    if validateCustomInstallTokens "${selectCustomInstallType}" 1; then
         # 走 CDN 的协议提示：Reality 的 TLS 必须直连本机，挂在 CDN 后面连不上
         if echo "${selectCustomInstallType}" | grep -q -E ",1,|,3,"; then
             echoContent yellow "\n ---> 提示: WS 只在走 CDN 时才值得用；不走 CDN 选 7 或 12（Reality）抗检测更好，但 Reality 不能挂在 CDN 后面"

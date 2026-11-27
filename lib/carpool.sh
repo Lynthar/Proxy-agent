@@ -7,9 +7,6 @@
 [[ -n "${_CARPOOL_LOADED:-}" ]] && return 0
 readonly _CARPOOL_LOADED=1
 
-# 可纳入拼车计量的协议：Xray 自己承载的入站。6/9 在 Xray 内核下跑在 sing-box sidecar，v2ray_api 计不到
-readonly CARPOOL_PROTOCOLS=",0,1,3,4,7,12,15,"
-
 # jq 侧共享定义。日期算术只有这一份实现（Hinnant days_from_civil，输入 "YYYY-MM-DD"），判定算到期天数用它；
 # 用量也只在这里算：成员 = 上下行合计 × 口径系数（both 为 2），整机按网卡收发（out 只计发、max 取大）
 readonly _CARPOOL_JQ_DEFS='
@@ -61,12 +58,17 @@ carpoolIsValidUUID() {
     [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]
 }
 
-# carpoolUnmanagedProtocols ",2,7,8," → xray/conf 扫出的协议里由 Xray 承载、带用户却不在 CARPOOL_PROTOCOLS 的 ID，每行一个
-# 对账只管名单内的入站，名单外的那里停用与删人都无效（v1.0.x 留下的 gRPC 2 / 5 / 8，或新协议忘了加进名单）
+# carpoolMetered ID → 0 = 拼车计量这个协议：Xray 自己承载的入站，即 Xray 的可装清单。6/9 在 Xray 内核下跑在 sing-box sidecar，v2ray_api 计不到
+carpoolMetered() {
+    protocolInstallableOn 1 "$1"
+}
+
+# carpoolUnmanagedProtocols ",2,7,8," → xray/conf 扫出的协议里由 Xray 承载、带用户却不归拼车计量的 ID，每行一个
+# 对账只管计量的入站，别的入站里停用与删人都无效（v1.0.x 留下的 gRPC 2 / 5 / 8）
 carpoolUnmanagedProtocols() {
     local id
     for id in ${1//,/ }; do
-        [[ "${CARPOOL_PROTOCOLS}" == *",${id},"* ]] && continue
+        carpoolMetered "${id}" && continue
         [[ -n "$(getProtocolUsersPath 1 "${id}")" ]] && echo "${id}"
     done
     return 0
@@ -76,7 +78,7 @@ carpoolUnmanagedProtocols() {
 carpoolInstalledProtocolsJson() {
     local id out=
     for id in ${1//,/ }; do
-        [[ "${CARPOOL_PROTOCOLS}" == *",${id},"* ]] && out+="${id},"
+        carpoolMetered "${id}" && out+="${id},"
     done
     jq -cn --arg ids "${out}" '$ids | split(",") | map(select(. != "") | tonumber) | unique'
 }
@@ -172,7 +174,7 @@ carpoolValidateMembers() {
     local installedJson raw
     installedJson=$(carpoolInstalledProtocolsJson "${installed}")
     raw=$(jq -r --argjson installed "${installedJson}" --argjson foreign "${foreign}" --argjson retired "${retired}" --argjson memberUuids "${memberUuids}" \
-        --argjson allowed "$(carpoolInstalledProtocolsJson "${CARPOOL_PROTOCOLS}")" '
+        --argjson allowed "$(carpoolInstalledProtocolsJson "$(installableProtocols 1)")" '
       if type != "object" then "NOT_OBJECT\t" else
         ( keys[] | select(. != "resetDay" and . != "notify" and . != "billing" and . != "plan" and . != "members") | "UNKNOWN_FIELD\t\(.)" ),
         ( if has("resetDay") and ((.resetDay | type) != "number" or .resetDay != (.resetDay | floor) or .resetDay < 1 or .resetDay > 28)
@@ -642,7 +644,7 @@ carpoolDiffText() {
 # .removing 里的名字两边都不进，即从 inbound 删掉
 carpoolExpectedClients() {
     local id=$1 suffix
-    [[ "${CARPOOL_PROTOCOLS}" == *",${id},"* ]] || return 1
+    carpoolMetered "${id}" || return 1
     suffix=$(getProtocolEmailSuffix 1 "${id}") || return 1
     jq -c --argjson id "${id}" --arg suffix "${suffix}" --argjson state "$2" '
       def shape($n; $u):
