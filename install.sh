@@ -1955,6 +1955,10 @@ unInstallSingBox() {
         echoContent green " ---> sing-box 卸载完成"
     fi
     refreshSubscribeAfterInstall
+    # 卸掉的是本机最后一个协议：nginx、证书、续签任务与订阅文件都还在，整机清理只有菜单 20
+    if [[ -z "${coreKind}" && ! -e "${SINGBOX_BIN}" ]]; then
+        echoContent yellow " ---> $(t NO_PROTOCOL_LEFT_HINT)"
+    fi
 }
 
 # 检查文件目录以及path路径

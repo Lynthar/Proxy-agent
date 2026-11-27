@@ -6902,7 +6902,7 @@ assert_equals "no" "$(run_rd_prev my.example 8443 '' '' | grep -qE '^(my\.exampl
 US_FN=$(sed -n '/^unInstallSingBox() {/,/^}/p;/^singBoxFragmentsHaveInbounds() {/,/^}/p' install.sh)
 US_DIR="${MOCK_ROOT}/uninstallsb"
 # run_us WITH_CHAIN [NODES] → 造一台 Xray 机：旁挂 6，WITH_CHAIN 非空时再有链式入口的桥片段与状态文件，NODES 是外部节点清单；
-# 卸掉 6 后打印 sing-box 目录里还剩什么
+# 卸掉 6 后打印 sing-box 目录里还剩什么，打印过的话记进 said。US_CORE 是卸完后读到的 coreKind，默认 1，设空就是 sing-box 机
 run_us() {
     rm -rf "${US_DIR}" && mkdir -p "${US_DIR}/sing-box/conf/config"
     : >"${US_DIR}/sing-box/sing-box"
@@ -6916,14 +6916,16 @@ run_us() {
     mkdir -p "${US_DIR}/etc/systemd/system" "${US_DIR}/etc/init.d"
     : >"${US_DIR}/etc/systemd/system/sing-box.service"
     : >"${US_DIR}/etc/init.d/sing-box"
-    env US_FN="${US_FN}" US_DIR="${US_DIR}" bash -c '
+    env US_FN="${US_FN}" US_DIR="${US_DIR}" US_CORE="${US_CORE-1}" bash -c '
         SINGBOX_DIR="${US_DIR}/sing-box" SINGBOX_BIN="${US_DIR}/sing-box/sing-box" SINGBOX_CONF_DIR="${US_DIR}/sing-box/conf"
         SINGBOX_FRAGMENT_DIR="${US_DIR}/sing-box/conf/config" SINGBOX_MERGED_CONFIG="${US_DIR}/sing-box/conf/config.json"
         EXTERNAL_NODE_FILE="${SINGBOX_CONF_DIR}/external_node_info.json"
         singBoxConfigPath="${SINGBOX_FRAGMENT_DIR}/"
         eval "${US_FN}"
-        for f in echoContent t handleSingBox singBoxAutostart refreshSubscribeAfterInstall rm_service removeProtocolPortHopping; do eval "$f() { :; }"; done
-        readInstallType() { singBoxConfigPath=; [[ -f "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" ]] && singBoxConfigPath="${SINGBOX_FRAGMENT_DIR}/"; }
+        for f in handleSingBox singBoxAutostart refreshSubscribeAfterInstall rm_service removeProtocolPortHopping; do eval "$f() { :; }"; done
+        echoContent() { printf "%s\n" "$2" >>"${US_DIR}/said"; }
+        t() { echo "$1"; }
+        readInstallType() { coreKind=${US_CORE}; singBoxConfigPath=; [[ -f "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" ]] && singBoxConfigPath="${SINGBOX_FRAGMENT_DIR}/"; }
         rm() { local a=() x; for x in "$@"; do a+=("${x/#\/etc\//${US_DIR}/etc/}"); done; command rm "${a[@]}"; }
         unInstallSingBox hysteria2
         cd "${SINGBOX_DIR}" && find . -type f | sort | paste -sd" " -' 2>&1
@@ -6938,6 +6940,13 @@ assert_equals "secret" "$(jq -r '.nodes[0].password' "${US_DIR}/sing-box/conf/ex
 assert_equals "" "$(run_us "" '{"nodes":[]}')" "外部节点清单是空的：照样整个删掉，不留空目录之外的东西"
 assert_equals "./conf/chain_multi_info.json ./conf/config/chain_bridge_inbound.json ./conf/external_node_info.json ./sing-box" \
     "$(run_us chain "${US_NODES}")" "还有链式入站：外部节点清单和其余状态一样留着"
+# 卸掉的是本机最后一个协议才提示菜单 20：Xray 还在、或链式的入站让 sing-box 留着都不提示
+US_CORE= run_us "" >/dev/null
+assert_contains "$(cat "${US_DIR}/said")" "NO_PROTOCOL_LEFT_HINT" "sing-box 机上卸掉最后一个协议：提示整机清理走菜单 20"
+run_us "" >/dev/null
+assert_equals "0" "$(grep -c NO_PROTOCOL_LEFT_HINT "${US_DIR}/said")" "Xray 机上卸 Hysteria2：Xray 还在，不提示"
+US_CORE= run_us chain >/dev/null
+assert_equals "0" "$(grep -c NO_PROTOCOL_LEFT_HINT "${US_DIR}/said")" "sing-box 机上还有链式入站：sing-box 留着，不提示"
 
 # --- Xray 带域名重装换了域名：旁挂的 6 / 9 跟着换证书，不然按新域名校验必失败 ---
 SC_FN=$(sed -n '/^syncSidecarTlsDomain() {/,/^}/p' install.sh)
