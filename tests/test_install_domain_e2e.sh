@@ -296,6 +296,24 @@ for _proto in --http1.1 --http2; do
     assert_equals "200" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "${_proto}" "https://${DOMAIN_A}/s/$(subKey)")" "订阅经 443 回落取得到（${_proto#--}：0 按 ALPN 分到两个回落站点）"
 done
 assert_equals "404" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://${DOMAIN_A}/s/00000000000000000000000000000000")" "不存在的订阅键在 443 上是伪装站的 404"
+# respSig CURL_ARGS… → 状态码、去掉 date 之后排好序的响应头名、正文字节数：两个响应的这一行相同，探测的人就分不出它们
+respSig() {
+    local out
+    out=$(curl -s -D- -o /tmp/pa-e2e-sig-body --max-time 10 "$@" | tr -d '\r')
+    echo "$(sed -n '1s/^HTTP[^ ]* \([0-9]*\).*/\1/p' <<<"${out}") $(sed -n 's/^\([A-Za-z-]*\):.*/\1/p' <<<"${out}" | tr 'A-Z' 'a-z' | grep -v '^date$' | sort | paste -sd, -) $(wc -c </tmp/pa-e2e-sig-body | tr -d ' ')"
+}
+# 不存在的订阅键要和随便一个不存在的路径分不出来：多带订阅专用的头、或少了站点自己的头，一个请求就能把这台机器认出来
+for _proto in --http1.1 --http2; do
+    _ref=$(respSig "${_proto}" "https://${DOMAIN_A}/no-such-page")
+    assert_equals "404" "${_ref%% *}" "对照：不存在的路径是 404（${_proto#--}）"
+    for _p in /s /s/default /s/sing-box /s/clashMetaProfiles; do
+        assert_equals "${_ref}" "$(respSig "${_proto}" "https://${DOMAIN_A}${_p}/00000000000000000000000000000000")" \
+            "不存在的订阅键（${_p}/…，${_proto#--}）：状态码、响应头、正文长度都和普通的不存在路径一样"
+    done
+    assert_equals "${_ref}" "$(respSig "${_proto}" "https://${DOMAIN_A}/check")" "伪装站目录里没有对外取得到的标记文件（${_proto#--}）"
+done
+assert_contains "$(curl -s -D- -o /dev/null --max-time 10 "https://${DOMAIN_A}/s/$(subKey)" | tr -d '\r' | tr 'A-Z' 'a-z')" "profile-update-interval: 12" "真订阅照常带更新间隔"
+assert_not_empty "$(sed -n 2p "${INSTALL_ROOT}/blog_site" 2>/dev/null)" "伪装站用的模板记在安装根，不在站点目录里"
 subKeyA=$(subKey)
 assert_not_empty "${subKeyA}" "订阅目录里有本账号的订阅文件"
 assert_equals "200" "$(fetchSub "${DOMAIN_A}" 'sing-box 1.14.4' "${WORK}/sub-sb.json")" "sing-box 的 UA 取订阅 200"
@@ -618,6 +636,8 @@ done <<<"${pageUrls}"
 pageBase=$(head -n 1 <<<"${pageUrls}")
 pageBase=${pageBase%/*}
 assert_equals "404" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "${pageBase}/0123456789abcdef0123456789abcdef")" "随便编一个键 404"
+assert_equals "$(respSig "${pageBase%/s/carpool}/no-such-page")" "$(respSig "${pageBase}/0123456789abcdef0123456789abcdef")" \
+    "编造的页面键：和普通的不存在路径分不出来"
 assert_equals "404" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "${pageBase}/${subKeyA}")" \
     "拿订阅地址的 md5 当页面键 404（成员页不等于订阅）"
 

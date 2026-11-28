@@ -876,13 +876,15 @@ carpoolUserinfoTable() {
 }
 
 # carpoolNginxLocationBlock PAGE_DIR → 嵌进 subscribe.conf 的 location 块：路径只收 32–64 位十六进制、只读静态文件、
-# 禁脚本禁外链、不进搜索引擎；带起止标记，撤掉时按标记整段删。正则必须带引号：nginx 把裸 {32,64} 当块的花括号
+# 禁脚本禁外链、不进搜索引擎；带起止标记，撤掉时按标记整段删。正则必须带引号：nginx 把裸 {32,64} 当块的花括号。
+# 没有这个键时和订阅一样转给 /s/-，由本站对不存在的路径的那套处理来答
 carpoolNginxLocationBlock() {
     cat <<EOF
     # carpool-page-begin
-    location ~ "^/s/carpool/([0-9a-f]{32,64})\$" {
+    location ~ "^/s/carpool/(?<paPageKey>[0-9a-f]{32,64})\$" {
         default_type 'text/html; charset=utf-8';
-        alias $1/\$1;
+        root $1;
+        try_files /\$paPageKey /s/-;
         add_header X-Robots-Tag noindex;
         add_header Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'";
     }

@@ -47,8 +47,10 @@ readonly XHTTP_TLS_DECRYPTION_PREFIX="mlkem768x25519plus.native.600s."
 readonly XHTTP_TLS_ENCRYPTION_PREFIX="mlkem768x25519plus.native.0rtt."
 # 订阅文件上次完整重建时的脚本版本：与 SCRIPT_VERSION 不同，菜单入口就沿用 salt 静默重建一次，新版的节点写法不用等机主查看订阅
 readonly SUBSCRIBE_BUILT_VERSION_FILE="${SUBSCRIBE_LOCAL_DIR}/built_version"
+# 伪装站目录是不是本脚本铺的、用的哪个模板。不放进站点目录：那里的文件对外取得到
+readonly BLOG_SITE_MARK_FILE="${PROXY_AGENT_DIR}/blog_site"
 # subscribe.conf 第一行记的模板修订号：renderSubscribeConf 的输出一改就加一，旧号的机器进菜单时按原端口与域名重写
-readonly SUBSCRIBE_CONF_REVISION=3
+readonly SUBSCRIBE_CONF_REVISION=4
 # 订阅响应的 subscription-userinfo 从这个 nginx map 来；文件名要与 renderSubscribeConf 里 include 的通配对得上
 readonly SUBSCRIBE_USERINFO_MAP="${PROXY_AGENT_DIR}/subscribe_userinfo.map"
 readonly WARP_DIR="${PROXY_AGENT_DIR}/warp"

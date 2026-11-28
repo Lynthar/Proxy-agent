@@ -1240,8 +1240,9 @@ cp_assert_contains "${_cpPage}" "<li>now · 统计采集已连续失败 3 次</l
 
 # --- nginx location 块 ---
 _cpBlock=$(carpoolNginxLocationBlock /srv/sub/carpool)
-cp_assert_contains "${_cpBlock}" 'location ~ "^/s/carpool/([0-9a-f]{32,64})$" {' "nginx 块: 路径正则只收 32–64 位十六进制，且带引号（裸 {32,64} 会被 nginx 当块括号）"
-cp_assert_contains "${_cpBlock}" 'alias /srv/sub/carpool/$1;' "nginx 块: alias 指向页面目录下的捕获名"
+cp_assert_contains "${_cpBlock}" 'location ~ "^/s/carpool/(?<paPageKey>[0-9a-f]{32,64})$" {' "nginx 块: 路径正则只收 32–64 位十六进制，且带引号（裸 {32,64} 会被 nginx 当块括号）"
+cp_assert_contains "${_cpBlock}" 'root /srv/sub/carpool;' "nginx 块: 根目录是页面目录"
+cp_assert_contains "${_cpBlock}" 'try_files /$paPageKey /s/-;' "nginx 块: 只取捕获名对应的文件；没有这个键就交回站点自己答，不在这个 location 里出 404"
 cp_assert_contains "${_cpBlock}" "default-src 'none'; style-src 'unsafe-inline'" "nginx 块: CSP 只放行内联样式"
 cp_assert_contains "${_cpBlock}" 'X-Robots-Tag noindex' "nginx 块: 不进搜索引擎"
 cp_assert_contains "${_cpBlock}" "default_type 'text/html; charset=utf-8'" "nginx 块: HTML 类型"

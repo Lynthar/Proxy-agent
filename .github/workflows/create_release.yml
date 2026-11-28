@@ -48,7 +48,11 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo
             }).catch(() => ({ data: null }));
-            return latest ? latest.tag_name: "";
+            // A latest release that lacks an asset counts as not released: the
+            // steps below then run again and complete it.
+            const wanted = ['install.sh', 'install.sh.sha256', 'lib_bundle.tar.gz', 'lib_bundle.tar.gz.sha256'];
+            const names = latest ? latest.assets.map(a => a.name) : [];
+            return latest && wanted.every(n => names.includes(n)) ? latest.tag_name : "";
           result-encoding: string
 
       - name: Compute install.sh SHA256
@@ -83,6 +87,10 @@ jobs:
             // hand-written in markdown and pasted via the GitHub Web UI after
             // the workflow attaches assets. Auto-filling from the last commit
             // message produced noisy "v1.3.0 + commit subject" displays.
+
+            // A release for this tag can already exist from a run that died half-way:
+            // reuse it, and replace whatever it has so all four assets come from this
+            // checkout. Any other failure fails the job; green must mean four assets.
             let release;
             try {
               const result = await github.rest.repos.createRelease({
@@ -93,8 +101,30 @@ jobs:
               });
               release = result.data;
             } catch (err) {
-              console.log(`Skip release ${err.message}`);
-              return;
+              if (err.status !== 422) {
+                core.setFailed(`Creating release ${tag} failed: ${err.message}`);
+                return;
+              }
+              const existing = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: tag
+              });
+              release = existing.data;
+              // Complete but not the latest release (an older tag): leave it alone.
+              const wanted = ['install.sh', 'install.sh.sha256', 'lib_bundle.tar.gz', 'lib_bundle.tar.gz.sha256'];
+              const names = release.assets.map(a => a.name);
+              if (wanted.every(n => names.includes(n))) {
+                console.log(`Release ${tag} already has all four assets; nothing to do`);
+                return;
+              }
+            }
+            for (const asset of release.assets || []) {
+              await github.rest.repos.deleteReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                asset_id: asset.id
+              });
             }
 
             // Helper: upload one file as a release asset. A single failure must

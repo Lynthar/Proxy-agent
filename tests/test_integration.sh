@@ -3242,7 +3242,7 @@ assert_equals "1" "$(grep -c 'carpoolCollectBeforeStop' <<<"${HANDLE_XRAY_FN}")"
 assert_equals "CarpoolCollect) carpoolCollectBeforeStop checkForUpdates" \
     "$(sed -n '/^# 顶层入口分发/,$p' install.sh | grep -oE 'CarpoolCollect\)|carpoolCollectBeforeStop|checkForUpdates' | paste -sd' ' -)" \
     "入口：服务停止钩子 CarpoolCollect 在更新检查之前分发（关机途中网络可能已断）"
-assert_equals "ensureCarpoolXray migrateChainEntryState legacyRoutingClear handleSingBox handleSingBox writeXrayChainConfig writeXrayRouting" \
+assert_equals "ensureCarpoolXray migrateChainEntryState legacyRoutingClear handleSingBox writeXrayChainConfig writeXrayRouting" \
     "$(sed 's/legacyRoutingCleared//g' <<<"${HANDLE_XRAY_FN}" | grep -oE 'ensureCarpoolXray|migrateChainEntryState|legacyRoutingClear|handleSingBox|writeXrayChainConfig|writeXrayRouting' | paste -sd' ' -)" \
     "handleXray start：拼车之后先转旧入口状态、清旧分流工具的文件（改了连 sing-box 一起重启），再整份生成路由（接了链式的连桥的出站一起）"
 SUBSCRIBE_FN=$(sed -n '/^subscribeLocalHasEmptyHost() {/,/^}/p;/^subscribe() {/,/^}/p' install.sh)
@@ -3277,6 +3277,12 @@ echo placeholder >"${CP_ROOT}/subscribe/sing-box/${CP_ALICE_MD5}"
 run_cp "${SUBSCRIBE_FN}; ${CP_SUB_STUBS}; wget() { return 4; }; subscribe false true" >/dev/null 2>&1
 assert_equals "placeholder" "$(cat "${CP_ROOT}/subscribe/sing-box/${CP_ALICE_MD5}")" "subscribe：模板拉不到时不动已有的 sing-box 配置"
 assert_equals "proxies:" "$(head -1 "${CP_ROOT}/subscribe/clashMeta/${CP_ALICE_MD5}")" "subscribe：模板拉不到不影响 clashMeta 重建"
+# 聚合其他机器的订阅：远端的 Clash 节点追加在本机的后面，不被本机那份盖掉
+mkdir -p "${CP_ROOT}/subscribe_remote" && echo 'b.example:443:hk' >"${CP_ROOT}/subscribe_remote/remoteSubscribeUrl"
+run_cp "${SUBSCRIBE_FN}; ${CP_SUB_STUBS}; ${CP_WGET_OK}"'; updateRemoteSubscribe() { echo "  - {name: $2_hk}" >>"${SUBSCRIBE_DIR}/clashMeta/$1"; }; subscribe false true' >/dev/null 2>&1
+assert_equals "proxies:|  - {name: zed}|  - {name: zed_hk}" "$(paste -sd'|' "${CP_ROOT}/subscribe/clashMeta/${CP_ZED_MD5}")" \
+    "subscribe（聚合了其他机器）：Clash 节点文件里本机与远端的节点都在"
+rm -rf "${CP_ROOT}/subscribe_remote"
 
 # 只装 16：通用订阅不收它，Clash 与 sing-box 订阅照常生成；入站里没有域名，链接用订阅自己的 server_name
 DEFAULT_B64_FN=$(sed -n '/^defaultBase64Code() {/,/^}/p' install.sh)
@@ -3454,7 +3460,7 @@ run_cp 'carpoolSyncUserinfo' >/dev/null 2>&1
 assert_equals "no|" "$([[ -e "${CP_UI_FILE}" ]] && echo yes || echo no)|$(grep -E '^nginx' "${CP_CALLS}" || true)" "用量头：旧模板的机器不写也不重载"
 RSC_FN=$(awk '/^subscribeConfMaps\(\) \{/{f=1} /^subscribeIsMerged\(\) \{/{f=0} f' install.sh)
 assert_contains "${RSC_FN}" 'include ${PROXY_AGENT_DIR}/subscribe_userinfo*.map;' "用量头：模板用通配 include，文件缺失时 nginx -t 照过"
-assert_equals "2" "$(grep -c 'add_header Subscription-Userinfo \\$paSubUserinfo always;' <<<"${RSC_FN}")" "用量头：通用地址与定格式地址都带这个头"
+assert_equals "2" "$(grep -c 'add_header Subscription-Userinfo \\$paSubUserinfo;' <<<"${RSC_FN}")" "用量头：通用地址与定格式地址都带这个头"
 assert_equals "${CP_ROOT}/subscribe_userinfo.map" "$(env PROXY_AGENT_DIR="${CP_ROOT}" bash -c 'source lib/constants.sh; printf %s "${SUBSCRIBE_USERINFO_MAP}"')" "用量头：常量里的路径与模板通配的文件名对得上"
 
 # 「查看订阅」：回车沿用 salt，只有明确答 n 才换（换 salt 等于换掉所有人的订阅地址）
@@ -3537,6 +3543,34 @@ assert_equals "3" "$(grep -c 'resolveXrayVersion' <<<"${INSTALL_XRAY_FN}")" "ins
 
 echo ""
 
+# handleSingBox start 也用来重启：先合并、过了才停旧进程；合并不出来时在跑的那个不动（原文执行，systemctl 与进程桩掉）
+HS_FN=$(sed -n '/^handleSingBox() {/,/^}/p' install.sh)
+HS_DIR="${MOCK_ROOT}/hs"
+# run_hs RUNNING MERGE_RC → 打印 systemctl 的调用序列与退出码
+run_hs() {
+    rm -rf "${HS_DIR}" && mkdir -p "${HS_DIR}"
+    [[ -z "$1" ]] || : >"${HS_DIR}/running"
+    env HS_FN="${HS_FN}" HS_DIR="${HS_DIR}" HS_MERGE_RC="$2" bash -c '
+        eval "$(sed "s|/etc/systemd/system/sing-box.service|${HS_DIR}/unit|g" <<<"${HS_FN}")"
+        : >"${HS_DIR}/unit"
+        for f in ensureAlpineProcps ownCoreBinary labelCoreBinary markCoreStarted echoContent t; do eval "$f() { :; }"; done
+        sleep() { :; }
+        singBoxDaemonRunning() { [[ -e "${HS_DIR}/running" ]]; }
+        singBoxMergeConfig() { echo merge >>"${HS_DIR}/calls"; return "${HS_MERGE_RC}"; }
+        systemctl() {
+            echo "$1" >>"${HS_DIR}/calls"
+            case "$1" in start) : >"${HS_DIR}/running" ;; stop) rm -f "${HS_DIR}/running" ;; esac
+        }
+        (handleSingBox start) >/dev/null 2>&1; echo "rc=$?" >>"${HS_DIR}/calls"'
+    paste -sd' ' "${HS_DIR}/calls"
+    [[ -e "${HS_DIR}/running" ]] && echo up || echo down
+}
+assert_equals "merge stop start rc=0|up" "$(run_hs yes 0 | paste -sd'|' -)" "handleSingBox start（在跑）：先合并，再停旧的、起新的"
+assert_equals "merge rc=1|up" "$(run_hs yes 1 | paste -sd'|' -)" "handleSingBox start（在跑、合并失败）：不停旧进程，它按原配置继续服务"
+assert_equals "merge start rc=0|up" "$(run_hs "" 0 | paste -sd'|' -)" "handleSingBox start（没在跑）：合并后启动"
+assert_equals "merge rc=1|down" "$(run_hs "" 1 | paste -sd'|' -)" "handleSingBox start（没在跑、合并失败）：不启动，退出 1"
+rm -rf "${HS_DIR}"
+
 # ============================================================================
 # reloadCore：Xray 内核上旁挂的 sing-box 片段里有入站就跟着重启，一个不剩就停掉
 # ============================================================================
@@ -3549,17 +3583,18 @@ RELOAD_DIR="${MOCK_ROOT}/reload"
 
 # run_reload CORE SIDECAR6_9 RUNNING → 在干净 bash 里以 RELOAD_DIR 为安装根跑 reloadCore，打印启停调用序列（空格分隔）
 run_reload() {
-    env PROXY_AGENT_DIR="${RELOAD_DIR}" RELOAD_FN="${RELOAD_FN}" R_CORE="$1" R_SIDECAR="$2" RUNNING="$3" bash -c '
+    env PROXY_AGENT_DIR="${RELOAD_DIR}" RELOAD_FN="${RELOAD_FN}" R_CORE="$1" R_SIDECAR="$2" RUNNING="$3" R_MERGE_RC="${R_MERGE_RC:-0}" bash -c '
         source lib/constants.sh
         eval "${RELOAD_FN}"
         readInstallType() { coreKind="${R_CORE}"; singBoxConfigPath="${R_SIDECAR}"; currentInstallProtocolType=",7,"; }
         handleXray() { calls+="xray-$1 "; }
         handleSingBox() { calls+="singbox-$1 "; }
         singBoxAutostart() { calls+="autostart-$1 "; }
+        singBoxMergeConfig() { calls+="merge "; return "${R_MERGE_RC}"; }
+        echoContent() { :; }; t() { :; }
         pgrep() { [[ -n "${RUNNING}" ]] && echo 4242; }
         calls=
-        reloadCore
-        printf "%s\n" "${calls% }"'
+        (reloadCore; printf "%s\n" "${calls% }" >&3) 3>&1 >/dev/null || echo "rc=$?"'
 }
 reload_tree() { # FRAGMENT_JSON... → 重建安装根下的 sing-box 二进制与片段目录
     local dir="${RELOAD_DIR}/sing-box/conf/config" i=0 f
@@ -3569,15 +3604,18 @@ reload_tree() { # FRAGMENT_JSON... → 重建安装根下的 sing-box 二进制�
 rm -rf "${RELOAD_DIR}"
 assert_equals "xray-stop xray-start autostart-off" "$(run_reload 1 "" "")" "Xray 内核、没装 sing-box：只重启 Xray（关自启在没有服务文件时什么都不做）"
 reload_tree '{"log":{"level":"info"}}' '{"inbounds":[{"type":"socks","tag":"chain_bridge_in"}]}' '{"outbounds":[{"type":"direct"}]}'
-assert_equals "xray-stop xray-start singbox-stop singbox-start autostart-on" "$(run_reload 1 "" "")" "Xray 内核、片段里有链式的桥：连旁挂的 sing-box 一起重启，并确保开机自启"
+assert_equals "xray-stop xray-start singbox-start autostart-on" "$(run_reload 1 "" "")" "Xray 内核、片段里有链式的桥：连旁挂的 sing-box 一起重启，并确保开机自启"
 reload_tree '{"log":{"level":"info"}}' '{"inbounds":[]}' '{"outbounds":[{"type":"direct"}]}'
 assert_equals "xray-stop xray-start singbox-stop autostart-off" "$(run_reload 1 "" yes)" "Xray 内核、片段里一个入站都不剩、sing-box 还在跑：停掉它，并关掉开机自启（否则重启后起一个空 sing-box）"
 assert_equals "xray-stop xray-start autostart-off" "$(run_reload 1 "" "")" "Xray 内核、没有入站、sing-box 也没在跑：不启停它，只确保自启关着"
 reload_tree '{"inbounds":[' '{"outbounds":[]}'
-assert_equals "xray-stop xray-start singbox-stop singbox-start autostart-on" "$(run_reload 1 "" yes)" "片段读不懂：照常重启，让合并去报错，不当成没东西停掉"
+assert_equals "merge xray-stop xray-start singbox-start autostart-on" "$(run_reload 1 "" yes)" "片段读不懂：照常重启，让合并去报错，不当成没东西停掉"
+reload_tree '{"inbounds":[{"type":"socks","tag":"chain_bridge_in"}]}'
+assert_equals "rc=1" "$(R_MERGE_RC=1 run_reload 1 "" yes)" \
+    "Xray 内核、旁挂的 sing-box 在跑、新配置合并不出来：两个内核都不动（Xray 换了而 sing-box 没换，按账号走的出口会对不上）"
 reload_tree '{"outbounds":[]}'
-assert_equals "xray-stop xray-start singbox-stop singbox-start autostart-on" "$(run_reload 1 "${RELOAD_DIR}/sing-box/conf/config/" "")" "Xray 内核装了 6 / 9（singBoxConfigPath 非空）：照旧重启"
-assert_equals "singbox-stop singbox-start autostart-on" "$(run_reload 2 "${RELOAD_DIR}/sing-box/conf/config/" "")" "sing-box 内核：只重启 sing-box"
+assert_equals "xray-stop xray-start singbox-start autostart-on" "$(run_reload 1 "${RELOAD_DIR}/sing-box/conf/config/" "")" "Xray 内核装了 6 / 9（singBoxConfigPath 非空）：照旧重启"
+assert_equals "singbox-start autostart-on" "$(run_reload 2 "${RELOAD_DIR}/sing-box/conf/config/" "")" "sing-box 内核：只重启 sing-box"
 
 echo ""
 
@@ -3587,7 +3625,7 @@ echo ""
 
 echo -e "${YELLOW}=== 测试按账号选出口 ===${NC}"
 
-CA_FN_NAMES="singBoxProbeExitIP localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs writeXrayRouting localBlockInject chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountApply xrayConfigTest chainAccountSave chainAccountForget accountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic chainFileModify chainReadName chainReadFirstRule chainLinkBuild chainStoreExit chainFinishAdd addExternalNodeAsChain addChainToConfig chainPickExit chainRestartSingBox chainReadPublicIP writeChainInbound chainInboundAllowedIP chainExitCode chainRelayCode chainPrintHops chainInitEntryState validateChainName removeMultiChainOutbound xrayChainUnwire chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable multiChainRuleSetStatus legacyRoutingClear addXrayOutbound isValidIP isLocalBlockedIP ipv6Hex xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig chainRouteLazyResolve migrateChainRouteResolve chainExitDefs chainExitTarget chainExitIsSni chainWarpEnsureRegistered chainWarpFragment chainLocalExitFragment addLocalExitAsChain multiChainAddOne singBoxProbeEndpointIP migrateChainEntryState chainHopOutbounds chainReadManualExit addSingleChainOutbound chainIsExitMachine chainRefuseRemoteOnExit _linkCheckEndpoint _linkRefuse isValidDomain _chainTCPProbe"
+CA_FN_NAMES="singBoxProbeExitIP localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs writeXrayRouting localBlockInject chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountApply xrayConfigTest chainAccountSave chainAccountForget accountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic chainFileModify chainReadName chainReadFirstRule chainLinkBuild chainStoreExit chainFinishAdd addExternalNodeAsChain addChainToConfig chainPickExit chainRestartSingBox chainReadPublicIP writeChainInbound chainInboundAllowedIP chainExitCode chainRelayCode chainPrintHops chainInitEntryState validateChainName removeMultiChainOutbound xrayChainUnwire chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable multiChainRuleSetStatus legacyRoutingClear addXrayOutbound isValidIP isLocalBlockedIP ipv6Hex xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig chainRouteLazyResolve migrateChainRouteResolve chainExitDefs chainExitTarget chainExitIsSni chainWarpEnsureRegistered chainWarpFragment chainLocalExitFragment addLocalExitAsChain multiChainAddOne singBoxProbeEndpointIP migrateChainEntryState chainHopOutbounds chainReadManualExit addSingleChainOutbound chainIsExitMachine chainRefuseRemoteOnExit _linkCheckEndpoint _linkRefuse isValidDomain _chainTCPProbe chainCleanDomains chainRevertTable chainDeleteRule"
 CA_FNS=$(sed -n "$(for _f in ${CA_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_equals "$(wc -w <<<"${CA_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9_]*() {$' <<<"${CA_FNS}")" "按账号选出口：每个函数都抽到了"
 CA_ROOT="${MOCK_ROOT}/chainacct.root"
@@ -3834,10 +3872,10 @@ _caFin='multiChainRestoreAccounts() { :; }; writeChainBridgeInbound() { echo bri
     handleSingBox() { echo "singbox $1" >>"${CA_CALLS}"; }; pgrep() { [[ -z "${CA_SB_DOWN:-}" ]] && echo 4242; }; showMultiChainSummary() { echo summary >>"${CA_CALLS}"; }
     testMultiChainConnection() { echo test >>"${CA_CALLS}"; }; sleep() { :; }; finalizeMultiChainConfig; echo rc=$?'
 _out=$(run_ca "${_caFin}" 2>&1)
-assert_equals "rc=0|routeConfig bridge xray 31111 merge singbox stop singbox start summary test" "$(grep -o 'rc=[0-9]' <<<"${_out}")|$(paste -sd ' ' - <"${CA_CALLS}")" "向导收尾：Xray 接线在 sing-box 启动之前"
+assert_equals "rc=0|routeConfig bridge xray 31111 merge singbox start summary test" "$(grep -o 'rc=[0-9]' <<<"${_out}")|$(paste -sd ' ' - <"${CA_CALLS}")" "向导收尾：Xray 接线在 sing-box 启动之前"
 : >"${CA_CALLS}"
 _out=$(CA_SB_DOWN=1 run_ca "${_caFin}" 2>&1)
-assert_equals "rc=1|routeConfig bridge xray 31111 merge singbox stop singbox start" "$(grep -o 'rc=[0-9]' <<<"${_out}")|$(paste -sd ' ' - <"${CA_CALLS}")" "向导收尾：sing-box 起不来返回 1，Xray 已经接好"
+assert_equals "rc=1|routeConfig bridge xray 31111 merge singbox start" "$(grep -o 'rc=[0-9]' <<<"${_out}")|$(paste -sd ' ' - <"${CA_CALLS}")" "向导收尾：sing-box 起不来返回 1，Xray 已经接好"
 
 # --- 规则集预检：预设与 GeoIP 选中时就 HEAD 一遍，上游没有的（404）或连不上的重问，不写进配置 ---
 ca_reset
@@ -3869,6 +3907,11 @@ CA_LAZY='{"action":"resolve","strategy":"prefer_ipv4"}'
 CA_SNIFF='{"inbound":"chain_bridge_in","action":"sniff","timeout":"1s"}'
 assert_equals "[${CA_SNIFF},{\"domain_suffix\":[\"a.com\"],\"outbound\":\"us\"}]" "$(jq -c '.route.rules' "${CA_F}/chain_route.json")" \
     "惰性解析（多链路）：只有域名规则时一条 resolve 都不插，域名原样交给出口"
+# 存量状态里带空项的规则（旧版只判非空）：空项丢掉；一项都不剩的整条不写，不能变成没有条件、收走全部流量的规则
+ca_multi '{"default_chain": "us", "rules": [{"type": "custom", "value": "a.com, ", "chain": "us"}, {"type": "custom", "value": " , ", "chain": "hk"}, {"type": "ip_cidr", "value": ",", "chain": "hk"}]}'
+run_ca "${_caRoute}" >/dev/null 2>&1
+assert_equals "[${CA_SNIFF},{\"domain_suffix\":[\"a.com\"],\"outbound\":\"us\"}]" "$(jq -c '.route.rules' "${CA_F}/chain_route.json")" \
+    "多链路路由（存量的坏规则）：空项不进 domain_suffix，全空的规则不生成"
 ca_multi '{"default_chain": "us", "rules": [{"type": "custom", "value": "a.com", "chain": "us"}, {"type": "ip_cidr", "value": "203.0.113.0/24", "chain": "hk"},
     {"type": "preset", "value": "developer", "chain": "us"}, {"type": "geoip", "value": "jp", "chain": "jp"}]}'
 run_ca "${_caRoute}" >/dev/null 2>&1
@@ -4019,6 +4062,36 @@ _out=$(ca_set_default '\n')
 assert_equals "rc=0|w4|" "$(tail -n 1 <<<"${_out}")|$(jq -r '.default_chain' "${CA_MULTI}")|$(cat "${CA_CALLS}")" "设默认出口：回车保留当前默认，不重启内核"
 _out=$(ca_set_default '5\n')
 assert_equals "rc=0|direct" "$(tail -n 1 <<<"${_out}")|$(jq -r '.default_chain' "${CA_MULTI}")" "设默认出口：选最后一项改回直连"
+# sing-box 不认新配置：默认出口写回原来的；留着新的话，重试会因为「没换」直接报成功、其实没生效
+_out=$(CA_MERGE_RC=1 ca_set_default '3\n')
+assert_equals "rc=1|direct|routeConfig merge routeConfig" "$(tail -n 1 <<<"${_out}")|$(jq -r '.default_chain' "${CA_MULTI}")|$(paste -sd ' ' - <"${CA_CALLS}")" \
+    "设默认出口（合并失败）：状态改回原来的默认，路由按它重新生成，不重启内核"
+_out=$(ca_set_default '3\n')
+assert_equals "rc=0|w4|routeConfig merge reloadCore" "$(tail -n 1 <<<"${_out}")|$(jq -r '.default_chain' "${CA_MULTI}")|$(paste -sd ' ' - <"${CA_CALLS}")" \
+    "设默认出口（排除故障后重试）：真的去合并并重启，不是假成功"
+# 规则输入：空项与非域名在输入处拦下；空项进了规则，sing-box 整份配置都不认，之后每次重启都撞上
+assert_equals "rc=0|custom|netflix.com|自定义域名" "$(_caRule "" '2\nnetflix.com, \n')" "选规则（自定义域名）：结尾的逗号加空格不留下空项"
+assert_equals "rc=0|custom|a.com,.b.org|自定义域名" "$(_caRule "" '2\n a.com,, .b.org\n')" "选规则（自定义域名）：去空白、丢空项，前导点照收"
+assert_equals "rc=0|custom|ok.com|自定义域名" "$(_caRule "" '2\nhttp://a.com/x\n2\n , \n2\na.com b.com\n2\nok.com\n')" "选规则（自定义域名）：不是域名、全是空项、拿空格当分隔的都重问（不把两个域名粘成一个）"
+assert_equals "0|1|1|1" "$(run_ca 'for c in "10.0.0.0/8, 2001:db8::/32" "010.0.0.0/8" ":::/0" "10.0.0.256/8"; do validateIpCidrs "$c"; echo $?; done' 2>/dev/null | paste -sd'|' -)" \
+    "IP CIDR：前导零、三个冒号、超界的段都拒（sing-box 不认，写进去整份配置起不来）"
+# 删一条规则；出口表改了而 sing-box 不认时整份写回
+ca_multi '{"rules": [{"type": "custom", "value": "a.com", "chain": "us"}, {"type": "geoip", "value": "jp", "chain": "jp"}]}'
+_out=$(printf '9\n' | run_ca 'chainDeleteRule 2; echo rc=$?' 2>&1)
+assert_equals "rc=1|2" "$(tail -n 1 <<<"${_out}")|$(jq '.rules | length' "${CA_MULTI}")" "删规则：序号越界不删"
+_out=$(printf '1\n' | run_ca 'chainDeleteRule 2; echo rc=$?' 2>&1)
+assert_equals 'rc=0|[{"type":"geoip","value":"jp","chain":"jp"}]' "$(tail -n 1 <<<"${_out}")|$(jq -c '.rules' "${CA_MULTI}")" "删规则：按序号删掉那一条，别的不动"
+assert_contains "${_out}" "a.com → us" "删规则：列表里看得到每条规则的内容与去向"
+_caBefore=$(cat "${CA_MULTI}")
+jq '.chains += [{name: "newone", ip: "198.51.100.9", port: 5009}] | .rules += [{type: "custom", value: "x.com", chain: "newone"}]' <<<"${_caBefore}" >"${CA_MULTI}"
+echo '{"outbounds":[]}' >"${CA_F}/chain_outbound_newone.json"
+echo '{"outbounds":[]}' >"${CA_F}/chain_outbound_us.json"
+: >"${CA_CALLS}"
+run_ca "chainRevertTable '${_caBefore}'" >/dev/null 2>&1
+assert_equals "$(jq -cS . <<<"${_caBefore}")|no|yes|routeConfig" \
+    "$(jq -cS . "${CA_MULTI}")|$([[ -e "${CA_F}/chain_outbound_newone.json" ]] && echo yes || echo no)|$([[ -e "${CA_F}/chain_outbound_us.json" ]] && echo yes || echo no)|$(cat "${CA_CALLS}")" \
+    "出口表回滚：状态写回原样，新加的出口片段收掉、原有的留着，路由按原样重新生成"
+ca_multi '{}'
 # 入口删光了出口，表照留：列表里不能冒出空条目，测试不去测一个空出口
 ca_multi '{"chains": [], "default_chain": "us"}'
 _out=$(printf '1\n' | CA_SD="${_caSetDefault}" run_ca 'eval "${CA_SD}"; setDefaultChain; echo rc=$?' 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
@@ -4159,7 +4232,7 @@ _caExitCode="chain://ss2022@203.0.113.5:23456?key=${_caKeyB64}&method=2022-blake
 assert_equals 'rc=0|{"role":"exit","ip":"203.0.113.5","port":23456,"method":"2022-blake3-aes-128-gcm","password":"AAAAAAAAAAAAAAAAAAAAAA==","allowed_ip":"","domain_strategy":"prefer_ipv4"}|chain_inbound 23456 AAAAAAAAAAAAAAAAAAAAAA==' \
     "$(tail -n 1 <<<"${_out}")|$(jq -c '{role, ip, port, method, password, allowed_ip, domain_strategy}' "${CA_EXIT}")|$(jq -r '.inbounds[0] | "\(.tag) \(.listen_port) \(.password)"' "${CA_F}/chain_inbound.json")" \
     "配出口（回车用随机端口、不限来源）：出口状态与入站片段对得上"
-assert_equals "1|routeConfig allow 23456 tcp merge singbox stop singbox start" "$(grep -cxF "${_caExitCode}" <<<"${_out}")|$(paste -sd ' ' - <"${CA_CALLS}")" \
+assert_equals "1|routeConfig allow 23456 tcp merge singbox start" "$(grep -cxF "${_caExitCode}" <<<"${_out}")|$(paste -sd ' ' - <"${CA_CALLS}")" \
     "配出口：打出配置码；先写路由、放行端口，再合并并重启 sing-box"
 _out=$(CA_PUBIP=203.0.113.5 _caSetupRun 'singBoxDaemonRunning() { return 0; }; showChainStatus')
 assert_equals "1|1" "$(grep -c '允许连接: 所有IP' <<<"${_out}")|$(grep -cxF "${_caExitCode}" <<<"${_out}")" "出口的状态页：没限来源写成所有 IP，配置码与向导给的一样"
@@ -4181,7 +4254,7 @@ _caRelayCode=$(grep -o 'chain://v2@[A-Za-z0-9+/=]*' <<<"${_out}" | head -n 1)
 assert_equals 'rc=0|relay 192.0.2.77 23456 2 203.0.113.5:23456|["192.0.2.77:23456","203.0.113.5:23456"]|no' \
     "$(tail -n 1 <<<"${_out}")|$(jq -r '"\(.role) \(.ip) \(.port) \(.total_hops) \(.downstream_hops[0].ip):\(.downstream_hops[0].port)"' "${CA_RELAY}")|$(printf '%s' "${_caRelayCode#chain://v2@}" | base64 -d 2>/dev/null | jq -c 'map("\(.ip):\(.port)")')|$([[ -e "${CA_EXIT}" ]] && echo yes || echo no)" \
     "配中继：中继状态记下游各跳，配置码是本机这一跳加下游"
-assert_equals "chain_inbound|chain_outbound|203.0.113.5|allow 23456 tcp merge singbox stop singbox start" \
+assert_equals "chain_inbound|chain_outbound|203.0.113.5|allow 23456 tcp merge singbox start" \
     "$(jq -r '.inbounds[0].tag' "${CA_F}/chain_inbound.json")|$(jq -r '.outbounds[-1].tag' "${CA_F}/chain_outbound.json")|$(jq -r '.route.rules[0].ip_cidr[0]' "${CA_F}/chain_route.json")|$(paste -sd ' ' - <"${CA_CALLS}")" \
     "配中继：入站、出站、路由三个片段都写了，合并后重启 sing-box"
 assert_contains "${_out}" "→ 出口(203.0.113.5:23456) → 互联网" "配中继：收尾列出下游路径"
@@ -4196,6 +4269,25 @@ _caEntrySetupNew=$(sed -n '/^setupMultiChainEntry() {/,/^}/p' install.sh)
 _out=$(run_ca "${_caEntrySetupNew}"$'\n''planAction() { return 1; }; ensureSingBoxInstalled() { echo ensure >>"${CA_CALLS}"; return 1; }; setupMultiChainEntry; echo rc=$?' 2>&1 </dev/null)
 assert_contains "${_out}" "本机是中继" "配入口（本机是中继）：拒绝并说明"
 assert_equals "rc=1|" "$(tail -n 1 <<<"${_out}")|$(cat "${CA_CALLS}")" "配入口（本机是中继）：返回 1，没去装 sing-box"
+# 重新配置：选定怎么配之前回车或取消，旧出口表原样留着；清了旧的却一条没配成，Xray 那头的线一起拆
+_caEntryStubs='planAction() { return 1; }; ensureSingBoxInstalled() { :; }; setupMultiChainBatch() { :; }
+    setupMultiChainInteractive() { echo interactive >>"${CA_CALLS}"; return 1; }'
+_caRelayBak=$(cat "${CA_RELAY}") && rm -f "${CA_RELAY}"
+ca_multi '{}'
+echo '{"outbounds":[]}' >"${CA_F}/chain_outbound_us.json"
+echo '{"outbounds":[]}' >"${CA_X}/chain_outbound.json"
+: >"${CA_CALLS}"
+_caTable=$(cat "${CA_MULTI}")
+_out=$(printf '2\ny\n\n' | run_ca "${_caEntrySetupNew}"$'\n'"${_caEntryStubs}; setupMultiChainEntry; echo rc=\$?" 2>&1)
+assert_equals "rc=0|${_caTable}|yes|yes|" \
+    "$(tail -n 1 <<<"${_out}")|$(cat "${CA_MULTI}")|$([[ -e "${CA_F}/chain_outbound_us.json" ]] && echo yes || echo no)|$([[ -e "${CA_X}/chain_outbound.json" ]] && echo yes || echo no)|$(cat "${CA_CALLS}")" \
+    "重新配置（确认后在选方式处回车）：出口表、出站片段、Xray 接线都没动"
+assert_contains "${_out}" "已取消，没有改动" "重新配置（在选方式处回车）：明说没有改动"
+_out=$(printf '2\ny\n1\n' | run_ca "${_caEntrySetupNew}"$'\n'"${_caEntryStubs}; setupMultiChainInteractive() { rm -f \"\${CHAIN_MULTI_INFO}\"; return 1; }; setupMultiChainEntry; echo rc=\$?" 2>&1)
+assert_equals "rc=1|no|no|reloadCore" \
+    "$(tail -n 1 <<<"${_out}")|$([[ -e "${CA_MULTI}" ]] && echo yes || echo no)|$([[ -e "${CA_X}/chain_outbound.json" ]] && echo yes || echo no)|$(cat "${CA_CALLS}")" \
+    "重新配置（旧的清了、新的一条没配成）：Xray 的接线一起拆并重载，不留一条通向已删掉的桥的路由"
+printf '%s\n' "${_caRelayBak}" >"${CA_RELAY}"
 rm -f "${CA_RELAY}"
 
 # --- 删外部节点：还被链路引用的不删并点名，没人用的照删 ---
@@ -4517,7 +4609,7 @@ ca_reset
 printf '%s\n' '{"stats":{},"api":{"tag":"api","listen":"127.0.0.1:23456","services":["StatsService"]}}' >"${CA_X}/12_stats_api.json"
 printf '%s\n' '{"route":{"rules":[{"inbound":"x","outbound":"direct"}],"final":"direct"}}' >"${CA_MERGED}"
 run_ca "localBlockInject ${CA_MERGED}" >/dev/null 2>&1
-assert_equals '[{"ip_is_private":true,"action":"reject"},{"ip_cidr":["0.0.0.0/8","::ffff:0:0/96"],"action":"reject"},{"port_range":["31111:31210"],"action":"reject"},{"port":[23456],"action":"reject"},{"inbound":"x","outbound":"direct"}]' \
+assert_equals '[{"ip_is_private":true,"action":"reject"},{"ip_cidr":["0.0.0.0/8","100.100.100.200/32","::ffff:0:0/96"],"action":"reject"},{"port_range":["31111:31210"],"action":"reject"},{"port":[23456],"action":"reject"},{"inbound":"x","outbound":"direct"}]' \
     "$(jq -c '.route.rules' "${CA_MERGED}")" "本机封锁（sing-box）：私网、0.0.0.0/8 与 IPv4 映射、桥端口段、统计 API 端口排在最前"
 rm -f "${CA_X}/12_stats_api.json"
 printf '%s\n' '{"outbounds":[{"type":"direct","tag":"direct"}]}' >"${CA_MERGED}"
@@ -4527,7 +4619,7 @@ assert_equals "6|null" "$(jq -r '"\(.route.rules | length)|\(.route.final)"' "${
 
 # --- 解析到内网的域名：走 direct 类出站的规则与默认出站前「没解析就解析、按 IP 拒」，解析器照抄该出站的；走代理与非路由的规则原样 ---
 LB_U='{"ip_cidr":["0.0.0.0/0","::/0"],"invert":true}'
-LB_IP='{"ip_is_private":true,"action":"reject"},{"ip_cidr":["0.0.0.0/8","::ffff:0:0/96"],"action":"reject"}'
+LB_IP='{"ip_is_private":true,"action":"reject"},{"ip_cidr":["0.0.0.0/8","100.100.100.200/32","::ffff:0:0/96"],"action":"reject"}'
 # lb_rules MERGED_JSON → 跑 localBlockInject，打印最前三条封锁之后的规则
 lb_rules() {
     ca_reset
@@ -4565,7 +4657,7 @@ assert_equals "true|false|1" "$(ca_rules '[.routing.rules[] | select(.ruleTag ==
 CA_ADDRS='2: eth0    inet 203.0.113.5/24 scope global eth0'
 printf '%s\n' '{"route":{"rules":[]}}' >"${CA_MERGED}"
 run_ca "localBlockInject ${CA_MERGED}" >/dev/null 2>&1
-assert_equals '["0.0.0.0/8","::ffff:0:0/96","203.0.113.5"]' "$(jq -c '.route.rules[1].ip_cidr' "${CA_MERGED}")" "本机地址（sing-box）：并进 ip_cidr"
+assert_equals '["0.0.0.0/8","100.100.100.200/32","::ffff:0:0/96","203.0.113.5"]' "$(jq -c '.route.rules[1].ip_cidr' "${CA_MERGED}")" "本机地址（sing-box）：并进 ip_cidr"
 CA_ADDRS=
 
 # --- 卸载链式：Xray 重启时按「没接链式」重新生成路由。默认规则只在直连出站还在时才写：规则指向不存在的出站，Xray 会直接断连接 ---
@@ -5164,7 +5256,7 @@ assert_equals '{"s":["local"],"r":null}' "$(dns_inject '{"dns":{"servers":[{"tag
 assert_equals '{"s":["a","b","local"],"r":"local"}' "$(dns_inject '{"dns":{"servers":[{"tag":"a","type":"udp","server":"8.8.8.8"},{"tag":"b","type":"udp","server":"1.1.1.1"}]}}')" "注入：没有 local 时补一个再指向它"
 
 # sing-box 本机封锁按 IP 拒的地址：输入检查与 localBlockInject 的 ip_is_private + 0.0.0.0/8 + IPv4-mapped + 本机网卡地址一致
-for _ip in 0.1.2.3 10.0.0.1 010.0.0.1 127.0.0.1 169.254.169.254 172.16.0.1 172.31.255.255 192.168.1.1 224.0.0.1 239.255.255.255 \
+for _ip in 0.1.2.3 10.0.0.1 010.0.0.1 127.0.0.1 100.100.100.200 169.254.169.254 172.16.0.1 172.31.255.255 192.168.1.1 224.0.0.1 239.255.255.255 \
            :: ::1 fd00::1 FC00::1 fe80::1 febf::1 ff02::1 ::ffff:7f00:1 ::ffff:808:808 203.0.113.9 2001:DB8:0:0:0:0:0:9; do
     assert_equals 'blocked' "$(run_dns "isLocalBlockedIP '${_ip}'" >/dev/null 2>&1 && echo blocked || echo open)" "本机封锁地址：${_ip} 算封锁"
 done
@@ -5528,10 +5620,14 @@ run_sub 1.27.3 cert v4 >/dev/null
 assert_contains "$(head -1 "${SUB_CONF}")" "# proxy-agent subscribe.conf r" "订阅渲染：第一行是模板修订号（旧号的机器进菜单时按原设置重写）"
 sub_location_matches "/s/${SUB_HEX}"; assert_equals "0" "$?" "通用订阅：/s/<32 位十六进制> 命中"
 sub_location_matches "/s/${SUB_HEX}x"; assert_equals "1" "$?" "通用订阅：33 位不命中"
-assert_equals "2|1" "$(grep -c 'add_header Profile-Update-Interval 12 always;' "${SUB_CONF}")|$(grep -c 'add_header Vary User-Agent always;' "${SUB_CONF}")" \
+assert_equals "2|1" "$(grep -c 'add_header Profile-Update-Interval 12;' "${SUB_CONF}")|$(grep -c 'add_header Vary User-Agent;' "${SUB_CONF}")" \
     "订阅响应：两种地址都带更新间隔（整数小时），通用地址带 Vary: User-Agent"
-assert_contains "$(cat "${SUB_CONF}")" 'try_files /$paSubFormat/$paSubKey /default/$paSubKey =404;' \
+assert_contains "$(cat "${SUB_CONF}")" 'try_files /$paSubFormat/$paSubKey /default/$paSubKey /s/-;' \
     "通用订阅：文件名用命名捕获（map 求值会冲掉 \$1），选中的格式没有文件时退回默认订阅"
+# 没有这个键：两个 location 都转给 /s/-，由本站对不存在路径的处理来答（在 location 里直接回 404 的话，响应头和本站别的 404 对不上）
+assert_equals "2|0|0" "$(grep -c 'try_files .* /s/-;$' "${SUB_CONF}")|$(grep -c '=404' "${SUB_CONF}")|$(grep -c 'alias ' "${SUB_CONF}")" \
+    "订阅响应：键不存在时两种地址都交回站点自己处理，不在订阅的 location 里出 404"
+sub_location_matches "/s/-"; assert_equals "1" "$?" "订阅响应：转过去的 /s/- 不命中订阅的 location（命中就成了内部重定向死循环）"
 
 # sub_ua_format UA → 按 subscribe.conf 里 map 的规则自上而下第一个命中给出的格式
 sub_ua_format() {
@@ -5686,7 +5782,7 @@ assert_equals "${_mgBefore}" "$(cat "${MG_NGX}/alone.conf")" "并入：include �
 mg_run 'carpoolEnsureNginxLocation on' >/dev/null
 assert_equals "1|0" "$(grep -c '# carpool-page-begin' "${MG_NGX}/subscribe_locations.inc")|$(grep -c 'carpool-page' "${MG_NGX}/subscribe.conf")" "并口下开拼车页面：块进片段，不进 subscribe.conf"
 mg_run 'subscribeSettleMerged' >/dev/null
-assert_equals "1|2" "$(grep -c '# carpool-page-begin' "${MG_NGX}/subscribe_locations.inc")|$(grep -c 'paSubUserinfo always' "${MG_NGX}/subscribe_locations.inc")" "并口对账（宿主还在）：片段重写，拼车页面块补回、只有一份"
+assert_equals "1|2" "$(grep -c '# carpool-page-begin' "${MG_NGX}/subscribe_locations.inc")|$(grep -c 'paSubUserinfo;' "${MG_NGX}/subscribe_locations.inc")" "并口对账（宿主还在）：片段重写，拼车页面块补回、只有一份"
 # 0 没了、也没有本机目标的 7：退回独立端口
 rm -f "${MG_ROOT}/xray/conf/02_VLESS_TCP_inbounds.json"
 assert_equals "||" "$(mg_run "${MG_READ}")" "并口的宿主没了：读订阅当没装（不给出连不上的地址）"
@@ -6646,14 +6742,17 @@ OU_FN=$(sed -n '/^offerUfw() {/,/^}/p;/^externalListeners() {/,/^}/p;/^debPackag
 assert_equals "3" "$(grep -cE '^(offerUfw|externalListeners|debPackageInstalled)\(\) \{$' <<<"${OU_FN}")" "offerUfw：抽到三个函数原文"
 # run_ou ANSWER [TTY] [SSH_PORTS] [ACTIVE_UNIT] → ANSWER 从 stdin 喂给提问；打印提示、ufw 收到的命令，最后一行是返回码
 run_ou() {
-    env OU_FN="${OU_FN}" OU_TTY="${2-1}" OU_SSH="${3:-}" OU_ACTIVE="${4:-}" OU_ALLOW_RC="${OU_ALLOW_RC:-0}" V2RAY_LANG=en bash -c '
+    env OU_FN="${OU_FN}" OU_TTY="${2-1}" OU_SSH="${3:-}" OU_ACTIVE="${4:-}" OU_ALLOW_RC="${OU_ALLOW_RC:-0}" OU_CHAIN="${OU_CHAIN:-}" V2RAY_LANG=en bash -c '
         source lib/i18n.sh; source lib/utils.sh
         eval "${OU_FN}"
         echoContent() { printf "%s\n" "$2"; }
         stdinIsTty() { [[ -n "${OU_TTY}" ]]; }
         systemctl() { [[ "$3" == "${OU_ACTIVE}" ]]; }
         sshListenPorts() { [[ -z "${OU_SSH}" ]] || printf "%s\n" ${OU_SSH}; }
-        proxyPortsInUse() { echo 443/tcp; }
+        proxyPortsInUse() { printf "%s\n" 443/tcp 443/udp; }
+        SINGBOX_FRAGMENT_DIR=$(mktemp -d); trap "rm -rf ${SINGBOX_FRAGMENT_DIR}" EXIT
+        [[ -z "${OU_CHAIN}" ]] || echo "{\"inbounds\":[{\"listen_port\":24680}]}" >"${SINGBOX_FRAGMENT_DIR}/chain_inbound.json"
+        chainInboundAllowedIP() { [[ "${OU_CHAIN}" != src ]] || echo 198.51.100.7; }
         ss() {
             printf "%s\n" "tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:((\"sshd\",pid=1,fd=3))" \
                 "tcp LISTEN 0 128 [::]:8080 [::]:* users:((\"python3\",pid=2,fd=3))" \
@@ -6681,8 +6780,11 @@ assert_contains "${_out}" "8080/tcp python3" "ufw：启用前列出别的程序�
 assert_contains "${_out}" "51820/udp -" "ufw：UDP 的也列（WireGuard 这类）"
 assert_equals "" "$(grep -E '631|68/udp|443/tcp|22/tcp' <<<"${_out}")" "ufw：只听回环的、DHCP 客户端、本脚本的端口、SSH 都不列"
 _out=$(run_ou y)
-assert_equals "ufw default deny incoming|ufw default allow outgoing|ufw allow 22/tcp|ufw --force enable|ufw status" "$(grep '^ufw ' <<<"${_out}" | paste -sd'|' -)" \
-    "ufw：认不出 sshd 的端口就放行 22，放行在启用之前（反过来当前的 SSH 会被锁在外面）"
+assert_equals "ufw default deny incoming|ufw default allow outgoing|ufw allow 22/tcp|ufw allow 443/tcp|ufw allow 443/udp|ufw --force enable|ufw status" "$(grep '^ufw ' <<<"${_out}" | paste -sd'|' -)" \
+    "ufw：认不出 sshd 的端口就放行 22，本脚本已经在用的端口一起放行，都在启用之前（存量机器上这次没重装的协议不会再有人替它放行）"
+assert_equals "ufw allow 24680/tcp|ufw allow from 198.51.100.7 to any port 24680 proto tcp" \
+    "$({ OU_CHAIN=any run_ou y; OU_CHAIN=src run_ou y; } | grep 'ufw allow.*24680' | paste -sd'|' -)" \
+    "ufw：出口 / 中继收链路的端口也放行，限了来源的带着来源（和向导放行它时同一个写法，之后收得回）"
 assert_equals "rc=0" "$(tail -n 1 <<<"${_out}")" "ufw：装上并启用返回 0，调用方不再装 iptables-persistent"
 assert_contains "${_out}" "SSH (22) allowed" "ufw：启用后说明放行了哪个 SSH 端口"
 _out=$(run_ou y 1 "2222 2222")
@@ -7327,6 +7429,51 @@ assert_equals "secret" "$(jq -r '.nodes[0].password' "${US_DIR}/sing-box/conf/ex
 assert_equals "" "$(run_us "" '{"nodes":[]}')" "外部节点清单是空的：照样整个删掉，不留空目录之外的东西"
 assert_equals "./conf/chain_multi_info.json ./conf/config/chain_bridge_inbound.json ./conf/external_node_info.json ./sing-box" \
     "$(run_us chain "${US_NODES}")" "还有链式入站：外部节点清单和其余状态一样留着"
+# sing-box 机卸掉最后一个协议：出口表里还有出口就先问；不在终端里问不了，留着
+# run_us_exits TTY ANSWER → 没有桥、出口表里两个出口，卸掉 6 之后 sing-box 目录里还剩什么
+run_us_exits() {
+    rm -rf "${US_DIR}" && mkdir -p "${US_DIR}/sing-box/conf/config" "${US_DIR}/etc/systemd/system" "${US_DIR}/etc/init.d"
+    : >"${US_DIR}/sing-box/sing-box"
+    echo '{"inbounds":[{"type":"hysteria2","tag":"hy2"}]}' >"${US_DIR}/sing-box/conf/config/06_hysteria2_inbounds.json"
+    echo '{"outbounds":[{"tag":"us"}]}' >"${US_DIR}/sing-box/conf/config/chain_outbound_us.json"
+    echo '{"inbounds":[{"type":"hysteria2"}]}' >"${US_DIR}/sing-box/conf/config.json"
+    echo '{"role":"entry","chains":[{"name":"us"},{"name":"hk"}]}' >"${US_DIR}/sing-box/conf/chain_multi_info.json"
+    printf '%s\n' "$2" | env US_FN="${US_FN}" US_DIR="${US_DIR}" US_TTY="$1" bash -c '
+        SINGBOX_DIR="${US_DIR}/sing-box" SINGBOX_BIN="${US_DIR}/sing-box/sing-box" SINGBOX_CONF_DIR="${US_DIR}/sing-box/conf"
+        SINGBOX_FRAGMENT_DIR="${US_DIR}/sing-box/conf/config" SINGBOX_MERGED_CONFIG="${US_DIR}/sing-box/conf/config.json"
+        EXTERNAL_NODE_FILE="${SINGBOX_CONF_DIR}/external_node_info.json" CHAIN_MULTI_INFO="${SINGBOX_CONF_DIR}/chain_multi_info.json"
+        singBoxConfigPath="${SINGBOX_FRAGMENT_DIR}/"
+        eval "${US_FN}"
+        for f in handleSingBox singBoxAutostart refreshSubscribeAfterInstall removeProtocolPortHopping echoContent t; do eval "$f() { :; }"; done
+        stdinIsTty() { [[ -n "${US_TTY}" ]]; }
+        isYesInput() { [[ "$1" == y ]]; }
+        readInstallType() { coreKind=; singBoxConfigPath=; [[ -f "${SINGBOX_FRAGMENT_DIR}/06_hysteria2_inbounds.json" ]] && singBoxConfigPath="${SINGBOX_FRAGMENT_DIR}/"; }
+        rm() { local a=() x; for x in "$@"; do a+=("${x/#\/etc\//${US_DIR}/etc/}"); done; command rm "${a[@]}"; }
+        unInstallSingBox hysteria2 >/dev/null
+        cd "${SINGBOX_DIR}" && find . -type f | sort | paste -sd" " -' 2>&1
+}
+assert_equals "./conf/chain_multi_info.json ./conf/config/chain_outbound_us.json" "$(run_us_exits "" "")" "卸掉最后一个协议（不在终端）：出口表与出口片段留着，二进制删掉"
+assert_equals "./conf/chain_multi_info.json ./conf/config/chain_outbound_us.json" "$(run_us_exits 1 "")" "卸掉最后一个协议（终端里回车）：默认不删出口表"
+assert_equals "" "$(run_us_exits 1 y)" "卸掉最后一个协议（终端里答 y）：出口表一起删"
+
+# 伪装站是不是本脚本铺的：标记记在安装根，旧版留在站点目录里的 check（对外取得到）见到就挪走
+BS_FN=$(sed -n '/^blogSiteTemplate() {/,/^}/p;/^blogSiteMark() {/,/^}/p' install.sh)
+BS_DIR="${MOCK_ROOT}/blogsite"
+run_bs() {
+    env BS_FN="${BS_FN}" BS_DIR="${BS_DIR}" bash -c '
+        eval "${BS_FN}"
+        BLOG_SITE_MARK_FILE="${BS_DIR}/root/blog_site" nginxStaticPath="${BS_DIR}/html/"
+        eval "$1"' _ "$1" 2>&1
+}
+rm -rf "${BS_DIR}" && mkdir -p "${BS_DIR}/root" "${BS_DIR}/html"
+assert_equals "rc=1" "$(run_bs 'blogSiteTemplate; echo rc=$?')" "伪装站标记：没铺过返回 1"
+echo cloud-drive >"${BS_DIR}/html/check"
+assert_equals "cloud-drive|rc=0|no" "$(run_bs 'blogSiteTemplate; echo rc=$?' | paste -sd'|' -)|$([[ -e "${BS_DIR}/html/check" ]] && echo yes || echo no)" \
+    "伪装站标记（旧版的 check 文件）：读得到模板名，文件从站点目录里挪走"
+assert_equals "blog|rc=0|no" "$(run_bs 'blogSiteMark blog; blogSiteTemplate; echo rc=$?' | paste -sd'|' -)|$([[ -e "${BS_DIR}/html/check" ]] && echo yes || echo no)" \
+    "伪装站标记：新铺的站点只记在安装根，站点目录里不再有 check"
+assert_equals "rc=1" "$(run_bs 'nginxStaticPath=/www/other/; blogSiteTemplate; echo rc=$?')" "伪装站标记：换了站点目录（面板接管的站点）不算本脚本铺的，卸载时不会去删它"
+rm -rf "${BS_DIR}"
 # 卸掉的是本机最后一个协议才提示菜单 20：Xray 还在、或链式的入站让 sing-box 留着都不提示
 US_CORE= run_us "" >/dev/null
 assert_contains "$(cat "${US_DIR}/said")" "NO_PROTOCOL_LEFT_HINT" "sing-box 机上卸掉最后一个协议：提示整机清理走菜单 20"

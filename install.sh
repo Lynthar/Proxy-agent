@@ -1838,7 +1838,7 @@ externalListeners() {
 # 就在终端里问要不要装 ufw 并启用，默认不要。0 = ufw 装上了，调用方不能再装与它互斥的 iptables-persistent；
 # 不是终端、答 N、装不上都返回 1。启用前先放行 sshd 的端口（一个都认不出就放行 22），不然当前的 SSH 会被锁在外面
 offerUfw() {
-    local sshPorts others answer port
+    local sshPorts others answer port rule rules chainPort chainSource
     stdinIsTty || return 1
     if systemctl is-active --quiet firewalld 2>/dev/null || systemctl is-active --quiet nftables 2>/dev/null; then
         return 1
@@ -1861,13 +1861,25 @@ offerUfw() {
     fi
     ufw default deny incoming >/dev/null
     ufw default allow outgoing >/dev/null
-    while IFS= read -r port; do
-        # SSH 没放行成就不启用：默认拒绝已经写下，一启用当前的连接之后就进不来了
-        if ! ufw allow "${port}/tcp" >/dev/null; then
+    # 本脚本已经在用的端口一起放行：这次没重装的协议不会再走 allowPort，漏了它们一启用就连不进来。
+    # 出口 / 中继收链路的端口不在协议入站里，照向导放行它时的写法另加（限了来源的带来源）
+    rules=$(sed 's|$|/tcp|' <<<"${sshPorts}"; proxyPortsInUse)
+    chainPort=$(jq -r '.inbounds[0].listen_port // empty' "${SINGBOX_FRAGMENT_DIR}/chain_inbound.json" 2>/dev/null)
+    chainSource=$(chainInboundAllowedIP)
+    if [[ -n "${chainPort}" && -n "${chainSource}" ]]; then
+        rules+=$'\n'"from ${chainSource} to any port ${chainPort} proto tcp"
+    elif [[ -n "${chainPort}" ]]; then
+        rules+=$'\n'"${chainPort}/tcp"
+    fi
+    while IFS= read -r rule; do
+        [[ -n "${rule}" ]] || continue
+        # 有一条没放行成就不启用：默认拒绝已经写下，一启用它就进不来了（SSH 的话连当前的连接之后也进不来）
+        # shellcheck disable=SC2086
+        if ! ufw allow ${rule} >/dev/null; then
             echoContent yellow " ---> $(t UFW_ENABLE_FAILED)"
             return 0
         fi
-    done <<<"${sshPorts}"
+    done <<<"${rules}"
     if ufw --force enable >/dev/null 2>&1 && ufw status | grep "Status: active" >/dev/null; then
         echoContent green " ---> $(t UFW_ENABLED "${sshPorts//$'\n'/, }")"
     else
@@ -1975,16 +1987,29 @@ singBoxKeepOrRemove() {
     readInstallType
     if [[ -n "${singBoxConfigPath}" ]] || singBoxFragmentsHaveInbounds; then
         echoContent yellow " ---> 检测到有其他配置，保留sing-box核心"
-        handleSingBox stop
         handleSingBox start
     else
         handleSingBox stop
         singBoxAutostart off
         rm -f /etc/systemd/system/sing-box.service /etc/init.d/sing-box
+        # 出口表与各出口的密钥重装协议后还用得上：有就先问；不在终端里问不了，留着
+        local extNodes entry exits keepExits= answer
+        exits=$(jq -r '.chains | length' "${CHAIN_MULTI_INFO}" 2>/dev/null)
+        if [[ "${exits:-0}" -gt 0 ]]; then
+            keepExits=1
+            if stdinIsTty; then
+                read -r -p "$(t CHAIN_EXITS_DELETE_CONFIRM "${exits}")" answer
+                isYesInput "${answer}" && keepExits=
+            fi
+        fi
         # 外部节点清单是用户填的，没有片段能重建；清单空了才整个删
-        local extNodes entry
         extNodes=$(jq -r '.nodes | length' "${EXTERNAL_NODE_FILE}" 2>/dev/null)
-        if [[ "${extNodes:-0}" -gt 0 ]]; then
+        if [[ -n "${keepExits}" ]]; then
+            for entry in "${SINGBOX_DIR}"/*; do
+                [[ "${entry}" == "${SINGBOX_CONF_DIR}" ]] || rm -rf "${entry}"
+            done
+            echoContent yellow " ---> $(t CHAIN_EXITS_KEPT "${exits}")"
+        elif [[ "${extNodes:-0}" -gt 0 ]]; then
             for entry in "${SINGBOX_DIR}"/* "${SINGBOX_CONF_DIR}"/*; do
                 [[ "${entry}" == "${SINGBOX_CONF_DIR}" || "${entry}" == "${EXTERNAL_NODE_FILE}" ]] || rm -rf "${entry}"
             done
@@ -3461,6 +3486,21 @@ nginxStaticHasForeignContent() {
     return 1
 }
 
+# blogSiteTemplate → 现在的伪装站目录是本脚本铺的就打印模板名、返回 0。标记记在安装根（目录、模板各一行）：
+# 以前是站点目录里的 check 文件，对外取得到，一个请求就认出是这个脚本，见到就挪走
+blogSiteTemplate() {
+    if [[ -f "${nginxStaticPath}/check" ]]; then
+        blogSiteMark "$(head -n 1 "${nginxStaticPath}/check")" && rm -f "${nginxStaticPath}/check"
+    fi
+    [[ -f "${BLOG_SITE_MARK_FILE}" && "$(sed -n 1p "${BLOG_SITE_MARK_FILE}")" == "${nginxStaticPath}" ]] || return 1
+    sed -n 2p "${BLOG_SITE_MARK_FILE}"
+}
+
+# blogSiteMark TEMPLATE → 记下现在的伪装站目录铺的是哪个模板
+blogSiteMark() {
+    printf '%s\n%s\n' "${nginxStaticPath}" "$1" >"${BLOG_SITE_MARK_FILE}"
+}
+
 # Nginx伪装博客
 nginxBlog() {
     if [[ -n "${1:-}" ]]; then
@@ -3475,7 +3515,7 @@ nginxBlog() {
     local repoUrl="https://github.com/Lynthar/website-examples/archive/refs/heads/main.zip"
     local tempDir="/tmp/website-examples-$$"
 
-    if [[ -d "${nginxStaticPath}" && -f "${nginxStaticPath}/check" ]]; then
+    if [[ -d "${nginxStaticPath}" ]] && blogSiteTemplate >/dev/null; then
         echo
         if [[ -z "${lastInstallationConfig}" ]]; then
             read -r -p "检测到安装伪装站点，是否需要重新安装[y/n]:" nginxBlogInstallStatus
@@ -3519,8 +3559,7 @@ nginxBlog() {
             mkdir -p "${nginxStaticPath}"
             cp -rf "${_srcDir}/"* "${nginxStaticPath}"
 
-            # 创建 check 标记文件
-            echo "${selectedTemplate}" > "${nginxStaticPath}/check"
+            blogSiteMark "${selectedTemplate}"
 
             # 清理临时文件
             rm -rf "${tempDir}"
@@ -3569,8 +3608,7 @@ nginxBlog() {
         mkdir -p "${nginxStaticPath}"
         cp -rf "${_srcDir}/"* "${nginxStaticPath}"
 
-        # 创建 check 标记文件
-        echo "${selectedTemplate}" > "${nginxStaticPath}/check"
+        blogSiteMark "${selectedTemplate}"
 
         # 清理临时文件
         rm -rf "${tempDir}"
@@ -4482,14 +4520,22 @@ EOF
     fi
 }
 
-# 操作sing-box
+# handleSingBox start|stop → start 也用来重启：先合并配置，过了才停掉在跑的进程再起；失败 exit 1
 handleSingBox() {
     ensureAlpineProcps
     local startResult=0
-    local mergeResult=0
     if [[ "$1" == "start" ]]; then
         ownCoreBinary "${SINGBOX_BIN}"
         labelCoreBinary "${SINGBOX_BIN}"
+        # 先合并、后停旧进程：新配置合并不出来时，在跑的那个按原配置继续服务，不至于所有人断线
+        if ! singBoxMergeConfig; then
+            if singBoxDaemonRunning; then
+                echoContent red " ---> $(t SINGBOX_MERGE_FAILED_KEPT)"
+            else
+                echoContent red " ---> sing-box 配置合并失败，无法启动服务"
+            fi
+            exit 1
+        fi
     fi
 
     if [[ -f "/etc/systemd/system/sing-box.service" ]]; then
@@ -4503,11 +4549,6 @@ handleSingBox() {
                     sleep 0.5
                     ((waitCount++))
                 done
-            fi
-            singBoxMergeConfig || mergeResult=$?
-            if [[ ${mergeResult} -ne 0 ]]; then
-                echoContent red " ---> sing-box 配置合并失败，无法启动服务"
-                exit 1
             fi
             systemctl start sing-box.service || startResult=$?
         elif [[ "$1" == "stop" ]] && singBoxDaemonRunning; then
@@ -4529,11 +4570,6 @@ handleSingBox() {
                     sleep 0.5
                     ((waitCount++))
                 done
-            fi
-            singBoxMergeConfig || mergeResult=$?
-            if [[ ${mergeResult} -ne 0 ]]; then
-                echoContent red " ---> sing-box 配置合并失败，无法启动服务"
-                exit 1
             fi
             rc-service sing-box start || startResult=$?
         elif [[ "$1" == "stop" ]] && singBoxDaemonRunning; then
@@ -4688,13 +4724,15 @@ ipv6Hex() {
 }
 
 # isLocalBlockedIP IP → 0 = sing-box 本机封锁按 IP 拒的地址：ip_is_private（私网、回环、组播、链路本地、未指定）、0.0.0.0/8、
-# IPv4-mapped、本机网卡地址。必须与 localBlockInject 的 $ipBlock 同一套，否则输入时放过的地址经代理照样不通
+# 阿里云元数据地址、IPv4-mapped、本机网卡地址。必须与 localBlockInject 的 $ipBlock 同一套，否则输入时放过的地址经代理照样不通
 isLocalBlockedIP() {
     local ip=$1 a b c d hex="" addr
     if [[ "${ip}" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
         a=$((10#${BASH_REMATCH[1]})) b=$((10#${BASH_REMATCH[2]})) c=$((10#${BASH_REMATCH[3]})) d=$((10#${BASH_REMATCH[4]}))
         ((a == 0 || a == 10 || a == 127 || (a >= 224 && a <= 239))) && return 0
         ((a == 169 && b == 254 || a == 172 && b >= 16 && b <= 31 || a == 192 && b == 168)) && return 0
+        # 阿里云的实例元数据地址，在 CGNAT 段里、不算私网
+        ((a == 100 && b == 100 && c == 100 && d == 200)) && return 0
         ip="${a}.${b}.${c}.${d}"
     elif hex=$(ipv6Hex "${ip}"); then
         [[ "${hex}" =~ ^(0{31}[01]|0{20}ffff|f[cd]|fe[89ab]|ff) ]] && return 0
@@ -4753,7 +4791,7 @@ writeXrayRouting() {
             (if ($hops | length) > 0 then [{type: "field", ruleTag: "local-block-pass", inboundTag: $hops, outboundTag: "local_pass"}] else [] end)
             + [{type: "field", ruleTag: "local-block-port", port: $ports, outboundTag: "local_block"},
                {type: "field", ruleTag: "local-block-ip", outboundTag: "local_block",
-                ip: (["0.0.0.0/8", "10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4",
+                ip: (["0.0.0.0/8", "10.0.0.0/8", "127.0.0.0/8", "100.100.100.200/32", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4",
                      "255.255.255.255/32", "::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8"] + $addrs)}]
             + $rules)}}') || return 1
     rm -f "${routing}.bak.chain"
@@ -4769,7 +4807,7 @@ localBlockInject() {
     local merged=$1 apiPort out
     apiPort=$(localBlockApiPort) || return 1
     out=$(jq --arg ports "${CHAIN_BRIDGE_PORT}:${CHAIN_BRIDGE_PORT_LAST}" --arg api "${apiPort}" --argjson addrs "$(localGlobalAddrs)" '
-        [{ip_is_private: true, action: "reject"}, {ip_cidr: (["0.0.0.0/8", "::ffff:0:0/96"] + $addrs), action: "reject"}] as $ipBlock
+        [{ip_is_private: true, action: "reject"}, {ip_cidr: (["0.0.0.0/8", "100.100.100.200/32", "::ffff:0:0/96"] + $addrs), action: "reject"}] as $ipBlock
         | ($ipBlock + [{port_range: [$ports], action: "reject"}]
            + (if $api == "" then [] else [{port: [($api | tonumber)], action: "reject"}] end)) as $block
         | ([.outbounds[]? | select(.type == "direct") | {key: .tag, value: .domain_resolver}] | from_entries) as $direct
@@ -4891,7 +4929,6 @@ handleXray() {
             exit 1
         fi
         if [[ "${chainEntryMigrated}" == "true" || "${legacyRoutingCleared}" == "true" ]] && singBoxDaemonRunning; then
-            handleSingBox stop
             handleSingBox start
         fi
         # 路由每次启动前从状态整份生成；接了链式的连桥的出站一起，写不出来就不启动：不然指定了出口的人静默走本机直连
@@ -6907,10 +6944,10 @@ EOF
         # 可能有 PHP 源码，文件服务器会原样吐出去，所以不配
         local hysteria2SiteDir= hysteria2Json=
         if [[ -z "${btDomain}" ]]; then
-            if [[ ! -f "${nginxStaticPath}/check" ]]; then
+            if ! blogSiteTemplate >/dev/null; then
                 nginxBlog
             fi
-            if [[ -f "${nginxStaticPath}/check" ]]; then
+            if blogSiteTemplate >/dev/null; then
                 hysteria2SiteDir=${nginxStaticPath%/}
             fi
         fi
@@ -8124,9 +8161,7 @@ updateNginxBlog() {
 
     # 显示当前模板
     local currentTemplate=""
-    if [[ -f "${nginxStaticPath}/check" ]]; then
-        currentTemplate=$(cat "${nginxStaticPath}/check")
-    fi
+    currentTemplate=$(blogSiteTemplate)
 
     echoContent red "=============================================================="
     echoContent yellow "# 模板来源: https://github.com/Lynthar/website-examples"
@@ -8229,8 +8264,7 @@ updateNginxBlog() {
         mkdir -p "${nginxStaticPath}"
         cp -rf "${_srcDir}/"* "${nginxStaticPath}"
 
-        # 创建 check 标记文件
-        echo "${selectedTemplate}" > "${nginxStaticPath}/check"
+        blogSiteMark "${selectedTemplate}"
 
         # 清理临时文件
         rm -rf "${tempDir}"
@@ -8569,6 +8603,11 @@ unInstall() {
     removeProtocolPortHopping hysteria2 "${XRAY_CONF_DIR}/17_hysteria_inbounds.json"
     removeProtocolPortHopping tuic "${SINGBOX_FRAGMENT_DIR}/09_tuic_inbounds.json"
     removeOwnFirewallRules
+    # 伪装站是不是本脚本铺的记在安装根里，趁它还在先看
+    local blogSiteOurs=
+    if [[ -d "${nginxStaticPath}" ]] && blogSiteTemplate >/dev/null; then
+        blogSiteOurs=1
+    fi
     rm -rf ${PROXY_AGENT_DIR}
     # 旧版本建过、从没用过的空目录
     rm -rf /tmp/Proxy-agent-tls
@@ -8580,7 +8619,7 @@ unInstall() {
 
     unInstallSubscribe
 
-    if [[ -d "${nginxStaticPath}" && -f "${nginxStaticPath}/check" ]]; then
+    if [[ -n "${blogSiteOurs}" ]]; then
         rm -rf "${nginxStaticPath}"
         echoContent green " ---> 删除伪装网站完成"
     fi
@@ -11809,7 +11848,6 @@ chainRestartSingBox() {
     if ! singBoxMergeConfig; then
         return 1
     fi
-    handleSingBox stop
     handleSingBox start
     sleep 1
     if ! singBoxDaemonRunning; then
@@ -12031,6 +12069,8 @@ parseChainCode() {
             fi
             ((i++))
         done
+        # 端口写成字符串的码也收，存成数字：出站片段里是字符串的话 sing-box 不认
+        chainHops=$(jq -c 'map(.port |= tonumber)' <<<"${chainHops}")
 
         echoContent green " ---> $(t CHAIN_CODE_V2_OK)"
         echoContent green "  $(t CHAIN_CODE_TOTAL_HOPS "${chainHopCount}")"
@@ -12895,6 +12935,9 @@ removeChainProxy() {
         echoContent yellow "\n$(t CHAIN_REMOVE_ROLE_EXIT)"
     elif [[ -f "${CHAIN_ENTRY_INFO}" ]]; then
         echoContent yellow "\n$(t CHAIN_REMOVE_ROLE_OLD_ENTRY)"
+    elif [[ -f "${XRAY_CONF_DIR}/chain_outbound.json" ]]; then
+        # 出口表不在了、Xray 还接着桥（配到一半放弃留下的）：照样能卸，拆线在下面
+        echoContent yellow "\n$(t CHAIN_REMOVE_ROLE_ENTRY 0)"
     else
         echoContent yellow "\n$(t CHAIN_NOTHING_CONFIGURED)"
         return 0
@@ -13143,7 +13186,8 @@ validateIpCidrs() {
 
             IFS='.' read -ra octets <<< "${ip}"
             for octet in "${octets[@]}"; do
-                if [[ ${octet} -gt 255 ]]; then
+                # 前导零 sing-box 不认，bash 还会把它当八进制
+                if [[ "${octet}" =~ ^0[0-9] ]] || ((octet > 255)); then
                     return 1
                 fi
             done
@@ -13153,7 +13197,7 @@ validateIpCidrs() {
                 return 1
             fi
         # IPv6 CIDR 格式: xxxx:xxxx::/prefix
-        elif [[ "${cidr}" =~ ^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}/[0-9]{1,3}$ ]]; then
+        elif [[ "${cidr}" =~ ^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}/[0-9]{1,3}$ && "${cidr}" != *:::* ]]; then
             local prefix="${cidr#*/}"
             if [[ ${prefix} -gt 128 ]]; then
                 return 1
@@ -13200,7 +13244,7 @@ isChainNameExists() {
 
 # 多链路入口配置向导
 setupMultiChainEntry() {
-    local multiChainCarriedAccounts=
+    local multiChainCarriedAccounts= reconfigure= rc=0
     if planAction "$(t PLAN_CHAIN_ENTRY_MULTI)"; then return 0; fi
     echoContent skyBlue "\n$(t CHAIN_MULTI_TITLE)"
     echoContent red "\n=============================================================="
@@ -13233,12 +13277,7 @@ setupMultiChainEntry() {
                 fi
                 # 账号的出口映射留到新链路都定下来再带回去，见 multiChainRestoreAccounts
                 multiChainCarriedAccounts=$(jq -c '.accounts // {}' "${CHAIN_MULTI_INFO}" 2>/dev/null) || multiChainCarriedAccounts=
-                # 清除现有多链路配置
-                rm -f ${CHAIN_MULTI_INFO}
-                rm -f ${SINGBOX_FRAGMENT_DIR}/chain_outbound_*.json
-                rm -f ${SINGBOX_FRAGMENT_DIR}/chain_route.json
-                rm -f ${SINGBOX_FRAGMENT_DIR}/chain_ruleset.json
-                rm -f ${SINGBOX_FRAGMENT_DIR}/chain_bridge_inbound.json
+                reconfigure=1
                 ;;
             *)
                 return 0
@@ -13256,19 +13295,30 @@ setupMultiChainEntry() {
     echoContent yellow "2.$(t CHAIN_BATCH_IMPORT)"
     read -r -p "$(t PROMPT_SELECT):" configMode
 
-    case "${configMode}" in
-        1)
-            # 逐个添加模式
-            setupMultiChainInteractive
-            ;;
-        2)
-            # 批量导入模式
-            setupMultiChainBatch
-            ;;
-        *)
-            return 0
-            ;;
-    esac
+    # 选定了怎么配才清旧的：在这之前回车或取消，原来的出口表原样留着
+    if [[ "${configMode}" != "1" && "${configMode}" != "2" ]]; then
+        echoContent yellow " ---> $(t CHAIN_SETUP_CANCELLED)"
+        return 0
+    fi
+    if [[ -n "${reconfigure}" ]]; then
+        rm -f ${CHAIN_MULTI_INFO}
+        rm -f ${SINGBOX_FRAGMENT_DIR}/chain_outbound_*.json
+        rm -f ${SINGBOX_FRAGMENT_DIR}/chain_route.json
+        rm -f ${SINGBOX_FRAGMENT_DIR}/chain_ruleset.json
+        rm -f ${SINGBOX_FRAGMENT_DIR}/chain_bridge_inbound.json
+    fi
+    if [[ "${configMode}" == "1" ]]; then
+        setupMultiChainInteractive || rc=$?
+    else
+        setupMultiChainBatch || rc=$?
+    fi
+    # 旧出口表清了、新的一条都没配成：Xray 还接着那条已经不在的桥，拆掉；留着的话下次重启它所有人断线
+    if [[ ${rc} -ne 0 && ! -f "${CHAIN_MULTI_INFO}" && -f "${XRAY_CONF_DIR}/chain_outbound.json" ]]; then
+        rm -f "${XRAY_CONF_DIR}/chain_outbound.json"
+        echoContent yellow " ---> $(t CHAIN_REMOVE_XRAY_DONE)"
+        reloadCore
+    fi
+    return "${rc}"
 }
 
 # chainInitEntryState → 写一份空的入口状态：没有出口、没有规则、默认直连
@@ -13745,7 +13795,7 @@ chainFinishAdd() {
     [[ "${chainRuleType}" == "default" ]] && isDefault=true
     chainStoreExit "${entry}" "$2" "${isDefault}" || return 1
     case "${chainRuleType}" in
-        preset | custom | ip_cidr | geoip | geosite) addRuleToConfig "${chainRuleType}" "${chainRuleValue}" "${name}" ;;
+        preset | custom | ip_cidr | geoip | geosite) addRuleToConfig "${chainRuleType}" "${chainRuleValue}" "${name}" || return 1 ;;
     esac
     echoContent green "\n ---> $(t CHAIN_ADDED): [${name}]$([[ "${isDefault}" == "true" ]] && echo " ($(t DEFAULT_CHAIN))")"
     echoContent green "   $3"
@@ -13757,6 +13807,17 @@ addChainToConfig() {
     chainLinkBuild "$1" "$2" "$3" "$4" "$5" "${7:-}" && chainStoreExit "${chainNewEntry}" "${chainNewFragment}" "${6:-false}"
 }
 
+# chainRevertTable OLD_STATE → 出口表改了、sing-box 却不认：写回 OLD_STATE，收掉它里面没有的出口片段，路由按它重新生成。
+# 留着没生效的改动，之后每次重启内核都会撞上同一个错
+chainRevertTable() {
+    local old=$1 name
+    [[ -n "${old}" ]] || return 0
+    for name in $(jq -r --argjson old "${old}" '[.chains[].name] - [$old.chains[].name] | .[]' "${CHAIN_MULTI_INFO}" 2>/dev/null); do
+        rm -f "${SINGBOX_FRAGMENT_DIR}/chain_outbound_${name}.json"
+    done
+    writeChainInfoAtomic "${CHAIN_MULTI_INFO}" "${old}" && generateMultiChainRouteConfig
+}
+
 # 添加规则到配置
 addRuleToConfig() {
     local ruleType=$1
@@ -13765,6 +13826,21 @@ addRuleToConfig() {
 
     chainFileModify "${CHAIN_MULTI_INFO}" '.rules += [{type: $type, value: $value, chain: $chain}]' \
         --arg type "${ruleType}" --arg value "${ruleValue}" --arg chain "${chainName}"
+}
+
+# chainCleanDomains LIST → 逗号分隔的域名去掉两头空白与空项后打印；有一项不是域名返回 1（中间带空格的也算：那是拿空格当了分隔）。
+# 空项写进规则，sing-box 整份配置都不认
+chainCleanDomains() {
+    local item list out=()
+    IFS=',' read -ra list <<<"$1"
+    for item in "${list[@]}"; do
+        read -r item <<<"${item}"
+        [[ -n "${item}" ]] || continue
+        isValidDomain "${item#.}" || return 1
+        out+=("${item}")
+    done
+    ((${#out[@]} > 0)) || return 1
+    (IFS=,; echo "${out[*]}")
 }
 
 # chainReadRule [later] → 交互选一条分流规则，结果放在 chainRuleType（none / preset / custom / ip_cidr / geoip / default / geosite）与 chainRuleValue。
@@ -13828,13 +13904,17 @@ chainReadRule() {
             2)
                 echoContent yellow "$(t CHAIN_DOMAIN_HINT):"
                 read -r -p "$(t CHAIN_DOMAIN): " value || return 1
-                if [[ -n "${value}" ]]; then
-                    chainRuleType=custom
-                    chainRuleValue=${value}
-                    return 0
+                if [[ -z "${value//[[:space:],]/}" ]]; then
+                    echoContent red " ---> $(t CHAIN_DOMAIN_EMPTY)"
+                    continue
                 fi
-                echoContent red " ---> $(t CHAIN_DOMAIN_EMPTY)"
-                continue
+                if ! value=$(chainCleanDomains "${value}"); then
+                    echoContent red " ---> $(t CHAIN_DOMAIN_INVALID)"
+                    continue
+                fi
+                chainRuleType=custom
+                chainRuleValue=${value}
+                return 0
                 ;;
             3)
                 echoContent yellow "$(t CHAIN_IP_CIDR_HINT):"
@@ -13952,6 +14032,22 @@ chainPickExit() {
     fi
 }
 
+# chainDeleteRule COUNT → 列出规则、按序号从出口表里删一条；序号不对或没选返回 1。生效由调用方做
+chainDeleteRule() {
+    local i=0 type value chain pick
+    while IFS=$'\t' read -r type chain value; do
+        i=$((i + 1))
+        echoContent yellow "${i}.$(chainRuleLabel "${type}" "${value}")$([[ "${type}" == custom || "${type}" == ip_cidr ]] && echo " ${value}") → ${chain}"
+    done < <(jq -r '.rules[] | [.type, .chain, .value] | @tsv' "${CHAIN_MULTI_INFO}")
+    read -r -p "$(t CHAIN_RULE_DELETE_PROMPT): " pick
+    if [[ ! "${pick}" =~ ^[1-9][0-9]{0,3}$ ]] || ((pick > $1)); then
+        echoContent red " ---> $(t INVALID_SELECTION)"
+        return 1
+    fi
+    chainFileModify "${CHAIN_MULTI_INFO}" 'del(.rules[$i])' --argjson i "$((pick - 1))" || return 1
+    echoContent green " ---> $(t CHAIN_RULE_DELETED)"
+}
+
 # 配置多链路分流规则
 configureMultiChainRules() {
     local infoFile="${CHAIN_MULTI_INFO}"
@@ -13972,6 +14068,17 @@ configureMultiChainRules() {
 
     echoContent skyBlue "\n$(t CHAIN_RULES_TITLE)"
     echoContent red "=============================================================="
+    local ruleCount action
+    ruleCount=$(jq -r '.rules | length' "${infoFile}")
+    if ((ruleCount > 0)); then
+        echoContent yellow "1.$(t CHAIN_RULE_ADD_ITEM)"
+        echoContent yellow "2.$(t CHAIN_RULE_DELETE_ITEM)"
+        read -r -p "$(t PROMPT_SELECT): " action
+        if [[ "${action}" == "2" ]]; then
+            chainDeleteRule "${ruleCount}"
+            return $?
+        fi
+    fi
     echoContent yellow "$(t CHAIN_CURRENT_CHAINS):\n"
 
     local chainPicked
@@ -14170,10 +14277,12 @@ generateMultiChainRouteConfig() {
             IFS=',' read -ra domainArray <<< "${ruleValue}"
             for domain in "${domainArray[@]}"; do
                 domain=$(echo "${domain}" | xargs)  # trim
+                [[ -n "${domain}" ]] || continue
                 domains=$(echo "${domains}" | jq --arg d "${domain}" '. + [$d]')
             done
 
-            match=$(jq -cn --argjson ds "${domains}" '{domain_suffix: $ds}')
+            # 一项都不剩的规则不写：没有条件的规则会把所有流量都收走
+            [[ "$(jq 'length' <<<"${domains}")" == "0" ]] || match=$(jq -cn --argjson ds "${domains}" '{domain_suffix: $ds}')
 
         elif [[ "${ruleType}" == "ip_cidr" ]]; then
             # IP CIDR 规则
@@ -14181,10 +14290,11 @@ generateMultiChainRouteConfig() {
             IFS=',' read -ra cidrArray <<< "${ruleValue}"
             for cidr in "${cidrArray[@]}"; do
                 cidr=$(echo "${cidr}" | xargs)  # trim
+                [[ -n "${cidr}" ]] || continue
                 ipCidrs=$(echo "${ipCidrs}" | jq --arg c "${cidr}" '. + [$c]')
             done
 
-            match=$(jq -cn --argjson ips "${ipCidrs}" '{ip_cidr: $ips}')
+            [[ "$(jq 'length' <<<"${ipCidrs}")" == "0" ]] || match=$(jq -cn --argjson ips "${ipCidrs}" '{ip_cidr: $ips}')
 
         elif [[ "${ruleType}" == "geoip" ]]; then
             # GeoIP 规则
@@ -14497,6 +14607,8 @@ showMultiChainStatus() {
 
 # multiChainAddChain → 往已有多链路里加一条：加完出站要重建路由、合并、重载，只加出站的话新链路的分流规则一直不生效
 multiChainAddChain() {
+    local tableBefore
+    tableBefore=$(cat "${CHAIN_MULTI_INFO}" 2>/dev/null)
     multiChainAddOne
     case $? in
         0) ;;
@@ -14506,6 +14618,7 @@ multiChainAddChain() {
     multiChainEnsureXrayWired || return 1
     generateMultiChainRouteConfig
     if ! singBoxMergeConfig; then
+        chainRevertTable "${tableBefore}"
         echoContent red " ---> $(t CHAIN_MERGE_FAILED_ADD)"
         return 1
     fi
@@ -14515,6 +14628,7 @@ multiChainAddChain() {
 
 # 多链路高级管理菜单
 multiChainAdvancedMenu() {
+    local tableBefore
     echoContent skyBlue "\n$(t CHAIN_ADV_TITLE)"
     echoContent red "=============================================================="
 
@@ -14535,13 +14649,15 @@ multiChainAdvancedMenu() {
         removeMultiChainOutbound
         ;;
     3)
-        configureMultiChainRules
+        tableBefore=$(cat "${CHAIN_MULTI_INFO}" 2>/dev/null)
+        configureMultiChainRules || return 1
         multiChainEnsureXrayWired
         generateMultiChainRouteConfig
         if singBoxMergeConfig; then
             reloadCore
             echoContent green " ---> $(t CHAIN_CONFIG_UPDATED)"
         else
+            chainRevertTable "${tableBefore}"
             echoContent red " ---> $(t CHAIN_MERGE_FAILED_RULES)"
         fi
         ;;
@@ -14643,11 +14759,14 @@ setDefaultChain() {
         return 0
     fi
 
+    local tableBefore
+    tableBefore=$(cat "${infoFile}")
     chainFileModify "${infoFile}" '.default_chain = $name' --arg name "${newDefault}" || return 1
 
     # 重新生成路由配置
     generateMultiChainRouteConfig
     if ! singBoxMergeConfig; then
+        chainRevertTable "${tableBefore}"
         echoContent red " ---> $(t CHAIN_MERGE_FAILED_DEFAULT)"
         return 1
     fi
@@ -15889,14 +16008,22 @@ singBoxAutostart() {
 
 reloadCore() {
     readInstallType
+    # Xray 内核上 sing-box 是旁挂：片段里还有入站就跟着重启，一个都不剩就停掉并关掉自启——链式拆掉后不能留一条通到出口的桥
+    local withSingBox=
+    if echo "${currentInstallProtocolType}" | grep -q ",20," || [[ "${coreKind}" == "2" || -n "${singBoxConfigPath}" ]] || singBoxFragmentsHaveInbounds; then
+        withSingBox=1
+    fi
+    # 两个内核的配置要成对换：sing-box 的新配置合并不出来，就连 Xray 也不动，两边都按原配置继续跑
+    if [[ -n "${withSingBox}" && "${coreKind}" == "1" ]] && singBoxDaemonRunning && ! singBoxMergeConfig; then
+        echoContent red " ---> $(t SINGBOX_MERGE_FAILED_KEPT)"
+        exit 1
+    fi
 
     if [[ "${coreKind}" == "1" ]]; then
         handleXray stop
         handleXray start
     fi
-    # Xray 内核上 sing-box 是旁挂：片段里还有入站就跟着重启，一个都不剩就停掉并关掉自启——链式拆掉后不能留一条通到出口的桥
-    if echo "${currentInstallProtocolType}" | grep -q ",20," || [[ "${coreKind}" == "2" || -n "${singBoxConfigPath}" ]] || singBoxFragmentsHaveInbounds; then
-        handleSingBox stop
+    if [[ -n "${withSingBox}" ]]; then
         handleSingBox start
         singBoxAutostart on
     elif [[ "${coreKind}" == "1" ]]; then
@@ -16025,7 +16152,6 @@ customSingBoxInstall() {
         initSingBoxConfig custom 6
         cleanUp xrayDel
         installCronTLS 7
-        handleSingBox stop
         handleSingBox start
         handleNginx stop
         # 不要证书的选择（7、14）没装 nginx；开着订阅的话下面的收尾会把它起来
@@ -16243,7 +16369,6 @@ installSingBoxRealityOnly() {
     installSingBoxService 3
     initSingBoxConfig custom 4
     cleanUp xrayDel
-    handleSingBox stop
     handleSingBox start
     refreshSubscribeAfterInstall
     checkGFWStatue 5
@@ -16344,7 +16469,6 @@ singBoxInstall() {
     cleanUp xrayDel
     installCronTLS 8
 
-    handleSingBox stop
     handleSingBox start
     handleNginx stop
     handleNginx start
@@ -16641,7 +16765,8 @@ installSubscribe() {
 }
 
 # subscribeConfMaps / subscribeConfLocations → 订阅的 http 级 map 与两个 location，独立端口与并口两种形态共用同一份文本。
-# 文件名一律是 32 位十六进制 md5，location 只收这种名字；正则带花括号必须加引号；map 求值会冲掉 $1，文件名用命名捕获
+# 文件名一律是 32 位十六进制 md5，location 只收这种名字；正则带花括号必须加引号；map 求值会冲掉 $1，文件名用命名捕获。
+# 没有这个键时转给 /s/-（不匹配这两个正则），由本站对不存在的路径的那套处理来答：状态码与响应头和别的 404 分不出来
 subscribeConfMaps() {
     cat <<EOF
 map \$http_user_agent \$paSubFormat {
@@ -16664,17 +16789,18 @@ subscribeConfLocations() {
     cat <<EOF
     location ~ "^/s/(?<paSubKey>[0-9a-f]{32})\$" {
         default_type 'text/plain; charset=utf-8';
-        add_header Profile-Update-Interval 12 always;
-        add_header Subscription-Userinfo \$paSubUserinfo always;
-        add_header Vary User-Agent always;
+        add_header Profile-Update-Interval 12;
+        add_header Subscription-Userinfo \$paSubUserinfo;
+        add_header Vary User-Agent;
         root ${SUBSCRIBE_DIR};
-        try_files /\$paSubFormat/\$paSubKey /default/\$paSubKey =404;
+        try_files /\$paSubFormat/\$paSubKey /default/\$paSubKey /s/-;
     }
-    location ~ "^/s/(clashMeta|default|clashMetaProfiles|sing-box|sing-box_profiles)/([0-9a-f]{32})\$" {
+    location ~ "^/s/(?<paSubDir>clashMeta|default|clashMetaProfiles|sing-box|sing-box_profiles)/(?<paSubFile>[0-9a-f]{32})\$" {
         default_type 'text/plain; charset=utf-8';
-        add_header Profile-Update-Interval 12 always;
-        add_header Subscription-Userinfo \$paSubUserinfo always;
-        alias ${SUBSCRIBE_DIR}/\$1/\$2;
+        add_header Profile-Update-Interval 12;
+        add_header Subscription-Userinfo \$paSubUserinfo;
+        root ${SUBSCRIBE_DIR};
+        try_files /\$paSubDir/\$paSubFile /s/-;
     }
 EOF
 }
@@ -16890,7 +17016,7 @@ renderSubscribeConf() {
         nginxSubscribeListen="listen ${port} ${SSLType} so_keepalive=on;${listenIPv6}"
     fi
 
-    # 订阅文件名一律是 32 位十六进制 md5，location 只收这种名字：$2 里没有 / 和 .，alias 拼不出目录外的路径。正则带花括号，
+    # 订阅文件名一律是 32 位十六进制 md5，location 只收这种名字：捕获里没有 / 和 .，拼不出目录外的路径。正则带花括号，
     # 必须加引号，否则 nginx 当成块的开头；readNginxSubscribe 取第一行 listen、靠 sing-box 这个词认文件，主 server 块要排在最前
     # 通用地址按 UA 给格式：规则锚定开头（Hiddify / NekoBox / Karing 的 UA 带着别家的名字），map 求值会冲掉 $1，文件名用命名捕获
     cat <<EOF >${nginxConfigPath}subscribe.conf
@@ -17623,6 +17749,10 @@ subscribe() {
                 emailMd5=$(echo -n "${email}${subscribeSalt}"$'\n' | md5sum | awk '{print $1}')
 
                 cat "${SUBSCRIBE_LOCAL_DIR}/default/${email}" >>"${SUBSCRIBE_DIR}/default/${emailMd5}"
+                # 本机的 Clash 节点先落盘，其他机器的往后追加：反过来写会把刚拉到的远端节点整份盖掉
+                if [[ -f "${SUBSCRIBE_LOCAL_DIR}/clashMeta/${email}" ]]; then
+                    { echo "proxies:"; cat "${SUBSCRIBE_LOCAL_DIR}/clashMeta/${email}"; } >"${SUBSCRIBE_DIR}/clashMeta/${emailMd5}"
+                fi
                 if isYesInput "${updateOtherSubscribeStatus}"; then
                     updateRemoteSubscribe "${emailMd5}" "${email}"
                 fi
@@ -17657,7 +17787,6 @@ subscribe() {
 
                 # clashMeta
                 if [[ -f "${SUBSCRIBE_LOCAL_DIR}/clashMeta/${email}" ]]; then
-                    { echo "proxies:"; cat "${SUBSCRIBE_LOCAL_DIR}/clashMeta/${email}"; } >"${SUBSCRIBE_DIR}/clashMeta/${emailMd5}"
                     local clashProxyUrl="${subscribeType}://${currentDomain}/s/clashMeta/${emailMd5}"
                     clashMetaConfig "${clashProxyUrl}" "${emailMd5}"
                     if [[ -z "${showStatus}" ]]; then
@@ -18328,7 +18457,6 @@ singBoxLog() {
 }
 EOF
 
-    handleSingBox stop
     handleSingBox start
 }
 
@@ -18364,14 +18492,12 @@ singBoxVersionManageMenu() {
     fi
     if [[ "${selectSingBoxType}" == "1" ]]; then
         installSingBox 1 || { echoContent red "\n ---> sing-box 安装失败"; exit 1; }
-        handleSingBox stop
         handleSingBox start
     elif [[ "${selectSingBoxType}" == "2" ]]; then
         handleSingBox stop
     elif [[ "${selectSingBoxType}" == "3" ]]; then
         handleSingBox start
     elif [[ "${selectSingBoxType}" == "4" ]]; then
-        handleSingBox stop
         handleSingBox start
     elif [[ "${selectSingBoxType}" == "5" ]]; then
         singBoxLog ${logStatus}
@@ -18639,7 +18765,7 @@ _doctorCheckCore() {
     if [[ -n "${running}" ]]; then
         _doctorRow "$(t DOCTOR_CHECK_PROCESS)" pass "running"
     else
-        _doctorRow "$(t DOCTOR_CHECK_PROCESS)" warn "not running"
+        _doctorRow "$(t DOCTOR_CHECK_PROCESS)" fail "not running"
     fi
 
     local stale
@@ -19700,6 +19826,8 @@ checkRoot
 # 启动时检查更新（使用短超时，避免阻塞太久）
 checkForUpdates 2>/dev/null
 
+# 旧版放在伪装站目录里的标记文件挪进安装根（定时任务进来也挪，升级后不用等人进菜单）
+isDryRun || blogSiteTemplate >/dev/null 2>&1
 cronFunction
 chainEntryMigrated=false
 legacyRoutingCleared=false
