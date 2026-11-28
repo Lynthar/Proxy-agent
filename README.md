@@ -75,7 +75,7 @@ Github: https://github.com/Lynthar/Proxy-agent
 四条不进菜单、执行完就退出的子命令：
 
 ```bash
-pasly doctor       # 只读诊断，这条不需要 root
+pasly doctor       # 只读诊断
 pasly topo         # 只读的路由总览：入站、账号、出口画成一张图
 pasly --dry-run    # 计划模式：安装 / 卸载 / 链式代理只打印不执行（等价 -n）
 V2RAY_LANG=en pasly

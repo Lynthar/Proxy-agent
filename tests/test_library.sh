@@ -76,10 +76,31 @@ if ! grep -qF '[bootstrap] lib/ 不存在' "$WORK/boot-nolib.err"; then
     cat "$WORK/boot-nolib.err" >&2
     exit 1
 fi
+# 已装机器上只重新下了一份 install.sh（同级没有 lib/）：安装根里的 lib 是上次装的，当成过期重新自举；拉不到才沿用它
+mkdir -p "$WORK/stale" "$WORK/installed"
+cp "$ROOT/install.sh" "$WORK/stale/"
+cp -r "$ROOT/lib" "$WORK/installed/"
+(LIBRARY_TEST_CALLS="$WORK/calls-stale" PROXY_AGENT_DIR="$WORK/installed" \
+    bash "$WORK/stale/install.sh" </dev/null >/dev/null 2>"$WORK/boot-stale.err") || true
+if ! grep -qF '来自上次安装' "$WORK/boot-stale.err" || ! grep -qF '[bootstrap] 没拉到，沿用' "$WORK/boot-stale.err" \
+    || grep -qF '[FATAL]' "$WORK/boot-stale.err"; then
+    echo 'a lone install.sh next to an installed root should re-bootstrap, and fall back to the installed lib/ when offline' >&2
+    cat "$WORK/boot-stale.err" >&2
+    exit 1
+fi
+# 从安装根自己跑（pasly）不算过期，不联网
+cp "$ROOT/install.sh" "$WORK/installed/"
+(LIBRARY_TEST_CALLS="$WORK/calls-own" PROXY_AGENT_DIR="$WORK/installed" \
+    bash "$WORK/installed/install.sh" </dev/null >/dev/null 2>"$WORK/boot-own.err") || true
+if grep -qF '[bootstrap]' "$WORK/boot-own.err"; then
+    echo 'install.sh run from its own install root must not bootstrap' >&2
+    cat "$WORK/boot-own.err" >&2
+    exit 1
+fi
 # 直接执行时统一成 umask 022（root 的 umask 严时 nginx 读不到新建的订阅），子进程看到的就是它
 if [[ ! -s "$WORK/calls-nolib" ]] || awk '$2 != "0022"' "$WORK/calls-nolib" | grep -q .; then
     echo 'executed install.sh should run with umask 022' >&2
     cat "$WORK/calls-nolib" >&2
     exit 1
 fi
-echo '9 library loading cases passed'
+echo '11 library loading cases passed'

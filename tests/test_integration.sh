@@ -621,6 +621,24 @@ assert_equals '[{"action":"block","port":"25"}]' \
 assert_equals "" "$(run_df none ensureXrayDirectFinalRules)" "直连出站：文件不在时不新建（WARP / IPv6 全局删掉过它）"
 assert_equals "${_dfAllow}" "$(run_df none 'addXrayOutbound z_direct_outbound')" "直连出站：新写的就带着"
 assert_contains "$(sed -n '/^handleXray() {/,/^}/p' install.sh)" "ensureXrayDirectFinalRules" "handleXray start 前挂了 finalRules 补齐（存量机器靠它补上）"
+# 15 的入站经 nginx 进来、每个请求都带 XFF：老安装启动前补上 trustedXForwardedFor，已经写了的不动（原文执行）
+XF_FN=$(sed -n '/^ensureXhttpTlsTrustedXff() {/,/^}/p' install.sh)
+run_xf() {
+    rm -rf "${DS_ROOT}" && mkdir -p "${DS_ROOT}/xray/conf"
+    [[ "$1" == none ]] || printf '%s\n' "$1" >"${DS_ROOT}/xray/conf/15_VLESS_XHTTP_TLS_inbounds.json"
+    env PROXY_AGENT_DIR="${DS_ROOT}" XF_FN="${XF_FN}" bash -c '
+        source lib/constants.sh; source lib/utils.sh; source lib/json-utils.sh
+        eval "${XF_FN}"
+        ensureXhttpTlsTrustedXff || echo "rc=$?"
+        jq -c ".inbounds[0] | [.streamSettings.sockopt, .settings.decryption]" "${XRAY_CONF_DIR}/15_VLESS_XHTTP_TLS_inbounds.json" 2>/dev/null'
+}
+assert_equals '[{"trustedXForwardedFor":["X-Forwarded-For"]},"mlkem768x25519plus.native.600s.k"]' \
+    "$(run_xf '{"inbounds":[{"settings":{"clients":[],"decryption":"mlkem768x25519plus.native.600s.k"},"streamSettings":{"network":"xhttp"}}]}')" \
+    "15 入站：老安装补上 trustedXForwardedFor，加密开关原样留着"
+assert_equals '[{"mark":1,"trustedXForwardedFor":["CF-Connecting-IP"]},null]' \
+    "$(run_xf '{"inbounds":[{"settings":{},"streamSettings":{"sockopt":{"mark":1,"trustedXForwardedFor":["CF-Connecting-IP"]}}}]}')" "15 入站：已经写了的不动"
+assert_equals "" "$(run_xf none)" "15 入站：没装 15 时不新建文件"
+assert_contains "$(sed -n '/^handleXray() {/,/^}/p' install.sh)" "ensureXhttpTlsTrustedXff" "handleXray start 前挂了 15 的 XFF 补齐"
 rm -rf "${DS_ROOT}"
 
 # 内核由哪一版脚本起：起成功才记版本，入口与 doctor 据此提示自更新后还没用上的启动前修正（原文执行，进程、服务与重启桩掉）
@@ -1171,7 +1189,7 @@ echo ""
 
 echo -e "${BLUE}[真机修复] 链式、安装路径、订阅${NC}"
 
-VPS_FN_NAMES="chainHopOutbounds chainRelayRouteJson chainExitSourceInject isValidRedirectUrl _linkBase64Decode _linkPercentDecode _linkQueryGet _linkRefuse _linkCheckEndpoint _linkTlsJson _linkTransportJson parseVlessLink _vmessField parseVmessLink isValidDomain isValidIP parseSSLink cleanUp chainRefuseCoreSwitch singBoxFragmentsHaveInbounds configuredPorts portsTakenFor customUserEmail initRealityShortIds"
+VPS_FN_NAMES="chainHopOutbounds chainRelayRouteJson chainExitSourceInject isValidRedirectUrl _linkBase64Decode _linkPercentDecode _linkQueryGet _linkRefuse _linkCheckEndpoint _linkTlsJson _linkTransportJson parseVlessLink _vmessField parseVmessLink isValidDomain isValidIP parseSSLink parseTrojanLink parseSOCKS5Link _chainTCPProbe cleanUp chainRefuseCoreSwitch singBoxFragmentsHaveInbounds configuredPorts portsTakenFor customUserEmail initRealityShortIds"
 VPS_FNS=$(sed -n "$(for _f in ${VPS_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
 assert_equals "$(wc -w <<<"${VPS_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9_]*() {$' <<<"${VPS_FNS}")" "真机修复：每个函数都抽到了"
 # 订阅与 Reality 回落的渲染函数 heredoc 里有顶格的 }，按下一个函数的开头截取（同 installSubscribe 那段）
@@ -1288,6 +1306,21 @@ assert_equals "2022-blake3-aes-128-gcm|xPU/ab+c==" \
 assert_equals "aes-128-gcm|pass" \
     "$(run_vps "parseSSLink 'ss://$(printf 'aes-128-gcm:pass' | base64 | tr -d '=')@192.0.2.5:8388#n'" | jq -r '"\(.method)|\(.password)"')" \
     "SS 链接：SIP002 的 base64 userinfo 照旧解码"
+
+# --- ss / trojan / socks5 链接的地址也过校验：它会进测试节点的 TCP 探测，带命令替换的地址曾被 bash -c 执行 ---
+_vpsBad=""
+for _l in 'parseSSLink ss://YWVzLTEyOC1nY206cGFzcw@$(id):443#n' 'parseSSLink ss://YWVzLTEyOC1nY206cGFzcw@x;id;:443#n' 'parseTrojanLink trojan://pw@$(id):443#n' \
+    'parseTrojanLink trojan://pw@a b:443#n' 'parseSOCKS5Link socks5://u:p@`id`:1080#n' 'parseSOCKS5Link socks5://[2001:db8::1]:1080#n' 'parseTrojanLink trojan://pw@192.0.2.5:70000#n'; do
+    _vpsBad+="$(run_vps "${_l%% *} '${_l#* }'" 2>/dev/null | jq -r '.server // empty' 2>/dev/null)|"
+done
+assert_equals "|||||||" "${_vpsBad}" "旧三种链接：地址带命令替换、分号、空格、被切坏的 IPv6，或端口越界，都不产出节点"
+assert_equals "192.0.2.5|443|example.com|1080" \
+    "$(run_vps "parseTrojanLink 'trojan://pw@192.0.2.5:443?sni=a.example#n'; parseSOCKS5Link 'socks5://u:p@example.com:1080#n'" | jq -r '.server, .server_port' | paste -sd'|' -)" \
+    "旧三种链接：正常的 IP 与域名照旧解析"
+_vpsMark="${MOCK_ROOT}/vps_probe_mark"
+rm -f "${_vpsMark}"
+run_vps "command() { [[ \"\$2\" == nc ]] && return 1; builtin command \"\$@\"; }; _chainTCPProbe 'x;touch ${_vpsMark};' 9 1" >/dev/null 2>&1
+assert_equals "no" "$([[ -e "${_vpsMark}" ]] && echo yes || echo no)" "TCP 探测：没有 nc 走 /dev/tcp 时，地址不被当成命令执行"
 
 # --- vless / vmess 链接：解析出 sing-box 出站的形状，sing-box 连不了的当场拒绝 ---
 EXT_UUID=0f3c8a4e-1b2d-4c5e-8f90-123456789abc
@@ -2848,7 +2881,9 @@ printf '+5\n' | run_cp 'carpoolMemberEdit renew alice' >/dev/null 2>&1
 assert_equals "$(cp_days_later 35)" "$(cp_state '.members.alice.expire')" "成员管理（续期）：没过期的从原到期日往后加"
 printf '20\n' | run_cp 'carpoolMemberEdit quota bob' >/dev/null 2>&1
 assert_equals "20|$((20 * GiB))" "$(cp_members '.members.bob.quotaGiB')|$(cp_state '.members.bob.quotaBytes')" "成员管理（改额度）：文件与 state 都改"
-printf '0, 7\n' | run_cp 'carpoolMemberEdit protocols alice' >/dev/null 2>&1
+: >"${CP_CALLS}"
+printf '0, 7\n' | CP_SUBPORT=12345 run_cp 'carpoolMemberEdit protocols alice' >/dev/null 2>&1
+assert_equals "1" "$(grep -c '^subscribe false true$' "${CP_CALLS}")" "成员管理（改协议）：订阅跟着重建，不然里面留着已移出入站的节点"
 assert_equals '[0,7]|[0,7]' "$(cp_members '.members.alice.protocols')|$(cp_state '.members.alice.protocols | tojson')" "成员管理（改协议）：逗号或空格分隔都认"
 _cpBefore=$(cat "${CP_ROOT}/carpool/members.json")
 _out=$(printf '7\n' | run_cp 'carpoolMemberEdit protocols alice; echo "rc=$?"' 2>&1)
@@ -3552,9 +3587,9 @@ echo ""
 
 echo -e "${YELLOW}=== 测试按账号选出口 ===${NC}"
 
-CA_FN_NAMES="singBoxProbeExitIP localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs writeXrayRouting localBlockInject chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountApply xrayConfigTest chainAccountSave chainAccountForget accountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic chainFileModify chainReadName chainReadFirstRule chainLinkBuild chainStoreExit chainFinishAdd addExternalNodeAsChain addChainToConfig chainPickExit chainRestartSingBox chainReadPublicIP writeChainInbound chainInboundAllowedIP chainExitCode chainRelayCode chainPrintHops chainInitEntryState validateChainName removeMultiChainOutbound xrayChainUnwire chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable multiChainRuleSetStatus legacyRoutingClear addXrayOutbound isValidIP isLocalBlockedIP ipv6Hex xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig chainRouteLazyResolve migrateChainRouteResolve chainExitDefs chainExitTarget chainExitIsSni chainWarpEnsureRegistered chainWarpFragment chainLocalExitFragment addLocalExitAsChain multiChainAddOne singBoxProbeEndpointIP migrateChainEntryState chainHopOutbounds chainReadManualExit addSingleChainOutbound chainIsExitMachine chainRefuseRemoteOnExit"
+CA_FN_NAMES="singBoxProbeExitIP localBlockApiPort singBoxDaemonPid singBoxDaemonRunning localGlobalAddrs writeXrayRouting localBlockInject chainAccountReadState chainAccountBridges chainAccountAssignPorts writeXrayChainConfig chainAccountInject chainAccountApply xrayConfigTest chainAccountSave chainAccountForget accountAllNames chainAccountExitLabel chainAccountExitMenu writeChainInfoAtomic chainFileModify chainReadName chainReadFirstRule chainLinkBuild chainStoreExit chainFinishAdd addExternalNodeAsChain addChainToConfig chainPickExit chainRestartSingBox chainReadPublicIP writeChainInbound chainInboundAllowedIP chainExitCode chainRelayCode chainPrintHops chainInitEntryState validateChainName removeMultiChainOutbound xrayChainUnwire chainReadRule chainRuleLabel getPresetDisplayName validateIpCidrs updateChainKey showMultiChainSummary multiChainAddChain testMultiChainConnection testExternalNodeConnection selectSSMethod generateExternalOutboundConfig getExternalNodeById initExternalNodeFile getPresetRulesets multiChainRuleSetUrl multiChainRuleSetsAvailable multiChainRuleSetStatus legacyRoutingClear addXrayOutbound isValidIP isLocalBlockedIP ipv6Hex xrayChainUnwired multiChainEnsureXrayWired externalNodeUsers deleteExternalNode getExternalNodeCount removeExternalNodeFromFile finalizeMultiChainConfig chainRouteLazyResolve migrateChainRouteResolve chainExitDefs chainExitTarget chainExitIsSni chainWarpEnsureRegistered chainWarpFragment chainLocalExitFragment addLocalExitAsChain multiChainAddOne singBoxProbeEndpointIP migrateChainEntryState chainHopOutbounds chainReadManualExit addSingleChainOutbound chainIsExitMachine chainRefuseRemoteOnExit _linkCheckEndpoint _linkRefuse isValidDomain _chainTCPProbe"
 CA_FNS=$(sed -n "$(for _f in ${CA_FN_NAMES}; do printf '/^%s() {/,/^}/p\n' "${_f}"; done)" install.sh)
-assert_equals "$(wc -w <<<"${CA_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9]*() {$' <<<"${CA_FNS}")" "按账号选出口：每个函数都抽到了"
+assert_equals "$(wc -w <<<"${CA_FN_NAMES}" | tr -d ' ')" "$(grep -c '^[a-zA-Z0-9_]*() {$' <<<"${CA_FNS}")" "按账号选出口：每个函数都抽到了"
 CA_ROOT="${MOCK_ROOT}/chainacct.root"
 CA_CALLS="${MOCK_ROOT}/chainacct_calls"
 CA_X="${CA_ROOT}/xray/conf"
@@ -4185,7 +4220,7 @@ mkdir -p "${CA_ROOT}/sing-box"
 printf '%s\n' '#!/bin/bash' 'echo "$*" >>"$(dirname "$0")/argv"' \
     'jq -e ".outbounds[0].password == \"right\" and .route.default_domain_resolver == \"local\"" "$4" >/dev/null && echo 203.0.113.9' >"${CA_ROOT}/sing-box/sing-box"
 chmod +x "${CA_ROOT}/sing-box/sing-box"
-_caExt='listExternalNodes() { :; }; getExternalNodeCount() { echo 2; }; timeout() { [[ "$1" == 5 ]] && return 0; shift; "$@"; }; testExternalNodeConnection; echo rc=$?'
+_caExt='listExternalNodes() { :; }; getExternalNodeCount() { echo 2; }; _chainTCPProbe() { return 0; }; testExternalNodeConnection; echo rc=$?'
 _out=$(printf '1\n' | run_ca "${_caExt}" 2>&1)
 assert_contains "${_out}" "出口 IP：203.0.113.9" "外部节点测试（密码对）：经节点取到出口 IP 才报成功"
 assert_contains "$(head -1 "${CA_ROOT}/sing-box/argv")" "tools fetch -c " "外部节点测试：用 sing-box tools fetch 经这个出站发请求，不起常驻进程"
@@ -4195,6 +4230,13 @@ assert_contains "${_out}" "访问外网失败" "外部节点测试（密码错�
 assert_equals "" "$(ls -A "${CA_ROOT}/tmp")" "外部节点测试：带凭据的临时配置用完即删"
 rm -f "${CA_ROOT}/sing-box/sing-box"
 assert_contains "$(printf '1\n' | run_ca "${_caExt}" 2>&1)" "只测了 TCP 端口" "外部节点测试（没装 sing-box）：如实说只测了端口"
+
+# 旧版本存进去的地址没校验过：测试时先拦下，不拿去探测
+jq --arg s "\$(touch ${CA_ROOT}/ext_mark)" '.nodes[0].server = $s' "${CA_ROOT}/sing-box/conf/external_node_info.json" >"${CA_ROOT}/ext.tmp" \
+    && cat "${CA_ROOT}/ext.tmp" >"${CA_ROOT}/sing-box/conf/external_node_info.json"
+_out=$(printf '1\n' | run_ca 'listExternalNodes() { :; }; getExternalNodeCount() { echo 2; }; _chainTCPProbe() { echo PROBED; }; testExternalNodeConnection; echo rc=$?' 2>&1)
+assert_equals "rc=1||no" "$(grep -o 'rc=[0-9]' <<<"${_out}")|$(grep PROBED <<<"${_out}")|$([[ -e "${CA_ROOT}/ext_mark" ]] && echo yes || echo no)" \
+    "外部节点测试（库里的地址不合法）：拒绝，不探测、不执行"
 
 # --- 外部节点：加密方式菜单不进节点；旧版写坏的节点拦下 ---
 assert_equals "aes-256-gcm" "$(printf '2\n' | run_ca 'SS_METHODS=(aes-128-gcm aes-256-gcm); selectSSMethod' 2>/dev/null)" \
@@ -5141,11 +5183,12 @@ XV_FN=$(sed -n '/^xrayVersionManageMenu() {/,/^}/p' install.sh)
 assert_not_empty "${XV_FN}" "回退菜单：抽到函数原文"
 XV_RELEASES='[{"tag_name":"v26.10.31","prerelease":false},{"tag_name":"v26.10.21","prerelease":false},{"tag_name":"v26.9.30","prerelease":true},{"tag_name":"v26.3.27","prerelease":false},{"tag_name":"v26.2.6","prerelease":false}]'
 run_xv() {
-    printf '%s\n' "$@" | env XV_FN="${XV_FN}" XV_RELEASES="${XV_RELEASES}" bash -c '
+    printf '%s\n' "$@" | env XV_FN="${XV_FN}" XV_RELEASES="${XV_RELEASES}" XV_CONF="${XV_CONF:-}" bash -c '
         source lib/utils.sh
         echoContent() { printf "%s\n" "$2"; }
         t() { printf "%s\n" "$1"; }
         coreKind=1; totalProgress=1; XRAY_PINNED_VERSION=v26.3.27
+        XRAY_CONF_DIR="${XV_CONF:-/nonexistent}"; HYSTERIA_XRAY_MIN_VERSION=26.11.9
         curl() { printf "%s" "${XV_RELEASES}"; }
         updateXray() { echo "updateXray $*"; }
         eval "${XV_FN}"
@@ -5156,6 +5199,11 @@ assert_contains "${_out}" "updateXray v26.3.27" "回退菜单：第 1 个就是�
 assert_equals "1:v26.3.27|2:v26.2.6" "$(grep -E '^[0-9]+:v' <<<"${_out}" | paste -sd'|' -)" "回退菜单：高于钉版的新版与预发布不在列表里"
 assert_equals "" "$(grep 'updateXray' <<<"$(run_xv 3 9)")" "回退菜单：序号越界不装"
 assert_equals "" "$(grep 'updateXray' <<<"$(run_xv 3 '1;x')")" "回退菜单：序号不是数字不装"
+mkdir -p "${MOCK_ROOT}/xv_conf" && : >"${MOCK_ROOT}/xv_conf/17_hysteria_inbounds.json"
+_out=$(XV_CONF="${MOCK_ROOT}/xv_conf" run_xv 3 1)
+assert_equals "HY2_ROLLBACK_REFUSED|" "$(grep -o 'HY2_ROLLBACK_REFUSED' <<<"${_out}")|$(grep 'updateXray' <<<"${_out}")" \
+    "回退菜单：装着 17 时不回退到低于它最低要求的内核（配置检查照过，带 gecko 的客户端握手不上）"
+rm -rf "${MOCK_ROOT}/xv_conf"
 
 echo ""
 
@@ -5759,6 +5807,71 @@ assert_equals "no" "$([[ -f "${RB_ROOT}/lib/carpool.sh" ]] && echo yes || echo n
 assert_equals "1" "$(run_rb yes no)" "rollbackScript（GitHub）：目标版本要 carpool 却下不到时中止"
 assert_equals "1.5.0|# new carpool" "$(cat "${RB_ROOT}/VERSION")|$(cat "${RB_ROOT}/lib/carpool.sh")" "rollbackScript（GitHub）：中止时一个文件都不动"
 assert_equals "0" "$(run_rb yes yes)" "rollbackScript（GitHub）：目标版本有 carpool 时照常下"
+
+# 回退前先备份当前版本，轮转只留 5 份：选中的那份恰好最老时不能被这次轮转删掉（原文执行；函数里有顶格的 }，按下一个函数截）
+BK_FN=$(awk '/^backupScript\(\) \{/{f=1} /^listScriptVersions\(\) \{/{f=0} f' install.sh)
+BK_ROOT="${MOCK_ROOT}/bk.root"
+# run_bk [KEEP_NAME] → 摆 5 份旧备份后再备份一次，打印最老那份还在不在、现在共几份
+run_bk() {
+    local i d
+    rm -rf "${BK_ROOT}" && mkdir -p "${BK_ROOT}/backup"
+    echo 1.5.8 >"${BK_ROOT}/VERSION"
+    for i in 1 2 3 4 5; do
+        d="${BK_ROOT}/backup/v1.5.${i}_2026010${i}_000000"
+        mkdir -p "${d}" && touch -t "2026010${i}0000" "${d}"
+    done
+    env PROXY_AGENT_DIR="${BK_ROOT}" BK_FN="${BK_FN}" bash -c '
+        eval "${BK_FN}"
+        backupConfigSnapshot() { return 1; }
+        backupScript rollback ${1:+"${PROXY_AGENT_DIR}/backup/$1"} >/dev/null' _ "${1:-}"
+    echo "$([[ -d "${BK_ROOT}/backup/v1.5.1_20260101_000000" ]] && echo kept || echo gone)|$(find "${BK_ROOT}/backup" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"
+}
+assert_equals "gone|5" "$(run_bk)" "备份轮转：超过 5 份删最老的"
+assert_equals "kept|6" "$(run_bk v1.5.1_20260101_000000)" "备份轮转：回退选中的那份不删（删了的话回退什么都没恢复却报成功）"
+assert_contains "$(sed -n '/^rollbackScript() {/,/^}/p' install.sh)" 'backupScript "rollback" "${sourcePath}"' "rollbackScript：备份时带上选中的那份"
+rm -rf "${BK_ROOT}"
+
+# Hysteria2 重装时原来开着混淆：回车沿用，明确选 1 才关（原文执行）
+HN_FN=$(sed -n '/^initHysteria2Network() {/,/^}/p' install.sh)
+# run_hn OLD_TYPE OLD_PASSWORD ANSWERS… → 打印问完之后的混淆类型与密码
+run_hn() {
+    local oldType=$1 oldPassword=$2
+    shift 2
+    printf '%s\n' "$@" | env HN_FN="${HN_FN}" HN_TYPE="${oldType}" HN_PW="${oldPassword}" bash -c '
+        eval "${HN_FN}"
+        echoContent() { :; }; t() { :; }
+        hysteria2ObfsType=${HN_TYPE} hysteria2ObfsPassword=${HN_PW}
+        initHysteria2Network xray >/dev/null 2>&1
+        echo "${hysteria2ObfsType}|${hysteria2ObfsPassword}"'
+}
+assert_equals "gecko|oldpw" "$(run_hn gecko oldpw "" "")" "Hysteria2 重装：一路回车沿用原来的混淆与密码（关掉的话拿着分享链接的客户端全断）"
+assert_equals "|" "$(run_hn gecko oldpw "" 1)" "Hysteria2 重装：选 1 才关混淆"
+assert_equals "salamander|newpw" "$(run_hn gecko oldpw "" 2 newpw)" "Hysteria2 重装：也能换一种混淆"
+assert_equals "|" "$(run_hn "" "" "" "")" "Hysteria2 新装：回车仍是不混淆"
+
+# 装 17 会删掉旁挂的 6：新配置内核不认时退回去，6 与在跑的 Xray 都不动（原文执行）
+HI_FN=$(sed -n '/^xrayHysteriaInstall() {/,/^}/p' install.sh)
+HI_DIR="${MOCK_ROOT}/hi.conf"
+# run_hi TEST_RC [OLD_17] → 打印调用顺序与结束后 17 文件的内容
+run_hi() {
+    rm -rf "${HI_DIR}" && mkdir -p "${HI_DIR}"
+    [[ -z "${2:-}" ]] || printf '%s\n' "$2" >"${HI_DIR}/17_hysteria_inbounds.json"
+    env HI_FN="${HI_FN}" HI_DIR="${HI_DIR}" HI_RC="$1" bash -c '
+        source lib/json-utils.sh
+        eval "${HI_FN}"
+        XRAY_CONF_DIR=${HI_DIR} currentInstallProtocolType=",0,7," currentHost=a.example
+        echoContent() { :; }; t() { :; }
+        xrayHysteriaSupported() { return 0; }
+        initXrayConfig() { echo "{\"new\":1}" >"${HI_DIR}/17_hysteria_inbounds.json"; echo init; }
+        xrayConfigTest() { return "${HI_RC}"; }
+        for f in cleanUp reloadCore refreshSubscribeAfterInstall showAccounts; do eval "$f() { echo $f; }"; done
+        (xrayHysteriaInstall); echo "rc=$?"' 2>&1 | paste -sd'|' -
+    echo "|$(jq -c . "${HI_DIR}/17_hysteria_inbounds.json" 2>/dev/null)"
+}
+assert_equals 'init|cleanUp|reloadCore|refreshSubscribeAfterInstall|showAccounts|rc=0 |{"new":1}' "$(run_hi 0 | paste -sd' ' -)" "装 17：配置过了内核检查才清旁挂的 6、再重启"
+assert_equals 'init|rc=1 |' "$(run_hi 1 | paste -sd' ' -)" "装 17（内核不认）：17 撤掉，不清 6、不重启"
+assert_equals 'init|rc=1 |{"old":1}' "$(run_hi 1 '{"old":1}' | paste -sd' ' -)" "重装 17（内核不认）：退回原来的 17"
+rm -rf "${HI_DIR}"
 assert_equals "# old carpool" "$(cat "${RB_ROOT}/lib/carpool.sh")" "rollbackScript（GitHub）：carpool 换成目标版本的"
 rm -rf "${RB_ROOT}" "${RB_TAG}"
 
@@ -6533,7 +6646,7 @@ OU_FN=$(sed -n '/^offerUfw() {/,/^}/p;/^externalListeners() {/,/^}/p;/^debPackag
 assert_equals "3" "$(grep -cE '^(offerUfw|externalListeners|debPackageInstalled)\(\) \{$' <<<"${OU_FN}")" "offerUfw：抽到三个函数原文"
 # run_ou ANSWER [TTY] [SSH_PORTS] [ACTIVE_UNIT] → ANSWER 从 stdin 喂给提问；打印提示、ufw 收到的命令，最后一行是返回码
 run_ou() {
-    env OU_FN="${OU_FN}" OU_TTY="${2-1}" OU_SSH="${3:-}" OU_ACTIVE="${4:-}" V2RAY_LANG=en bash -c '
+    env OU_FN="${OU_FN}" OU_TTY="${2-1}" OU_SSH="${3:-}" OU_ACTIVE="${4:-}" OU_ALLOW_RC="${OU_ALLOW_RC:-0}" V2RAY_LANG=en bash -c '
         source lib/i18n.sh; source lib/utils.sh
         eval "${OU_FN}"
         echoContent() { printf "%s\n" "$2"; }
@@ -6552,7 +6665,7 @@ run_ou() {
         ouLog=$(mktemp)
         pkg() { echo installed >>"${ouLog}"; }
         dpkg-query() { grep -qx installed "${ouLog}" && printf "install ok installed"; }
-        ufw() { echo "ufw $*" >>"${ouLog}"; [[ "$1" == status ]] && echo "Status: active"; return 0; }
+        ufw() { echo "ufw $*" >>"${ouLog}"; [[ "$1" == status ]] && echo "Status: active"; [[ "$1" != allow ]] || return "${OU_ALLOW_RC}"; return 0; }
         installType="pkg -y install"
         offerUfw; rc=$?
         grep "^ufw " "${ouLog}"; rm -f "${ouLog}"
@@ -6576,6 +6689,8 @@ _out=$(run_ou y 1 "2222 2222")
 assert_contains "${_out}" "ufw allow 2222/tcp" "ufw：放行 sshd 实际用的端口"
 assert_equals "" "$(grep 'ufw allow 22/tcp' <<<"${_out}")" "ufw：sshd 不在 22 时不多放 22"
 assert_contains "${_out}" "22/tcp sshd" "ufw：sshd 改了端口时，22 上别的监听照样列出来"
+_out=$(OU_ALLOW_RC=1 run_ou y 1 2222)
+assert_equals "|" "$(grep 'ufw --force enable' <<<"${_out}")|$(grep 'SSH (2222) allowed' <<<"${_out}")" "ufw：SSH 端口没放行成就不启用，也不说已放行"
 
 # --- 端口跳跃菜单认 iptables：find | grep -q 在 pipefail 下会因 SIGPIPE 误判没有 ---
 PH_FN=$(sed -n '/^portHoppingMenu() {/,/^}/p' install.sh)

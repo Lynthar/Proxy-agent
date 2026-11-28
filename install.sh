@@ -73,6 +73,14 @@ if [[ -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" || "${BASH_SOURCE[0]}" != "$0" ]]; then
         _lib_health_ok=
     fi
 fi
+# 脚本不在安装根、同级又没带 lib/（已装机器上重新下了一份 install.sh）：安装根里的 lib 是上次装的版本，
+# 缺这份脚本要调的函数。当成缺失重新自举；拉不到才沿用旧的
+_lib_stale=
+if [[ -n "${_lib_health_ok}" && -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" && "${BASH_SOURCE[0]}" == "$0" && "${_LIB_DIR}" == "${_LIB_FALLBACK_DIR}" \
+    && "$(cd "${_SCRIPT_DIR}" && pwd -P)" != "$(cd "${PROXY_AGENT_DIR}" 2>/dev/null && pwd -P)" ]]; then
+    _lib_health_ok=
+    _lib_stale=1
+fi
 # source 只加载完整的本地库；自动修复会下载或删除文件，必须留给直接执行。
 if [[ "${BASH_SOURCE[0]}" != "$0" && -z "${_lib_health_ok}" ]]; then
     printf '[Proxy-agent] source requires a complete local lib/ directory.\n' >&2
@@ -109,7 +117,9 @@ if [[ -z "${_lib_health_ok}" && -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
             return 1
         fi
 
-        if [[ -d "${_LIB_DIR}" ]]; then
+        if [[ -n "${_lib_stale}" ]]; then
+            printf '\033[36m[bootstrap] %s 里的 lib/ 来自上次安装，按这份脚本的版本重新拉取（mode=%s）...\033[0m\n' "${PROXY_AGENT_DIR}" "${mode}" >&2
+        elif [[ -d "${_LIB_DIR}" ]]; then
             printf '\033[36m[bootstrap] lib/ 缺 %s 个模块（%s），开始拉取依赖文件（mode=%s）...\033[0m\n' \
                 "${#_lib_missing[@]}" "${_lib_missing[*]}" "${mode}" >&2
         else
@@ -330,6 +340,9 @@ if [[ -z "${_lib_health_ok}" && -z "${PROXY_AGENT_NO_BOOTSTRAP:-}" ]]; then
 
     if _bootstrap_libs; then
         _LIB_DIR="${_LIB_FALLBACK_DIR}"
+    elif [[ -n "${_lib_stale}" ]]; then
+        printf '\033[33m[bootstrap] 没拉到，沿用 %s 里原有的 lib/；它可能配不上这份脚本，联网后请重跑或用菜单 17 更新\033[0m\n' "${PROXY_AGENT_DIR}" >&2
+        printf '\033[33m[bootstrap] Download failed; using the lib/ already in %s. It may not match this script: rerun when online, or update from menu 17.\033[0m\n' "${PROXY_AGENT_DIR}" >&2
     fi
     unset -f _bootstrap_libs
 fi
@@ -376,7 +389,7 @@ if [[ ${#_missing_lib_fns[@]} -gt 0 ]]; then
 fi
 
 # 清理临时变量
-unset _LIB_DIR _LIB_FALLBACK_DIR _LANG_FALLBACK_DIR _SCRIPT_PATH _module _fn _required_lib_fns _missing_lib_fns _lib_health_ok _lib_missing _f
+unset _LIB_DIR _LIB_FALLBACK_DIR _LANG_FALLBACK_DIR _SCRIPT_PATH _module _fn _required_lib_fns _missing_lib_fns _lib_health_ok _lib_missing _lib_stale _f
 
 # ============================================================================
 # 版本号来源优先级：VERSION 文件 > GitHub Release > 硬编码默认值
@@ -1849,7 +1862,11 @@ offerUfw() {
     ufw default deny incoming >/dev/null
     ufw default allow outgoing >/dev/null
     while IFS= read -r port; do
-        ufw allow "${port}/tcp" >/dev/null
+        # SSH 没放行成就不启用：默认拒绝已经写下，一启用当前的连接之后就进不来了
+        if ! ufw allow "${port}/tcp" >/dev/null; then
+            echoContent yellow " ---> $(t UFW_ENABLE_FAILED)"
+            return 0
+        fi
     done <<<"${sshPorts}"
     if ufw --force enable >/dev/null 2>&1 && ufw status | grep "Status: active" >/dev/null; then
         echoContent green " ---> $(t UFW_ENABLED "${sshPorts//$'\n'/, }")"
@@ -4169,6 +4186,11 @@ xrayVersionManageMenu() {
         if [[ "${selectXrayVersionType}" =~ ^[1-9][0-9]*$ ]]; then
             version=$(sed -n "${selectXrayVersionType}p" <<<"${rollbackVersions}")
         fi
+        # 17 要 HYSTERIA_XRAY_MIN_VERSION：更老的内核照样通过配置检查，带 gecko 混淆的客户端却握手不上
+        if [[ -n "${version}" && -f "${XRAY_CONF_DIR}/17_hysteria_inbounds.json" ]] && ! versionGreaterOrEqual "${version#v}" "${HYSTERIA_XRAY_MIN_VERSION}"; then
+            echoContent red " ---> $(t HY2_ROLLBACK_REFUSED "${version}" "${HYSTERIA_XRAY_MIN_VERSION}")"
+            exit 1
+        fi
         if [[ -n "${version}" ]]; then
             updateXray "${version}"
         else
@@ -4623,6 +4645,14 @@ ensureXrayDirectFinalRules() {
     jsonModifyFile "${file}" "(.outbounds[] | select(.tag == \"z_direct_outbound\")).settings.finalRules = ${XRAY_DIRECT_FINAL_RULES}" false
 }
 
+# ensureXhttpTlsTrustedXff → 老安装的 15 入站补上 trustedXForwardedFor：nginx 转进来的请求都带 XFF，没有它新内核每个请求记一条 Warning
+ensureXhttpTlsTrustedXff() {
+    local file="${XRAY_CONF_DIR}/15_VLESS_XHTTP_TLS_inbounds.json"
+    [[ -f "${file}" ]] || return 0
+    jq -e '.inbounds[0].streamSettings.sockopt.trustedXForwardedFor == null' "${file}" >/dev/null 2>&1 || return 0
+    jsonModifyFile "${file}" '.inbounds[0].streamSettings.sockopt.trustedXForwardedFor = ["X-Forwarded-For"]' false
+}
+
 # localBlockApiPort → 拼车统计 API 的端口（12_stats_api.json 的 api.listen），没开拼车时为空
 localBlockApiPort() {
     local file="${XRAY_CONF_DIR}/12_stats_api.json"
@@ -4852,6 +4882,7 @@ handleXray() {
         ensureRealityMinClientVer
         ensureXrayDirectStrategy
         ensureXrayDirectFinalRules
+        ensureXhttpTlsTrustedXff
         ensureCorePortTargets || echoContent yellow " ---> $(t CORE_PORT_TARGET_FAILED)"
         ensureCarpoolXray
         # 旧入口状态先转成现在的形状、旧分流工具的文件删掉，改了就把 sing-box 一起重启：下面写的 Xray 路由要和它的路由成对生效
@@ -5163,7 +5194,7 @@ initSingBoxClients() {
 # initHysteria2Network [xray] → 问拥塞控制与混淆。BBR 时 hysteria2ClientDownloadSpeed / UploadSpeed 为空，
 # 不混淆时 hysteria2ObfsType / hysteria2ObfsPassword 为空；gecko 要 sing-box ≥ 1.14，低于它不给选，xray（17）的最低内核都带
 initHysteria2Network() {
-    local choice= gecko=
+    local choice= gecko= keptObfsType=${hysteria2ObfsType:-} keptObfsPassword=${hysteria2ObfsPassword:-}
     hysteria2ClientDownloadSpeed=
     hysteria2ClientUploadSpeed=
     hysteria2ObfsType=
@@ -5186,7 +5217,18 @@ initHysteria2Network() {
     if [[ -n "${gecko}" ]]; then
         echoContent yellow "$(t HY2_OBFS_GECKO)"
     fi
-    read -r -p "$(t HY2_SELECT_DEFAULT_1)" choice
+    # 重装时原来开着混淆：回车沿用。回车算关闭的话，一路回车就让拿着分享链接的客户端全断
+    if [[ -n "${keptObfsType}" && -n "${keptObfsPassword}" ]]; then
+        read -r -p "$(t HY2_OBFS_KEEP_PROMPT "${keptObfsType}")" choice
+        if [[ -z "${choice}" ]]; then
+            hysteria2ObfsType=${keptObfsType}
+            hysteria2ObfsPassword=${keptObfsPassword}
+            echoContent green " ---> obfs: ${hysteria2ObfsType}"
+            return 0
+        fi
+    else
+        read -r -p "$(t HY2_SELECT_DEFAULT_1)" choice
+    fi
     case "${choice}" in
     2) hysteria2ObfsType=salamander ;;
     3) [[ -n "${gecko}" ]] && hysteria2ObfsType=gecko ;;
@@ -9548,7 +9590,7 @@ carpoolApply() {
         done
         force=1
     fi
-    jq -e '(.added | length) > 0' <<<"${diff}" >/dev/null 2>&1 && force=1
+    jq -e '(.added + .protocols | length) > 0' <<<"${diff}" >/dev/null 2>&1 && force=1
     carpoolLock || return 1
     state=$(carpoolMergeState "$(carpoolReadState)" "${normalized}" "${accounts}")
     state=$(carpoolMarkRemoved "${state}" "$(jq -c '.removed' <<<"${diff}")")
@@ -10237,10 +10279,10 @@ restoreConfigSnapshot() {
     [[ ${restored} -eq 1 ]]
 }
 
-# 备份脚本
-# 参数: $1 - 备份原因 (update/manual/rollback)
+# backupScript [REASON=manual] [KEEP] → 备份当前脚本与配置，打印备份目录；只留最近 5 份。
+# KEEP 是这次轮转不能删的那份：回退时选中的可能正是最老的
 backupScript() {
-    local reason="${1:-manual}"
+    local reason="${1:-manual}" keep="${2:-}"
     local installDir="${PROXY_AGENT_DIR}"
     local backupDir="${installDir}/backup"
     local maxBackups=5
@@ -10301,7 +10343,7 @@ EOF
     local backupCount
     backupCount=$(ls -1d "${backupDir}"/v* 2>/dev/null | wc -l)
     if [[ ${backupCount} -gt ${maxBackups} ]]; then
-        ls -1td "${backupDir}"/v* 2>/dev/null | tail -n +$((maxBackups + 1)) | xargs rm -rf 2>/dev/null
+        ls -1td "${backupDir}"/v* 2>/dev/null | tail -n +$((maxBackups + 1)) | grep -vxF "${keep}" | xargs rm -rf 2>/dev/null
     fi
 
     echo "${backupPath}"
@@ -10435,7 +10477,7 @@ rollbackScript() {
     # 备份当前版本
     echoContent yellow " ---> $(t SCRIPT_BACKUP_BEFORE_UPDATE)"
     local backupPath
-    backupPath=$(backupScript "rollback")
+    backupPath=$(backupScript "rollback" "${sourcePath}")
     echoContent green " ---> $(t SCRIPT_BACKUP_COMPLETE): ${backupPath}"
 
     if [[ "${sourceType}" == "local" ]]; then
@@ -11904,7 +11946,7 @@ _chainTCPProbe() {
         return $?
     fi
     if command -v timeout >/dev/null 2>&1; then
-        timeout "${timeoutSec}" bash -c "exec 3<>/dev/tcp/${host}/${port} && exec 3<&-" >/dev/null 2>&1
+        timeout "${timeoutSec}" bash -c 'exec 3<>"/dev/tcp/$1/$2" && exec 3<&-' _ "${host}" "${port}" >/dev/null 2>&1
         return $?
     fi
     (exec 3<>/dev/tcp/"${host}"/"${port}" && exec 3<&-) >/dev/null 2>&1
@@ -14764,6 +14806,7 @@ addExternalNodeSS() {
         echoContent red " ---> $(t EXT_PORT_INVALID)"
         return 1
     fi
+    _linkCheckEndpoint "${server}" "${port}" || return 1
 
     # 加密方式
     local method
@@ -14821,6 +14864,7 @@ addExternalNodeSOCKS() {
         echoContent red " ---> $(t EXT_PORT_INVALID)"
         return 1
     fi
+    _linkCheckEndpoint "${server}" "${port}" || return 1
 
     # 用户名 (可选)
     read -r -p "$(t EXT_INPUT_USERNAME) ($(t OPTIONAL)): " username
@@ -14890,6 +14934,7 @@ addExternalNodeTrojan() {
         echoContent red " ---> $(t EXT_PORT_INVALID)"
         return 1
     fi
+    _linkCheckEndpoint "${server}" "${port}" || return 1
 
     # 密码
     read -r -p "$(t EXT_INPUT_PASSWORD): " password
@@ -15033,6 +15078,7 @@ parseSSLink() {
         echo ""
         return 1
     fi
+    _linkCheckEndpoint "${server}" "${port}" || return 1
 
     # 如果没有名称，使用服务器地址
     if [[ -z "${name}" ]]; then
@@ -15103,6 +15149,7 @@ parseTrojanLink() {
         echo ""
         return 1
     fi
+    _linkCheckEndpoint "${server}" "${port}" || return 1
 
     if [[ -z "${name}" ]]; then
         name="Trojan-${server}"
@@ -15156,6 +15203,7 @@ parseSOCKS5Link() {
         echo ""
         return 1
     fi
+    _linkCheckEndpoint "${server}" "${port}" || return 1
 
     if [[ -z "${name}" ]]; then
         name="SOCKS5-${server}"
@@ -15698,7 +15746,9 @@ testExternalNodeConnection() {
 
     echoContent yellow "\n$(t EXT_TESTING): ${nodeName} (${server}:${port})"
 
-    if ! timeout 5 bash -c "echo >/dev/tcp/${server}/${port}" 2>/dev/null; then
+    # 库里可能有旧版本存进去的没校验过的地址，用之前再查一次
+    _linkCheckEndpoint "${server}" "${port}" || return 1
+    if ! _chainTCPProbe "${server}" "${port}"; then
         echoContent red " ---> $(t EXT_TCP_FAILED)"
         return 1
     fi
@@ -18113,7 +18163,19 @@ xrayHysteriaInstall() {
     totalProgress=2
     domain=${currentHost}
     selectCustomInstallType=",17,"
+    local hy17File="${XRAY_CONF_DIR}/17_hysteria_inbounds.json" hy17Old=
+    [[ -f "${hy17File}" ]] && hy17Old=$(cat "${hy17File}")
     initXrayConfig custom 1 true
+    # 下一步要删旁挂的 6：先让内核认一遍新配置，不认就把 17 退回去，在跑的 Xray 与 6 都没动过
+    if ! xrayConfigTest; then
+        if [[ -n "${hy17Old}" ]]; then
+            jsonWriteFile "${hy17File}" "${hy17Old}" false
+        else
+            rm -f "${hy17File}"
+        fi
+        echoContent red " ---> $(t HY2_VALIDATE_FAILED)"
+        exit 1
+    fi
     cleanUp singBoxProtocolsDel 1
     reloadCore
     # 订阅装过就按原 salt 重建：不然新装的协议进不了用户手里的订阅
@@ -19641,7 +19703,7 @@ checkForUpdates 2>/dev/null
 cronFunction
 chainEntryMigrated=false
 legacyRoutingCleared=false
-if migrateChainEntryState && legacyRoutingClear && [[ "${chainEntryMigrated}" == "true" || "${legacyRoutingCleared}" == "true" ]]; then
+if ! isDryRun && migrateChainEntryState && legacyRoutingClear && [[ "${chainEntryMigrated}" == "true" || "${legacyRoutingCleared}" == "true" ]]; then
     reloadCore
 fi
 offerCoreRestart
